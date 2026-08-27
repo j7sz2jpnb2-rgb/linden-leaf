@@ -55,24 +55,44 @@ export class AppUpdater {
         const repo = (customRepo || localStorage.getItem('linden_custom_github_repo') || this.defaultRepo).trim()
 
         try {
-            const url = `https://api.github.com/repos/${repo}/releases/latest`
-            const res = await fetch(url, {
-                headers: {
-                    'Accept': 'application/vnd.github.v3+json'
-                }
-            })
-
-            if (!res.ok) {
-                if (res.status === 404) {
+            let data = null
+            if (window.electronAPI?.checkGitHubRelease) {
+                const ipcRes = await window.electronAPI.checkGitHubRelease(repo)
+                if (!ipcRes.success) {
                     return {
                         success: false,
-                        error: `未在 GitHub 仓库 [${repo}] 找到任何已发布的 Release 版本。请先在 GitHub 仓库创建 Release 发布。`
+                        error: ipcRes.error || '检查更新失败'
                     }
                 }
-                throw new Error(`GitHub API 返回 HTTP ${res.status}`)
+                data = ipcRes.data
+            } else {
+                const url = `https://api.github.com/repos/${repo}/releases/latest`
+                const res = await fetch(url, {
+                    headers: {
+                        'Accept': 'application/vnd.github.v3+json'
+                    }
+                })
+
+                if (!res.ok) {
+                    if (res.status === 404) {
+                        return {
+                            success: false,
+                            error: `未在 GitHub 仓库 [${repo}] 找到任何已发布的 Release 版本。请先在 GitHub 仓库创建 Release 发布。`
+                        }
+                    }
+                    if (res.status === 403) {
+                        return {
+                            success: false,
+                            error: 'GitHub API 访问频次暂时受限，请稍候再试（通常 1 小时后自动恢复），或直接前往网页查看。'
+                        }
+                    }
+                    throw new Error(`GitHub API 返回 HTTP ${res.status}`)
+                }
+                data = await res.json()
             }
 
-            const data = await res.json()
+            if (!data) throw new Error('未获取到有效的 Release 数据')
+
             const latestTag = data.tag_name || data.name || '0.0.0'
             const hasUpdate = this.compareVersions(latestTag, this.currentVersion) > 0
 

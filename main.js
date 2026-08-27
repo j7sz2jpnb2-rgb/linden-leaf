@@ -328,6 +328,50 @@ ipcMain.handle('app:getVersion', () => {
     return app.getVersion()
 })
 
+// GitHub Releases Update Checker IPC (Native HTTPS with custom User-Agent)
+const https = require('https')
+ipcMain.handle('updater:checkRelease', async (_event, repo) => {
+    const targetRepo = (repo || 'j7sz2jpnb2-rgb/linden-leaf').trim()
+    return new Promise((resolve) => {
+        const req = https.request({
+            hostname: 'api.github.com',
+            path: `/repos/${targetRepo}/releases/latest`,
+            method: 'GET',
+            headers: {
+                'User-Agent': 'LindenLeaf-Desktop/0.1.0',
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        }, res => {
+            let data = ''
+            res.on('data', d => data += d)
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    try {
+                        const json = JSON.parse(data)
+                        resolve({ success: true, statusCode: 200, data: json })
+                    } catch (e) {
+                        resolve({ success: false, statusCode: 200, error: '解析 GitHub 返回数据失败' })
+                    }
+                } else if (res.statusCode === 404) {
+                    resolve({ success: false, statusCode: 404, error: `未在 GitHub 仓库 [${targetRepo}] 找到任何已发布的 Release 版本。` })
+                } else if (res.statusCode === 403) {
+                    resolve({ success: false, statusCode: 403, error: 'GitHub API 访问频次暂时受限，请稍候再试（通常 1 小时后自动恢复），或直接前往网页查看。' })
+                } else {
+                    resolve({ success: false, statusCode: res.statusCode, error: `GitHub API 返回 HTTP ${res.statusCode}` })
+                }
+            })
+        })
+        req.on('error', err => {
+            resolve({ success: false, error: `网络连接失败: ${err.message}` })
+        })
+        req.setTimeout(15000, () => {
+            req.destroy()
+            resolve({ success: false, error: '连接 GitHub 超时，请检查网络。' })
+        })
+        req.end()
+    })
+})
+
 // Single Instance Lock & File Association Routing
 const gotTheLock = app.requestSingleInstanceLock()
 

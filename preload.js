@@ -32,5 +32,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // System Shell & App Info
     openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
-    getVersion: () => ipcRenderer.invoke('app:getVersion')
+    getVersion: () => ipcRenderer.invoke('app:getVersion'),
+    checkGitHubRelease: (repo) => ipcRenderer.invoke('updater:checkRelease', repo)
 })
