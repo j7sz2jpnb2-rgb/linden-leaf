@@ -1,0 +1,119 @@
+{
+  "name": "linden-leaf",
+  "productName": "Linden Leaf",
+  "version": "0.1.0",
+  "description": "Linden Leaf - Universal Modern & Skeuomorphic E-Book Reader",
+  "main": "main.js",
+  "author": "Linden Leaf Team",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "pack": "electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.lindenleaf.reader",
+    "productName": "Linden Leaf",
+    "afterPack": "./scripts/prune-locales.js",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "fileAssociations": [
+      {
+        "ext": "epub",
+        "name": "EPUB 电子书",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      },
+      {
+        "ext": "docx",
+        "name": "Word 文档",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      },
+      {
+        "ext": "pdf",
+        "name": "PDF 文档",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      },
+      {
+        "ext": "txt",
+        "name": "文本文档",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      },
+      {
+        "ext": "mobi",
+        "name": "MOBI 电子书",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-v${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Linden Leaf",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "license": "LICENSE.txt",
+      "language": "2052",
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh",
+      "artifactName": "${productName}-v${version}-Setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-v${version}-Portable.exe"
+    },
+    "files": [
+      "index.html",
+      "main.js",
+      "preload.js",
+      "package.json",
+      "css/**/*",
+      "js/**/*",
+      "services/**/*",
+      "foliate-js-main/**/*",
+      "assets/**/*",
+      "samples/**/*",
+      "vendor/**/*",
+      "!node_modules/**",
+      "!scripts/**",
+      "!dist/**",
+      "!.git/**",
+      "!*.log",
+      "!**/*.map",
+      "!foliate-js-main/test/**"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "puppeteer-core": "^25.9.0"
+  },
+  "dependencies": {
+    "mammoth": "^1.12.1"
+  }
+}

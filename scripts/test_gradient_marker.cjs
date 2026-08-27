@@ -1,0 +1,198 @@
+const fs = require('fs')
+const puppeteer = require('C:/Users/Administrator/.gemini/antigravity/scratch/universal-reader/node_modules/puppeteer-core')
+
+// Let's create an HTML mock page to test our WeChat Read Realistic Ink Marker with gradients and terminal ink accumulation!
+const html = `
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {
+    background: #fdfbf7;
+    color: #1a1a1a;
+    font-family: 'Source Han Serif SC', 'Noto Serif CJK SC', 'SimSun', serif;
+    font-size: 22px;
+    line-height: 2.2;
+    padding: 60px 80px;
+    max-width: 600px;
+    margin: 0 auto;
+}
+.poem-line {
+    position: relative;
+    margin-bottom: 8px;
+    display: inline-block;
+    padding: 2px 4px;
+}
+svg.marker-layer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: -1;
+    mix-blend-mode: multiply;
+}
+</style>
+</head>
+<body>
+    <h2>真实马克笔墨痕浓淡（微信读书全真对照）</h2>
+    
+    <div id="container">
+        <!-- Lines will be injected with SVG markers -->
+    </div>
+
+    <script>
+    const textLines = [
+        "“邓肯爵士，”罗翰妮夫人说，",
+        "“黑龙起兵时我才十岁。我乞求父",
+        "亲莫以身犯险，或至少留下我丈",
+        "夫，如果两个男人都走了，谁来保",
+        "护我？他带我登上冷壕堡城墙，指",
+        "出要津所在。‘保证它们完好，’",
+        "他说，‘它们会保护你。照顾好自",
+        "己，就没人能伤害你。’他指的第",
+        "一处就是护城壕。”她用辫子末梢"
+    ];
+
+    const color = '#f43f5e'; // Pink highlighter
+
+    const container = document.getElementById('container');
+    textLines.forEach((text, i) => {
+        const lineDiv = document.createElement('div');
+        lineDiv.className = 'poem-line';
+        lineDiv.innerText = text;
+        container.appendChild(lineDiv);
+    });
+
+    // Now compute bounding rects and draw SVG realistic marker with ink pressure gradients!
+    window.renderMarkers = function() {
+        const divs = document.querySelectorAll('.poem-line');
+        divs.forEach((div, i) => {
+            const w = div.offsetWidth;
+            const h = div.offsetHeight;
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('class', 'marker-layer');
+            svg.setAttribute('viewBox', \`0 0 \${w} \${h}\`);
+
+            const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+            const gradId = 'ink_grad_' + i;
+            const grad = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
+            grad.setAttribute('id', gradId);
+            grad.setAttribute('x1', '0%');
+            grad.setAttribute('y1', '0%');
+            grad.setAttribute('x2', '100%');
+            grad.setAttribute('y2', '0%');
+
+            // Variations in ink gradient
+            const isLastLine = (i === divs.length - 1);
+            const isFirstLine = (i === 0);
+
+            if (isFirstLine || isLastLine || i % 3 === 0) {
+                // Ending ink accumulation / bleed (Darker right terminal)
+                grad.innerHTML = \`
+                    <stop offset="0%" stop-color="\${color}" stop-opacity="0.30" />
+                    <stop offset="70%" stop-color="\${color}" stop-opacity="0.36" />
+                    <stop offset="90%" stop-color="\${color}" stop-opacity="0.48" />
+                    <stop offset="100%" stop-color="\${color}" stop-opacity="0.65" />
+                \`;
+            } else if (i % 3 === 1) {
+                // Heavy touchdown at start (Darker left entry)
+                grad.innerHTML = \`
+                    <stop offset="0%" stop-color="\${color}" stop-opacity="0.60" />
+                    <stop offset="10%" stop-color="\${color}" stop-opacity="0.42" />
+                    <stop offset="35%" stop-color="\${color}" stop-opacity="0.32" />
+                    <stop offset="100%" stop-color="\${color}" stop-opacity="0.34" />
+                \`;
+            } else {
+                // Smooth body with subtle natural hand pressure glide
+                grad.innerHTML = \`
+                    <stop offset="0%" stop-color="\${color}" stop-opacity="0.32" />
+                    <stop offset="50%" stop-color="\${color}" stop-opacity="0.40" />
+                    <stop offset="100%" stop-color="\${color}" stop-opacity="0.35" />
+                \`;
+            }
+            defs.appendChild(grad);
+            svg.appendChild(defs);
+
+            // Shape path
+            const top = 3;
+            const bottom = h - 2;
+            const left = 2;
+            const right = w - 2;
+            const midY = (top + bottom) / 2;
+            const midX = (left + right) / 2;
+
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            let d = '';
+
+            // 10 distinct profiles
+            switch(i % 5) {
+                case 0: // Right vertical edge with rich ink pooling band
+                    d = \`M \${left + 2},\${top} L \${right - 1},\${top} Q \${right + 1},\${midY} \${right - 1},\${bottom} L \${left + 2},\${bottom} Q \${left - 1},\${midY} \${left + 2},\${top} Z\`;
+                    break;
+                case 1: // Sharp 45° chisel touchdown cut on left, tapered right
+                    d = \`M \${left + 4},\${top} L \${right - 3},\${top} L \${right + 0.5},\${bottom} L \${left},\${bottom} Z\`;
+                    break;
+                case 2: // Chisel slant on right
+                    d = \`M \${left + 2},\${top} L \${right + 0.5},\${top} L \${right - 4.5},\${bottom} L \${left},\${bottom} Z\`;
+                    break;
+                case 3: // Organic wave
+                    d = \`M \${left + 2},\${top} Q \${midX},\${top - 0.4} \${right - 1.5},\${top} Q \${right + 2},\${midY} \${right - 1.5},\${bottom} Q \${midX},\${bottom + 0.4} \${left + 1},\${bottom} Z\`;
+                    break;
+                case 4: // Dual 35° parallel cut
+                    d = \`M \${left + 3.5},\${top} L \${right},\${top} L \${right - 3.5},\${bottom} L \${left - 0.5},\${bottom} Z\`;
+                    break;
+            }
+
+            path.setAttribute('d', d);
+            path.setAttribute('fill', \`url(#\${gradId})\`);
+            svg.appendChild(path);
+
+            // Double-pass ink accumulation on terminal lift-off (if line end has accumulation)
+            if (isFirstLine || isLastLine || i % 3 === 0) {
+                // Secondary dark bleed mark at the terminal
+                const bleed = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                bleed.setAttribute('d', \`M \${right - 3.5},\${top + 1} L \${right},\${top + 1} L \${right - 1},\${bottom - 1} L \${right - 4},\${bottom - 1} Z\`);
+                bleed.setAttribute('fill', color);
+                bleed.setAttribute('opacity', '0.22');
+                svg.appendChild(bleed);
+            }
+
+            if (i % 3 === 1) {
+                // Touchdown chisel corner mark at the left entry
+                const corner = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                corner.setAttribute('d', \`M \${left + 4},\${top} L \${left + 6},\${top} L \${left + 2},\${bottom} L \${left},\${bottom} Z\`);
+                corner.setAttribute('fill', color);
+                corner.setAttribute('opacity', '0.25');
+                svg.appendChild(corner);
+            }
+
+            div.appendChild(svg);
+        });
+    };
+    window.addEventListener('load', window.renderMarkers);
+    </script>
+</body>
+</html>
+`
+
+fs.writeFileSync('C:/Users/Administrator/.gemini/antigravity/scratch/universal-reader/scripts/test_gradient_marker.html', html)
+
+async function capture() {
+    const browser = await puppeteer.launch({
+        executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        headless: true
+    })
+    const page = await browser.newPage()
+    await page.setViewport({ width: 900, height: 950 })
+    await page.goto('file:///C:/Users/Administrator/.gemini/antigravity/scratch/universal-reader/scripts/test_gradient_marker.html')
+    await new Promise(r => setTimeout(r, 1000))
+    const out = 'C:/Users/Administrator/.gemini/antigravity/brain/40ebe18d-48fa-406e-96c5-420fe912e1ea/scratch/gradient_marker_demo.png'
+    await page.screenshot({ path: out })
+    console.log('Saved demo to:', out)
+    await browser.close()
+}
+
+capture().catch(console.error)

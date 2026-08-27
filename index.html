@@ -1,0 +1,1137 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8"/>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://fonts.font.im https://fonts.gstatic.font.im https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; frame-src 'self' blob: data:; font-src 'self' data: blob: https://fonts.font.im https://fonts.gstatic.font.im https://cdn.jsdelivr.net; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' data: blob: https://fonts.font.im https://fonts.gstatic.font.im https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' blob: data: https://fonts.font.im https://cdn.jsdelivr.net;"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <title>Linden Leaf - 现代化全格式电子书阅读器</title>
+  <link rel="preconnect" href="https://fonts.font.im">
+  <link rel="preconnect" href="https://fonts.gstatic.font.im" crossorigin>
+  <link rel="stylesheet" href="https://fonts.font.im/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"/>
+  <link rel="stylesheet" href="./css/main.css"/>
+  <link rel="icon" type="image/png" href="./assets/icon.png"/>
+  <!-- Standard ES2024 Polyfills (Response.bytes, Uint8Array toHex/toBase64, Promise.try, Promise.withResolvers, Object.groupBy) for PDF.js v5 compatibility -->
+  <script>
+    if (typeof Response !== 'undefined' && typeof Response.prototype.bytes !== 'function') {
+      Response.prototype.bytes = async function () {
+        var buffer = await this.arrayBuffer();
+        return new Uint8Array(buffer);
+      };
+    }
+    if (typeof Uint8Array.prototype.toHex !== 'function') {
+      Uint8Array.prototype.toHex = function () {
+        var hex = '';
+        for (var i = 0; i < this.length; i++) {
+          hex += this[i].toString(16).padStart(2, '0');
+        }
+        return hex;
+      };
+    }
+    if (typeof Uint8Array.prototype.toBase64 !== 'function') {
+      Uint8Array.prototype.toBase64 = function () {
+        var binary = '';
+        var len = this.byteLength;
+        for (var i = 0; i < len; i++) {
+          binary += String.fromCharCode(this[i]);
+        }
+        return btoa(binary);
+      };
+    }
+    if (typeof Uint8Array.fromBase64 !== 'function') {
+      Uint8Array.fromBase64 = function (base64) {
+        var binary = atob(base64);
+        var len = binary.length;
+        var bytes = new Uint8Array(len);
+        for (var i = 0; i < len; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes;
+      };
+    }
+    if (typeof Map.prototype.getOrInsertComputed !== 'function') {
+      Map.prototype.getOrInsertComputed = function (key, callbackFunction) {
+        if (this.has(key)) return this.get(key);
+        var value = callbackFunction(key);
+        this.set(key, value);
+        return value;
+      };
+    }
+    if (typeof Map.prototype.getOrInsert !== 'function') {
+      Map.prototype.getOrInsert = function (key, defaultValue) {
+        if (this.has(key)) return this.get(key);
+        this.set(key, defaultValue);
+        return defaultValue;
+      };
+    }
+    if (typeof Set.prototype.intersection !== 'function') {
+      Set.prototype.intersection = function (other) {
+        var result = new Set();
+        for (var elem of this) {
+          if (other && typeof other.has === 'function' ? other.has(elem) : false) {
+            result.add(elem);
+          }
+        }
+        return result;
+      };
+    }
+    if (typeof Set.prototype.union !== 'function') {
+      Set.prototype.union = function (other) {
+        var result = new Set(this);
+        if (other && typeof other[Symbol.iterator] === 'function') {
+          for (var elem of other) {
+            result.add(elem);
+          }
+        }
+        return result;
+      };
+    }
+    if (typeof Set.prototype.difference !== 'function') {
+      Set.prototype.difference = function (other) {
+        var result = new Set(this);
+        if (other && typeof other.has === 'function') {
+          for (var elem of this) {
+            if (other.has(elem)) result.delete(elem);
+          }
+        }
+        return result;
+      };
+    }
+    if (typeof Promise.try !== 'function') {
+      Promise.try = function (fn) {
+        var args = Array.prototype.slice.call(arguments, 1);
+        return new Promise(function (resolve) {
+          resolve(fn.apply(null, args));
+        });
+      };
+    }
+    if (typeof Promise.withResolvers !== 'function') {
+      Promise.withResolvers = function () {
+        var resolve, reject;
+        var promise = new Promise(function (res, rej) {
+          resolve = res;
+          reject = rej;
+        });
+        return { promise: promise, resolve: resolve, reject: reject };
+      };
+    }
+    if (typeof Object.groupBy !== 'function') {
+      Object.groupBy = function (items, callback) {
+        var result = Object.create(null);
+        var i = 0;
+        for (var idx = 0; idx < items.length; idx++) {
+          var item = items[idx];
+          var key = callback(item, i++);
+          if (key in result) {
+            result[key].push(item);
+          } else {
+            result[key] = [item];
+          }
+        }
+        return result;
+      };
+    }
+  </script>
+</head>
+<body>
+  <div id="app-container">
+    
+    <!-- ==========================================================
+         BOOKSHELF VIEW (Linden Leaf Design)
+         ========================================================== -->
+    <div id="bookshelf-view">
+      <!-- Left Sidebar -->
+      <aside class="jane-sidebar">
+        <div class="sidebar-top">
+          <!-- Brand -->
+          <div class="sidebar-brand">
+            <img class="brand-icon-img" src="./assets/logo-leaf.png" alt="Linden Leaf" />
+            <div class="brand-name">Linden Leaf</div>
+            <div class="brand-version">0.1</div>
+          </div>
+
+          <!-- Search Box -->
+          <div class="sidebar-search">
+            <svg class="icon icon-sm" viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input type="text" id="shelf-search" placeholder="搜索书库"/>
+          </div>
+
+          <!-- Nav Group: 书库 -->
+          <div class="sidebar-group">
+            <div class="group-title">书库</div>
+            <button class="nav-item active" data-category="all" id="nav-cat-all">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+              <span>全部图书</span>
+            </button>
+            <button class="nav-item" data-category="favorite" id="nav-cat-favorite">
+              <svg class="icon icon-sm" viewBox="0 0 24 24" fill="currentColor" style="color: #f59e0b;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+              <span>收藏的书</span>
+            </button>
+          </div>
+
+          <!-- Nav Group: 我的书单 (放在收藏的下面) -->
+          <div class="sidebar-group" id="sidebar-custom-lists-group">
+            <div class="group-title" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>我的书单</span>
+              <button id="btn-create-list" class="btn-group-action" title="新建自定义书单" style="background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 1.15rem; line-height: 1; padding: 0 4px; font-weight: 700; transition: color 0.15s;">+</button>
+            </div>
+            <div id="custom-lists-container" style="display: flex; flex-direction: column; gap: 0.2rem;">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- Nav Group: 阅读状态与统计 -->
+          <div class="sidebar-group">
+            <div class="group-title">阅读状态</div>
+            <button class="nav-item" data-category="finished" id="nav-cat-finished">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+              <span>已读完</span>
+            </button>
+            <button class="nav-item" data-category="stats" id="nav-cat-stats">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+              <span>阅读统计</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="sidebar-bottom">
+          <button class="btn-sidebar-settings" id="btn-shelf-settings" title="设置">
+            <svg class="icon" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Main Content Area -->
+      <main class="jane-main-area">
+        <!-- Header -->
+        <header class="jane-header">
+          <h2 class="header-category-title" id="current-category-title">全部图书</h2>
+
+          <div class="header-actions" id="shelf-header-actions">
+            <!-- Add Books to List Button (Shown when in a custom list) -->
+            <button class="btn-header-action" id="btn-list-add-books" title="添加图书到此书单" style="display: none;">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+            </button>
+
+            <!-- Import Book Button -->
+            <button class="btn-header-action" id="btn-import" title="添加图书">
+              <svg class="icon" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <input type="file" id="file-input" multiple accept=".epub,.txt,.pdf,.mobi,.azw3,.azw,.fb2,.cbz,.md,.docx" style="display: none;"/>
+
+            <!-- Favorite Books Filter Button -->
+            <button class="btn-header-action" id="btn-header-favorite" title="只看收藏的书 / 快速切换收藏">
+              <svg class="icon icon-sm" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+              </svg>
+            </button>
+
+            <!-- Sort Toggle Button -->
+            <button class="btn-header-action" id="btn-sort-toggle" title="排序方式">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+              <svg class="icon" style="width: 10px; height: 10px; margin-left: 2px;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+
+            <!-- Sort Dropdown Menu -->
+            <div id="sort-dropdown-menu">
+              <div class="sort-menu-item" data-sort="title"><span>标题</span><span class="sort-check"></span></div>
+              <div class="sort-menu-item" data-sort="author"><span>作者</span><span class="sort-check"></span></div>
+              <div class="sort-menu-item" data-sort="language"><span>语言</span><span class="sort-check"></span></div>
+              <div class="sort-menu-item" data-sort="size"><span>大小</span><span class="sort-check"></span></div>
+              <div class="sort-menu-item" data-sort="totalReadingSeconds"><span>阅读时长</span><span class="sort-check"></span></div>
+              <div class="sort-menu-item" data-sort="lastReadAt"><span>上次阅读</span><span class="sort-check"></span></div>
+              <div class="sort-menu-item active" data-sort="addedAt"><span>添加日期</span><span class="sort-check">✓</span></div>
+              <div class="sort-menu-divider"></div>
+              <div class="sort-menu-item" data-order="asc"><span>升序</span><span class="order-check"></span></div>
+              <div class="sort-menu-item active" data-order="desc"><span>降序</span><span class="order-check">✓</span></div>
+            </div>
+
+            <!-- View Mode Switcher (Skeuomorphic Shelf, Modern Grid, List) -->
+            <div class="view-mode-switcher">
+              <button class="btn-view-mode active" id="btn-view-shelf" title="拟物木质书架 (iOS 6 经典质感)">
+                <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M3 19h18v2H3z"/><path d="M5 5h3v14H5z"/><path d="M9 7h3v12H9z"/><path d="M14 9h3v10h-3z"/><path d="M18 6h3v13h-3z"/></svg>
+              </button>
+              <button class="btn-view-mode" id="btn-view-grid" title="现代极简网格">
+                <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+              </button>
+              <button class="btn-view-mode" id="btn-view-list" title="详细列表视图">
+                <svg class="icon icon-sm" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <!-- Content Workspace -->
+        <section class="jane-content-workspace">
+          <!-- 1. Skeuomorphic Wooden Bookshelf View (iOS 6 iBooks Style) -->
+          <div id="books-shelf" class="books-shelf-layout"></div>
+
+          <!-- 2. Grid View Container -->
+          <div id="books-grid" class="books-grid-layout" style="display: none;"></div>
+
+          <!-- 3. List View Table Container -->
+          <div id="books-table-container" style="display: none;">
+            <table class="jane-table-view">
+              <thead>
+                <tr>
+                  <th class="jane-table-header" style="width: 44px; text-align: center;">★</th>
+                  <th class="jane-table-header">标题</th>
+                  <th class="jane-table-header">作者</th>
+                  <th class="jane-table-header">格式与大小</th>
+                  <th class="jane-table-header">阅读进度</th>
+                  <th class="jane-table-header">添加日期</th>
+                  <th class="jane-table-header" style="width: 120px; text-align: center;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="books-table-body"></tbody>
+            </table>
+          </div>
+
+          <!-- Stats View Container (Authentic WeChat Read Style Dashboard) -->
+          <div id="stats-dashboard-container" class="stats-dashboard-layout" style="display: none;">
+            <!-- Top WeChat Read Segmented Tabs (周 / 月 / 年 / 总) -->
+            <div class="wechat-stats-nav-bar">
+              <div class="wechat-stats-segmented-tabs">
+                <button class="stats-tab-btn" data-mode="week">周</button>
+                <button class="stats-tab-btn active" data-mode="month">月</button>
+                <button class="stats-tab-btn" data-mode="year">年</button>
+                <button class="stats-tab-btn" data-mode="total">总</button>
+              </div>
+            </div>
+
+            <!-- Header KPI Banner -->
+            <div class="wechat-stats-header-card">
+              <div class="stats-date-navigator" id="stats-date-navigator">
+                <span id="stats-date-label" class="stats-date-label">2026年8月</span>
+                <div class="stats-date-arrows">
+                  <button id="btn-stats-prev-date" class="btn-stats-nav-arrow" title="上一周期">‹</button>
+                  <button id="btn-stats-next-date" class="btn-stats-nav-arrow" title="下一周期">›</button>
+                </div>
+              </div>
+
+              <div class="stats-hero-time" id="stats-hero-time">
+                0<span class="stats-unit">小时</span> 0<span class="stats-unit">分钟</span>
+              </div>
+              <div class="stats-hero-sub" id="stats-hero-sub">日均阅读 0 分钟</div>
+
+              <!-- 4 Micro KPIs (读过 / 读完 / 阅读天数 / 笔记) -->
+              <div class="stats-quad-kpis-grid">
+                <div class="stats-quad-card" id="card-quad-read-books" title="点击查看全部图书">
+                  <span class="stats-quad-label">读过</span>
+                  <span class="stats-quad-num" id="quad-read-books">0</span>
+                  <span class="stats-quad-unit">本 ›</span>
+                </div>
+                <div class="stats-quad-card" id="card-quad-finished-books" title="点击筛选已读完图书">
+                  <span class="stats-quad-label">读完</span>
+                  <span class="stats-quad-num" id="quad-finished-books">0</span>
+                  <span class="stats-quad-unit">本 ›</span>
+                </div>
+                <div class="stats-quad-card" id="card-quad-read-days" title="点击定位到时长趋势图">
+                  <span class="stats-quad-label">阅读</span>
+                  <span class="stats-quad-num" id="quad-read-days">0</span>
+                  <span class="stats-quad-unit">天 ›</span>
+                </div>
+                <div class="stats-quad-card" id="card-quad-notes" title="点击查看读书笔记与划线">
+                  <span class="stats-quad-label">笔记</span>
+                  <span class="stats-quad-num" id="quad-note-count">0</span>
+                  <span class="stats-quad-unit">条 ›</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Reading Duration Distribution Bar Chart Card (微信读书柱状图) -->
+            <div class="wechat-stats-card stats-chart-card">
+              <div class="stats-card-header">
+                <div class="stats-card-title">阅读时长分布</div>
+                <div class="stats-card-action-icon">📅</div>
+              </div>
+              
+              <!-- The Chart Container with reference dashed grid lines -->
+              <div class="stats-chart-wrapper">
+                <div class="stats-grid-lines">
+                  <div class="stats-grid-line"><span id="stats-y-max">2h</span></div>
+                  <div class="stats-grid-line"><span id="stats-y-mid">1h</span></div>
+                  <div class="stats-grid-line"><span>0</span></div>
+                </div>
+                <div id="stats-distribution-chart" class="stats-distribution-chart"></div>
+              </div>
+
+              <!-- Peak Day / Month Insight Pill -->
+              <div id="stats-peak-pill" class="stats-peak-pill" style="display: none;">
+                <span id="stats-peak-text">3日阅读最久 · 1小时10分钟</span>
+              </div>
+            </div>
+
+            <!-- Top Books Leaderboard & History Row -->
+            <div class="stats-charts-row">
+              <!-- Top Books Leaderboard Section -->
+              <div class="stats-section-box stats-leaderboard-box">
+                <div class="stats-section-header">
+                  <div class="stats-section-title">书籍阅读时长榜</div>
+                  <div class="stats-section-subtitle">按累计时长</div>
+                </div>
+                <div id="stats-leaderboard-list" class="stats-leaderboard-list"></div>
+              </div>
+
+              <!-- Recent Sessions Timeline -->
+              <div class="stats-section-box">
+                <div class="stats-section-header">
+                  <div class="stats-section-title">最近阅读记录</div>
+                  <button id="btn-refresh-stats" class="btn-refresh-stats">刷新数据</button>
+                </div>
+                <div id="stats-recent-sessions" class="stats-recent-sessions"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Footer Status -->
+        <footer class="jane-footer-status">
+          <span id="book-count-footer">0 本图书</span>
+        </footer>
+      </main>
+    </div>
+
+    <!-- Drag & Drop Overlay -->
+    <div id="drop-zone-overlay">
+      <svg class="icon icon-xl" viewBox="0 0 24 24" stroke="currentColor">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <h2 style="font-size: 1.4rem; font-weight: 700; color: var(--accent-purple);">松开鼠标导入书籍</h2>
+      <p style="color: var(--text-muted);">支持 EPUB / DOCX / PDF / TXT / AZW3 / MOBI / CBZ / FB2 格式</p>
+    </div>
+
+    <!-- ==========================================================
+         READER VIEW & SAFE VIEWPORT
+         ========================================================== -->
+    <div id="reader-view">
+      <!-- Top Bar -->
+      <header id="reader-top-bar" class="reader-top-bar">
+        <div class="reader-top-left">
+          <button id="btn-back-to-shelf" class="btn-tool" title="返回书架">
+            <svg class="icon" viewBox="0 0 24 24">
+              <line x1="19" y1="12" x2="5" y2="12"/>
+              <polyline points="12 19 5 12 12 5"/>
+            </svg>
+          </button>
+          <button id="btn-toggle-toc" class="btn-tool" title="目录导航">
+            <svg class="icon" viewBox="0 0 24 24">
+              <line x1="8" y1="6" x2="21" y2="6"/>
+              <line x1="8" y1="12" x2="21" y2="12"/>
+              <line x1="8" y1="18" x2="21" y2="18"/>
+              <line x1="3" y1="6" x2="3.01" y2="6"/>
+              <line x1="3" y1="12" x2="3.01" y2="12"/>
+              <line x1="3" y1="18" x2="3.01" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <div id="reader-book-title" class="reader-title-center">加载中...</div>
+
+        <div class="reader-top-right">
+          <button id="btn-toggle-search" class="btn-tool" title="全文检索">
+            <svg class="icon" viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </button>
+          <button id="btn-toggle-notes" class="btn-tool" title="划线与笔记">
+            <svg class="icon" viewBox="0 0 24 24">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+              <polyline points="10 9 9 9 8 9"/>
+            </svg>
+          </button>
+          <button id="btn-toggle-settings" class="btn-tool" title="排版与主题设置">
+            <svg class="icon" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+          <button id="btn-toggle-fullscreen" class="btn-tool" title="全屏阅读 (快捷键 F)">
+            <svg class="icon" viewBox="0 0 24 24">
+              <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- Reader Content Area (Safe Viewport) -->
+      <div id="reader-content-area" class="reader-content-area">
+        <!-- Side Arrow Jump Click Targets -->
+        <button id="btn-nav-left" class="nav-arrow-btn nav-arrow-left" title="上一页 (←)">
+          <svg class="icon icon-lg" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button id="btn-nav-right" class="nav-arrow-btn nav-arrow-right" title="下一页 (→ / 空格)">
+          <svg class="icon icon-lg" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+
+      <!-- WPS / Adobe Style PDF Floating Zoom Controller -->
+      <div id="pdf-zoom-control-bar" class="pdf-zoom-control-bar" style="display: none;">
+        <button id="btn-pdf-zoom-out" class="btn-zoom-step" title="缩小 (快捷键 Ctrl + -)">−</button>
+        <input type="range" id="pdf-zoom-slider" class="pdf-zoom-slider" min="30" max="300" step="5" value="100" />
+        <button id="btn-pdf-zoom-in" class="btn-zoom-step" title="放大 (快捷键 Ctrl + +)">+</button>
+        <div class="zoom-value-wrapper">
+          <input type="text" id="pdf-zoom-percent-input" class="pdf-zoom-percent-input" value="100%" title="点击直接输入数字缩放比例 (如 125)" />
+        </div>
+        <div class="zoom-divider"></div>
+        <button id="btn-pdf-fit-width" class="btn-zoom-preset" title="适合宽度 (Fit Width)">↔ 适宽</button>
+        <button id="btn-pdf-fit-page" class="btn-zoom-preset" title="适合页面 (Fit Page)">↕ 适页</button>
+        <button id="btn-pdf-spread-toggle" class="btn-zoom-preset" title="切换 单页 / 双页展开">📖 单/双页</button>
+      </div>
+
+      <!-- Bottom Bar -->
+      <footer id="reader-bottom-bar" class="reader-bottom-bar">
+        <div class="reader-bottom-meta">
+          <span id="reader-page-number" class="reader-page-number" title="点击可输入页码快速跳转">1 / 1 页</span>
+          <span id="reader-live-timer" class="reader-badge-timer" title="本次连续阅读有效时长">⏱️ 0分钟</span>
+          <span id="reader-eta-badge" class="reader-badge-eta" title="预估全书剩余阅读时间">预计还需 --</span>
+        </div>
+        <div class="progress-slider-container">
+          <input type="range" id="reader-progress-slider" min="0" max="100" value="0" step="0.1"/>
+          <span id="reader-progress-text" class="progress-text">0%</span>
+        </div>
+      </footer>
+    </div>
+
+    <!-- ==========================================================
+         SIDEBAR DRAWER (TOC / Notes / Search / Settings)
+         ========================================================== -->
+    <div id="drawer-backdrop" class="drawer-backdrop"></div>
+    <aside id="sidebar-drawer" class="sidebar-drawer sidebar-left">
+      <div class="drawer-header">
+        <div class="drawer-tabs">
+          <button class="tab-btn active" data-tab="toc">目录</button>
+          <button class="tab-btn" data-tab="notes">笔记</button>
+          <button class="tab-btn" data-tab="search">检索</button>
+          <button class="tab-btn" data-tab="settings">设置</button>
+        </div>
+        <button id="drawer-close-btn" class="btn-tool" title="关闭">
+          <svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="drawer-body">
+        <!-- 1. TOC Panel -->
+        <div id="panel-toc" class="drawer-panel">
+          <div id="toc-tree-container"></div>
+        </div>
+
+        <!-- 2. Notes Panel -->
+        <div id="panel-notes" class="drawer-panel" style="display: none;">
+          <div style="display: flex; justify-content: flex-end; margin-bottom: 0.75rem;">
+            <button id="btn-export-notes" class="btn-tool" style="font-size: 0.75rem; width: auto; padding: 0.3rem 0.6rem; border: 1px solid var(--border-color); border-radius: 6px;">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span style="margin-left: 4px;">导出 Markdown</span>
+            </button>
+          </div>
+          <div id="notes-list-container"></div>
+        </div>
+
+        <!-- 3. Search Panel -->
+        <div id="panel-search" class="drawer-panel" style="display: none;">
+          <div class="search-input-group" style="display: flex; gap: 6px; align-items: center; margin-bottom: 0.75rem;">
+            <div style="position: relative; flex: 1;">
+              <input type="text" id="search-query-input" placeholder="输入关键词检索整本图书..." style="width: 100%; padding-right: 26px;"/>
+              <button id="btn-clear-search-input" style="position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; font-size: 14px; color: var(--text-muted); cursor: pointer; display: none;" title="清空输入">✕</button>
+            </div>
+            <button id="btn-exec-search" class="btn-tool" style="width: auto; padding: 0.5rem 0.8rem; background: var(--accent-purple); color: #fff; border-radius: 6px; white-space: nowrap;">检索</button>
+            <button id="btn-clear-search-highlights" class="btn-tool" style="width: auto; padding: 0.5rem 0.6rem; border: 1px solid var(--border-color); border-radius: 6px; font-size: 0.75rem; white-space: nowrap;" title="清除正文中的搜索标记">清除标记</button>
+          </div>
+          <div id="search-results-container"></div>
+        </div>
+
+        <!-- 4. Appearance Settings Panel -->
+        <div id="panel-settings" class="drawer-panel" style="display: none;">
+          <!-- Reader Profile & Nickname -->
+          <div class="setting-section">
+            <div class="setting-title">读者个人信息</div>
+            <div class="control-row">
+              <span class="control-label">读者昵称</span>
+              <input type="text" id="setting-user-name" class="control-input" placeholder="Linden 读者" style="width: 160px; padding: 0.35rem 0.6rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-sidebar); color: var(--text-main); font-size: 0.85rem;" />
+            </div>
+          </div>
+
+          <!-- Theme Selection -->
+          <div class="setting-section">
+            <div class="setting-title">阅读主题配色 (6套)</div>
+            <div class="theme-grid">
+              <button class="theme-btn active" data-val="light">
+                <span class="theme-preview" style="background: #ffffff;"></span>
+                极简白
+              </button>
+              <button class="theme-btn" data-val="sepia">
+                <span class="theme-preview" style="background: #f4ecd8;"></span>
+                羊皮纸
+              </button>
+              <button class="theme-btn" data-val="dark">
+                <span class="theme-preview" style="background: #1e293b;"></span>
+                深灰夜间
+              </button>
+              <button class="theme-btn" data-val="black">
+                <span class="theme-preview" style="background: #000000;"></span>
+                纯黑 OLED
+              </button>
+              <button class="theme-btn" data-val="green">
+                <span class="theme-preview" style="background: #e8f5e9;"></span>
+                护眼绿
+              </button>
+              <button class="theme-btn" data-val="eink">
+                <span class="theme-preview" style="background: #ffffff; border: 1px solid #000;"></span>
+                墨水屏
+              </button>
+            </div>
+          </div>
+
+          <!-- Font Choice (Open Source Fonts) -->
+          <div class="setting-section">
+            <div class="setting-title">开源中文字体族</div>
+            <div class="font-select-grid">
+              <button class="font-choice-btn active" data-val="serif" style="font-family: var(--font-serif);">思源宋体 (Adobe)</button>
+              <button class="font-choice-btn" data-val="sans" style="font-family: var(--font-sans);">思源黑体 (Adobe)</button>
+              <button class="font-choice-btn" data-val="kaiti" style="font-family: var(--font-kaiti);">霞鹜文楷 (开源楷体)</button>
+              <button class="font-choice-btn" data-val="mono" style="font-family: var(--font-mono);">等宽代码 (Fira Code)</button>
+            </div>
+          </div>
+
+          <!-- Typography Sliders -->
+          <div class="setting-section">
+            <div class="setting-title">排版与间距微调</div>
+            <div class="control-row">
+              <span class="control-label">字号大小</span>
+              <input type="range" id="setting-font-size" class="control-input" min="12" max="36" value="18"/>
+              <span id="value-font-size" style="font-size: 0.8rem; font-weight: 600; min-width: 45px; text-align: right;">18px</span>
+            </div>
+            <div class="control-row">
+              <span class="control-label">字体粗细</span>
+              <input type="range" id="setting-font-weight" class="control-input" min="300" max="800" step="100" value="400"/>
+              <span id="value-font-weight" style="font-size: 0.8rem; font-weight: 600; min-width: 45px; text-align: right;">标准 (400)</span>
+            </div>
+            <div class="control-row">
+              <span class="control-label">行间距</span>
+              <input type="range" id="setting-line-height" class="control-input" min="1.1" max="2.6" step="0.1" value="1.6"/>
+              <span id="value-line-height" style="font-size: 0.8rem; font-weight: 600; min-width: 45px; text-align: right;">1.6</span>
+            </div>
+            <div class="control-row">
+              <span class="control-label">页面边距</span>
+              <input type="range" id="setting-margin" class="control-input" min="16" max="96" step="4" value="48"/>
+              <span id="value-margin" style="font-size: 0.8rem; font-weight: 600; min-width: 45px; text-align: right;">48px</span>
+            </div>
+            <div class="control-row">
+              <span class="control-label">正文最大宽</span>
+              <input type="range" id="setting-max-width" class="control-input" min="500" max="1400" step="50" value="760"/>
+              <span id="value-max-width" style="font-size: 0.8rem; font-weight: 600; min-width: 45px; text-align: right;">760px</span>
+            </div>
+            <div class="control-row">
+              <span class="control-label">两栏间隙</span>
+              <input type="range" id="setting-gap" class="control-input" min="2" max="15" step="1" value="6"/>
+              <span id="value-gap" style="font-size: 0.8rem; font-weight: 600; min-width: 45px; text-align: right;">6%</span>
+            </div>
+            <div class="control-row">
+              <span class="control-label">字间距微调</span>
+              <input type="range" id="setting-letter-spacing" class="control-input" min="0" max="6" step="0.5" value="0"/>
+              <span id="value-letter-spacing" style="font-size: 0.8rem; font-weight: 600; min-width: 45px; text-align: right;">0px</span>
+            </div>
+            <div class="control-row">
+              <span class="control-label">中文直角引号</span>
+              <label class="toggle-switch" title="将弯引号转换为中文出版级直角引号 「」">
+                <input type="checkbox" id="setting-chinese-quotes" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+                        <div class="control-row">
+              <span class="control-label">文字排版方向</span>
+              <select id="setting-writing-mode" style="padding: 0.3rem 0.6rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-sidebar); color: var(--text-main);">
+                <option value="horizontal" selected>水平横排 (从左至右)</option>
+                <option value="vertical-rl">古典竖排 (从右至左)</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <span class="control-label">分栏布局</span>
+              <select id="setting-column-count" style="padding: 0.3rem 0.6rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-sidebar); color: var(--text-main);">
+                <option value="1">单栏 / 单页展示</option>
+                <option value="2" selected>双栏 / 双页展开</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <span class="control-label">翻页模式</span>
+              <select id="setting-layout-mode" style="padding: 0.3rem 0.6rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-sidebar); color: var(--text-main);">
+                <option value="paginated">左右双页/单页仿真分页</option>
+                <option value="scrolled">纵向连续平滑滚动</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <span class="control-label">模拟手绘笔痕</span>
+              <label class="toggle-switch">
+                <input type="checkbox" id="setting-realistic-pen" checked />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="control-row">
+              <span class="control-label">全屏时自动隐藏上下栏</span>
+              <label class="toggle-switch">
+                <input type="checkbox" id="setting-fullscreen-autohide" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Cloud Synchronization Setting Card -->
+          <div class="setting-section" id="sync-settings-section">
+            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>坚果云 / WebDAV 云同步</span>
+              <span id="sync-status-badge-sidebar" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--text-muted);">未配置</span>
+            </div>
+            <p style="font-size: 0.76rem; color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
+              跨设备实时双向同步阅读进度、书单与划线笔记。
+            </p>
+            <button type="button" id="btn-open-sync-modal" class="btn-secondary-action" style="width: 100%; justify-content: center; padding: 0.55rem 1rem;">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+              <span>配置云端同步</span>
+            </button>
+          </div>
+
+          <!-- About & Check for Updates Card -->
+          <div class="setting-section" id="about-settings-section">
+            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>关于与版本更新</span>
+              <span id="app-version-badge-sidebar" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple); font-weight: 600;">v0.1.0</span>
+            </div>
+            <p style="font-size: 0.76rem; color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
+              Linden Leaf 现代化全格式开源电子书阅读器。
+            </p>
+            <div style="display: flex; gap: 8px; margin-top: 0.4rem;">
+              <button type="button" id="btn-check-updates" class="btn-primary-action" style="flex: 1; justify-content: center; padding: 0.55rem 0.8rem; font-size: 0.82rem;">
+                <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                <span id="btn-check-updates-text">检查更新</span>
+              </button>
+              <button type="button" id="btn-open-github-repo" class="btn-secondary-action" style="padding: 0.55rem 0.8rem;" title="访问 GitHub 开源仓库">
+                <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Selection Toolbar -->
+    <div id="selection-popup">
+      <span id="popup-multi-badge" class="multi-sel-badge" style="display: none;">已选 1 处</span>
+      <div class="color-dot color-yellow" data-color="#facc15" title="黄色荧光笔"></div>
+      <div class="color-dot color-green" data-color="#4ade80" title="绿色荧光笔"></div>
+      <div class="color-dot color-blue" data-color="#60a5fa" title="蓝色荧光笔"></div>
+      <div class="color-dot color-pink" data-color="#f472b6" title="粉色荧光笔"></div>
+      <div style="width: 1px; height: 18px; background: var(--border-color); margin: 0 2px;"></div>
+      <button id="popup-underline" class="btn-tool" style="width: 28px; height: 28px; font-weight: 700; text-decoration: underline;" title="实线下划线">U</button>
+      <button id="popup-dashed" class="btn-tool" style="width: 28px; height: 28px; font-weight: 700; border-bottom: 2px dashed var(--text-muted); border-radius: 4px; font-size: 11px;" title="虚线下划线">┄</button>
+      <button id="popup-copy" class="btn-tool" style="width: 28px; height: 28px;" title="复制文本 (支持 Ctrl 多选合并复制)">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
+      <button id="popup-search" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-blue);" title="网络搜索 / 百科查词">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </button>
+      <button id="popup-note" class="btn-tool" style="width: 28px; height: 28px;" title="写想法/笔记">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+      </button>
+      <button id="popup-share" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple);" title="生成精美书摘图片 (可一键复制到剪贴板)">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      </button>
+    </div>
+
+    <!-- Highlight Click Action Popup -->
+    <div id="highlight-action-popup">
+      <div class="color-dot color-yellow" data-color="#facc15" title="改黄色"></div>
+      <div class="color-dot color-green" data-color="#4ade80" title="改绿色"></div>
+      <div class="color-dot color-blue" data-color="#60a5fa" title="改蓝色"></div>
+      <div class="color-dot color-pink" data-color="#f472b6" title="改粉色"></div>
+      <div style="width: 1px; height: 18px; background: var(--border-color); margin: 0 3px;"></div>
+      <button id="hl-action-note" class="btn-tool" style="width: 28px; height: 28px;" title="编辑想法">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+      </button>
+      <button id="hl-action-copy" class="btn-tool" style="width: 28px; height: 28px;" title="复制划线文本">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
+      <button id="hl-action-share" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple);" title="生成精美书摘图片 (可一键复制到剪贴板)">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      </button>
+      <button id="hl-action-del" class="btn-tool" style="width: 28px; height: 28px; color: #ef4444;" title="删除划线">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+    </div>
+
+    <!-- Floating Reader Search Controller Bar -->
+    <div id="reader-search-bar" class="reader-floating-search-bar" style="display: none;">
+      <span class="search-bar-badge" id="search-bar-title">检索标记生效中</span>
+      <button id="btn-search-bar-prev" class="btn-search-nav" title="上一处匹配">▲ 上一处</button>
+      <button id="btn-search-bar-next" class="btn-search-nav" title="下一处匹配">▼ 下一处</button>
+      <button id="btn-search-bar-close" class="btn-search-dismiss" title="关闭检索并清除标记 (Esc)">✕ 关闭检索标记</button>
+    </div>
+
+    <!-- Quote Card Modal (WeChat Read style share card generator) -->
+    <div id="quote-card-backdrop" class="global-modal-backdrop" style="display: none; z-index: 9999;">
+      <div id="quote-card-dialog" class="global-modal-card" style="max-width: 900px; width: 92vw; display: flex; flex-direction: row; padding: 0; position: relative; max-height: 90vh;">
+        <button id="btn-quote-close" class="footnote-popup-close" style="position: absolute; right: 15px; top: 15px; z-index: 10;" title="关闭">×</button>
+        
+        <!-- Left: Canvas Preview Wrapper -->
+        <div id="quote-card-canvas-wrap" style="flex: 1; padding: 24px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 12px 0 0 12px;"></div>
+
+        <!-- Right: Controls & Options -->
+        <div class="quote-controls-column" style="width: 340px; padding: 20px; overflow-y: auto; max-height: 85vh;">
+          <!-- 1. Theme Color Selector -->
+          <div class="control-group">
+            <label class="control-label">纸张质感与配色</label>
+            <div class="quote-theme-picker" id="quote-theme-picker">
+              <!-- Buttons rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- 2. Title Typography Style -->
+          <div class="control-group">
+            <label class="control-label">书名排版样式</label>
+            <div class="segmented-control" id="quote-title-layout-control">
+              <button class="seg-btn active" data-layout="vertical">竖排古典</button>
+              <button class="seg-btn" data-layout="horizontal">横排居左</button>
+            </div>
+          </div>
+
+          <!-- 3. Reader Nickname -->
+          <div class="control-group">
+            <label class="control-label">读者署名</label>
+            <input type="text" id="quote-user-name-input" class="quote-text-input" value="Linden 读者" placeholder="输入您的署名"/>
+          </div>
+
+          <!-- 4. Text Editor (Optional tweak) -->
+          <div class="control-group">
+            <label class="control-label">书摘内容微调</label>
+            <textarea id="quote-text-editor" class="quote-textarea" rows="4" placeholder="在此微调书摘文字"></textarea>
+          </div>
+
+          <!-- 5. Advanced Book & Author Details (Strip ads / edit titles) -->
+          <div class="control-group">
+            <button id="btn-quote-toggle-details" type="button" class="quote-toggle-details-btn">
+              <span>更多细节设置</span>
+              <svg class="icon icon-sm chevron-icon" id="quote-details-chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div id="quote-details-panel" class="quote-details-panel" style="display: none;">
+              <div class="expand-input-item">
+                <label class="expand-label">书籍名称</label>
+                <input type="text" id="quote-book-title-input" class="quote-text-input" placeholder="修改书名" />
+              </div>
+              <div class="expand-input-item">
+                <label class="expand-label">作者 / 来源</label>
+                <input type="text" id="quote-book-author-input" class="quote-text-input" placeholder="修改作者或来源" />
+              </div>
+              <div class="expand-input-item">
+                <label class="expand-label">章节名称</label>
+                <input type="text" id="quote-chapter-title-input" class="quote-text-input" placeholder="修改章节名称" />
+              </div>
+              <button id="btn-quote-save-to-shelf" type="button" class="btn-save-to-shelf" title="将修改后的书名和作者永久保存到书库数据库">
+                <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                <span>同步保存到书库</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="quote-action-buttons">
+            <button id="btn-quote-copy-clipboard" class="btn-primary-action btn-copy-image">
+              <svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span>复制图片到剪贴板</span>
+            </button>
+            <button id="btn-quote-download" class="btn-secondary-action">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>保存图片</span>
+            </button>
+          </div>
+
+          <!-- Toast alert -->
+          <div id="quote-copy-toast" class="quote-copy-toast" style="display: none;">
+            图片已复制到剪贴板，可直接粘贴发送
+          </div>
+        </div>
+      </div>
+    </div>
+
+  <!-- Floating Footnote Popup Bubble (WeChat Read / Apple Books style) -->
+  <div id="footnote-popup" class="footnote-popup" style="display: none;">
+    <div class="footnote-popup-header">
+      <span id="footnote-popup-title" class="footnote-popup-title">注释说明</span>
+      <button id="btn-close-footnote" class="footnote-popup-close" title="关闭注释">×</button>
+    </div>
+    <div id="footnote-popup-content" class="footnote-popup-content"></div>
+  </div>
+
+  <!-- Global App Toast Notification (WeChat Read style non-blocking pill) -->
+  <div id="global-toast" class="global-toast" style="display: none;">
+    <span id="global-toast-icon" class="toast-icon">ℹ️</span>
+    <span id="global-toast-msg" class="toast-msg"></span>
+  </div>
+
+  <!-- Global App Input Modal Dialog (Prompt replacement, fullscreen-safe) -->
+  <div id="global-modal-backdrop" class="global-modal-backdrop" style="display: none;">
+    <div class="global-modal-card">
+      <div class="global-modal-header">
+        <span id="global-modal-title" class="global-modal-title">标题</span>
+        <button id="global-modal-close" class="footnote-popup-close">×</button>
+      </div>
+      <div class="global-modal-body">
+        <textarea id="global-modal-input" class="global-modal-input" rows="3" placeholder="请输入内容..."></textarea>
+      </div>
+      <div class="global-modal-footer">
+        <button id="global-modal-cancel" class="btn-secondary-action" style="padding: 0.45rem 1rem;">取消</button>
+        <button id="global-modal-confirm" class="btn-primary-action" style="padding: 0.45rem 1.25rem;">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Welcome Onboarding Nickname Modal (First Time User Experience) -->
+  <div id="welcome-modal-backdrop" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 420px; text-align: center; padding: 2rem 1.75rem;">
+      <div style="font-size: 3rem; margin-bottom: 0.75rem;">🌱</div>
+      <h3 style="margin-bottom: 0.5rem; font-size: 1.25rem; font-weight: 700; color: var(--text-main);">欢迎使用 Linden Leaf</h3>
+      <p style="font-size: 0.88rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 1.25rem;">
+        为了在生成书摘金句卡片、阅读书签分享及阅读统计时呈现您的专属印记，请设置您的读者昵称：
+      </p>
+      <input type="text" id="welcome-username-input" class="global-modal-input" placeholder="例如：爱读书的李白" value="Linden 读者" style="text-align: center; font-size: 1rem; font-weight: 600; padding: 0.65rem 1rem; margin-bottom: 1.25rem; width: 100%; border-radius: 8px;" />
+      <div style="display: flex; gap: 0.75rem; justify-content: center;">
+        <button id="btn-welcome-confirm" class="btn-primary-action" style="width: 100%; justify-content: center; padding: 0.65rem 1.5rem; font-size: 0.95rem;">开启阅读之旅</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Create / Edit Custom List -->
+  <div id="modal-create-list" class="global-modal-backdrop" style="display: none;">
+    <div class="global-modal-card" style="max-width: 440px;">
+      <div class="global-modal-header">
+        <span id="modal-create-list-title" class="global-modal-title">新建自定义书单</span>
+        <button id="btn-close-create-list" class="footnote-popup-close">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 1rem 0; display: flex; flex-direction: column; gap: 0.85rem;">
+        <div>
+          <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 0.4rem;">书单名称</label>
+          <input type="text" id="input-custom-list-name" class="global-modal-input" placeholder="例如：2026 年度书单、文史研究、科幻精选..." maxlength="30" />
+        </div>
+        <div>
+          <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 0.4rem;">选择书单图标</label>
+          <div id="custom-list-icon-picker" class="icon-picker-grid" style="display: grid; grid-template-columns: repeat(8, 1fr); gap: 0.4rem;">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+      </div>
+      <div class="global-modal-footer">
+        <button id="btn-cancel-create-list" class="btn-secondary-action" style="padding: 0.45rem 1rem;">取消</button>
+        <button id="btn-confirm-create-list" class="btn-primary-action" style="padding: 0.45rem 1.25rem;">创建书单</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Manage Book Lists (Add / Remove Book to Custom Lists) -->
+  <div id="modal-manage-book-lists" class="global-modal-backdrop" style="display: none;">
+    <div class="global-modal-card" style="max-width: 460px;">
+      <div class="global-modal-header">
+        <span class="global-modal-title">加入与管理书单</span>
+        <button id="btn-close-book-lists" class="footnote-popup-close">×</button>
+      </div>
+      <div style="padding: 0.75rem 0 0.25rem 0;">
+        <div id="manage-book-target-title" style="font-size: 0.95rem; font-weight: 700; color: var(--accent-purple); margin-bottom: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
+        <p style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 0.75rem;">勾选该图书所属的书单，支持多选并即时归类：</p>
+        <div id="book-lists-checkbox-container" style="max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.45rem; padding-right: 0.25rem;">
+          <!-- Checkbox items -->
+        </div>
+      </div>
+      <div class="global-modal-footer" style="margin-top: 1rem; display: flex; justify-content: space-between; align-items: center;">
+        <button id="btn-quick-new-list-in-modal" class="btn-secondary-action" style="padding: 0.4rem 0.8rem; font-size: 0.82rem; border-style: dashed;">+ 新建书单</button>
+        <div style="display: flex; gap: 0.5rem;">
+          <button id="btn-cancel-book-lists" class="btn-secondary-action" style="padding: 0.45rem 1rem;">取消</button>
+          <button id="btn-save-book-lists" class="btn-primary-action" style="padding: 0.45rem 1.25rem;">保存设置</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Batch Add Books To Current Custom List -->
+  <div id="modal-batch-add-to-list" class="global-modal-backdrop" style="display: none;">
+    <div class="global-modal-card" style="max-width: 520px;">
+      <div class="global-modal-header">
+        <span id="batch-add-list-modal-title" class="global-modal-title">添加图书到书单</span>
+        <button id="btn-close-batch-add-list" class="footnote-popup-close">×</button>
+      </div>
+      <div style="padding: 0.75rem 0 0.25rem 0;">
+        <p style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 0.75rem;">从书库中勾选要加入此书单的图书：</p>
+        <div id="batch-add-books-container" style="max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.45rem; padding-right: 0.25rem;">
+          <!-- Checkbox list of all books -->
+        </div>
+      </div>
+      <div class="global-modal-footer" style="margin-top: 1rem;">
+        <button id="btn-cancel-batch-add-list" class="btn-secondary-action" style="padding: 0.45rem 1rem;">取消</button>
+        <button id="btn-confirm-batch-add-list" class="btn-primary-action" style="padding: 0.45rem 1.25rem;">确定添加</button>
+      </div>
+  <!-- Modal: Stats Detail (Books Read / Finished / Notes in period) -->
+  <div id="modal-stats-detail" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 560px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span id="stats-detail-modal-icon" style="font-size: 1.25rem;">📚</span>
+          <span id="stats-detail-modal-title" class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">本周期读过的图书</span>
+        </div>
+        <button id="btn-close-stats-detail" class="footnote-popup-close" title="关闭">×</button>
+      </div>
+      <div id="stats-detail-modal-list" class="global-modal-body" style="padding: 1rem 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 10px; max-height: 55vh;">
+        <!-- Dynamically populated books or notes list -->
+      </div>
+      <div class="global-modal-footer" style="padding-top: 0.75rem; border-top: 1px solid var(--border-color); display: flex; justify-content: flex-end;">
+        <button id="btn-stats-detail-confirm" class="btn-primary-action" style="padding: 0.45rem 1.25rem;">知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./vendor/mammoth/mammoth.browser.min.js"></script>
+  <script type="module" src="./js/app.js?v=20260826_64"></script>
+
+  <!-- Modal: Dedicated WebDAV Cloud Sync Dialog -->
+  <div id="modal-webdav-sync" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 520px; width: 90vw;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 600;">坚果云 / WebDAV 云端同步</span>
+        <button id="btn-close-sync-modal" class="footnote-popup-close" title="关闭">×</button>
+      </div>
+
+      <div style="padding: 1rem 0 0.5rem 0;">
+        <!-- Sync info notice -->
+        <div style="background: rgba(139, 92, 246, 0.08); border: 1px solid rgba(139, 92, 246, 0.2); border-radius: 8px; padding: 10px 12px; margin-bottom: 1rem; font-size: 0.78rem; color: var(--text-main); line-height: 1.45;">
+          💡 <strong>同步范围说明</strong>：云同步专注于跨设备秒级同步「阅读进度、划线笔记、书单分类与阅读统计」。由于电子书文件较大，书籍本体请在各设备本地导入。
+        </div>
+
+        <!-- Server type preset switch -->
+        <div class="sync-preset-bar" style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+          <button type="button" class="btn-sync-preset active" data-preset="jianguoyun" style="flex: 1; padding: 0.45rem; font-size: 0.82rem; font-weight: 500;">坚果云 (推荐)</button>
+          <button type="button" class="btn-sync-preset" data-preset="custom" style="flex: 1; padding: 0.45rem; font-size: 0.82rem; font-weight: 500;">自定义 WebDAV</button>
+        </div>
+
+        <!-- Form fields -->
+        <div class="sync-field-group">
+          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">服务器地址 (Server URL)</label>
+          <input type="text" id="sync-input-server" class="jane-modal-input sync-input" placeholder="https://dav.jianguoyun.com/dav/" value="https://dav.jianguoyun.com/dav/" style="width: 100%; box-sizing: border-box;" />
+        </div>
+
+        <div class="sync-field-group" style="margin-top: 0.65rem;">
+          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">坚果云账号 / 邮箱 (Email)</label>
+          <input type="email" id="sync-input-username" class="jane-modal-input sync-input" placeholder="例如: your_name@example.com" style="width: 100%; box-sizing: border-box;" />
+        </div>
+
+        <div class="sync-field-group" style="margin-top: 0.65rem;">
+          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">应用授权密码 (App Password)</label>
+          <div style="position: relative;">
+            <input type="password" id="sync-input-password" class="jane-modal-input sync-input" placeholder="16 位第三方应用专用授权密码" style="width: 100%; box-sizing: border-box; padding-right: 2.4rem;" />
+            <button type="button" id="btn-toggle-sync-pwd" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--text-tertiary); font-size: 0.85rem;" title="显示/隐藏密码">👁️</button>
+          </div>
+        </div>
+
+        <div class="sync-field-group" style="margin-top: 0.65rem;">
+          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">云端同步目录 (Remote Folder)</label>
+          <input type="text" id="sync-input-dir" class="jane-modal-input sync-input" value="LindenLeaf" placeholder="LindenLeaf" style="width: 100%; box-sizing: border-box;" />
+        </div>
+
+        <!-- Built-in Mandatory Automatic Features List -->
+        <div style="margin-top: 0.9rem; padding: 0.75rem 0.9rem; background: var(--bg-tertiary); border-radius: 8px; border: 1px solid var(--border-color); font-size: 0.76rem; color: var(--text-secondary); line-height: 1.5;">
+          <div style="font-weight: 600; color: var(--text-main); margin-bottom: 0.35rem;">✓ 开启后自动生效的多端对齐机制：</div>
+          <div>• <strong>启动自动拉取</strong>：应用启动时自动获取最新阅读进度与书单</div>
+          <div>• <strong>退出自动上传</strong>：关闭书籍时实时将进度、划线笔记增量同步至云端</div>
+          <div>• <strong>安全合并策略</strong>：基于时间戳的 LWW 智能冲突对齐，绝不丢失离线笔记</div>
+        </div>
+
+        <!-- Sync live status card -->
+        <div id="sync-status-card" style="margin-top: 0.75rem; padding: 0.55rem 0.75rem; border-radius: 6px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2); font-size: 0.76rem; color: var(--text-secondary); line-height: 1.4;">
+          <div style="display: flex; align-items: center; gap: 6px; font-weight: 600; color: #059669; margin-bottom: 2px;">
+            <span id="sync-status-dot">🟢</span>
+            <span id="sync-status-title">云同步就绪</span>
+          </div>
+          <div id="sync-status-desc" style="color: var(--text-tertiary);">尚未进行同步</div>
+        </div>
+      </div>
+
+      <!-- Action buttons footer -->
+      <div class="global-modal-footer" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <div style="display: flex; gap: 0.5rem;">
+          <button type="button" id="btn-sync-test-conn" class="btn-secondary-action" style="padding: 0.45rem 0.9rem; font-size: 0.82rem;">
+            <span>测试连接</span>
+          </button>
+          <button type="button" id="btn-sync-trigger-now" class="btn-secondary-action" style="padding: 0.45rem 0.9rem; font-size: 0.82rem;">
+            <span>立即同步</span>
+          </button>
+        </div>
+        <div style="display: flex; gap: 0.5rem;">
+          <button type="button" id="btn-sync-disable" class="btn-secondary-action" style="padding: 0.45rem 0.9rem; font-size: 0.82rem; color: #ef4444;">
+            <span>关闭同步</span>
+          </button>
+          <button type="button" id="btn-sync-save-enable" class="btn-primary-action" style="padding: 0.45rem 1.15rem; font-size: 0.82rem;">
+            <span>保存并开启</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Dedicated Update Notification Dialog -->
+  <div id="modal-update-dialog" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 500px; width: 90vw;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 1.25rem;">🎉</span>
+          <span id="update-modal-title" class="global-modal-title" style="font-size: 1.05rem; font-weight: 600;">发现新版本</span>
+        </div>
+        <button id="btn-close-update-modal" class="footnote-popup-close" title="关闭">×</button>
+      </div>
+
+      <div style="padding: 1rem 0 0.5rem 0;">
+        <!-- Version Compare Badge -->
+        <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(139, 92, 246, 0.08); border: 1px solid rgba(139, 92, 246, 0.2); border-radius: 8px; padding: 10px 14px; margin-bottom: 1rem;">
+          <div>
+            <div style="font-size: 0.75rem; color: var(--text-tertiary);">当前版本</div>
+            <div id="update-current-version" style="font-size: 0.95rem; font-weight: 600; color: var(--text-main);">v0.1.0</div>
+          </div>
+          <div style="font-size: 1.2rem; color: var(--accent-purple);">➔</div>
+          <div>
+            <div style="font-size: 0.75rem; color: var(--text-tertiary);">最新版本</div>
+            <div id="update-latest-version" style="font-size: 0.95rem; font-weight: 700; color: var(--accent-purple);">v0.2.0</div>
+          </div>
+          <div>
+            <div style="font-size: 0.75rem; color: var(--text-tertiary);">发布日期</div>
+            <div id="update-published-date" style="font-size: 0.82rem; color: var(--text-secondary);">2026-08-28</div>
+          </div>
+        </div>
+
+        <!-- Release Notes Log -->
+        <div style="margin-bottom: 0.5rem;">
+          <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-main); margin-bottom: 0.35rem;">📝 更新日志与新特性：</div>
+          <div id="update-release-notes" style="max-height: 180px; overflow-y: auto; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px; font-size: 0.8rem; line-height: 1.5; color: var(--text-secondary); white-space: pre-wrap; font-family: inherit;">
+          </div>
+        </div>
+      </div>
+
+      <!-- Action buttons footer -->
+      <div class="global-modal-footer" style="display: flex; justify-content: flex-end; align-items: center; gap: 0.6rem; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <button type="button" id="btn-update-later" class="btn-secondary-action" style="padding: 0.45rem 1rem; font-size: 0.82rem;">
+          <span>稍后再说</span>
+        </button>
+        <button type="button" id="btn-update-download" class="btn-primary-action" style="padding: 0.45rem 1.25rem; font-size: 0.82rem;">
+          <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>立即前往 GitHub 下载</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

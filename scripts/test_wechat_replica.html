@@ -1,0 +1,248 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@font-face {
+    font-family: 'SourceHanSerif';
+    src: local('Source Han Serif SC'), local('Noto Serif CJK SC'), local('SimSun');
+}
+body {
+    background: #fdfbf7;
+    color: #1a1a1a;
+    font-family: 'SourceHanSerif', serif;
+    font-size: 26px;
+    font-weight: 500;
+    line-height: 2.1;
+    padding: 60px 80px;
+    max-width: 640px;
+    margin: 0 auto;
+    -webkit-font-smoothing: antialiased;
+}
+.line-wrap {
+    position: relative;
+    display: inline-block;
+    margin-bottom: 14px;
+    padding: 0 4px;
+}
+svg.marker-svg {
+    position: absolute;
+    top: -2px;
+    left: -4px;
+    width: calc(100% + 8px);
+    height: calc(100% + 4px);
+    pointer-events: none;
+    z-index: -1;
+    mix-blend-mode: multiply;
+}
+</style>
+</head>
+<body>
+    <div id="container"></div>
+
+    <script>
+    const textLines = [
+        "“邓肯爵士，” 罗翰妮夫人说，",
+        "“黑龙起兵时我才十岁。我乞求父",
+        "亲莫以身犯险，或至少留下我丈",
+        "夫，如果两个男人都走了，谁来保",
+        "护我？他带我登上冷壕堡城墙，指",
+        "出要津所在。‘保证它们完好，’",
+        "他说，‘它们会保护你。照顾好自",
+        "己，就没人能伤害你。’他指的第",
+        "一处就是护城壕。”她用辫子末梢"
+    ];
+
+    // WeChat Read Authentic Marker Palette
+    const WECHAT_PINK = '#f43f5e';
+    const WECHAT_OPACITY = 0.24; // Soft pastel opacity matching WeChat Read #fad4d9 on white
+
+    const container = document.getElementById('container');
+    textLines.forEach((text, i) => {
+        const lineDiv = document.createElement('div');
+        lineDiv.className = 'line-wrap';
+        lineDiv.innerText = text;
+        container.appendChild(lineDiv);
+        container.appendChild(document.createElement('br'));
+    });
+
+    // WeChat Read Authentic Marker Geometry Engine
+    // Generates genuine soft-cornered hand-drawn chisel strokes with organic micro-variations
+    function drawWeChatMarker(svg, w, h, lineIndex) {
+        const top = 3;
+        const bottom = h - 3;
+        const left = 3;
+        const right = w - 3;
+        const midY = (top + bottom) * 0.5;
+        const width = right - left;
+
+        // 12 Authentic WeChat Read Profiles (Studied from real app screenshots)
+        // Each has smooth filleted corners (r = 3.5px) and organic edge curvature
+        let d = '';
+        const v = lineIndex % 12;
+
+        switch (v) {
+            case 0: // Line 1: Soft rounded entry, top micro-wave, delicate vertical soft cap on right
+                d = `M ${left + 3.5},${top + 0.5}
+                     Q ${left + width * 0.5},${top - 0.5} ${right - 3.5},${top}
+                     Q ${right},${top} ${right},${top + 3.5}
+                     L ${right},${bottom - 3.5}
+                     Q ${right},${bottom} ${right - 3.5},${bottom}
+                     Q ${left + width * 0.5},${bottom + 0.5} ${left + 3.5},${bottom}
+                     Q ${left},${bottom} ${left},${bottom - 3.5}
+                     L ${left},${top + 3.5}
+                     Q ${left},${top} ${left + 3.5},${top + 0.5} Z`;
+                break;
+
+            case 1: // Line 2: 45° Chisel cut entry (top left extends more), right side gentle forward tilt
+                d = `M ${left + 5.5},${top}
+                     Q ${left + width * 0.5},${top + 0.3} ${right - 2},${top}
+                     Q ${right + 1},${top + 2} ${right + 1.5},${top + 4}
+                     L ${right + 2.5},${bottom - 3.5}
+                     Q ${right + 2.5},${bottom} ${right - 1},${bottom}
+                     Q ${left + width * 0.5},${bottom - 0.3} ${left + 2},${bottom}
+                     Q ${left - 0.5},${bottom} ${left},${bottom - 3}
+                     L ${left + 3},${top + 2}
+                     Q ${left + 4},${top} ${left + 5.5},${top} Z`;
+                break;
+
+            case 2: // Line 3: Soft vertical entry, right side 35° chisel slant with rounded corners
+                d = `M ${left + 3.5},${top + 0.5}
+                     Q ${left + width * 0.5},${top - 0.3} ${right + 0.5},${top}
+                     Q ${right + 2.5},${top + 1} ${right + 2.5},${top + 3}
+                     L ${right - 2.5},${bottom - 2.5}
+                     Q ${right - 4},${bottom} ${right - 6},${bottom}
+                     Q ${left + width * 0.5},${bottom + 0.4} ${left + 3.5},${bottom}
+                     Q ${left},${bottom} ${left},${bottom - 3.5}
+                     L ${left},${top + 3.5}
+                     Q ${left},${top} ${left + 3.5},${top + 0.5} Z`;
+                break;
+
+            case 3: // Line 4: Clean horizontal with subtle hand-glide arc on right
+                d = `M ${left + 3.5},${top}
+                     Q ${left + width * 0.5},${top + 0.4} ${right - 3},${top}
+                     Q ${right + 2},${midY} ${right - 3},${bottom}
+                     Q ${left + width * 0.5},${bottom - 0.4} ${left + 3.5},${bottom}
+                     Q ${left},${midY} ${left + 3.5},${top} Z`;
+                break;
+
+            case 4: // Line 5: Reverse Chisel Tilt (top-right overhang with smooth round tip)
+                d = `M ${left + 2},${top + 1}
+                     Q ${left + width * 0.5},${top - 0.4} ${right - 2},${top}
+                     Q ${right + 1},${top} ${right + 1.5},${top + 2.5}
+                     L ${right - 2.5},${bottom - 2}
+                     Q ${right - 3.5},${bottom} ${right - 5.5},${bottom}
+                     Q ${left + width * 0.5},${bottom + 0.3} ${left + 3},${bottom}
+                     Q ${left},${bottom} ${left + 0.5},${bottom - 3}
+                     L ${left + 1},${top + 3}
+                     Q ${left + 1},${top} ${left + 2},${top + 1} Z`;
+                break;
+
+            case 5: // Line 6: Dual 35° Parallel Slanted Marker Stroke
+                d = `M ${left + 5},${top}
+                     Q ${left + width * 0.5},${top + 0.2} ${right + 1},${top}
+                     Q ${right + 2.5},${top + 1.5} ${right + 2},${top + 3.5}
+                     L ${right - 2.5},${bottom - 2}
+                     Q ${right - 3.5},${bottom} ${right - 5.5},${bottom}
+                     Q ${left + width * 0.5},${bottom - 0.2} ${left},${bottom}
+                     Q ${left - 1.5},${bottom} ${left - 1},${bottom - 3}
+                     L ${left + 3},${top + 2}
+                     Q ${left + 3.5},${top} ${left + 5},${top} Z`;
+                break;
+
+            case 6: // Line 7: Subtle S-Curve Waist Squeeze
+                d = `M ${left + 3.5},${top + 0.5}
+                     Q ${left + width * 0.3},${top - 0.5} ${left + width * 0.7},${top + 0.5}
+                     Q ${right},${top} ${right - 1},${top + 3.5}
+                     L ${right - 1.5},${bottom - 3.5}
+                     Q ${right - 1},${bottom} ${right - 3.5},${bottom}
+                     Q ${left + width * 0.7},${bottom - 0.5} ${left + width * 0.3},${bottom + 0.5}
+                     Q ${left},${bottom} ${left},${bottom - 3.5}
+                     L ${left},${top + 3.5}
+                     Q ${left},${top} ${left + 3.5},${top + 0.5} Z`;
+                break;
+
+            case 7: // Line 8: Droplet soft entry with vertical flat chisel release
+                d = `M ${left + 4},${top}
+                     Q ${left + width * 0.5},${top - 0.3} ${right - 3.5},${top}
+                     Q ${right},${top} ${right},${top + 3.5}
+                     L ${right},${bottom - 3.5}
+                     Q ${right},${bottom} ${right - 3.5},${bottom}
+                     Q ${left + width * 0.5},${bottom + 0.3} ${left + 4},${bottom}
+                     Q ${left - 1},${midY} ${left + 4},${top} Z`;
+                break;
+
+            case 8: // Line 9: Fast Stroke with smooth tapered lift-off
+                d = `M ${left + 3},${top + 0.8}
+                     Q ${left + width * 0.5},${top} ${right - 2},${top}
+                     Q ${right + 1},${midY} ${right - 4.5},${bottom}
+                     Q ${left + width * 0.5},${bottom} ${left + 2},${bottom}
+                     Q ${left},${midY} ${left + 3},${top + 0.8} Z`;
+                break;
+
+            case 9: // Line 10: Heavy solid stroke with soft rounded corners
+                d = `M ${left + 4},${top}
+                     L ${right - 4},${top}
+                     Q ${right},${top} ${right},${top + 4}
+                     L ${right},${bottom - 4}
+                     Q ${right},${bottom} ${right - 4},${bottom}
+                     L ${left + 4},${bottom}
+                     Q ${left},${bottom} ${left},${bottom - 4}
+                     L ${left},${top + 4}
+                     Q ${left},${top} ${left + 4},${top} Z`;
+                break;
+
+            case 10: // Line 11: Upward gentle tilt with rounded tip
+                d = `M ${left + 3},${top + 1}
+                     Q ${left + width * 0.5},${top - 0.6} ${right - 1},${top - 0.5}
+                     Q ${right + 1.5},${top + 1} ${right + 1},${top + 3}
+                     L ${right - 1},${bottom - 2}
+                     Q ${right - 2},${bottom} ${right - 4},${bottom}
+                     Q ${left + width * 0.5},${bottom + 0.4} ${left + 2},${bottom}
+                     Q ${left},${midY} ${left + 3},${top + 1} Z`;
+                break;
+
+            case 11:
+            default: // Line 12: Standard Organic Highlighter
+                d = `M ${left + 3.5},${top + 0.3}
+                     Q ${left + width * 0.5},${top - 0.3} ${right - 3.5},${top + 0.2}
+                     Q ${right + 0.5},${midY} ${right - 3.5},${bottom - 0.2}
+                     Q ${left + width * 0.5},${bottom + 0.3} ${left + 3.5},${bottom - 0.3}
+                     Q ${left - 0.5},${midY} ${left + 3.5},${top + 0.3} Z`;
+                break;
+        }
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('fill', WECHAT_PINK);
+        path.style.opacity = WECHAT_OPACITY.toString();
+        svg.appendChild(path);
+
+        // Line 1 WeChat Read detail: Subtle soft vertical lift-off mark
+        if (v === 0) {
+            const tail = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            tail.setAttribute('d', `M ${right - 2.5},${top + 1} Q ${right + 1},${midY} ${right - 1.5},${bottom - 1} L ${right - 3.5},${bottom - 1} Q ${right - 1},${midY} ${right - 3.5},${top + 1} Z`);
+            tail.setAttribute('fill', WECHAT_PINK);
+            tail.style.opacity = '0.16';
+            svg.appendChild(tail);
+        }
+    }
+
+    window.renderMarkers = function() {
+        const divs = document.querySelectorAll('.line-wrap');
+        divs.forEach((div, i) => {
+            const w = div.offsetWidth + 8;
+            const h = div.offsetHeight + 4;
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('class', 'marker-svg');
+            svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+
+            drawWeChatMarker(svg, w, h, i);
+            div.appendChild(svg);
+        });
+    };
+    window.addEventListener('load', window.renderMarkers);
+    </script>
+</body>
+</html>
