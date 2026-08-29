@@ -1,8 +1,8 @@
 {
   "name": "linden-leaf",
   "productName": "Linden Leaf",
-  "version": "0.1.0",
-  "description": "Linden Leaf - Universal Modern & Skeuomorphic E-Book Reader",
+  "version": "1.0.0",
+  "description": "Linden Leaf - 现代化全格式电子书阅读器",
   "main": "main.js",
   "author": "Linden Leaf Team",
   "license": "MIT",

@@ -4,9 +4,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     isElectron: true,
     platform: process.platform,
 
-    // Dialogs
+    // Dialogs & File Stream
     openFileDialog: () => ipcRenderer.invoke('dialog:openFile'),
-    saveFileDialog: (options) => ipcRenderer.invoke('dialog:saveFile', options),
+    readFileBuffer: (filePath) => ipcRenderer.invoke('file:readBuffer', filePath),
 
     // Window Controls
     minimize: () => ipcRenderer.send('window:minimize'),

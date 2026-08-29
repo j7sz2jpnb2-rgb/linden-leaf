@@ -206,9 +206,7 @@ const buildContentCSS = (settings) => {
             font-size: ${fontSize}px !important;
             box-sizing: border-box;
             margin: 0 !important;
-            padding-block-start: 56px !important;
-            padding-block-end: 52px !important;
-            padding-inline: 24px !important;
+            padding: 0 !important;
         }
         p, li, blockquote, dd, div {
             line-height: ${lineHeight} !important;
@@ -217,28 +215,117 @@ const buildContentCSS = (settings) => {
             hyphens: ${hyphenate ? 'auto' : 'manual'};
         }
         p {
-            text-indent: 0 !important;
+            text-indent: 2em;
             margin-top: 0 !important;
-            margin-bottom: 0.5em !important;
-            orphans: 1 !important;
-            widows: 1 !important;
-        }
-        p:not(.no-indent)::before {
-            content: "";
-            display: inline-block;
-            width: 2em;
+            margin-bottom: 0.65em !important;
+            orphans: 2 !important;
+            widows: 2 !important;
         }
         li, dd {
             margin-top: 0.4em;
             margin-bottom: 0.4em;
         }
-        p.no-indent::before, .no-indent::before, .chapter-subtitle::before, h1::before, h2::before, h3::before, h4::before, h5::before, h6::before, .titlepage *::before, blockquote *::before {
+
+        /* Elements that must NEVER have 2em text-indent (Center, Right, Headings, Poetry, Captions) */
+        p.no-indent, .no-indent,
+        [data-align="center"], [data-align="right"],
+        [data-reader-heading], [data-poetry-line], [data-has-media],
+        h1, h2, h3, h4, h5, h6,
+        blockquote, pre, figure, figcaption,
+        .poetry, .verse, .subtitle, .author, .date, [class*="sequence"],
+        .titlepage *,
+        [align="center"], [align="right"],
+        [style*="text-align:center" i], [style*="text-align: center" i],
+        [style*="text-align:right" i], [style*="text-align: right" i] {
+            text-indent: 0 !important;
+        }
+
+        /* Remove any pseudo-element hacks */
+        p::before, .no-indent::before, h1::before, h2::before, h3::before, h4::before, h5::before, h6::before {
             content: none !important;
             display: none !important;
         }
-        p.no-indent, .no-indent, .chapter-subtitle, h1, h2, h3, h4, h5, h6, .titlepage * {
+
+        /* 1. Chapter First Visible Heading (Compact top margin) */
+        [data-first-heading="true"] {
+            margin-top: 0.5em !important;
+            margin-bottom: 1.2em !important;
             text-indent: 0 !important;
+            page-break-after: avoid !important;
+            break-after: avoid !important;
         }
+
+        /* 2. Chapter Headings in single-file books (Force Break to New Page / Column with Bold Center) */
+        [data-chapter-heading="true"]:not([data-first-heading="true"]) {
+            break-before: column !important;
+            page-break-before: always !important;
+            margin-top: 3.5em !important;
+            margin-bottom: 1.8em !important;
+            text-indent: 0 !important;
+            font-weight: bold !important;
+            font-size: 1.25em !important;
+            text-align: center !important;
+            break-after: avoid !important;
+            page-break-after: avoid !important;
+            display: block !important;
+            clear: both !important;
+        }
+
+        /* 3. In-document Subsections & Poem Titles (Generous 3.2em respiratory margin & avoid orphan headings) */
+        [data-section-heading="true"]:not([data-chapter-heading="true"]) {
+            margin-top: 3.2em !important;
+            margin-bottom: 1.2em !important;
+            text-indent: 0 !important;
+            page-break-after: avoid !important;
+            break-after: avoid !important;
+            clear: both !important;
+            display: block !important;
+        }
+
+        /* Subtitle / Author directly following a heading (Bond tightly with previous heading) */
+        h1 + p, h2 + p, h3 + p,
+        [data-reader-heading] + p[data-align="center"],
+        [data-reader-heading] + .contenttitle1,
+        [data-reader-heading] + [class*="author" i],
+        [data-reader-heading] + [class*="subtitle" i] {
+            margin-top: -0.3em !important;
+            text-indent: 0 !important;
+            page-break-after: avoid !important;
+            break-after: avoid !important;
+        }
+
+        /* 3. Anti-Phantom Blank Page: eliminate trailing element bottom margins at section end */
+        body > :last-child,
+        body > div:last-child > :last-child,
+        body > section:last-child > :last-child {
+            margin-bottom: 0 !important;
+            padding-bottom: 0 !important;
+        }
+
+        /* 4. Target Calibre / Pandoc dummy page-break markers directly in CSS as well */
+        [id*="calibre_pb" i],
+        [class*="calibre_pb" i],
+        .calibre_pb,
+        h1:empty, h2:empty, h3:empty, h4:empty, h5:empty, h6:empty,
+        [data-reader-heading]:empty {
+            display: none !important;
+            height: 0 !important;
+            min-height: 0 !important;
+            max-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            font-size: 0 !important;
+            line-height: 0 !important;
+            border: none !important;
+        }
+
+        /* Full page SVG illustrations and standalone chapter dividers */
+        svg {
+            max-width: 100% !important;
+            max-height: 100% !important;
+            box-sizing: border-box !important;
+        }
+
         blockquote {
             margin: 1.2em 0 0.8em 0;
             padding: 0;
@@ -285,7 +372,7 @@ const buildContentCSS = (settings) => {
             color: inherit !important;
         }
 
-        /* Hide EPUB 3 / HTML5 Footnotes & Endnotes from regular text flow (without hiding regular aside callouts/sidebars) */
+        /* Hide EPUB 3 / HTML5 Footnotes & Endnotes Content Blocks from regular text flow */
         aside[epub\\:type~="footnote"],
         aside[epub\\:type~="endnote"],
         aside[epub\\:type~="rearnote"],
@@ -295,15 +382,11 @@ const buildContentCSS = (settings) => {
         aside.footnote,
         aside.endnote,
         aside.rearnote,
-        [epub\\:type~="footnote"],
-        [epub\\:type~="endnote"],
-        [epub\\:type~="rearnote"],
-        [role~="doc-footnote"],
-        [role~="doc-endnote"],
-        [role~="doc-rearnote"],
-        .footnote,
-        .endnote,
-        .rearnote {
+        div.footnote:not(:has(a[href])),
+        div.endnote:not(:has(a[href])),
+        li.footnote,
+        li.endnote,
+        section.footnotes {
             display: none !important;
         }
 
@@ -313,8 +396,6 @@ const buildContentCSS = (settings) => {
         a.epub-footnote,
         a.footnote-ref,
         a.noteref,
-        a[href*="footnote"],
-        a[href*="note"],
         sup a,
         sup.footnote {
             cursor: pointer !important;
@@ -388,12 +469,20 @@ class UniversalReaderApp {
         this.statsViewMode = 'month' // 'week', 'month', 'year', 'total'
         this.statsYear = new Date().getFullYear()
         this.statsMonth = new Date().getMonth() + 1
+        this.statsWeekOffset = 0
 
         // Custom Reading Lists State
         this.customLists = []
         this.selectedListIcon = '📌'
         this.managingBookId = null
         this.icons = ['📌', '🌟', '📜', '📚', '📑', '🎯', '💡', '☕', '🌿', '🚀', '🏛️', '🎨', '📖', '🔮', '💼', '🔖']
+
+        // PDF Freehand Drawing & OCR State
+        this.pdfDrawTool = null // 'marker' | 'pen' | 'eraser' | null
+        this.pdfDrawColor = 'rgba(250, 204, 21, 0.45)'
+        this.pdfDrawWidth = 18
+        this.currentPdfPageIndex = 1
+        this.pdfOverlayCanvas = null
 
         this.initDOM()
         this.bindEvents()
@@ -579,7 +668,7 @@ class UniversalReaderApp {
             footnotePopupContent: document.getElementById('footnote-popup-content'),
             btnCloseFootnote: document.getElementById('btn-close-footnote'),
 
-            // PDF Zoom Controls (WPS Style)
+            // PDF Zoom & Freehand Drawing & OCR Controls
             pdfZoomBar: document.getElementById('pdf-zoom-control-bar'),
             btnPdfZoomOut: document.getElementById('btn-pdf-zoom-out'),
             pdfZoomSlider: document.getElementById('pdf-zoom-slider'),
@@ -588,6 +677,22 @@ class UniversalReaderApp {
             btnPdfFitWidth: document.getElementById('btn-pdf-fit-width'),
             btnPdfFitPage: document.getElementById('btn-pdf-fit-page'),
             btnPdfSpreadToggle: document.getElementById('btn-pdf-spread-toggle'),
+            btnPdfMarkerYellow: document.getElementById('btn-pdf-marker-yellow'),
+            btnPdfMarkerGreen: document.getElementById('btn-pdf-marker-green'),
+            btnPdfPenRed: document.getElementById('btn-pdf-pen-red'),
+            btnPdfEraser: document.getElementById('btn-pdf-eraser'),
+            btnPdfClearDraw: document.getElementById('btn-pdf-clear-draw'),
+            btnPdfOcrExtract: document.getElementById('btn-pdf-ocr-extract'),
+
+            // PDF OCR Modal Elements
+            modalPdfOcr: document.getElementById('modal-pdf-ocr'),
+            btnClosePdfOcr: document.getElementById('btn-close-pdf-ocr'),
+            btnCancelPdfOcr: document.getElementById('btn-cancel-pdf-ocr'),
+            btnCopyPdfOcr: document.getElementById('btn-copy-pdf-ocr'),
+            pdfOcrResultText: document.getElementById('pdf-ocr-result-text'),
+            pdfOcrStatusIcon: document.getElementById('pdf-ocr-status-icon'),
+            pdfOcrStatusText: document.getElementById('pdf-ocr-status-text'),
+            pdfOcrCharCount: document.getElementById('pdf-ocr-char-count'),
 
             // Global Toast & Input Modal
             globalToast: document.getElementById('global-toast'),
@@ -795,8 +900,18 @@ class UniversalReaderApp {
         this.updateSettingsUI()
     }
 
+    saveSettingsDebounced(delay = 200) {
+        this.applySettingsToReader()
+        clearTimeout(this._saveSettingsTimer)
+        this._saveSettingsTimer = setTimeout(() => {
+            this.saveSettings().catch(err => console.warn('Failed to save settings:', err))
+        }, delay)
+    }
+
     async saveSettings() {
+        clearTimeout(this._saveSettingsTimer)
         this.settings.shelfViewMode = this.shelfViewMode
+        this.settings.updatedAt = Date.now()
         await db.setSetting('readerSettings', this.settings)
         this.applySettingsToReader()
     }
@@ -916,11 +1031,14 @@ class UniversalReaderApp {
         // Bookshelf actions
         this.dom.btnImport?.addEventListener('click', async () => {
             if (window.electronAPI?.openFileDialog) {
-                const filesData = await window.electronAPI.openFileDialog()
-                if (filesData && filesData.length > 0) {
-                    for (const f of filesData) {
-                        const fileObj = new File([f.buffer], f.filename)
-                        await this.processAndSaveBook(fileObj)
+                const fileItems = await window.electronAPI.openFileDialog()
+                if (fileItems && fileItems.length > 0) {
+                    for (const f of fileItems) {
+                        const buffer = f.buffer || (window.electronAPI.readFileBuffer ? await window.electronAPI.readFileBuffer(f.filePath) : null)
+                        if (buffer) {
+                            const fileObj = new File([buffer], f.filename)
+                            await this.processAndSaveBook(fileObj)
+                        }
                     }
                     this.refreshBookshelf()
                 }
@@ -974,7 +1092,6 @@ class UniversalReaderApp {
                 }
             })
         }
-        this.dom.btnLoadSamples?.addEventListener('click', () => this.loadSampleBooks())
         this.dom.btnShelfSettings?.addEventListener('click', () => this.openDrawer('settings'))
         this.setupSyncEventListeners()
         this.setupUpdateEventListeners()
@@ -1107,13 +1224,18 @@ class UniversalReaderApp {
                 this.dom.statsSegmentedTabs.forEach(b => b.classList.remove('active'))
                 btn.classList.add('active')
                 this.statsViewMode = btn.dataset.mode || 'month'
+                if (this.statsViewMode === 'week') {
+                    this.statsWeekOffset = 0
+                }
                 this.renderStatsDashboard()
             })
         })
 
         // Stats Date Navigator (上一周期 / 下一周期)
         this.dom.btnStatsPrevDate?.addEventListener('click', () => {
-            if (this.statsViewMode === 'month') {
+            if (this.statsViewMode === 'week') {
+                this.statsWeekOffset--
+            } else if (this.statsViewMode === 'month') {
                 this.statsMonth--
                 if (this.statsMonth < 1) { this.statsMonth = 12; this.statsYear-- }
             } else if (this.statsViewMode === 'year') {
@@ -1122,10 +1244,17 @@ class UniversalReaderApp {
             this.renderStatsDashboard()
         })
         this.dom.btnStatsNextDate?.addEventListener('click', () => {
-            if (this.statsViewMode === 'month') {
+            if (this.dom.btnStatsNextDate.disabled) return
+            const now = new Date()
+            if (this.statsViewMode === 'week') {
+                if ((this.statsWeekOffset || 0) >= 0) return
+                this.statsWeekOffset++
+            } else if (this.statsViewMode === 'month') {
+                if (this.statsYear > now.getFullYear() || (this.statsYear === now.getFullYear() && this.statsMonth >= (now.getMonth() + 1))) return
                 this.statsMonth++
                 if (this.statsMonth > 12) { this.statsMonth = 1; this.statsYear++ }
             } else if (this.statsViewMode === 'year') {
+                if (this.statsYear >= now.getFullYear()) return
                 this.statsYear++
             }
             this.renderStatsDashboard()
@@ -1233,12 +1362,25 @@ class UniversalReaderApp {
             this.toggleReaderUI()
         })
 
-        // Progress Slider
-        this.dom.progressSlider?.addEventListener('input', e => {
-            const fraction = parseFloat(e.target.value) / 100
+        // Progress Slider (Smooth debounced seeking and guaranteed change commit)
+        let progressSeekTimer = null
+        const executeSeek = fraction => {
             if (this.foliateView) {
                 this.foliateView.goToFraction(fraction)
             }
+        }
+        this.dom.progressSlider?.addEventListener('input', e => {
+            const fraction = parseFloat(e.target.value) / 100
+            if (this.dom.progressText) {
+                this.dom.progressText.innerText = `${Math.round(fraction * 100)}%`
+            }
+            clearTimeout(progressSeekTimer)
+            progressSeekTimer = setTimeout(() => executeSeek(fraction), 80)
+        })
+        this.dom.progressSlider?.addEventListener('change', e => {
+            clearTimeout(progressSeekTimer)
+            const fraction = parseFloat(e.target.value) / 100
+            executeSeek(fraction)
         })
 
         // Drawer toggles
@@ -1274,37 +1416,37 @@ class UniversalReaderApp {
         this.dom.fontSizeSlider?.addEventListener('input', e => {
             this.settings.fontSize = parseInt(e.target.value, 10)
             this.dom.fontSizeValue.innerText = `${this.settings.fontSize}px`
-            this.saveSettings()
+            this.saveSettingsDebounced()
         })
 
         this.dom.fontWeightSlider?.addEventListener('input', e => {
             this.settings.fontWeight = parseInt(e.target.value, 10)
             this.dom.fontWeightValue.innerText = formatFontWeight(this.settings.fontWeight)
-            this.saveSettings()
+            this.saveSettingsDebounced()
         })
 
         this.dom.lineHeightSlider?.addEventListener('input', e => {
             this.settings.lineHeight = parseFloat(e.target.value)
             this.dom.lineHeightValue.innerText = this.settings.lineHeight
-            this.saveSettings()
+            this.saveSettingsDebounced()
         })
 
         this.dom.marginSlider?.addEventListener('input', e => {
             this.settings.margin = parseInt(e.target.value, 10)
             this.dom.marginValue.innerText = `${this.settings.margin}px`
-            this.saveSettings()
+            this.saveSettingsDebounced()
         })
 
         this.dom.maxWidthSlider?.addEventListener('input', e => {
             this.settings.maxWidth = parseInt(e.target.value, 10)
             this.dom.maxWidthValue.innerText = `${this.settings.maxWidth}px`
-            this.saveSettings()
+            this.saveSettingsDebounced()
         })
 
         this.dom.gapSlider?.addEventListener('input', e => {
             this.settings.gap = parseInt(e.target.value, 10)
             this.dom.gapValue.innerText = `${this.settings.gap}%`
-            this.saveSettings()
+            this.saveSettingsDebounced()
         })
 
         this.dom.columnCountSelect?.addEventListener('change', e => {
@@ -1689,6 +1831,65 @@ class UniversalReaderApp {
             this.showToast(nextMode === '2' ? '📖 已切换为双页展开' : '📄 已切换为单页展示')
         })
 
+        // PDF Freehand Drawing Tool Listeners
+        const pdfToolBtns = [
+            this.dom.btnPdfMarkerYellow,
+            this.dom.btnPdfMarkerGreen,
+            this.dom.btnPdfPenRed,
+            this.dom.btnPdfEraser
+        ]
+        pdfToolBtns.forEach(btn => {
+            btn?.addEventListener('click', () => {
+                const tool = btn.dataset.tool
+                const color = btn.dataset.color || '#ef4444'
+                if (this.pdfDrawTool === tool && (tool === 'eraser' || this.pdfDrawColor === color)) {
+                    // Toggle off
+                    this.pdfDrawTool = null
+                    pdfToolBtns.forEach(b => b?.classList.remove('active'))
+                    this.setPdfOverlayDrawingActive(false)
+                    this.showToast('已退出手动画笔模式')
+                } else {
+                    // Activate tool
+                    this.pdfDrawTool = tool
+                    this.pdfDrawColor = color
+                    this.pdfDrawWidth = tool === 'marker' ? 18 : (tool === 'pen' ? 3 : 26)
+                    pdfToolBtns.forEach(b => b?.classList.remove('active'))
+                    btn.classList.add('active')
+                    this.setPdfOverlayDrawingActive(true)
+                    const toolName = tool === 'marker' ? '🖍️ 荧光马克笔 (半透明)' : (tool === 'pen' ? '✏️ 批注笔' : '🧹 橡皮擦')
+                    this.showToast(`已开启 ${toolName}，可在页面上自由绘制`)
+                }
+            })
+        })
+
+        // PDF Clear Page Drawing
+        this.dom.btnPdfClearDraw?.addEventListener('click', async () => {
+            if (!this.currentBookId || this.currentPdfPageIndex == null) return
+            await db.clearPdfPageDrawing(this.currentBookId, this.currentPdfPageIndex)
+            this.redrawPdfPageOverlay()
+            this.showToast('🗑️ 已清空当前页手绘批注')
+        })
+
+        // PDF OCR Extract Button
+        this.dom.btnPdfOcrExtract?.addEventListener('click', () => this.handlePdfOcrExtract())
+        this.dom.btnClosePdfOcr?.addEventListener('click', () => this.closePdfOcrModal())
+        this.dom.btnCancelPdfOcr?.addEventListener('click', () => this.closePdfOcrModal())
+        this.dom.modalPdfOcr?.addEventListener('click', e => {
+            if (e.target === this.dom.modalPdfOcr) this.closePdfOcrModal()
+        })
+        this.dom.btnCopyPdfOcr?.addEventListener('click', () => {
+            const text = this.dom.pdfOcrResultText?.value || ''
+            if (!text.trim()) {
+                this.showToast('没有可复制的识别文字', '⚠️')
+                return
+            }
+            navigator.clipboard.writeText(text).then(() => {
+                this.showToast('📋 识别文字已复制到剪贴板', '✅')
+            }).catch(() => {
+                this.showToast('复制失败，请手动选取复制', '⚠️')
+            })
+        })
+
         // Click Page Number to Jump
         this.dom.readerPageNumber?.addEventListener('click', async () => {
             const total = this.currentLocation?.totalPages || this.currentLocation?.location?.total || 1
@@ -1773,6 +1974,299 @@ class UniversalReaderApp {
             } else {
                 this.setPDFZoom('fit-page')
             }
+        }
+    }
+
+    // ==========================================================
+    // PDF Freehand Drawing & Light OCR Annotation Engine
+    // ==========================================================
+    getPdfActiveDocAndTarget() {
+        if (!this.foliateView) return null
+        
+        // Find iframes in shadow roots or documents
+        const renderer = this.foliateView.renderer
+        let iframes = []
+        if (renderer?.shadowRoot) {
+            iframes = Array.from(renderer.shadowRoot.querySelectorAll('iframe'))
+        }
+        if (iframes.length === 0 && this.foliateView.shadowRoot) {
+            iframes = Array.from(this.foliateView.shadowRoot.querySelectorAll('iframe'))
+        }
+        if (iframes.length === 0) {
+            iframes = Array.from(document.querySelectorAll('foliate-fxl iframe, foliate-view iframe'))
+        }
+
+        for (const iframe of iframes) {
+            try {
+                const doc = iframe.contentDocument
+                if (doc) {
+                    const canvas = doc.querySelector('canvas')
+                    const img = doc.querySelector('img')
+                    const svg = doc.querySelector('svg')
+                    const container = doc.getElementById('page-container') || doc.body || doc.documentElement
+                    return { iframe, doc, canvas, img, svg, container }
+                }
+            } catch (e) {}
+        }
+        return null
+    }
+
+    setPdfOverlayDrawingActive(isActive) {
+        const activeObj = this.getPdfActiveDocAndTarget()
+        if (!activeObj?.doc) return
+        const overlayCanvases = activeObj.doc.querySelectorAll('.pdf-draw-overlay-canvas')
+        overlayCanvases.forEach(cvs => {
+            if (isActive) {
+                cvs.classList.add('is-drawing-active')
+                cvs.style.pointerEvents = 'auto'
+            } else {
+                cvs.classList.remove('is-drawing-active')
+                cvs.style.pointerEvents = 'none'
+            }
+        })
+    }
+
+    async renderPdfDrawingOverlayForCurrentPage() {
+        const activeObj = this.getPdfActiveDocAndTarget()
+        if (!activeObj?.doc || !this.currentBookId) return
+
+        const { doc, container, canvas, img, svg } = activeObj
+        const targetElement = canvas || img || svg || container
+        if (!targetElement) return
+
+        // Ensure container position relative
+        container.style.position = 'relative'
+
+        let overlayCanvas = doc.getElementById('pdf-page-draw-overlay')
+        if (!overlayCanvas) {
+            overlayCanvas = doc.createElement('canvas')
+            overlayCanvas.id = 'pdf-page-draw-overlay'
+            overlayCanvas.className = 'pdf-draw-overlay-canvas'
+            if (this.pdfDrawTool) {
+                overlayCanvas.classList.add('is-drawing-active')
+                overlayCanvas.style.pointerEvents = 'auto'
+            } else {
+                overlayCanvas.style.pointerEvents = 'none'
+            }
+            container.appendChild(overlayCanvas)
+            this.attachPdfDrawingPointerEvents(overlayCanvas, doc)
+        }
+
+        // Match dimensions to target
+        const rect = targetElement.getBoundingClientRect()
+        const targetWidth = canvas?.width || Math.round(rect.width) || 800
+        const targetHeight = canvas?.height || Math.round(rect.height) || 1100
+
+        overlayCanvas.width = targetWidth
+        overlayCanvas.height = targetHeight
+        overlayCanvas.style.position = 'absolute'
+        overlayCanvas.style.top = (targetElement.offsetTop || 0) + 'px'
+        overlayCanvas.style.left = (targetElement.offsetLeft || 0) + 'px'
+        overlayCanvas.style.width = (targetElement.style.width || (rect.width ? `${rect.width}px` : '100%'))
+        overlayCanvas.style.height = (targetElement.style.height || (rect.height ? `${rect.height}px` : '100%'))
+        overlayCanvas.style.zIndex = '30'
+
+        this.pdfOverlayCanvas = overlayCanvas
+
+        // Load saved strokes from IndexedDB
+        await this.redrawPdfPageOverlay()
+    }
+
+    async redrawPdfPageOverlay() {
+        const activeObj = this.getPdfActiveDocAndTarget()
+        if (!activeObj?.doc || !this.currentBookId || this.currentPdfPageIndex == null) return
+        const overlayCanvas = activeObj.doc.getElementById('pdf-page-draw-overlay')
+        if (!overlayCanvas) return
+
+        const ctx = overlayCanvas.getContext('2d')
+        ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
+
+        const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, this.currentPdfPageIndex)
+        const strokes = drawingRecord?.strokes || []
+
+        strokes.forEach(stroke => {
+            this.drawSingleStrokeOnCanvas(ctx, stroke, overlayCanvas.width, overlayCanvas.height)
+        })
+    }
+
+    drawSingleStrokeOnCanvas(ctx, stroke, w, h) {
+        if (!stroke.points || stroke.points.length === 0) return
+        ctx.save()
+        if (stroke.tool === 'eraser') {
+            ctx.globalCompositeOperation = 'destination-out'
+            ctx.strokeStyle = 'rgba(0,0,0,1)'
+            ctx.lineWidth = (stroke.width || 24) * (w / 800)
+        } else if (stroke.tool === 'marker') {
+            ctx.globalCompositeOperation = 'source-over'
+            ctx.strokeStyle = stroke.color || 'rgba(250, 204, 21, 0.45)'
+            ctx.lineWidth = (stroke.width || 18) * (w / 800)
+        } else {
+            ctx.globalCompositeOperation = 'source-over'
+            ctx.strokeStyle = stroke.color || '#ef4444'
+            ctx.lineWidth = (stroke.width || 3) * (w / 800)
+        }
+        ctx.lineCap = 'round'
+        ctx.lineJoin = 'round'
+
+        ctx.beginPath()
+        const p0 = stroke.points[0]
+        ctx.moveTo(p0[0] * w, p0[1] * h)
+
+        if (stroke.points.length === 1) {
+            ctx.lineTo(p0[0] * w + 0.5, p0[1] * h + 0.5)
+        } else {
+            for (let i = 1; i < stroke.points.length; i++) {
+                const pt = stroke.points[i]
+                ctx.lineTo(pt[0] * w, pt[1] * h)
+            }
+        }
+        ctx.stroke()
+        ctx.restore()
+    }
+
+    attachPdfDrawingPointerEvents(canvasElement, doc) {
+        let isDrawing = false
+        let currentStroke = null
+        let currentStrokesList = []
+        let gestureBookId = null
+        let gesturePageIndex = null
+
+        const getCoords = e => {
+            const rect = canvasElement.getBoundingClientRect()
+            return [
+                Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
+                Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height))
+            ]
+        }
+
+        const handlePointerDown = async e => {
+            if (!this.pdfDrawTool || !this.currentBookId || this.currentPdfPageIndex == null) return
+            e.preventDefault()
+            e.stopPropagation()
+            isDrawing = true
+            gestureBookId = this.currentBookId
+            gesturePageIndex = this.currentPdfPageIndex
+
+            // Fetch current strokes for this specific book & page
+            const drawingRecord = await db.getPdfPageDrawing(gestureBookId, gesturePageIndex)
+            currentStrokesList = drawingRecord?.strokes || []
+
+            const [nx, ny] = getCoords(e)
+            currentStroke = {
+                tool: this.pdfDrawTool,
+                color: this.pdfDrawColor,
+                width: this.pdfDrawWidth,
+                points: [[nx, ny]]
+            }
+
+            const ctx = canvasElement.getContext('2d')
+            this.drawSingleStrokeOnCanvas(ctx, currentStroke, canvasElement.width, canvasElement.height)
+        }
+
+        const handlePointerMove = e => {
+            if (!isDrawing || !currentStroke) return
+            e.preventDefault()
+            e.stopPropagation()
+
+            const [nx, ny] = getCoords(e)
+            currentStroke.points.push([nx, ny])
+
+            const ctx = canvasElement.getContext('2d')
+            // Draw latest segment
+            this.drawSingleStrokeOnCanvas(ctx, currentStroke, canvasElement.width, canvasElement.height)
+        }
+
+        const handlePointerUp = async e => {
+            if (!isDrawing || !currentStroke) return
+            isDrawing = false
+
+            if (currentStroke.points.length > 0 && gestureBookId && gesturePageIndex != null) {
+                currentStrokesList.push(currentStroke)
+                await db.savePdfPageDrawing(gestureBookId, gesturePageIndex, currentStrokesList)
+            }
+            currentStroke = null
+            gestureBookId = null
+            gesturePageIndex = null
+            await this.redrawPdfPageOverlay()
+        }
+
+        canvasElement.addEventListener('pointerdown', handlePointerDown)
+        canvasElement.addEventListener('pointermove', handlePointerMove)
+        canvasElement.addEventListener('pointerup', handlePointerUp)
+        canvasElement.addEventListener('pointercancel', handlePointerUp)
+    }
+
+    // ==========================================================
+    // Lightweight On-Demand PDF OCR Text Extraction
+    // ==========================================================
+    async handlePdfOcrExtract() {
+        if (!this.dom.modalPdfOcr) return
+
+        this.dom.modalPdfOcr.style.display = 'flex'
+        if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⏳'
+        if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '正在提取当前页面图像并进行文字识别...'
+        if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = ''
+        if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = '共 0 字'
+
+        try {
+            const activeObj = this.getPdfActiveDocAndTarget()
+            let imageSource = null
+
+            if (activeObj?.canvas) {
+                imageSource = activeObj.canvas
+            } else if (activeObj?.img) {
+                imageSource = activeObj.img.src
+            } else if (activeObj?.doc) {
+                // Fallback: search any canvas in document
+                const anyCanvas = activeObj.doc.querySelector('canvas')
+                if (anyCanvas) imageSource = anyCanvas
+            }
+
+            if (!imageSource) {
+                // Check if any canvas in reader content area
+                const readerCanvas = document.querySelector('#reader-content-area canvas')
+                if (readerCanvas) imageSource = readerCanvas
+            }
+
+            if (!imageSource) {
+                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
+                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '未找到可识别的页面图像，请确认页面已完全载入。'
+                return
+            }
+
+            if (typeof Tesseract === 'undefined') {
+                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
+                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = 'OCR 识别引擎未就绪，请检查网络或刷新重试。'
+                return
+            }
+
+            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = 'OCR 引擎分析识别中 (中文/英文)...'
+            
+            const result = await Tesseract.recognize(imageSource, 'chi_sim+eng', {
+                workerPath: './vendor/tesseract/worker.min.js'
+            })
+
+            const recognizedText = (result?.data?.text || '').trim()
+            if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = recognizedText
+            if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = `共 ${recognizedText.length} 字`
+            
+            if (recognizedText.length > 0) {
+                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '✅'
+                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '识别完成！可在上方选词或点击下方按钮快速复制'
+            } else {
+                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = 'ℹ️'
+                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '识别结束，当前页未检测到明显文字或图像较模糊。'
+            }
+        } catch (err) {
+            console.error('PDF OCR error:', err)
+            if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
+            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = `识别出错: ${err.message || '未知错误'}`
+        }
+    }
+
+    closePdfOcrModal() {
+        if (this.dom.modalPdfOcr) {
+            this.dom.modalPdfOcr.style.display = 'none'
         }
     }
 
@@ -2160,8 +2654,13 @@ class UniversalReaderApp {
                     metadata.author = bookAuthor
                 }
                 if (tempBook.metadata.language) {
-                    const l = tempBook.metadata.language.toLowerCase()
-                    metadata.language = l.startsWith('zh') ? '中文' : l.startsWith('en') ? '英语' : l.startsWith('ja') ? '日语' : l
+                    const rawLang = Array.isArray(tempBook.metadata.language)
+                        ? tempBook.metadata.language[0]
+                        : tempBook.metadata.language
+                    if (rawLang && typeof rawLang === 'string') {
+                        const l = rawLang.toLowerCase()
+                        metadata.language = l.startsWith('zh') ? '中文' : l.startsWith('en') ? '英语' : l.startsWith('ja') ? '日语' : l
+                    }
                 }
             }
             if (typeof tempBook.getCover === 'function') {
@@ -2180,7 +2679,7 @@ class UniversalReaderApp {
                 const imgEntries = loader.entries.filter(e => /\.(jpe?g|png|webp)$/i.test(e.filename))
                 const coverEntry = imgEntries.find(e => /cover/i.test(e.filename)) || imgEntries[0]
                 if (coverEntry) {
-                    const mime = coverEntry.filename.endsWith('.png') ? 'image/png' : 'image/jpeg'
+                    const mime = coverEntry.filename.endsWith('.png') ? 'image/png' : coverEntry.filename.endsWith('.webp') ? 'image/webp' : 'image/jpeg'
                     coverBlob = await loader.loadBlob(coverEntry.filename, mime)
                 }
             } catch (e) {
@@ -2223,9 +2722,12 @@ class UniversalReaderApp {
             return match.id
         }
 
+        const stableKey = metadata.identifier || `${metadata.title || ''}_${file.size || 0}_${format}`.replace(/\s+/g, '').toLowerCase()
         const bookId = `book_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
         const bookRecord = {
             id: bookId,
+            stableKey,
+            identifier: metadata.identifier || null,
             title: metadata.title,
             author: metadata.author,
             language: metadata.language || '中文',
@@ -2420,16 +2922,8 @@ class UniversalReaderApp {
                     <div class="empty-book-icon">${emptyIcon}</div>
                     <h3>${emptyTitle}</h3>
                     <p>${emptySub}</p>
-                    ${!isFavView && !isCustomList ? `
-                        <div style="margin-top: 1.25rem;">
-                            <button class="btn-primary-action btn-load-samples-empty" style="padding: 0.5rem 1.25rem; font-size: 0.82rem; cursor: pointer;">
-                                📚 一键载入精选演示图书
-                            </button>
-                        </div>
-                    ` : ''}
                 </div>
             `
-            container.querySelector('.btn-load-samples-empty')?.addEventListener('click', () => this.loadSampleBooks())
             return
         }
 
@@ -2527,10 +3021,11 @@ class UniversalReaderApp {
         }
 
         const favActive = book.isFavorite ? 'active' : ''
+        const favClass = book.isFavorite ? 'is-favorite' : ''
         const favTitle = book.isFavorite ? '取消收藏' : '加入收藏'
 
         card.innerHTML = `
-            <div class="skeuo-book-cover">
+            <div class="skeuo-book-cover ${favClass}">
                 <button class="skeuo-fav-btn ${favActive}" title="${favTitle}">★</button>
                 <button class="skeuo-list-btn" title="加入与管理书单">📑</button>
                 <button class="skeuo-delete-btn" title="从书架删除">×</button>
@@ -2550,6 +3045,11 @@ class UniversalReaderApp {
             if (btn) {
                 btn.className = `skeuo-fav-btn ${isFav ? 'active' : ''}`
                 btn.title = isFav ? '取消收藏' : '加入收藏'
+            }
+            const coverEl = card.querySelector('.skeuo-book-cover')
+            if (coverEl) {
+                if (isFav) coverEl.classList.add('is-favorite')
+                else coverEl.classList.remove('is-favorite')
             }
             this.showToast(isFav ? `⭐ 已将《${book.title}》加入收藏` : `已取消《${book.title}》收藏`, '⭐')
             if (this.shelfCategory === 'favorite') {
@@ -2593,10 +3093,11 @@ class UniversalReaderApp {
         }
 
         const favActive = book.isFavorite ? 'active' : ''
+        const favClass = book.isFavorite ? 'is-favorite' : ''
         const favTitle = book.isFavorite ? '取消收藏' : '加入收藏'
 
         card.innerHTML = `
-            <div class="jane-cover-box" style="position: relative;">
+            <div class="jane-cover-box ${favClass}" style="position: relative;">
                 <button class="grid-fav-btn ${favActive}" title="${favTitle}">★</button>
                 <button class="grid-list-btn" title="加入与管理书单">📑</button>
                 <button class="grid-delete-btn" title="从书架删除">×</button>
@@ -2626,16 +3127,8 @@ class UniversalReaderApp {
                     <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">${emptyIcon}</div>
                     <h3>${emptyTitle}</h3>
                     <p>${emptySub}</p>
-                    ${!isFavView && !isCustomList ? `
-                        <div style="margin-top: 1.25rem;">
-                            <button class="btn-primary-action btn-load-samples-empty" style="padding: 0.5rem 1.25rem; font-size: 0.82rem; cursor: pointer;">
-                                📚 一键载入精选演示图书
-                            </button>
-                        </div>
-                    ` : ''}
                 </div>
             `
-            this.dom.booksGrid.querySelector('.btn-load-samples-empty')?.addEventListener('click', () => this.loadSampleBooks())
             return
         }
 
@@ -2651,6 +3144,11 @@ class UniversalReaderApp {
                 if (btn) {
                     btn.className = `grid-fav-btn ${isFav ? 'active' : ''}`
                     btn.title = isFav ? '取消收藏' : '加入收藏'
+                }
+                const coverBox = card.querySelector('.jane-cover-box')
+                if (coverBox) {
+                    if (isFav) coverBox.classList.add('is-favorite')
+                    else coverBox.classList.remove('is-favorite')
                 }
                 this.showToast(isFav ? `⭐ 已将《${book.title}》加入收藏` : `已取消《${book.title}》收藏`, '⭐')
                 if (this.shelfCategory === 'favorite') {
@@ -2782,12 +3280,29 @@ class UniversalReaderApp {
             item.dataset.listId = list.id
             item.title = list.name
 
-            item.innerHTML = `
-                <span class="list-icon">${list.icon || '📑'}</span>
-                <span class="list-title">${escapeHTML(list.name)}</span>
-                <span class="list-count-badge ${!list.isBuiltIn ? 'has-del' : ''}">${count}</span>
-                ${!list.isBuiltIn ? `<span class="list-del-btn" title="删除书单">✕</span>` : ''}
-            `
+            const iconSpan = document.createElement('span')
+            iconSpan.className = 'list-icon'
+            iconSpan.textContent = list.icon || '📑'
+
+            const titleSpan = document.createElement('span')
+            titleSpan.className = 'list-title'
+            titleSpan.textContent = list.name
+
+            const badgeSpan = document.createElement('span')
+            badgeSpan.className = `list-count-badge ${!list.isBuiltIn ? 'has-del' : ''}`
+            badgeSpan.textContent = String(count)
+
+            item.appendChild(iconSpan)
+            item.appendChild(titleSpan)
+            item.appendChild(badgeSpan)
+
+            if (!list.isBuiltIn) {
+                const delSpan = document.createElement('span')
+                delSpan.className = 'list-del-btn'
+                delSpan.title = '删除书单'
+                delSpan.textContent = '✕'
+                item.appendChild(delSpan)
+            }
 
             item.addEventListener('click', e => {
                 if (e.target.classList.contains('list-del-btn')) {
@@ -2915,11 +3430,23 @@ class UniversalReaderApp {
                 const isChecked = currentListIds.includes(list.id)
                 const row = document.createElement('label')
                 row.className = 'book-list-check-row'
-                row.innerHTML = `
-                    <input type="checkbox" data-list-id="${list.id}" ${isChecked ? 'checked' : ''} />
-                    <span style="font-size: 1.1rem;">${list.icon || '📑'}</span>
-                    <span style="flex: 1; font-size: 0.88rem; font-weight: 500; color: var(--text-main);">${escapeHTML(list.name)}</span>
-                `
+
+                const input = document.createElement('input')
+                input.type = 'checkbox'
+                input.dataset.listId = list.id
+                input.checked = isChecked
+
+                const iconSpan = document.createElement('span')
+                iconSpan.style.fontSize = '1.1rem'
+                iconSpan.textContent = list.icon || '📑'
+
+                const nameSpan = document.createElement('span')
+                nameSpan.style.cssText = 'flex: 1; font-size: 0.88rem; font-weight: 500; color: var(--text-main);'
+                nameSpan.textContent = list.name
+
+                row.appendChild(input)
+                row.appendChild(iconSpan)
+                row.appendChild(nameSpan)
                 this.dom.bookListsCheckboxContainer.appendChild(row)
             })
         }
@@ -3040,8 +3567,12 @@ class UniversalReaderApp {
             this.dom.welcomeModalBackdrop.style.display = 'none'
         }
 
+        this._currentBookEpoch = (this._currentBookEpoch || 0) + 1
+        const currentEpoch = this._currentBookEpoch
+
         this.currentBookId = bookId
         this.currentBookData = bookData
+        this.currentLocation = null
 
         // Switch View
         this.dom.bookshelfView.style.display = 'none'
@@ -3058,15 +3589,24 @@ class UniversalReaderApp {
         this.dom.readerContentArea.appendChild(this.foliateView)
 
         // Pre-register ALL Events BEFORE calling open / init so the initial section load event is never missed!
-        this.foliateView.addEventListener('relocate', e => this.onReaderRelocate(e.detail))
-        this.foliateView.addEventListener('load', e => this.onSectionLoaded(e.detail))
+        this.foliateView.addEventListener('relocate', e => {
+            if (this._currentBookEpoch === currentEpoch) {
+                this.onReaderRelocate(e.detail)
+            }
+        })
+        this.foliateView.addEventListener('load', e => {
+            if (this._currentBookEpoch === currentEpoch) {
+                this.onSectionLoaded(e.detail)
+            }
+        })
 
         // Intercept Footnote / Anchor links so Foliate doesn't jump to hidden footnote elements
         this.foliateView.addEventListener('link', async e => {
+            if (this._currentBookEpoch !== currentEpoch) return
             const { a, href, href_ } = e.detail || {}
             const targetHref = href_ || href || ''
             
-            // Handle external web links safely without hijacking reader iframe
+            // 1. Handle external web links safely without hijacking reader iframe
             if (targetHref.startsWith('http://') || targetHref.startsWith('https://') || targetHref.startsWith('mailto:')) {
                 e.preventDefault()
                 try {
@@ -3077,18 +3617,16 @@ class UniversalReaderApp {
                 return
             }
 
+            // 2. Check for Footnote / Annotation popups
+            const isSup = a?.closest('sup')
             const isNoteref = a?.getAttribute('epub:type') === 'noteref' ||
                               a?.getAttribute('role') === 'doc-noteref' ||
-                              targetHref.includes('footnote') ||
-                              targetHref.includes('note') ||
                               a?.classList?.contains('epub-footnote') ||
-                              a?.querySelector('img.epub-footnote') ||
-                              a?.querySelector('img')
+                              a?.classList?.contains('footnote-ref') ||
+                              (isSup && /(?:foot)?note|fn|ref/i.test(targetHref))
 
-            if (isNoteref || (targetHref.startsWith('#') && !targetHref.includes('chapter'))) {
-                e.preventDefault()
-                
-                const targetId = targetHref.startsWith('#') ? targetHref.slice(1) : targetHref.split('#')[1]
+            if (isNoteref) {
+                const targetId = targetHref.includes('#') ? targetHref.split('#')[1] : null
                 const doc = a?.ownerDocument
                 let targetEl = targetId && doc ? doc.getElementById(targetId) : null
                 
@@ -3098,7 +3636,9 @@ class UniversalReaderApp {
                     footnoteText = (img?.getAttribute('alt') || a.getAttribute('title') || '').trim()
                 }
 
-                if (footnoteText && a) {
+                // ONLY intercept if valid popup footnote text was actually found in the current doc!
+                if (footnoteText) {
+                    e.preventDefault()
                     const rect = a.getBoundingClientRect()
                     const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
                     const iframeRect = (iframe || this.foliateView).getBoundingClientRect()
@@ -3113,12 +3653,15 @@ class UniversalReaderApp {
                             height: rect.height
                         }
                     })
+                    return
                 }
             }
+            // Normal navigation (TOC links, cross-chapter jumps) will proceed via Foliate goTo!
         })
 
         // Overlayer Annotation Rendering
         this.foliateView.addEventListener('draw-annotation', e => {
+            if (this._currentBookEpoch !== currentEpoch) return
             const { draw, annotation } = e.detail
             const { color = '#facc15', style = 'highlight' } = annotation
             if (style === 'underline') {
@@ -3136,8 +3679,9 @@ class UniversalReaderApp {
 
         // When new section overlay is mounted, draw all saved highlights!
         this.foliateView.addEventListener('create-overlay', async () => {
-            if (this.currentBookId) {
+            if (this.currentBookId && this._currentBookEpoch === currentEpoch) {
                 const highlights = await db.getHighlightsByBook(this.currentBookId)
+                if (this._currentBookEpoch !== currentEpoch) return
                 for (const hl of highlights) {
                     try {
                         await this.foliateView.addAnnotation({
@@ -3155,6 +3699,7 @@ class UniversalReaderApp {
 
         // Clicked an existing highlight on the page!
         this.foliateView.addEventListener('show-annotation', e => {
+            if (this._currentBookEpoch !== currentEpoch) return
             const { value, range } = e.detail
             this.onHighlightClicked(value, range)
         })
@@ -3167,6 +3712,7 @@ class UniversalReaderApp {
                 return this.closeReader()
             }
             await this.foliateView.open(targetBlob)
+            if (this._currentBookEpoch !== currentEpoch) return
             
             // Set initial styles & flow
             this.applySettingsToReader()
@@ -3174,6 +3720,7 @@ class UniversalReaderApp {
             // Restore location
             const lastLoc = bookData.progress?.cfi || bookData.progress?.fraction || 0
             await this.foliateView.init({ lastLocation: lastLoc })
+            if (this._currentBookEpoch !== currentEpoch) return
 
             // Ensure any already-loaded content doc is initialized
             const contents = this.foliateView.renderer?.getContents?.() || []
@@ -3185,7 +3732,7 @@ class UniversalReaderApp {
             const startFrac = bookData.progress?.fraction || 0
             tracker.startSession(bookId, bookData.title, startFrac)
             tracker.onTickCallback = ({ seconds, isIdle }) => {
-                if (this.dom.readerLiveTimer) {
+                if (this.dom.readerLiveTimer && this._currentBookEpoch === currentEpoch) {
                     const timeText = seconds < 60 ? '< 1分钟' : `${Math.floor(seconds / 60)}分钟`
                     this.dom.readerLiveTimer.innerText = isIdle ? `⏱️ 暂停中 (${timeText})` : `⏱️ ${timeText}`
                 }
@@ -3201,16 +3748,18 @@ class UniversalReaderApp {
 
             // Defer non-critical TOC and notes population so first page paints with zero delay
             setTimeout(() => {
-                if (this.currentBookId === bookId && this.foliateView) {
+                if (this.currentBookId === bookId && this._currentBookEpoch === currentEpoch && this.foliateView) {
                     this.renderTOC(this.foliateView.book?.toc || [])
                     this.loadNotesList()
                 }
             }, 20)
 
         } catch (err) {
-            console.error('Failed to open book in foliate-view:', err)
-            this.showToast(`打开书籍失败: ${err.message}`, '⚠️')
-            this.closeReader()
+            if (this._currentBookEpoch === currentEpoch) {
+                console.error('Failed to open book in foliate-view:', err)
+                this.showToast(`打开书籍失败: ${err.message}`, '⚠️')
+                this.closeReader()
+            }
         }
     }
 
@@ -3256,6 +3805,7 @@ class UniversalReaderApp {
         this.dom.bookshelfView.style.display = 'flex'
         this.currentBookId = null
         this.currentBookData = null
+        this.currentLocation = null
         this.refreshBookshelf()
 
         if (this.syncConfig?.enabled && this.syncConfig?.autoSyncOnBookClose) {
@@ -3264,44 +3814,56 @@ class UniversalReaderApp {
     }
 
     onReaderRelocate(detail) {
+        if (!this.currentBookId) return
+        const activeBookId = this.currentBookId
+        const activeEpoch = this._currentBookEpoch
+
         tracker.resetActivity()
+        tracker.recordPageTurn()
         this.currentLocation = detail
         const fraction = detail.fraction || 0
         const pct = Math.round(fraction * 100)
         this.dom.progressSlider.value = pct
         this.dom.progressText.innerText = `${pct}%`
 
-        // Smart Estimated Time Left (ETA)
+        // Smart Estimated Time Left (ETA) using Adaptive Dual-State Time Window Engine
         if (this.dom.readerEtaBadge) {
             if (fraction >= 0.99) {
                 this.dom.readerEtaBadge.innerText = '🎉 即将读完'
-            } else if (fraction <= 0.01) {
+            } else if (fraction <= 0.005) {
                 this.dom.readerEtaBadge.innerText = '预计还需 --'
             } else {
                 const totalPages = detail.totalPages || (detail.location?.total > 0 ? detail.location.total : null)
                 const currentPage = detail.page || (detail.location?.current != null ? detail.location.current + 1 : null)
                 let remainingSecs = 0
+                const paceSecs = tracker.getCurrentPaceSecs()
                 
                 if (totalPages && currentPage && totalPages > currentPage) {
                     const remainingPages = totalPages - currentPage
-                    const sessionSecs = tracker.sessionCumulativeSeconds || 0
-                    const pagesRead = Math.max(1, currentPage - (this._sessionStartPage || currentPage))
-                    let pagePaceSecs = 75
-                    if (sessionSecs >= 120 && pagesRead > 1) {
-                        pagePaceSecs = Math.min(180, Math.max(30, Math.round(sessionSecs / pagesRead)))
-                    }
-                    remainingSecs = remainingPages * pagePaceSecs
+                    remainingSecs = remainingPages * paceSecs
                 } else {
-                    const totalSecs = (this.currentBookData?.totalReadingSeconds || 0) + (tracker.sessionCumulativeSeconds || 0)
-                    if (totalSecs >= 180) {
-                        const rawRemaining = (totalSecs / fraction) - totalSecs
-                        remainingSecs = Math.min(86400, Math.max(120, Math.round(rawRemaining)))
+                    const totalActiveSecs = (this.currentBookData?.totalReadingSeconds || 0) + (tracker.sessionCumulativeSeconds || 0)
+                    if (totalActiveSecs >= 90 && fraction > 0.01) {
+                        const rawRemaining = (totalActiveSecs / fraction) * (1 - fraction)
+                        remainingSecs = Math.min(86400, Math.max(60, Math.round(rawRemaining)))
                     } else {
-                        remainingSecs = Math.round((1 - fraction) * 3.5 * 3600)
+                        const estimatedTotalScreens = Math.max(20, Math.round(1 / Math.max(0.005, fraction || 0.01)))
+                        remainingSecs = Math.round((1 - fraction) * Math.min(250, estimatedTotalScreens) * paceSecs)
                     }
                 }
                 this.dom.readerEtaBadge.innerText = `预计还需 ${tracker.formatDuration(remainingSecs)}`
             }
+        }
+
+        // PDF Page Index Tracking and Overlay Mount
+        const isPdfMode = this.foliateView?.isFixedLayout || this.currentBookData?.format === 'pdf'
+        if (isPdfMode) {
+            this.currentPdfPageIndex = detail.page || (detail.location?.current != null ? detail.location.current + 1 : 1)
+            setTimeout(() => {
+                if (this.currentBookId === activeBookId && this._currentBookEpoch === activeEpoch) {
+                    this.renderPdfDrawingOverlayForCurrentPage()
+                }
+            }, 100)
         }
 
         // Page Number Indicator
@@ -3321,18 +3883,16 @@ class UniversalReaderApp {
         }
 
         // Save progress to IndexedDB with debounce
-        if (this.currentBookId) {
-            clearTimeout(this._progressDebounceTimer)
-            this._progressDebounceTimer = setTimeout(() => {
-                if (this.currentBookId) {
-                    db.updateBookProgress(this.currentBookId, {
-                        fraction: fraction,
-                        cfi: detail.cfi,
-                        tocItem: detail.tocItem ? { label: detail.tocItem.label, href: detail.tocItem.href } : null
-                    }).catch(err => console.warn('Failed to update book progress:', err))
-                }
-            }, 500)
-        }
+        clearTimeout(this._progressDebounceTimer)
+        this._progressDebounceTimer = setTimeout(() => {
+            if (this.currentBookId === activeBookId && this._currentBookEpoch === activeEpoch) {
+                db.updateBookProgress(activeBookId, {
+                    fraction: fraction,
+                    cfi: detail.cfi,
+                    tocItem: detail.tocItem ? { label: detail.tocItem.label, href: detail.tocItem.href } : null
+                }).catch(err => console.warn('Failed to update book progress:', err))
+            }
+        }, 500)
     }
 
     toggleReaderUI(forceState) {
@@ -3351,9 +3911,178 @@ class UniversalReaderApp {
         }
     }
 
+    normalizeEpubDocument(doc) {
+        if (!doc || !doc.body) return
+        const win = doc.defaultView || window
+
+        try {
+            // 1. Safe Non-Destructive Hiding of Calibre Dummy Page Breaks & Ghost Elements
+            // (Preserve element IDs for TOC / CFI / Footnote jumping, but eliminate all visual footprint)
+            const calibrePbs = doc.querySelectorAll('[id*="calibre_pb" i], [class*="calibre_pb" i], .calibre_pb')
+            calibrePbs.forEach(el => {
+                el.dataset.readerHidden = 'true'
+                el.style.setProperty('display', 'none', 'important')
+                el.style.setProperty('height', '0', 'important')
+                el.style.setProperty('min-height', '0', 'important')
+                el.style.setProperty('max-height', '0', 'important')
+                el.style.setProperty('margin', '0', 'important')
+                el.style.setProperty('padding', '0', 'important')
+                el.style.setProperty('font-size', '0', 'important')
+                el.style.setProperty('line-height', '0', 'important')
+                el.style.setProperty('border', 'none', 'important')
+            })
+
+            // Safely collapse trailing ghost empty spacer paragraphs at the bottom of the section
+            const allBlocks = Array.from(doc.querySelectorAll('p, div'))
+            for (let i = allBlocks.length - 1; i >= 0; i--) {
+                const el = allBlocks[i]
+                if (!el.isConnected) continue
+                const rawText = (el.textContent || '').replace(/[\s\u00a0\u3000\ufeff\u200b\u200c\u200d]/g, '')
+                const hasMedia = el.querySelector('img, svg, picture, video, audio, canvas, table, iframe')
+                if (!rawText && !hasMedia && el.children.length <= 1) {
+                    if (el === doc.body.lastElementChild || (el.parentElement === doc.body && !el.nextElementSibling)) {
+                        el.dataset.readerHidden = 'true'
+                        el.style.setProperty('display', 'none', 'important')
+                        el.style.setProperty('height', '0', 'important')
+                        el.style.setProperty('margin', '0', 'important')
+                        el.style.setProperty('padding', '0', 'important')
+                    }
+                } else {
+                    if (el.parentElement === doc.body) break
+                }
+            }
+
+            // 2. Deep Heading & Chapter Title Recognition
+            const chapterPattern = /^(?:第[一二三四五六七八九十百千0-9\s]+[章节回部篇卷折幕集期讲]|chapter\s+\d+|section\s+\d+|prologue|epilogue|引言|序言|楔子|尾声|结语|后记|前言)\b/i
+
+            const candidateList = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, [class*="title" i], [class*="heading" i], [class*="chapter" i], .contenttitle, .contenttitle1, .contenttitle2, .chaptertitle, .sequencetitle, [id^="toc_" i], [id^="chap" i]'))
+
+            // Also scan short standalone paragraphs matching Chinese/English chapter patterns (like 《黑暗托马》)
+            const allP = doc.querySelectorAll('p, div')
+            allP.forEach(p => {
+                if (!candidateList.includes(p)) {
+                    const txt = (p.textContent || '').trim()
+                    if (txt.length >= 2 && txt.length <= 40 && chapterPattern.test(txt)) {
+                        candidateList.push(p)
+                    }
+                }
+            })
+
+            let isFirstHeadingFound = false
+
+            candidateList.forEach(el => {
+                if (el.classList.contains('titlepage') || el.closest('.titlepage')) return
+
+                const rawHeadingText = (el.textContent || '').replace(/[\s\u00a0\u3000\ufeff\u200b\u200c\u200d]/g, '')
+                const hasMedia = el.querySelector('img, svg, picture, video, canvas')
+                
+                // Empty anchor headings (like <h1 id="a004"></h1> placed before full-page SVG illustrations in 砂女)
+                if (!rawHeadingText && !hasMedia) {
+                    el.dataset.readerHidden = 'true'
+                    el.style.setProperty('display', 'none', 'important')
+                    el.style.setProperty('height', '0', 'important')
+                    el.style.setProperty('min-height', '0', 'important')
+                    el.style.setProperty('max-height', '0', 'important')
+                    el.style.setProperty('margin', '0', 'important')
+                    el.style.setProperty('padding', '0', 'important')
+                    el.style.setProperty('font-size', '0', 'important')
+                    el.style.setProperty('line-height', '0', 'important')
+                    el.style.setProperty('border', 'none', 'important')
+                    return
+                }
+
+                el.dataset.readerHeading = 'true'
+                const isChapter = chapterPattern.test(rawHeadingText) || /chapter|chap/i.test(el.id || el.className)
+                if (isChapter) {
+                    el.dataset.chapterHeading = 'true'
+                }
+
+                if (isFirstHeadingFound) {
+                    el.dataset.sectionHeading = 'true'
+                    return
+                }
+
+                // Check if this heading has substantive visible content before it
+                let hasVisibleContentBefore = false
+                let current = el
+                while (current && current !== doc.body) {
+                    let prev = current.previousElementSibling
+                    while (prev) {
+                        const cleanText = (prev.textContent || '').replace(/[\s\u00a0\u3000\ufeff\u200b\u200c\u200d]/g, '')
+                        const hasMedia = prev.querySelector('img, svg, picture, video, canvas, table')
+                        if ((cleanText.length > 0 || hasMedia) && !prev.dataset.readerHidden) {
+                            hasVisibleContentBefore = true
+                            break
+                        }
+                        prev = prev.previousElementSibling
+                    }
+                    if (hasVisibleContentBefore) break
+                    current = current.parentElement
+                }
+
+                if (!hasVisibleContentBefore) {
+                    el.dataset.firstHeading = 'true'
+                    isFirstHeadingFound = true
+                } else {
+                    el.dataset.sectionHeading = 'true'
+                }
+            })
+
+            // 3. Computed Style Penetration & Semantic Tagging (Solves InDesign/Calibre hashed classes)
+            const allParagraphs = doc.querySelectorAll('p, div, blockquote, h1, h2, h3, h4, h5, h6, span, section, article')
+            allParagraphs.forEach(el => {
+                // Mark media containers
+                if (el.querySelector('img, svg, picture, video, canvas')) {
+                    el.dataset.hasMedia = 'true'
+                    return
+                }
+
+                const rawText = (el.textContent || '').replace(/[\s\u00a0\u3000\ufeff\u200b\u200c\u200d]/g, '')
+                if (!rawText && !el.dataset.readerHidden) {
+                    el.dataset.emptyLine = 'true'
+                    return
+                }
+
+                // Penetrate real computed style via getComputedStyle
+                try {
+                    const style = win.getComputedStyle(el)
+                    const textAlign = style?.textAlign
+                    const alignAttr = (el.getAttribute('align') || '').toLowerCase()
+                    const className = (el.className || '').toLowerCase()
+
+                    if (textAlign === 'center' || alignAttr === 'center' || /center/i.test(className)) {
+                        el.dataset.align = 'center'
+                    } else if (textAlign === 'right' || alignAttr === 'right' || /right|sequence/i.test(className)) {
+                        el.dataset.align = 'right'
+                    }
+                } catch (styleErr) {
+                    // Fallback to attribute / class heuristics if window context is detached
+                    const alignAttr = (el.getAttribute('align') || '').toLowerCase()
+                    const inlineAlign = (el.style?.textAlign || '').toLowerCase()
+                    if (alignAttr === 'center' || inlineAlign === 'center') el.dataset.align = 'center'
+                    else if (alignAttr === 'right' || inlineAlign === 'right') el.dataset.align = 'right'
+                }
+
+                // Poetry line detection (short verse lines in poem collections)
+                const className = (el.className || '').toLowerCase()
+                if (className.includes('copyright') || className.includes('poetry') || className.includes('verse') || className.includes('poem')) {
+                    const txt = (el.textContent || '').trim()
+                    if (txt.length < 35 && !txt.endsWith('。') && !txt.endsWith('”') && !txt.endsWith('；')) {
+                        el.dataset.poetryLine = 'true'
+                    }
+                }
+            })
+        } catch (e) {
+            console.warn('[DOM Normalizer] Warning:', e)
+        }
+    }
+
     onSectionLoaded({ doc, index }) {
         if (!doc || doc._readerInitDone) return
         doc._readerInitDone = true
+
+        // Industrial-grade DOM Normalization (Prune ghost pagebreaks, format headings, normalize poetry)
+        this.normalizeEpubDocument(doc)
 
         // Throttled activity heartbeat on reading doc (mousemove, scroll, selection, keydown)
         let lastActReset = 0
@@ -4260,8 +4989,7 @@ class UniversalReaderApp {
     }
 
     async loadSampleBooks() {
-        if (!this.dom.btnLoadSamples) return
-        this.dom.btnLoadSamples.disabled = true
+        if (this.dom.btnLoadSamples) this.dom.btnLoadSamples.disabled = true
 
         try {
             const existingBooks = await db.getAllBooks()
@@ -4321,7 +5049,7 @@ class UniversalReaderApp {
             console.error('Failed to load sample books:', e)
             this.showToast('⚠️ 加载样例图书失败: ' + e.message)
         } finally {
-            this.dom.btnLoadSamples.disabled = false
+            if (this.dom.btnLoadSamples) this.dom.btnLoadSamples.disabled = false
         }
     }
 
@@ -4335,24 +5063,48 @@ class UniversalReaderApp {
 
         try {
             const mode = this.statsViewMode || 'month'
-            const stats = await db.getReadingStats(mode, this.statsYear, this.statsMonth)
+            const stats = await db.getReadingStats(mode, this.statsYear, this.statsMonth, this.statsWeekOffset || 0)
             if (currentReqId !== this._statsReqId) return // Drop stale response!
 
             // 1. Update Date Navigator Text
             if (this.dom.statsDateLabel) {
                 if (this.dom.statsDateNavigator) this.dom.statsDateNavigator.style.visibility = 'visible'
-                if (mode === 'month') {
+                if (mode === 'week') {
+                    if (this.statsWeekOffset === 0) {
+                        this.dom.statsDateLabel.innerText = stats.weekDateRangeStr ? `本周 (${stats.weekDateRangeStr})` : `本周`
+                    } else {
+                        this.dom.statsDateLabel.innerText = stats.weekDateRangeStr || `第 ${this.statsWeekOffset} 周`
+                    }
+                    if (this.dom.btnStatsPrevDate) this.dom.btnStatsPrevDate.style.display = 'inline-flex'
+                    if (this.dom.btnStatsNextDate) {
+                        this.dom.btnStatsNextDate.style.display = 'inline-flex'
+                        const isFutureOrCurrent = (this.statsWeekOffset || 0) >= 0
+                        this.dom.btnStatsNextDate.disabled = isFutureOrCurrent
+                        this.dom.btnStatsNextDate.style.opacity = isFutureOrCurrent ? '0.35' : '1'
+                        this.dom.btnStatsNextDate.style.cursor = isFutureOrCurrent ? 'default' : 'pointer'
+                    }
+                } else if (mode === 'month') {
                     this.dom.statsDateLabel.innerText = `${stats.targetYear}年${stats.targetMonth}月`
                     if (this.dom.btnStatsPrevDate) this.dom.btnStatsPrevDate.style.display = 'inline-flex'
-                    if (this.dom.btnStatsNextDate) this.dom.btnStatsNextDate.style.display = 'inline-flex'
+                    if (this.dom.btnStatsNextDate) {
+                        this.dom.btnStatsNextDate.style.display = 'inline-flex'
+                        const now = new Date()
+                        const isCurrentOrFuture = this.statsYear > now.getFullYear() || (this.statsYear === now.getFullYear() && this.statsMonth >= (now.getMonth() + 1))
+                        this.dom.btnStatsNextDate.disabled = isCurrentOrFuture
+                        this.dom.btnStatsNextDate.style.opacity = isCurrentOrFuture ? '0.35' : '1'
+                        this.dom.btnStatsNextDate.style.cursor = isCurrentOrFuture ? 'default' : 'pointer'
+                    }
                 } else if (mode === 'year') {
                     this.dom.statsDateLabel.innerText = `${stats.targetYear}年`
                     if (this.dom.btnStatsPrevDate) this.dom.btnStatsPrevDate.style.display = 'inline-flex'
-                    if (this.dom.btnStatsNextDate) this.dom.btnStatsNextDate.style.display = 'inline-flex'
-                } else if (mode === 'week') {
-                    this.dom.statsDateLabel.innerText = stats.weekDateRangeStr ? `本周 (${stats.weekDateRangeStr})` : `本周`
-                    if (this.dom.btnStatsPrevDate) this.dom.btnStatsPrevDate.style.display = 'none'
-                    if (this.dom.btnStatsNextDate) this.dom.btnStatsNextDate.style.display = 'none'
+                    if (this.dom.btnStatsNextDate) {
+                        this.dom.btnStatsNextDate.style.display = 'inline-flex'
+                        const now = new Date()
+                        const isCurrentOrFuture = this.statsYear >= now.getFullYear()
+                        this.dom.btnStatsNextDate.disabled = isCurrentOrFuture
+                        this.dom.btnStatsNextDate.style.opacity = isCurrentOrFuture ? '0.35' : '1'
+                        this.dom.btnStatsNextDate.style.cursor = isCurrentOrFuture ? 'default' : 'pointer'
+                    }
                 } else if (mode === 'total') {
                     this.dom.statsDateLabel.innerText = `全部历年总览`
                     if (this.dom.btnStatsPrevDate) this.dom.btnStatsPrevDate.style.display = 'none'
@@ -4387,7 +5139,7 @@ class UniversalReaderApp {
                     let divisor = 1
                     if (mode === 'week') {
                         const dayOfWeek = now.getDay() || 7
-                        divisor = targetYear === now.getFullYear() ? dayOfWeek : 7
+                        divisor = (this.statsWeekOffset === 0) ? dayOfWeek : 7
                     } else if (mode === 'month') {
                         const isCurrentMonth = targetYear === now.getFullYear() && targetMonth === (now.getMonth() + 1)
                         divisor = isCurrentMonth ? Math.max(1, now.getDate()) : (stats.chartData?.length || 30)
@@ -4466,7 +5218,9 @@ class UniversalReaderApp {
         // Update Chart Card Title
         const chartTitleEl = document.querySelector('.stats-card-title')
         if (chartTitleEl) {
-            if (stats.viewMode === 'week') chartTitleEl.innerText = '本周每日阅读分布'
+            if (stats.viewMode === 'week') {
+                chartTitleEl.innerText = stats.weekOffset === 0 ? '本周每日阅读分布' : `${stats.weekDateRangeStr} 每日阅读分布`
+            }
             else if (stats.viewMode === 'month') chartTitleEl.innerText = `${stats.targetYear}年${stats.targetMonth}月 每日阅读分布`
             else if (stats.viewMode === 'year') chartTitleEl.innerText = `${stats.targetYear}年 每月阅读分布`
             else if (stats.viewMode === 'total') chartTitleEl.innerText = '历年阅读时长总分布'

@@ -101,6 +101,7 @@ export class FixedLayout extends HTMLElement {
             border: '0',
             overflow: 'hidden',
         })
+        iframe.setAttribute('sandbox', 'allow-same-origin')
         iframe.setAttribute('scrolling', 'no')
         iframe.setAttribute('part', 'filter')
         this.#root.append(element)

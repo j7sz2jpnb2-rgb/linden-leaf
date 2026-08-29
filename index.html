@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="https://fonts.font.im/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"/>
   <link rel="stylesheet" href="./css/main.css"/>
   <link rel="icon" type="image/png" href="./assets/icon.png"/>
+  <script src="./vendor/tesseract/tesseract.min.js"></script>
   <!-- Standard ES2024 Polyfills (Response.bytes, Uint8Array toHex/toBase64, Promise.try, Promise.withResolvers, Object.groupBy) for PDF.js v5 compatibility -->
   <script>
     if (typeof Response !== 'undefined' && typeof Response.prototype.bytes !== 'function') {
@@ -146,7 +147,7 @@
           <div class="sidebar-brand">
             <img class="brand-icon-img" src="./assets/logo-leaf.png" alt="Linden Leaf" />
             <div class="brand-name">Linden Leaf</div>
-            <div class="brand-version">0.1</div>
+            <div class="brand-version">1.0</div>
           </div>
 
           <!-- Search Box -->
@@ -476,7 +477,7 @@
         </button>
       </div>
 
-      <!-- WPS / Adobe Style PDF Floating Zoom Controller -->
+      <!-- WPS / Adobe Style PDF Floating Zoom & Freehand Annotation Controller -->
       <div id="pdf-zoom-control-bar" class="pdf-zoom-control-bar" style="display: none;">
         <button id="btn-pdf-zoom-out" class="btn-zoom-step" title="缩小 (快捷键 Ctrl + -)">−</button>
         <input type="range" id="pdf-zoom-slider" class="pdf-zoom-slider" min="30" max="300" step="5" value="100" />
@@ -488,6 +489,16 @@
         <button id="btn-pdf-fit-width" class="btn-zoom-preset" title="适合宽度 (Fit Width)">↔ 适宽</button>
         <button id="btn-pdf-fit-page" class="btn-zoom-preset" title="适合页面 (Fit Page)">↕ 适页</button>
         <button id="btn-pdf-spread-toggle" class="btn-zoom-preset" title="切换 单页 / 双页展开">📖 单/双页</button>
+        <div class="zoom-divider"></div>
+        <!-- Freehand Drawing Annotation & Marker Tools -->
+        <button id="btn-pdf-marker-yellow" class="btn-zoom-preset pdf-tool-btn" data-tool="marker" data-color="rgba(250, 204, 21, 0.45)" title="荧光黄马克笔 (半透明手动画线)">🖍️ 荧光黄</button>
+        <button id="btn-pdf-marker-green" class="btn-zoom-preset pdf-tool-btn" data-tool="marker" data-color="rgba(74, 222, 128, 0.45)" title="荧光绿马克笔">🖍️ 荧光绿</button>
+        <button id="btn-pdf-pen-red" class="btn-zoom-preset pdf-tool-btn" data-tool="pen" data-color="#ef4444" title="红色批注笔">✏️ 批注笔</button>
+        <button id="btn-pdf-eraser" class="btn-zoom-preset pdf-tool-btn" data-tool="eraser" title="橡皮擦">🧹 擦除</button>
+        <button id="btn-pdf-clear-draw" class="btn-zoom-preset" title="清空当前页手绘批注" style="color: var(--text-muted);">🗑️ 清空</button>
+        <div class="zoom-divider"></div>
+        <!-- Light OCR Text Recognition & Quick Copy Tool -->
+        <button id="btn-pdf-ocr-extract" class="btn-zoom-preset" title="轻量 OCR 识别提取当前页图片文字并快速复制" style="color: var(--accent-purple); font-weight: 600;">🔍 提取文字</button>
       </div>
 
       <!-- Bottom Bar -->
@@ -706,7 +717,7 @@
           <div class="setting-section" id="about-settings-section">
             <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
               <span>关于与版本更新</span>
-              <span id="app-version-badge-sidebar" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple); font-weight: 600;">v0.1.0</span>
+              <span id="app-version-badge-sidebar" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple); font-weight: 600;">v1.0.0</span>
             </div>
             <p style="font-size: 0.76rem; color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
               Linden Leaf 现代化全格式开源电子书阅读器。
@@ -1099,7 +1110,7 @@
         <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(139, 92, 246, 0.08); border: 1px solid rgba(139, 92, 246, 0.2); border-radius: 8px; padding: 10px 14px; margin-bottom: 1rem;">
           <div>
             <div style="font-size: 0.75rem; color: var(--text-tertiary);">当前版本</div>
-            <div id="update-current-version" style="font-size: 0.95rem; font-weight: 600; color: var(--text-main);">v0.1.0</div>
+            <div id="update-current-version" style="font-size: 0.95rem; font-weight: 600; color: var(--text-main);">v1.0.0</div>
           </div>
           <div style="font-size: 1.2rem; color: var(--accent-purple);">➔</div>
           <div>
@@ -1128,7 +1139,38 @@
         <button type="button" id="btn-update-download" class="btn-primary-action" style="padding: 0.45rem 1.25rem; font-size: 0.82rem;">
           <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span>立即前往 GitHub 下载</span>
-        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: PDF Page OCR Quick Text Extraction -->
+  <div id="modal-pdf-ocr" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 640px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 1.25rem;">🔍</span>
+          <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">图片 PDF 文本识别提取 (OCR)</span>
+        </div>
+        <button id="btn-close-pdf-ocr" class="footnote-popup-close" title="关闭">×</button>
+      </div>
+      <div style="padding: 1rem 0 0.5rem 0; flex: 1; display: flex; flex-direction: column; gap: 10px;">
+        <div id="pdf-ocr-status" style="font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 8px;">
+          <span id="pdf-ocr-status-icon">⏳</span>
+          <span id="pdf-ocr-status-text">正在初始化 OCR 本地识别引擎...</span>
+        </div>
+        <div style="position: relative; flex: 1;">
+          <textarea id="pdf-ocr-result-text" placeholder="识别出的文字将显示在此处，可自由选取和复制..." style="width: 100%; height: 260px; padding: 12px; font-size: 0.9rem; line-height: 1.6; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary); color: var(--text-main); resize: vertical; box-sizing: border-box; font-family: var(--font-sans);"></textarea>
+        </div>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border-color); margin-top: 0.5rem;">
+        <span id="pdf-ocr-char-count" style="font-size: 0.8rem; color: var(--text-muted);">共 0 字</span>
+        <div style="display: flex; gap: 8px;">
+          <button type="button" id="btn-cancel-pdf-ocr" class="btn-secondary-action" style="padding: 0.45rem 1rem; font-size: 0.82rem;">关闭</button>
+          <button type="button" id="btn-copy-pdf-ocr" class="btn-primary-action" style="padding: 0.45rem 1.25rem; font-size: 0.82rem;">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span>一键复制文字</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>

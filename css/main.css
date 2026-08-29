@@ -786,15 +786,16 @@ button {
   justify-content: center;
   cursor: pointer;
   opacity: 0;
+  pointer-events: none;
   transform: scale(0.85);
   transition: all 0.2s ease;
   z-index: 20;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
 }
 
-.skeuo-book:hover .skeuo-fav-btn,
-.skeuo-fav-btn.active {
+.skeuo-book:hover .skeuo-fav-btn {
   opacity: 1;
+  pointer-events: auto;
   transform: scale(1);
 }
 
@@ -896,14 +897,15 @@ button {
   justify-content: center;
   cursor: pointer;
   opacity: 0;
+  pointer-events: none;
   transform: scale(0.85);
   transition: all 0.2s ease;
   z-index: 10;
 }
 
-.jane-book-card:hover .grid-fav-btn,
-.grid-fav-btn.active {
+.jane-book-card:hover .grid-fav-btn {
   opacity: 1;
+  pointer-events: auto;
   transform: scale(1);
 }
 
@@ -918,6 +920,46 @@ button {
   background: #f59e0b;
   color: #ffffff;
   transform: scale(1.1);
+}
+
+/* Favorite Book Indicator: Elegant Champagne Gold Delicate Border */
+.jane-cover-box {
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.2s ease;
+  box-sizing: border-box;
+}
+
+.jane-cover-box.is-favorite {
+  border: 1.5px solid rgba(217, 119, 6, 0.75);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.28), var(--shadow-cover);
+}
+
+[data-theme="dark"] .jane-cover-box.is-favorite,
+[data-theme="black"] .jane-cover-box.is-favorite {
+  border: 1.5px solid rgba(251, 191, 36, 0.85);
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.4), var(--shadow-cover);
+}
+
+[data-theme="eink"] .jane-cover-box.is-favorite {
+  border: 2px solid #000000;
+  box-shadow: none;
+}
+
+/* 3D Skeuomorphic Wooden Bookshelf Book Favorite Gold Edge */
+.skeuo-book-cover.is-favorite {
+  border: 1.5px solid rgba(251, 191, 36, 0.85);
+  box-shadow: 
+    0 0 12px rgba(245, 158, 11, 0.45),
+    -4px 12px 24px rgba(0, 0, 0, 0.75),
+    -1px 2px 6px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+
+.skeuo-book:hover .skeuo-book-cover.is-favorite {
+  border-color: rgba(251, 191, 36, 1);
+  box-shadow: 
+    0 0 16px rgba(245, 158, 11, 0.6),
+    -10px 26px 38px rgba(0, 0, 0, 0.9),
+    -2px 6px 12px rgba(0, 0, 0, 0.6);
 }
 
 /* Table Row Star Favorite Button */
@@ -1866,17 +1908,64 @@ foliate-view {
   transition: all 0.15s ease;
   white-space: nowrap;
 }
-.btn-zoom-preset:hover,
-.btn-zoom-preset.active {
+.btn-zoom-preset:hover {
   background: #eff6ff;
   border-color: var(--accent-blue);
   color: var(--accent-blue);
+}
+.btn-zoom-preset.active {
+  background: #7c3aed !important;
+  border-color: #6d28d9 !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 8px rgba(124, 58, 237, 0.4);
+}
+
+.pdf-tool-btn.active[data-color="rgba(250, 204, 21, 0.45)"] {
+  background: #fef08a !important;
+  border-color: #eab308 !important;
+  color: #854d0e !important;
+  box-shadow: 0 0 8px rgba(234, 179, 8, 0.4);
+}
+
+.pdf-tool-btn.active[data-color="rgba(74, 222, 128, 0.45)"] {
+  background: #bbf7d0 !important;
+  border-color: #22c55e !important;
+  color: #166534 !important;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.4);
+}
+
+.pdf-tool-btn.active[data-tool="eraser"] {
+  background: #fee2e2 !important;
+  border-color: #ef4444 !important;
+  color: #991b1b !important;
 }
 
 .pdf-zoom-control-bar.autohide {
   opacity: 0;
   pointer-events: none;
   transform: translateY(20px);
+}
+
+/* PDF Page Canvas Drawing Overlay */
+.pdf-page-draw-container {
+  position: relative;
+  display: inline-block;
+}
+
+.pdf-draw-overlay-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 15;
+  pointer-events: none;
+  touch-action: none;
+}
+
+.pdf-draw-overlay-canvas.is-drawing-active {
+  pointer-events: auto !important;
+  cursor: crosshair;
 }
 
 /* PDF Dark Mode Invert Filter (Only in dark & black OLED themes) */

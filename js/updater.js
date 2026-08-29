@@ -4,7 +4,7 @@
 
 export class AppUpdater {
     constructor() {
-        this.currentVersion = '0.1.0'
+        this.currentVersion = '1.0.0'
         this.defaultRepo = 'j7sz2jpnb2-rgb/linden-leaf'
         this.lastCheckTime = 0
         this.latestRelease = null
@@ -13,7 +13,7 @@ export class AppUpdater {
     async init() {
         if (window.electronAPI?.getVersion) {
             try {
-                this.currentVersion = await window.electronAPI.getVersion() || '0.1.0'
+                this.currentVersion = await window.electronAPI.getVersion() || '1.0.0'
             } catch (e) {
                 console.warn('Failed to get app version from electron:', e)
             }
@@ -74,21 +74,38 @@ export class AppUpdater {
                 })
 
                 if (!res.ok) {
-                    if (res.status === 404) {
-                        return {
-                            success: false,
-                            error: `未在 GitHub 仓库 [${repo}] 找到任何已发布的 Release 版本。请先在 GitHub 仓库创建 Release 发布。`
-                        }
-                    }
                     if (res.status === 403) {
-                        return {
-                            success: false,
-                            error: 'GitHub API 访问频次暂时受限，请稍候再试（通常 1 小时后自动恢复），或直接前往网页查看。'
-                        }
+                        try {
+                            const rawRes = await fetch(`https://raw.githubusercontent.com/${repo}/main/package.json`)
+                            if (rawRes.ok) {
+                                const pkg = await rawRes.json()
+                                data = {
+                                    tag_name: `v${pkg.version || '0.1.0'}`,
+                                    name: `Linden Leaf v${pkg.version || '0.1.0'}`,
+                                    html_url: `https://github.com/${repo}/releases`,
+                                    body: '可在 GitHub 查看最新版本发布与下载。'
+                                }
+                            }
+                        } catch (rawErr) {}
                     }
-                    throw new Error(`GitHub API 返回 HTTP ${res.status}`)
+                    if (!data) {
+                        if (res.status === 404) {
+                            return {
+                                success: false,
+                                error: `未在 GitHub 仓库 [${repo}] 找到任何已发布的 Release 版本。请先在 GitHub 仓库创建 Release 发布。`
+                            }
+                        }
+                        if (res.status === 403) {
+                            return {
+                                success: false,
+                                error: 'GitHub API 访问频次暂时受限，请稍候再试（通常 1 小时后自动恢复），或直接前往网页查看。'
+                            }
+                        }
+                        throw new Error(`GitHub API 返回 HTTP ${res.status}`)
+                    }
+                } else {
+                    data = await res.json()
                 }
-                data = await res.json()
             }
 
             if (!data) throw new Error('未获取到有效的 Release 数据')

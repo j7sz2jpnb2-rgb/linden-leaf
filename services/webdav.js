@@ -3,7 +3,7 @@
 
 class WebDAVService {
     /**
-     * Clean and normalize URL path
+     * Clean and normalize URL path while strictly preserving base origin
      */
     static normalizeUrl(baseUrl, subPath = '') {
         let base = (baseUrl || '').trim()
@@ -14,13 +14,16 @@ class WebDAVService {
             base += '/'
         }
 
-        let cleanSub = (subPath || '').trim()
-        if (cleanSub.startsWith('/')) {
-            cleanSub = cleanSub.slice(1)
-        }
+        const baseUrlObj = new URL(base)
+        const segments = (subPath || '')
+            .split('/')
+            .map(s => s.trim())
+            .filter(s => s.length > 0 && s !== '.' && s !== '..')
 
-        const parsed = new URL(cleanSub, base)
-        return parsed.toString()
+        const basePath = baseUrlObj.pathname.endsWith('/') ? baseUrlObj.pathname : baseUrlObj.pathname + '/'
+        const combinedPath = basePath + segments.map(encodeURIComponent).join('/')
+        baseUrlObj.pathname = combinedPath.replace(/\/+/g, '/')
+        return baseUrlObj.toString()
     }
 
     /**
@@ -34,46 +37,56 @@ class WebDAVService {
     }
 
     /**
-     * Ensure remote directory exists on WebDAV server
+     * Ensure remote directory (and any parent directories) exist on WebDAV server
      */
     static async ensureDirectory(serverUrl, username, password, remoteDir = 'LindenLeaf') {
-        const cleanDir = (remoteDir || 'LindenLeaf').replace(/^\/+|\/+$/g, '')
-        const targetUrl = this.normalizeUrl(serverUrl, cleanDir + '/')
         const auth = this.getAuthHeader(username, password)
+        const segments = (remoteDir || 'LindenLeaf')
+            .split('/')
+            .map(s => s.trim())
+            .filter(s => s.length > 0 && s !== '.' && s !== '..')
 
-        try {
-            // Check if directory exists with PROPFIND
-            const checkRes = await fetch(targetUrl, {
-                method: 'PROPFIND',
-                headers: {
-                    'Authorization': auth,
-                    'Depth': '0'
-                },
-                signal: AbortSignal.timeout(12000)
-            })
+        let currentPath = ''
+        let lastUrl = this.normalizeUrl(serverUrl, '')
 
-            if (checkRes.status === 200 || checkRes.status === 207) {
-                return { success: true, url: targetUrl }
-            }
+        for (const seg of segments) {
+            currentPath = currentPath ? `${currentPath}/${seg}` : seg
+            const targetUrl = this.normalizeUrl(serverUrl, currentPath + '/')
+            lastUrl = targetUrl
 
-            // If 404 or other not found status, attempt MKCOL
-            if (checkRes.status === 404 || checkRes.status === 405) {
-                const mkcolRes = await fetch(targetUrl, {
-                    method: 'MKCOL',
-                    headers: { 'Authorization': auth },
+            try {
+                // Check if directory exists with PROPFIND
+                const checkRes = await fetch(targetUrl, {
+                    method: 'PROPFIND',
+                    headers: {
+                        'Authorization': auth,
+                        'Depth': '0'
+                    },
                     signal: AbortSignal.timeout(12000)
                 })
 
-                if (mkcolRes.status === 201 || mkcolRes.status === 200 || mkcolRes.status === 405) {
-                    return { success: true, url: targetUrl }
+                if (checkRes.status === 200 || checkRes.status === 207) {
+                    continue
                 }
-            }
 
-            return { success: checkRes.ok, status: checkRes.status, url: targetUrl }
-        } catch (err) {
-            console.warn('[WebDAV] ensureDirectory notice:', err.message)
-            return { success: false, error: err.message, url: targetUrl }
+                // If not found, create directory with MKCOL
+                if (checkRes.status === 404 || checkRes.status === 405) {
+                    const mkcolRes = await fetch(targetUrl, {
+                        method: 'MKCOL',
+                        headers: { 'Authorization': auth },
+                        signal: AbortSignal.timeout(12000)
+                    })
+
+                    if (mkcolRes.status === 201 || mkcolRes.status === 200 || mkcolRes.status === 405) {
+                        continue
+                    }
+                }
+            } catch (err) {
+                console.warn('[WebDAV] ensureDirectory segment warning:', currentPath, err.message)
+            }
         }
+
+        return { success: true, url: lastUrl }
     }
 
     /**
@@ -122,7 +135,7 @@ class WebDAVService {
 
             return {
                 success: true,
-                message: '连接坚果云 / WebDAV 服务器成功！远程应用目录已就绪。',
+                message: '连接 WebDAV 服务器成功！远程应用目录已就绪。',
                 targetUrl: dirRes.url
             }
         } catch (err) {
@@ -137,8 +150,7 @@ class WebDAVService {
      * Fetch remote sync state JSON
      */
     static async fetchRemoteState({ serverUrl, username, password, remoteDir = 'LindenLeaf', fileName = 'linden_sync_data.json' }) {
-        const cleanDir = (remoteDir || 'LindenLeaf').replace(/^\/+|\/+$/g, '')
-        const fileUrl = this.normalizeUrl(serverUrl, `${cleanDir}/${fileName}`)
+        const fileUrl = this.normalizeUrl(serverUrl, `${remoteDir}/${fileName}`)
         const auth = this.getAuthHeader(username, password)
 
         try {
@@ -151,51 +163,66 @@ class WebDAVService {
                 signal: AbortSignal.timeout(15000)
             })
 
+            const etag = res.headers.get('etag') || null
+
             if (res.status === 404) {
-                return { exists: false, data: null }
+                return { exists: false, data: null, etag: null }
             }
 
             if (!res.ok) {
-                return { exists: false, error: `拉取云端数据失败 (HTTP ${res.status}): ${res.statusText}` }
+                return { exists: false, error: `拉取云端数据失败 (HTTP ${res.status}): ${res.statusText}`, etag: null }
             }
 
             const text = await res.text()
             if (!text || !text.trim()) {
-                return { exists: false, data: null }
+                return { exists: false, data: null, etag }
             }
 
             const data = JSON.parse(text)
-            return { exists: true, data }
+            return { exists: true, data, etag }
         } catch (err) {
-            return { exists: false, error: err.message }
+            return { exists: false, error: err.message, etag: null }
         }
     }
 
     /**
-     * Save / upload merged sync state JSON atomically
+     * Save / upload merged sync state JSON with optimistic concurrency
      */
-    static async saveRemoteState({ serverUrl, username, password, remoteDir = 'LindenLeaf', fileName = 'linden_sync_data.json', data }) {
+    static async saveRemoteState({ serverUrl, username, password, remoteDir = 'LindenLeaf', fileName = 'linden_sync_data.json', data, etag = null }) {
         // Ensure remote directory exists first
         await this.ensureDirectory(serverUrl, username, password, remoteDir)
 
-        const cleanDir = (remoteDir || 'LindenLeaf').replace(/^\/+|\/+$/g, '')
-        const fileUrl = this.normalizeUrl(serverUrl, `${cleanDir}/${fileName}`)
+        const fileUrl = this.normalizeUrl(serverUrl, `${remoteDir}/${fileName}`)
         const auth = this.getAuthHeader(username, password)
         const jsonString = JSON.stringify(data, null, 2)
+
+        const headers = {
+            'Authorization': auth,
+            'Content-Type': 'application/json; charset=utf-8'
+        }
+        if (etag) {
+            headers['If-Match'] = etag
+        }
 
         try {
             const res = await fetch(fileUrl, {
                 method: 'PUT',
-                headers: {
-                    'Authorization': auth,
-                    'Content-Type': 'application/json; charset=utf-8'
-                },
+                headers,
                 body: jsonString,
                 signal: AbortSignal.timeout(20000)
             })
 
+            if (res.status === 412) {
+                return {
+                    success: false,
+                    isConflict: true,
+                    error: '云端同步冲突：云端数据已被其他设备更新，请重试'
+                }
+            }
+
             if (res.status === 200 || res.status === 201 || res.status === 204) {
-                return { success: true, updatedAt: Date.now() }
+                const newEtag = res.headers.get('etag') || null
+                return { success: true, etag: newEtag, updatedAt: Date.now() }
             }
 
             return { success: false, error: `写入云端数据失败 (HTTP ${res.status})` }

@@ -1,7 +1,7 @@
 // db.js - IndexedDB storage wrapper for Universal E-Book Reader (with WeChat Read Statistics)
 
 const DB_NAME = 'UniversalReaderDB'
-const DB_VERSION = 5
+const DB_VERSION = 6
 
 let dbInstance = null
 
@@ -73,6 +73,12 @@ export const openDB = () => {
                 delStore.createIndex('deletedAt', 'deletedAt', { unique: false })
             }
 
+            // Store for PDF Page Drawings & Marker Annotations
+            if (!db.objectStoreNames.contains('pdf_drawings')) {
+                const drawStore = db.createObjectStore('pdf_drawings', { keyPath: 'id' })
+                drawStore.createIndex('bookId', 'bookId', { unique: false })
+            }
+
             // Migrate DB_VERSION < 4 records (strip blob from books and save to book_files)
             if (e.oldVersion < 4 && e.oldVersion > 0) {
                 try {
@@ -132,7 +138,7 @@ export const saveBook = async bookData => {
         if (meta.title != null) {
             if (meta.totalReadingSeconds == null) meta.totalReadingSeconds = 0
             if (!meta.addedAt) meta.addedAt = Date.now()
-            if (!meta.lastReadAt) meta.lastReadAt = meta.addedAt
+            if (meta.lastReadAt === undefined || meta.lastReadAt === null) meta.lastReadAt = 0
             bookStore.put(meta)
         } else if (meta.id) {
             // Partial metadata update or only file blob update
@@ -203,7 +209,12 @@ export const getAllBooks = async () => {
         const req = store.getAll()
         req.onsuccess = () => {
             const list = req.result || []
-            list.sort((a, b) => (b.lastReadAt || b.addedAt || 0) - (a.lastReadAt || a.addedAt || 0))
+            list.sort((a, b) => {
+                const aRead = a.lastReadAt || 0
+                const bRead = b.lastReadAt || 0
+                if (bRead !== aRead) return bRead - aRead
+                return (b.addedAt || 0) - (a.addedAt || 0)
+            })
             resolve(list)
         }
         req.onerror = () => reject(req.error || new Error('Failed to get all books'))
@@ -222,6 +233,7 @@ export const updateBookProgress = async (id, progressData) => {
             if (!book) return resolve(null)
             book.progress = progressData
             book.lastReadAt = Date.now()
+            book.updatedAt = Date.now()
             store.put(book)
         }
         tx.oncomplete = () => resolve(true)
@@ -241,6 +253,7 @@ export const updateBookReadingTime = async (id, addedSeconds) => {
             if (!book) return resolve(null)
             book.totalReadingSeconds = (book.totalReadingSeconds || 0) + addedSeconds
             book.lastReadAt = Date.now()
+            book.updatedAt = Date.now()
             store.put(book)
         }
         tx.oncomplete = () => resolve(true)
@@ -291,27 +304,29 @@ export const toggleBookFavorite = async id => {
     })
 }
 
-export const deleteBook = async id => {
+export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Date.now()) => {
     if (!id) return false
     const db = await openDB()
     return new Promise((resolve, reject) => {
         try {
-            const storeNames = db.objectStoreNames.contains('deleted_records')
-                ? ['books', 'book_files', 'bookmarks', 'highlights', 'deleted_records']
-                : ['books', 'book_files', 'bookmarks', 'highlights']
+            const allPossibleStores = ['books', 'book_files', 'bookmarks', 'highlights', 'deleted_records', 'pdf_drawings']
+            const storeNames = allPossibleStores.filter(name => db.objectStoreNames.contains(name))
             const tx = db.transaction(storeNames, 'readwrite')
             
             // Delete main book entry and binary blob file
             tx.objectStore('books').delete(id)
-            tx.objectStore('book_files').delete(id)
-            if (storeNames.includes('deleted_records')) {
-                tx.objectStore('deleted_records').put({ id, type: 'book', deletedAt: Date.now() })
+            if (storeNames.includes('book_files')) {
+                tx.objectStore('book_files').delete(id)
+            }
+            if (recordTombstone && storeNames.includes('deleted_records')) {
+                tx.objectStore('deleted_records').put({ id, type: 'book', deletedAt: tombstoneTime })
             }
             
-            // Safely clean up associated bookmarks and highlights
+            // Safely clean up associated bookmarks, highlights, and pdf_drawings
             // Note: reading_sessions are PERMANENT user statistics logs and are NEVER purged on book removal!
             const cleanStoreByIndex = (storeName, indexName) => {
                 try {
+                    if (!storeNames.includes(storeName)) return
                     const store = tx.objectStore(storeName)
                     const index = store.index(indexName)
                     const req = index.getAllKeys(id)
@@ -319,8 +334,8 @@ export const deleteBook = async id => {
                         const keys = req.result || []
                         for (const key of keys) {
                             store.delete(key)
-                            if (storeNames.includes('deleted_records')) {
-                                tx.objectStore('deleted_records').put({ id: key, type: storeName, deletedAt: Date.now() })
+                            if (recordTombstone && storeNames.includes('deleted_records') && storeName !== 'pdf_drawings') {
+                                tx.objectStore('deleted_records').put({ id: key, type: storeName, deletedAt: tombstoneTime })
                             }
                         }
                     }
@@ -331,6 +346,7 @@ export const deleteBook = async id => {
 
             cleanStoreByIndex('bookmarks', 'bookId')
             cleanStoreByIndex('highlights', 'bookId')
+            cleanStoreByIndex('pdf_drawings', 'bookId')
 
             tx.oncomplete = () => resolve(true)
             tx.onerror = () => reject(tx.error || new Error(`Failed to delete book ${id}`))
@@ -381,7 +397,7 @@ export const getAllHighlights = async () => {
     })
 }
 
-export const deleteHighlight = async id => {
+export const deleteHighlight = async (id, recordTombstone = true, tombstoneTime = Date.now()) => {
     if (!id) return false
     const db = await openDB()
     return new Promise((resolve, reject) => {
@@ -389,8 +405,8 @@ export const deleteHighlight = async id => {
         const tx = db.transaction(storeNames, 'readwrite')
         const store = tx.objectStore('highlights')
         store.delete(id)
-        if (storeNames.includes('deleted_records')) {
-            tx.objectStore('deleted_records').put({ id, type: 'highlight', deletedAt: Date.now() })
+        if (recordTombstone && storeNames.includes('deleted_records')) {
+            tx.objectStore('deleted_records').put({ id, type: 'highlight', deletedAt: tombstoneTime })
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to delete highlight'))
@@ -437,7 +453,7 @@ export const getAllBookmarks = async () => {
     })
 }
 
-export const deleteBookmark = async id => {
+export const deleteBookmark = async (id, recordTombstone = true, tombstoneTime = Date.now()) => {
     if (!id) return false
     const db = await openDB()
     return new Promise((resolve, reject) => {
@@ -445,8 +461,8 @@ export const deleteBookmark = async id => {
         const tx = db.transaction(storeNames, 'readwrite')
         const store = tx.objectStore('bookmarks')
         store.delete(id)
-        if (storeNames.includes('deleted_records')) {
-            tx.objectStore('deleted_records').put({ id, type: 'bookmark', deletedAt: Date.now() })
+        if (recordTombstone && storeNames.includes('deleted_records')) {
+            tx.objectStore('deleted_records').put({ id, type: 'bookmark', deletedAt: tombstoneTime })
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to delete bookmark'))
@@ -531,7 +547,7 @@ export const getAllReadingSessions = async () => {
 }
 
 // Calculate WeChat Read Full Statistics (Supports Week, Month, Year, Total views)
-export const getReadingStats = async (viewMode = 'month', targetYear = new Date().getFullYear(), targetMonth = new Date().getMonth() + 1) => {
+export const getReadingStats = async (viewMode = 'month', targetYear = new Date().getFullYear(), targetMonth = new Date().getMonth() + 1, weekOffset = 0) => {
     const allRawSessions = await getAllReadingSessions()
     const sessions = allRawSessions.filter(s => s && (s.durationSeconds || 0) >= 60)
     const books = await getAllBooks()
@@ -628,16 +644,28 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
     let peakInfo = { label: '', timeStr: '', seconds: 0 }
     let viewReadDays = 0
     let weekDateRangeStr = ''
+    let monday = null
+    let sunday = null
 
     if (viewMode === 'week') {
-        // Monday through Sunday of current week in LOCAL time
-        const curDay = now.getDay() || 7 // 1 (Mon) to 7 (Sun)
-        const monday = new Date(now)
-        monday.setDate(now.getDate() - curDay + 1)
+        // Calculate Monday through Sunday for (current week + weekOffset)
+        const baseDate = new Date(now)
+        baseDate.setDate(baseDate.getDate() + (weekOffset * 7))
+        const curDay = baseDate.getDay() || 7 // 1 (Mon) to 7 (Sun)
+        monday = new Date(baseDate)
+        monday.setDate(baseDate.getDate() - curDay + 1)
         monday.setHours(0, 0, 0, 0)
-        const sunday = new Date(monday)
+        sunday = new Date(monday)
         sunday.setDate(monday.getDate() + 6)
-        weekDateRangeStr = `${monday.getMonth() + 1}月${monday.getDate()}日 - ${sunday.getMonth() + 1}月${sunday.getDate()}日`
+        sunday.setHours(23, 59, 59, 999)
+
+        if (monday.getFullYear() !== sunday.getFullYear()) {
+            weekDateRangeStr = `${monday.getFullYear()}年${monday.getMonth() + 1}月${monday.getDate()}日 - ${sunday.getFullYear()}年${sunday.getMonth() + 1}月${sunday.getDate()}日`
+        } else if (monday.getFullYear() !== now.getFullYear()) {
+            weekDateRangeStr = `${monday.getFullYear()}年${monday.getMonth() + 1}月${monday.getDate()}日 - ${sunday.getMonth() + 1}月${sunday.getDate()}日`
+        } else {
+            weekDateRangeStr = `${monday.getMonth() + 1}月${monday.getDate()}日 - ${sunday.getMonth() + 1}月${sunday.getDate()}日`
+        }
         const weekLabels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 
         for (let i = 0; i < 7; i++) {
@@ -766,8 +794,8 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
                 periodReadingSeconds: periodBookDurationMap.get(b.id) || 0
             }))
             .sort((a, b) => b.periodReadingSeconds - a.periodReadingSeconds)
-    } else {
-        // Fallback: books with totalReadingSeconds > 0
+    } else if (viewMode === 'total') {
+        // Fallback ONLY for 'total' view when sessions store is completely empty
         periodBooks = books
             .filter(b => (b.totalReadingSeconds || 0) > 0)
             .map(b => ({
@@ -804,6 +832,7 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         viewMode,
         targetYear,
         targetMonth,
+        weekOffset,
         weekDateRangeStr,
         todaySeconds,
         todayMinutes: Math.round(todaySeconds / 60),
@@ -863,20 +892,8 @@ export const getAllCustomLists = async () => {
         const tx = db.transaction('custom_lists', 'readonly')
         const store = tx.objectStore('custom_lists')
         const req = store.getAll()
-        req.onsuccess = async () => {
-            let list = req.result || []
-            // Initialize default lists if empty
-            if (list.length === 0) {
-                const defaultLists = [
-                    { id: 'list_unread', name: '待读清单', icon: '📌', color: '#8b5cf6', isBuiltIn: true, createdAt: 1, updatedAt: 1 },
-                    { id: 'list_recommend', name: '2026 必读书单', icon: '🌟', color: '#f59e0b', isBuiltIn: false, createdAt: 2, updatedAt: 2 },
-                    { id: 'list_study', name: '专业研读与工作', icon: '📜', color: '#3b82f6', isBuiltIn: false, createdAt: 3, updatedAt: 3 }
-                ]
-                for (const d of defaultLists) {
-                    await saveCustomList(d)
-                }
-                list = defaultLists
-            }
+        req.onsuccess = () => {
+            const list = req.result || []
             list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
             resolve(list)
         }
@@ -884,7 +901,7 @@ export const getAllCustomLists = async () => {
     })
 }
 
-export const deleteCustomList = async id => {
+export const deleteCustomList = async (id, recordTombstone = true, tombstoneTime = Date.now()) => {
     const db = await openDB()
     return new Promise((resolve, reject) => {
         const storeNames = db.objectStoreNames.contains('deleted_records')
@@ -894,8 +911,8 @@ export const deleteCustomList = async id => {
         const bookStore = tx.objectStore('books')
         const listStore = tx.objectStore('custom_lists')
         listStore.delete(id)
-        if (storeNames.includes('deleted_records')) {
-            tx.objectStore('deleted_records').put({ id, type: 'custom_list', deletedAt: Date.now() })
+        if (recordTombstone && storeNames.includes('deleted_records')) {
+            tx.objectStore('deleted_records').put({ id, type: 'custom_list', deletedAt: tombstoneTime })
         }
         
         const req = bookStore.openCursor()
@@ -1009,4 +1026,50 @@ export const removeBookFromList = async (bookId, listId) => {
     book.customListIds = book.customListIds.filter(id => id !== listId)
     await saveBook(book)
     return true
+}
+
+// ==========================================================
+// PDF Freehand Drawing & Annotations CRUD
+// ==========================================================
+export const savePdfPageDrawing = async (bookId, pageIndex, strokes) => {
+    if (!bookId || pageIndex == null) return false
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('pdf_drawings', 'readwrite')
+        const store = tx.objectStore('pdf_drawings')
+        const record = {
+            id: `${bookId}_page_${pageIndex}`,
+            bookId,
+            pageIndex,
+            strokes: strokes || [],
+            updatedAt: Date.now()
+        }
+        store.put(record)
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error || new Error('Failed to save PDF drawing'))
+    })
+}
+
+export const getPdfPageDrawing = async (bookId, pageIndex) => {
+    if (!bookId || pageIndex == null) return null
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('pdf_drawings', 'readonly')
+        const store = tx.objectStore('pdf_drawings')
+        const req = store.get(`${bookId}_page_${pageIndex}`)
+        req.onsuccess = () => resolve(req.result || null)
+        req.onerror = () => reject(req.error || new Error('Failed to get PDF drawing'))
+    })
+}
+
+export const clearPdfPageDrawing = async (bookId, pageIndex) => {
+    if (!bookId || pageIndex == null) return false
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('pdf_drawings', 'readwrite')
+        const store = tx.objectStore('pdf_drawings')
+        store.delete(`${bookId}_page_${pageIndex}`)
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error || new Error('Failed to clear PDF drawing'))
+    })
 }

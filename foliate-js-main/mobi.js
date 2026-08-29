@@ -5,6 +5,23 @@ const unescapeHTML = str => {
     return textarea.value
 }
 
+const sanitizeDoc = doc => {
+    if (!doc) return doc
+    for (const el of doc.querySelectorAll('script, iframe, object, embed, form, meta[http-equiv]')) {
+        el.remove()
+    }
+    for (const el of doc.querySelectorAll('*')) {
+        for (const attr of Array.from(el.attributes)) {
+            const attrName = attr.name.toLowerCase()
+            const attrVal = (attr.value || '').trim().toLowerCase()
+            if (attrName.startsWith('on') || attrVal.startsWith('javascript:') || attrVal.startsWith('vbscript:')) {
+                el.removeAttribute(attr.name)
+            }
+        }
+    }
+    return doc
+}
+
 const MIME = {
     XML: 'application/xml',
     XHTML: 'application/xhtml+xml',
@@ -864,6 +881,7 @@ class MOBI6 {
         }`))
 
         await this.replaceResources(doc)
+        sanitizeDoc(doc)
         const result = this.serializer.serializeToString(doc)
         const url = URL.createObjectURL(new Blob([result], { type: this.#type }))
         this.#cache.set(section, url)
@@ -1184,6 +1202,7 @@ class KF8 {
             for (const el of doc.querySelectorAll(`img[src="${url}"]`))
                 el.replaceWith(node)
         }
+        sanitizeDoc(doc)
         const url = URL.createObjectURL(
             new Blob([this.serializer.serializeToString(doc)], { type: this.#type }))
         this.#cache.set(section, url)

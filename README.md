@@ -1,8 +1,8 @@
-﻿# 🍃 Linden Leaf (菩提叶阅读器)
+# 🍃 Linden Leaf (菩提叶阅读器)
 
 > 现代化全格式开源电子书阅读器 · 微信读书质感数据看板 · 拟物拟真手绘划线 · 坚果云/WebDAV多端同步
 
-[![GitHub release](https://img.shields.io/badge/release-v0.1.0-purple.svg)](https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases)
+[![GitHub release](https://img.shields.io/badge/release-v1.0.0-purple.svg)](https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE.txt)
 [![Electron](https://img.shields.io/badge/Electron-44.0.0-green.svg)](https://www.electronjs.org/)
 
@@ -23,8 +23,8 @@
   - 支持全屏自动隐藏上下栏；
   - 屏幕顶部与底部 50px 边缘悬停智能浮现。
 - ☁️ **跨设备 WebDAV / 坚果云云同步**：
-  - 自动双向同步阅读进度、书单分类与划线笔记；
-  - 离线保护与 LWW 时间戳冲突对齐。
+  - 自动双向秒级同步阅读进度、书单分类与划线笔记；
+  - 严格 CAS ETag 防覆盖与 LWW 冲突解决机制。
 - 🖼️ **精美书摘卡片生成器**：
   - 多款国风与极简主题背景；
   - 一键复制高清图片到剪贴板或下载导出。
@@ -37,8 +37,8 @@
 
 前往 [Releases 页面](https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases) 下载最新 Windows 安装包或免安装绿色便携版：
 
-- **安装版**：`Linden-Leaf-v0.1.0-Setup.exe`（支持自选安装路径与卸载时数据保留选择）
-- **便携版**：`Linden-Leaf-v0.1.0-Portable.exe`（单文件解压即用）
+- **安装版**：`Linden-Leaf-v1.0.0-Setup.exe`（支持自选安装路径与卸载时数据保留选择）
+- **便携版**：`Linden-Leaf-v1.0.0-Portable.exe`（单文件解压即用）
 
 ---
 

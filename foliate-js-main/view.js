@@ -218,7 +218,7 @@ const languageInfo = lang => {
     try {
         const canonical = Intl.getCanonicalLocales(lang)[0]
         const locale = new Intl.Locale(canonical)
-        const isCJK = ['zh', 'ja', 'kr'].includes(locale.language)
+        const isCJK = ['zh', 'ja', 'ko'].includes(locale.language)
         const direction = (locale.getTextInfo?.() ?? locale.textInfo)?.direction
         return { canonical, locale, isCJK, direction }
     } catch (e) {
@@ -501,9 +501,18 @@ export class View extends HTMLElement {
         }
     }
     async goToFraction(frac) {
-        const [index, anchor] = this.#sectionProgress.getSection(frac)
-        await this.renderer.goTo({ index, anchor })
-        this.history.pushState({ fraction: frac })
+        try {
+            if (this.#sectionProgress) {
+                const [index, anchor] = this.#sectionProgress.getSection(frac)
+                await this.renderer.goTo({ index, anchor })
+            } else if (this.book?.sections?.length) {
+                const index = Math.min(this.book.sections.length - 1, Math.max(0, Math.floor(frac * this.book.sections.length)))
+                await this.renderer.goTo({ index })
+            }
+            this.history.pushState({ fraction: frac })
+        } catch (e) {
+            console.warn('Failed to goToFraction:', frac, e)
+        }
     }
     async select(target) {
         try {
