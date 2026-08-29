@@ -2309,18 +2309,18 @@ class UniversalReaderApp {
 
     turnPageNext() {
         if (!this.foliateView) return
-        if (this.foliateView.book?.dir === 'rtl') {
-            this.foliateView.goLeft()
-        } else {
+        if (typeof this.foliateView.goRight === 'function') {
+            this.foliateView.goRight()
+        } else if (typeof this.foliateView.next === 'function') {
             this.foliateView.next()
         }
     }
 
     turnPagePrev() {
         if (!this.foliateView) return
-        if (this.foliateView.book?.dir === 'rtl') {
-            this.foliateView.goRight()
-        } else {
+        if (typeof this.foliateView.goLeft === 'function') {
+            this.foliateView.goLeft()
+        } else if (typeof this.foliateView.prev === 'function') {
             this.foliateView.prev()
         }
     }
@@ -2335,9 +2335,9 @@ class UniversalReaderApp {
                 this.closeStatsDetailModal()
                 return
             }
-            const syncModal = document.getElementById('modal-webdav-sync')
+            const syncModal = this.dom.modalWebdavSync || document.getElementById('modal-webdav-sync')
             if (syncModal && (syncModal.classList.contains('show') || syncModal.style.display !== 'none')) {
-                this.closeSyncModal()
+                this.closeWebdavSyncModal()
                 return
             }
             if (this.dom.quoteCardBackdrop && this.dom.quoteCardBackdrop.style.display !== 'none') {
@@ -2352,7 +2352,8 @@ class UniversalReaderApp {
                 this.closeCreateListModal()
                 return
             }
-            if (this.dom.modalUpdateDialog && (this.dom.modalUpdateDialog.classList.contains('show') || this.dom.modalUpdateDialog.style.display !== 'none')) {
+            const updateModal = this.dom.modalUpdateDialog || document.getElementById('modal-update-dialog')
+            if (updateModal && (updateModal.classList.contains('show') || updateModal.style.display !== 'none')) {
                 this.closeUpdateModal()
                 return
             }
@@ -2370,25 +2371,20 @@ class UniversalReaderApp {
             // Check if any modal backdrop or popup dialog is active
             const isModalActive = () => {
                 const modalBackdrops = [
-                    this.dom.globalModalBackdrop,
-                    this.dom.modalCreateList,
-                    this.dom.modalManageBookLists,
-                    this.dom.modalBatchAddToList,
-                    this.dom.modalUpdateDialog,
+                    this.dom.globalModalBackdrop || document.getElementById('global-modal-backdrop'),
+                    this.dom.modalCreateList || document.getElementById('modal-create-list'),
+                    this.dom.modalManageBookLists || document.getElementById('modal-manage-book-lists'),
+                    this.dom.modalBatchAddToList || document.getElementById('modal-batch-add-to-list'),
+                    this.dom.modalUpdateDialog || document.getElementById('modal-update-dialog'),
+                    this.dom.modalWebdavSync || document.getElementById('modal-webdav-sync'),
                     document.getElementById('modal-stats-detail'),
                     document.getElementById('quote-card-backdrop'),
-                    document.getElementById('modal-webdav-sync')
+                    document.getElementById('modal-pdf-ocr')
                 ]
-                return modalBackdrops.some(m => m && (m.classList?.contains('show') || m.style.display === 'flex' || m.style.display === 'block'))
+                return modalBackdrops.some(m => m && (m.classList?.contains('show') || (m.style.display !== 'none' && m.style.display !== '')))
             }
 
             if (isModalActive()) {
-                return
-            }
-
-            // Block page-turning shortcuts when sidebar drawer is open
-            const isDrawerOpen = this.dom.sidebarDrawer?.classList.contains('open')
-            if (isDrawerOpen && ['ArrowLeft', 'ArrowRight', ' ', 'Enter', 'h', 'H', 'j', 'J', 'k', 'K', 'l', 'L', 'PageUp', 'PageDown'].includes(e.key)) {
                 return
             }
 
@@ -5520,6 +5516,7 @@ class UniversalReaderApp {
                 serverUrl: 'https://dav.jianguoyun.com/dav/',
                 username: '',
                 password: '',
+                hasPassword: false,
                 remoteDir: 'LindenLeaf',
                 autoSyncOnStartup: true,
                 autoSyncOnBookClose: true,
@@ -5532,7 +5529,7 @@ class UniversalReaderApp {
         this.renderSyncUI()
 
         // Auto sync on startup
-        if (this.syncConfig.enabled && this.syncConfig.autoSyncOnStartup && this.syncConfig.username && this.syncConfig.password) {
+        if (this.syncConfig.enabled && this.syncConfig.autoSyncOnStartup && this.syncConfig.username && (this.syncConfig.password || this.syncConfig.hasPassword)) {
             setTimeout(() => {
                 this.triggerSilentBackgroundSync()
             }, 1200)
@@ -5541,19 +5538,21 @@ class UniversalReaderApp {
 
     openWebdavSyncModal() {
         this.renderSyncUI()
-        if (this.dom.modalWebdavSync) {
-            this.dom.modalWebdavSync.style.display = 'flex'
-            void this.dom.modalWebdavSync.offsetHeight
-            this.dom.modalWebdavSync.classList.add('show')
+        const modal = this.dom.modalWebdavSync || document.getElementById('modal-webdav-sync')
+        if (modal) {
+            modal.style.display = 'flex'
+            void modal.offsetHeight
+            modal.classList.add('show')
         }
     }
 
     closeWebdavSyncModal() {
-        if (this.dom.modalWebdavSync) {
-            this.dom.modalWebdavSync.classList.remove('show')
+        const modal = this.dom.modalWebdavSync || document.getElementById('modal-webdav-sync')
+        if (modal) {
+            modal.classList.remove('show')
             setTimeout(() => {
-                if (this.dom.modalWebdavSync && !this.dom.modalWebdavSync.classList.contains('show')) {
-                    this.dom.modalWebdavSync.style.display = 'none'
+                if (modal && !modal.classList.contains('show')) {
+                    modal.style.display = 'none'
                 }
             }, 220)
         }
@@ -5561,14 +5560,21 @@ class UniversalReaderApp {
 
     setupSyncEventListeners() {
         // Open/close dedicated WebDAV modal
-        this.dom.btnOpenSyncModal?.addEventListener('click', () => {
+        const btnOpen = this.dom.btnOpenSyncModal || document.getElementById('btn-open-sync-modal')
+        btnOpen?.addEventListener('click', (e) => {
+            e.preventDefault()
+            e.stopPropagation()
             this.openWebdavSyncModal()
         })
-        this.dom.btnCloseSyncModal?.addEventListener('click', () => {
+        const btnClose = this.dom.btnCloseSyncModal || document.getElementById('btn-close-sync-modal')
+        btnClose?.addEventListener('click', (e) => {
+            e.preventDefault()
+            e.stopPropagation()
             this.closeWebdavSyncModal()
         })
-        this.dom.modalWebdavSync?.addEventListener('click', e => {
-            if (e.target === this.dom.modalWebdavSync) this.closeWebdavSyncModal()
+        const modal = this.dom.modalWebdavSync || document.getElementById('modal-webdav-sync')
+        modal?.addEventListener('click', e => {
+            if (e.target === modal) this.closeWebdavSyncModal()
         })
 
         // Preset tab switching
@@ -5577,22 +5583,26 @@ class UniversalReaderApp {
                 document.querySelectorAll('.btn-sync-preset').forEach(b => b.classList.remove('active'))
                 btn.classList.add('active')
                 const preset = btn.dataset.preset
-                if (preset === 'jianguoyun' && this.dom.syncInputServer) {
-                    this.dom.syncInputServer.value = 'https://dav.jianguoyun.com/dav/'
+                const serverInput = this.dom.syncInputServer || document.getElementById('sync-input-server')
+                if (preset === 'jianguoyun' && serverInput) {
+                    serverInput.value = 'https://dav.jianguoyun.com/dav/'
                 }
             })
         })
 
         // Password visibility toggle
-        this.dom.btnToggleSyncPwd?.addEventListener('click', () => {
-            if (!this.dom.syncInputPassword) return
-            const isPwd = this.dom.syncInputPassword.type === 'password'
-            this.dom.syncInputPassword.type = isPwd ? 'text' : 'password'
-            this.dom.btnToggleSyncPwd.innerText = isPwd ? '🙈' : '👁️'
+        const btnTogglePwd = this.dom.btnToggleSyncPwd || document.getElementById('btn-toggle-sync-pwd')
+        btnTogglePwd?.addEventListener('click', () => {
+            const pwdInput = this.dom.syncInputPassword || document.getElementById('sync-input-password')
+            if (!pwdInput) return
+            const isPwd = pwdInput.type === 'password'
+            pwdInput.type = isPwd ? 'text' : 'password'
+            btnTogglePwd.innerText = isPwd ? '🙈' : '👁️'
         })
 
         // Save & Enable Button
-        this.dom.btnSyncSaveEnable?.addEventListener('click', async () => {
+        const btnSaveEnable = this.dom.btnSyncSaveEnable || document.getElementById('btn-sync-save-enable')
+        btnSaveEnable?.addEventListener('click', async () => {
             const cfg = this.getSyncConfigFromUI()
             cfg.enabled = true
             this.syncConfig = cfg
@@ -5604,7 +5614,8 @@ class UniversalReaderApp {
         })
 
         // Disable Sync Button
-        this.dom.btnSyncDisable?.addEventListener('click', async () => {
+        const btnDisable = this.dom.btnSyncDisable || document.getElementById('btn-sync-disable')
+        btnDisable?.addEventListener('click', async () => {
             const cfg = this.getSyncConfigFromUI()
             cfg.enabled = false
             this.syncConfig = cfg
@@ -5615,8 +5626,10 @@ class UniversalReaderApp {
         })
 
         // Action buttons inside modal
-        this.dom.btnSyncTestConn?.addEventListener('click', () => this.testSyncConnection())
-        this.dom.btnSyncTriggerNow?.addEventListener('click', () => this.triggerManualSync())
+        const btnTest = this.dom.btnSyncTestConn || document.getElementById('btn-sync-test-conn')
+        btnTest?.addEventListener('click', () => this.testSyncConnection())
+        const btnTrigger = this.dom.btnSyncTriggerNow || document.getElementById('btn-sync-trigger-now')
+        btnTrigger?.addEventListener('click', () => this.triggerManualSync())
     }
 
     renderSyncUI() {
@@ -5624,24 +5637,36 @@ class UniversalReaderApp {
         const c = this.syncConfig
 
         // Update sidebar status badge
-        if (this.dom.syncStatusBadgeSidebar) {
+        const badge = this.dom.syncStatusBadgeSidebar || document.getElementById('sync-status-badge-sidebar')
+        if (badge) {
             if (c.enabled && c.username) {
                 const typeName = c.serverType === 'jianguoyun' ? '坚果云' : 'WebDAV'
-                this.dom.syncStatusBadgeSidebar.innerText = `已开启 (${typeName})`
-                this.dom.syncStatusBadgeSidebar.style.background = 'rgba(16, 185, 129, 0.12)'
-                this.dom.syncStatusBadgeSidebar.style.color = '#059669'
+                badge.innerText = `已开启 (${typeName})`
+                badge.style.background = 'rgba(16, 185, 129, 0.12)'
+                badge.style.color = '#059669'
             } else {
-                this.dom.syncStatusBadgeSidebar.innerText = '未配置'
-                this.dom.syncStatusBadgeSidebar.style.background = 'var(--bg-tertiary)'
-                this.dom.syncStatusBadgeSidebar.style.color = 'var(--text-muted)'
+                badge.innerText = '未配置'
+                badge.style.background = 'var(--bg-tertiary)'
+                badge.style.color = 'var(--text-muted)'
             }
         }
 
         // Form fields inside modal
-        if (this.dom.syncInputServer) this.dom.syncInputServer.value = c.serverUrl || 'https://dav.jianguoyun.com/dav/'
-        if (this.dom.syncInputUsername) this.dom.syncInputUsername.value = c.username || ''
-        if (this.dom.syncInputPassword) this.dom.syncInputPassword.value = c.password || ''
-        if (this.dom.syncInputDir) this.dom.syncInputDir.value = c.remoteDir || 'LindenLeaf'
+        const serverInput = this.dom.syncInputServer || document.getElementById('sync-input-server')
+        if (serverInput) serverInput.value = c.serverUrl || 'https://dav.jianguoyun.com/dav/'
+        const userInput = this.dom.syncInputUsername || document.getElementById('sync-input-username')
+        if (userInput) userInput.value = c.username || ''
+        const pwdInput = this.dom.syncInputPassword || document.getElementById('sync-input-password')
+        if (pwdInput) {
+            pwdInput.value = c.password || ''
+            if (c.hasPassword && !c.password) {
+                pwdInput.placeholder = '•••••••••••••••• (已保存密码)'
+            } else {
+                pwdInput.placeholder = '16 位第三方应用专用授权密码'
+            }
+        }
+        const dirInput = this.dom.syncInputDir || document.getElementById('sync-input-dir')
+        if (dirInput) dirInput.value = c.remoteDir || 'LindenLeaf'
 
         // Update preset active button
         document.querySelectorAll('.btn-sync-preset')?.forEach(btn => {
@@ -5650,31 +5675,44 @@ class UniversalReaderApp {
         })
 
         // Update status card
+        const dot = this.dom.syncStatusDot || document.getElementById('sync-status-dot')
+        const title = this.dom.syncStatusTitle || document.getElementById('sync-status-title')
+        const desc = this.dom.syncStatusDesc || document.getElementById('sync-status-desc')
+
         if (c.lastSyncTime) {
             const timeStr = new Date(c.lastSyncTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
             const dateStr = new Date(c.lastSyncTime).toLocaleDateString('zh-CN')
             const isOk = c.lastSyncStatus === 'success'
-            if (this.dom.syncStatusDot) this.dom.syncStatusDot.innerText = isOk ? '🟢' : '🔴'
-            if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.innerText = isOk ? '云同步正常' : '同步异常'
-            if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.style.color = isOk ? '#059669' : '#dc2626'
-            if (this.dom.syncStatusDesc) this.dom.syncStatusDesc.innerText = `上次同步: ${dateStr} ${timeStr} ${c.lastSyncSummary || ''}`
+            if (dot) dot.innerText = isOk ? '🟢' : '🔴'
+            if (title) {
+                title.innerText = isOk ? '云同步正常' : '同步异常'
+                title.style.color = isOk ? '#059669' : '#dc2626'
+            }
+            if (desc) desc.innerText = `上次同步: ${dateStr} ${timeStr} ${c.lastSyncSummary || ''}`
         } else {
-            if (this.dom.syncStatusDot) this.dom.syncStatusDot.innerText = '⚪'
-            if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.innerText = '尚未同步'
-            if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.style.color = 'var(--text-secondary)'
-            if (this.dom.syncStatusDesc) this.dom.syncStatusDesc.innerText = '点击「立即同步」开始备份与多端对齐'
+            if (dot) dot.innerText = '⚪'
+            if (title) {
+                title.innerText = '尚未同步'
+                title.style.color = 'var(--text-secondary)'
+            }
+            if (desc) desc.innerText = '点击「立即同步」开始备份与多端对齐'
         }
     }
 
     getSyncConfigFromUI() {
         const serverType = document.querySelector('.btn-sync-preset.active')?.dataset.preset || 'jianguoyun'
+        const serverInput = this.dom.syncInputServer || document.getElementById('sync-input-server')
+        const userInput = this.dom.syncInputUsername || document.getElementById('sync-input-username')
+        const pwdInput = this.dom.syncInputPassword || document.getElementById('sync-input-password')
+        const dirInput = this.dom.syncInputDir || document.getElementById('sync-input-dir')
         return {
             enabled: this.syncConfig?.enabled || false,
             serverType,
-            serverUrl: this.dom.syncInputServer?.value.trim() || 'https://dav.jianguoyun.com/dav/',
-            username: this.dom.syncInputUsername?.value.trim() || '',
-            password: this.dom.syncInputPassword?.value || '',
-            remoteDir: this.dom.syncInputDir?.value.trim() || 'LindenLeaf',
+            serverUrl: serverInput?.value.trim() || 'https://dav.jianguoyun.com/dav/',
+            username: userInput?.value.trim() || '',
+            password: pwdInput?.value || '',
+            hasPassword: this.syncConfig?.hasPassword || false,
+            remoteDir: dirInput?.value.trim() || 'LindenLeaf',
             autoSyncOnStartup: true,
             autoSyncOnBookClose: true,
             lastSyncTime: this.syncConfig?.lastSyncTime || null,
@@ -5693,37 +5731,46 @@ class UniversalReaderApp {
     async testSyncConnection() {
         await this.saveSyncConfig()
         const config = this.syncConfig
-        if (!config.username || !config.password) {
+        if (!config.username || (!config.password && !config.hasPassword)) {
             this.showToast('请先输入坚果云账号（邮箱）和应用授权密码', '⚠️')
             return
         }
 
-        if (this.dom.btnSyncTestConn) {
-            this.dom.btnSyncTestConn.disabled = true
-            this.dom.btnSyncTestConn.innerHTML = '<span class="syncing-spin">⚡</span> <span>正在测试...</span>'
+        const btnTest = this.dom.btnSyncTestConn || document.getElementById('btn-sync-test-conn')
+        if (btnTest) {
+            btnTest.disabled = true
+            btnTest.innerHTML = '<span class="syncing-spin">⚡</span> <span>正在测试...</span>'
         }
+
+        const dot = this.dom.syncStatusDot || document.getElementById('sync-status-dot')
+        const title = this.dom.syncStatusTitle || document.getElementById('sync-status-title')
+        const desc = this.dom.syncStatusDesc || document.getElementById('sync-status-desc')
 
         try {
             const res = await window.electronAPI.syncTestConnection(config)
             if (res.success) {
                 this.showToast('🎉 ' + res.message, '🟢')
-                if (this.dom.syncStatusDot) this.dom.syncStatusDot.innerText = '🟢'
-                if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.innerText = '连接测试通过'
-                if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.style.color = '#059669'
-                if (this.dom.syncStatusDesc) this.dom.syncStatusDesc.innerText = '远程应用目录已就绪'
+                if (dot) dot.innerText = '🟢'
+                if (title) {
+                    title.innerText = '连接测试通过'
+                    title.style.color = '#059669'
+                }
+                if (desc) desc.innerText = '远程应用目录已就绪'
             } else {
                 this.showToast(res.error || '连接失败', '🔴')
-                if (this.dom.syncStatusDot) this.dom.syncStatusDot.innerText = '🔴'
-                if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.innerText = '连接失败'
-                if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.style.color = '#dc2626'
-                if (this.dom.syncStatusDesc) this.dom.syncStatusDesc.innerText = res.error || '请检查账号密码'
+                if (dot) dot.innerText = '🔴'
+                if (title) {
+                    title.innerText = '连接失败'
+                    title.style.color = '#dc2626'
+                }
+                if (desc) desc.innerText = res.error || '请检查账号密码'
             }
         } catch (e) {
             this.showToast(`测试出错: ${e.message}`, '🔴')
         } finally {
-            if (this.dom.btnSyncTestConn) {
-                this.dom.btnSyncTestConn.disabled = false
-                this.dom.btnSyncTestConn.innerHTML = '<span>⚡ 测试连接</span>'
+            if (btnTest) {
+                btnTest.disabled = false
+                btnTest.innerHTML = '<span>⚡ 测试连接</span>'
             }
         }
     }
@@ -5731,23 +5778,29 @@ class UniversalReaderApp {
     async triggerManualSync() {
         await this.saveSyncConfig()
         const config = this.syncConfig
-        if (!config.username || !config.password) {
+        if (!config.username || (!config.password && !config.hasPassword)) {
             this.showToast('请先输入坚果云账号与应用授权密码', '⚠️')
             return
         }
 
-        if (this.dom.btnSyncTriggerNow) {
-            this.dom.btnSyncTriggerNow.disabled = true
-            this.dom.btnSyncTriggerNow.innerHTML = '<span class="syncing-spin">🔄</span> <span>正在同步...</span>'
+        const btnTrigger = this.dom.btnSyncTriggerNow || document.getElementById('btn-sync-trigger-now')
+        if (btnTrigger) {
+            btnTrigger.disabled = true
+            btnTrigger.innerHTML = '<span class="syncing-spin">🔄</span> <span>正在同步...</span>'
         }
-        if (this.dom.syncStatusDot) this.dom.syncStatusDot.innerText = '🟡'
-        if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.innerText = '正在同步中...'
-        if (this.dom.syncStatusTitle) this.dom.syncStatusTitle.style.color = '#d97706'
+        const dot = this.dom.syncStatusDot || document.getElementById('sync-status-dot')
+        const title = this.dom.syncStatusTitle || document.getElementById('sync-status-title')
+        if (dot) dot.innerText = '🟡'
+        if (title) {
+            title.innerText = '正在同步中...'
+            title.style.color = '#d97706'
+        }
 
+        const desc = this.dom.syncStatusDesc || document.getElementById('sync-status-desc')
         try {
             const res = await syncEngine.executeSyncLifecycle(config, {
                 onProgress: (msg) => {
-                    if (this.dom.syncStatusDesc) this.dom.syncStatusDesc.innerText = msg
+                    if (desc) desc.innerText = msg
                 }
             })
 
@@ -5777,15 +5830,15 @@ class UniversalReaderApp {
             this.renderSyncUI()
             this.showToast(`同步失败: ${err.message}`, '🔴')
         } finally {
-            if (this.dom.btnSyncTriggerNow) {
-                this.dom.btnSyncTriggerNow.disabled = false
-                this.dom.btnSyncTriggerNow.innerHTML = '<span>🔄 立即双向同步</span>'
+            if (btnTrigger) {
+                btnTrigger.disabled = false
+                btnTrigger.innerHTML = '<span>🔄 立即双向同步</span>'
             }
         }
     }
 
     async triggerSilentBackgroundSync() {
-        if (!this.syncConfig?.enabled || !this.syncConfig?.username || !this.syncConfig?.password) return
+        if (!this.syncConfig?.enabled || !this.syncConfig?.username || (!this.syncConfig?.password && !this.syncConfig?.hasPassword)) return
         try {
             console.log('[CloudSync] Starting silent background sync...')
             const res = await syncEngine.executeSyncLifecycle(this.syncConfig)

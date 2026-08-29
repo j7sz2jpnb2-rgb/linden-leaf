@@ -788,6 +788,7 @@
       <button id="btn-search-bar-next" class="btn-search-nav" title="下一处匹配">▼ 下一处</button>
       <button id="btn-search-bar-close" class="btn-search-dismiss" title="关闭检索并清除标记 (Esc)">✕ 关闭检索标记</button>
     </div>
+  </div> <!-- #app-container end -->
 
     <!-- Quote Card Modal (WeChat Read style share card generator) -->
     <div id="quote-card-backdrop" class="global-modal-backdrop" style="display: none; z-index: 9999;">
@@ -988,6 +989,9 @@
         <button id="btn-cancel-batch-add-list" class="btn-secondary-action" style="padding: 0.45rem 1rem;">取消</button>
         <button id="btn-confirm-batch-add-list" class="btn-primary-action" style="padding: 0.45rem 1.25rem;">确定添加</button>
       </div>
+    </div>
+  </div>
+
   <!-- Modal: Stats Detail (Books Read / Finished / Notes in period) -->
   <div id="modal-stats-detail" class="global-modal-backdrop" style="display: none; z-index: 99999;">
     <div class="global-modal-card" style="max-width: 560px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
@@ -1007,8 +1011,6 @@
     </div>
   </div>
 
-  <script src="./vendor/mammoth/mammoth.browser.min.js"></script>
-  <script type="module" src="./js/app.js?v=20260826_64"></script>
 
   <!-- Modal: Dedicated WebDAV Cloud Sync Dialog -->
   <div id="modal-webdav-sync" class="global-modal-backdrop" style="display: none; z-index: 99999;">
@@ -1139,6 +1141,7 @@
         <button type="button" id="btn-update-download" class="btn-primary-action" style="padding: 0.45rem 1.25rem; font-size: 0.82rem;">
           <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span>立即前往 GitHub 下载</span>
+        </button>
       </div>
     </div>
   </div>
@@ -1175,5 +1178,7 @@
     </div>
   </div>
 
+  <script src="./vendor/mammoth/mammoth.browser.min.js"></script>
+  <script type="module" src="./js/app.js?v=20260829_v110"></script>
 </body>
 </html>
