@@ -5,24 +5,26 @@ const fs = require('fs')
 app.name = 'Linden Leaf'
 
 let mainWindow = null
+let isRendererReady = false
 const pendingFilesToOpen = []
 
 // All supported e-book and document file extensions
 const SUPPORTED_EXTENSIONS = ['.epub', '.pdf', '.docx', '.txt', '.md', '.mobi', '.azw', '.azw3', '.fb2', '.cbz']
 
 // Parse command line arguments for file paths to open
-function getFilePathFromArgv(argv) {
+function getFilePathsFromArgv(argv) {
     const isPackaged = app.isPackaged
     const args = isPackaged ? argv.slice(1) : argv.slice(2)
+    const files = []
     for (const arg of args) {
         if (!arg.startsWith('--') && !arg.startsWith('-') && fs.existsSync(arg)) {
             const ext = path.extname(arg).toLowerCase()
             if (SUPPORTED_EXTENSIONS.includes(ext)) {
-                return arg
+                files.push(arg)
             }
         }
     }
-    return null
+    return files
 }
 
 // Window state management with display bounds validation
@@ -104,13 +106,7 @@ function createWindow() {
     })
 
     mainWindow.webContents.on('did-finish-load', () => {
-        // Flush any pending files to open once renderer has finished loading
-        setTimeout(() => {
-            while (pendingFilesToOpen.length > 0) {
-                const fp = pendingFilesToOpen.shift()
-                sendOpenFile(fp)
-            }
-        }, 200)
+        isRendererReady = false
     })
 
     mainWindow.on('close', () => {
@@ -119,6 +115,7 @@ function createWindow() {
 
     mainWindow.on('closed', () => {
         mainWindow = null
+        isRendererReady = false
     })
 
     // Secure navigation & external link handling
@@ -150,7 +147,7 @@ function createWindow() {
 }
 
 async function sendOpenFile(filePath) {
-    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.webContents) {
+    if (!isRendererReady || !mainWindow || mainWindow.isDestroyed() || !mainWindow.webContents) {
         pendingFilesToOpen.push(filePath)
         return
     }
@@ -329,9 +326,19 @@ ipcMain.handle('sync:fetchRemote', async (_event, config) => {
     return await WebDAVService.fetchRemoteState(resolved)
 })
 
-ipcMain.handle('sync:saveRemote', async (_event, { config, data }) => {
+ipcMain.handle('sync:saveRemote', async (_event, { config, data, etag }) => {
     const resolved = getResolvedSyncConfig(config)
-    return await WebDAVService.saveRemoteState({ ...resolved, data })
+    return await WebDAVService.saveRemoteState({ ...resolved, data, etag })
+})
+
+// Renderer Handshake IPC (Eliminates cold-start setTimeout race condition)
+ipcMain.handle('app:rendererReady', () => {
+    isRendererReady = true
+    while (pendingFilesToOpen.length > 0) {
+        const fp = pendingFilesToOpen.shift()
+        sendOpenFile(fp)
+    }
+    return true
 })
 
 // External Browser & App Info IPC
@@ -405,7 +412,7 @@ ipcMain.handle('updater:checkRelease', async (_event, repo) => {
             path: `/repos/${targetRepo}/releases/latest`,
             method: 'GET',
             headers: {
-                'User-Agent': 'LindenLeaf-Desktop/1.0.0',
+                'User-Agent': 'LindenLeaf-Desktop/1.1.0',
                 'Accept': 'application/vnd.github.v3+json'
             }
         }, res => {
@@ -456,18 +463,16 @@ if (!gotTheLock) {
     app.quit()
     process.exit(0)
 } else {
-    const startupFile = getFilePathFromArgv(process.argv)
-    if (startupFile) pendingFilesToOpen.push(startupFile)
+    const startupFiles = getFilePathsFromArgv(process.argv)
+    startupFiles.forEach(f => pendingFilesToOpen.push(f))
 
     app.on('second-instance', (_event, argv) => {
         if (mainWindow) {
             if (mainWindow.isMinimized()) mainWindow.restore()
             mainWindow.focus()
 
-            const fileFromSecondInstance = getFilePathFromArgv(argv)
-            if (fileFromSecondInstance) {
-                sendOpenFile(fileFromSecondInstance)
-            }
+            const filesFromSecondInstance = getFilePathsFromArgv(argv)
+            filesFromSecondInstance.forEach(f => sendOpenFile(f))
         }
     })
 

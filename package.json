@@ -1,7 +1,7 @@
 {
   "name": "linden-leaf",
   "productName": "Linden Leaf",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Linden Leaf - 现代化全格式电子书阅读器",
   "main": "main.js",
   "author": "Linden Leaf Team",
@@ -45,8 +45,38 @@
         "icon": "build/icon.ico"
       },
       {
+        "ext": "md",
+        "name": "Markdown 文档",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      },
+      {
         "ext": "mobi",
         "name": "MOBI 电子书",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      },
+      {
+        "ext": "azw",
+        "name": "Kindle AZW 电子书",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      },
+      {
+        "ext": "azw3",
+        "name": "Kindle AZW3 电子书",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      },
+      {
+        "ext": "fb2",
+        "name": "FictionBook2 电子书",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      },
+      {
+        "ext": "cbz",
+        "name": "漫画归档文件",
         "role": "Viewer",
         "icon": "build/icon.ico"
       }

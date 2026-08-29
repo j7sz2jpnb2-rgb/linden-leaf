@@ -26,12 +26,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // WebDAV / Nutstore Cloud Sync APIs
     syncTestConnection: (config) => ipcRenderer.invoke('sync:testConnection', config),
     syncFetchRemote: (config) => ipcRenderer.invoke('sync:fetchRemote', config),
-    syncSaveRemote: (config, data) => ipcRenderer.invoke('sync:saveRemote', { config, data }),
+    syncSaveRemote: (config, data, etag = null) => ipcRenderer.invoke('sync:saveRemote', { config, data, etag }),
     syncGetConfig: () => ipcRenderer.invoke('sync:getConfig'),
     syncSaveConfig: (config) => ipcRenderer.invoke('sync:saveConfig', config),
 
     // System Shell & App Info
     openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
-    checkGitHubRelease: (repo) => ipcRenderer.invoke('updater:checkRelease', repo)
+    checkGitHubRelease: (repo) => ipcRenderer.invoke('updater:checkRelease', repo),
+    rendererReady: () => ipcRenderer.invoke('app:rendererReady')
 })

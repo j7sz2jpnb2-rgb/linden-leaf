@@ -1091,6 +1091,9 @@ class UniversalReaderApp {
                     console.error('Failed to open file from OS event:', err)
                 }
             })
+
+            // Notify main process that renderer is ready to receive and process file associations
+            window.electronAPI?.rendererReady?.().catch(() => {})
         }
         this.dom.btnShelfSettings?.addEventListener('click', () => this.openDrawer('settings'))
         this.setupSyncEventListeners()
