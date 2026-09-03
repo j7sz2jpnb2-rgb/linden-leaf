@@ -13,6 +13,7 @@ export const exportSyncPayload = async () => {
     const allBookmarks = await db.getAllBookmarks()
     const allSessions = await db.getAllReadingSessions()
     const deletedRecords = await db.getAllDeletedRecords()
+    const allPdfDrawings = (typeof db.getAllPdfDrawings === 'function') ? (await db.getAllPdfDrawings()) : []
     const settings = (await db.getSetting('readerSettings')) || (await db.getSetting('reader_settings')) || {}
 
     const booksMeta = allBooks.map(b => ({
@@ -45,6 +46,7 @@ export const exportSyncPayload = async () => {
         highlights: allHighlights,
         bookmarks: allBookmarks,
         readingSessions: allSessions,
+        pdfDrawings: allPdfDrawings,
         deletedRecords: deletedRecords || []
     }
 }
@@ -70,23 +72,33 @@ export const mergeSyncData = (localPayload, remotePayload) => {
     const maxAllowedTime = Date.now() + 60 * 1000 // Allow max 1 min clock drift
     const clampTime = (t) => (typeof t === 'number' && !isNaN(t) ? Math.min(t, maxAllowedTime) : 0)
 
-    // A. Merge Tombstones (Deleted Records)
+    // A. Merge Tombstones (Deleted Records with plural/singular normalization)
+    const normalizeTombType = t => {
+        if (!t) return 'unknown'
+        if (t === 'bookmarks') return 'bookmark'
+        if (t === 'highlights') return 'highlight'
+        if (t === 'books') return 'book'
+        if (t === 'pdf_drawings' || t === 'pdfDrawing') return 'pdfDrawing'
+        return t
+    }
     const tombstoneMap = new Map()
     ;(remotePayload.deletedRecords || []).forEach(t => {
         if (t && t.id) {
-            const key = `${t.type || 'unknown'}:${t.id}`
-            tombstoneMap.set(key, { ...t, deletedAt: clampTime(t.deletedAt) })
+            const normType = normalizeTombType(t.type)
+            const key = `${normType}:${t.id}`
+            tombstoneMap.set(key, { ...t, type: normType, deletedAt: clampTime(t.deletedAt) })
         }
     })
     ;(localPayload.deletedRecords || []).forEach(t => {
         if (!t || !t.id) return
-        const key = `${t.type || 'unknown'}:${t.id}`
+        const normType = normalizeTombType(t.type)
+        const key = `${normType}:${t.id}`
         const localDel = clampTime(t.deletedAt)
         if (!tombstoneMap.has(key)) {
-            tombstoneMap.set(key, { ...t, deletedAt: localDel })
+            tombstoneMap.set(key, { ...t, type: normType, deletedAt: localDel })
         } else {
             const remoteT = tombstoneMap.get(key)
-            const newer = localDel >= (remoteT.deletedAt || 0) ? { ...t, deletedAt: localDel } : remoteT
+            const newer = localDel >= (remoteT.deletedAt || 0) ? { ...t, type: normType, deletedAt: localDel } : remoteT
             tombstoneMap.set(key, newer)
         }
     })
@@ -207,10 +219,26 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         return true
     })
 
-    // D. Merge Highlights & Notes (Union by ID with Tombstone filtering)
+    // Map remote book IDs to local book IDs for books matched by stableKey
+    const bookIdRemap = new Map()
+    ;(remotePayload.booksMeta || []).forEach(remoteBook => {
+        if (!remoteBook || !remoteBook.id) return
+        let localBook = bookMap.get(remoteBook.id)
+        if (!localBook && remoteBook.stableKey) {
+            localBook = Array.from(bookMap.values()).find(b => b.isLocal && b.stableKey && b.stableKey === remoteBook.stableKey)
+        }
+        if (localBook && localBook.id !== remoteBook.id) {
+            bookIdRemap.set(remoteBook.id, localBook.id)
+        }
+    })
+
+    // D. Merge Highlights & Notes (Union by ID with Tombstone filtering and BookId Remapping)
     const hlMap = new Map()
     ;(remotePayload.highlights || []).forEach(h => {
-        if (h && h.id) hlMap.set(h.id, { ...h, updatedAt: clampTime(h.updatedAt), createdAt: clampTime(h.createdAt) })
+        if (h && h.id) {
+            const targetBookId = (h.bookId && bookIdRemap.has(h.bookId)) ? bookIdRemap.get(h.bookId) : h.bookId
+            hlMap.set(h.id, { ...h, bookId: targetBookId, updatedAt: clampTime(h.updatedAt), createdAt: clampTime(h.createdAt) })
+        }
     })
     ;(localPayload.highlights || []).forEach(h => {
         if (!h || !h.id) return
@@ -235,10 +263,13 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         return !h.deleted
     })
 
-    // E. Merge Bookmarks (Union by ID with Tombstone filtering)
+    // E. Merge Bookmarks (Union by ID with Tombstone filtering and BookId Remapping)
     const bmMap = new Map()
     ;(remotePayload.bookmarks || []).forEach(b => {
-        if (b && b.id) bmMap.set(b.id, { ...b, createdAt: clampTime(b.createdAt) })
+        if (b && b.id) {
+            const targetBookId = (b.bookId && bookIdRemap.has(b.bookId)) ? bookIdRemap.get(b.bookId) : b.bookId
+            bmMap.set(b.id, { ...b, bookId: targetBookId, createdAt: clampTime(b.createdAt) })
+        }
     })
     ;(localPayload.bookmarks || []).forEach(b => {
         if (!b || !b.id) return
@@ -262,9 +293,14 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         return !b.deleted
     })
 
-    // F. Merge Reading Sessions (Union by ID with duration max)
+    // F. Merge Reading Sessions (Union by ID with duration max and BookId Remapping)
     const sessMap = new Map()
-    ;(remotePayload.readingSessions || []).forEach(s => { if (s && s.id) sessMap.set(s.id, s) })
+    ;(remotePayload.readingSessions || []).forEach(s => {
+        if (s && s.id) {
+            const targetBookId = (s.bookId && bookIdRemap.has(s.bookId)) ? bookIdRemap.get(s.bookId) : s.bookId
+            sessMap.set(s.id, { ...s, bookId: targetBookId })
+        }
+    })
     ;(localPayload.readingSessions || []).forEach(s => {
         if (!s || !s.id) return
         if (!sessMap.has(s.id)) {
@@ -286,6 +322,46 @@ export const mergeSyncData = (localPayload, remotePayload) => {
     const remoteSetTime = remotePayload.settings?.updatedAt || 0
     const mergedSettings = remoteSetTime > localSetTime ? remotePayload.settings : localPayload.settings
 
+    // H. Merge PDF Drawings (LWW by id and updatedAt, filtered by book tombstones and BookId Remapping)
+    const drawingMap = new Map()
+    ;(remotePayload.pdfDrawings || []).forEach(d => {
+        if (d && d.id) {
+            let targetId = d.id
+            let targetBookId = d.bookId
+            if (d.bookId && bookIdRemap.has(d.bookId)) {
+                targetBookId = bookIdRemap.get(d.bookId)
+                if (d.id.includes('_page_')) {
+                    const parts = d.id.split('_page_')
+                    targetId = `${targetBookId}_page_${parts[1]}`
+                }
+            }
+            drawingMap.set(targetId, { ...d, id: targetId, bookId: targetBookId, updatedAt: clampTime(d.updatedAt) })
+        }
+    })
+    ;(localPayload.pdfDrawings || []).forEach(d => {
+        if (!d || !d.id) return
+        const localUpdated = clampTime(d.updatedAt)
+        if (!drawingMap.has(d.id)) {
+            drawingMap.set(d.id, { ...d, updatedAt: localUpdated })
+        } else {
+            const remoteD = drawingMap.get(d.id)
+            if (localUpdated >= (remoteD.updatedAt || 0)) {
+                drawingMap.set(d.id, { ...d, updatedAt: localUpdated })
+            }
+        }
+    })
+    const mergedPdfDrawings = Array.from(drawingMap.values()).filter(d => {
+        if (!d || !d.bookId) return false
+        const bookTombKey = `book:${d.bookId}`
+        if (tombstoneMap.has(bookTombKey)) return false
+        const drawingTombKey = `pdfDrawing:${d.id}`
+        if (tombstoneMap.has(drawingTombKey)) {
+            const tomb = tombstoneMap.get(drawingTombKey)
+            if ((tomb.deletedAt || 0) >= (d.updatedAt || 0)) return false
+        }
+        return true
+    })
+
     const merged = {
         version: 1,
         updatedAt: Date.now(),
@@ -295,6 +371,7 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         highlights: mergedHighlights,
         bookmarks: mergedBookmarks,
         readingSessions: mergedSessions,
+        pdfDrawings: mergedPdfDrawings,
         deletedRecords: Array.from(tombstoneMap.values())
     }
 
@@ -318,6 +395,12 @@ export const applyMergedPayload = async mergedPayload => {
                     await db.deleteBookmark(tomb.id, false, delTime)
                 } else if (tomb.type === 'custom_list') {
                     await db.deleteCustomList(tomb.id, false, delTime)
+                } else if (tomb.type === 'pdfDrawing' || tomb.type === 'pdf_drawings') {
+                    const parts = tomb.id.split('_page_')
+                    const localDrawing = parts.length === 2 ? await db.getPdfPageDrawing(parts[0], parseInt(parts[1], 10)) : null
+                    if (!localDrawing || delTime >= (localDrawing.updatedAt || 0)) {
+                        await db.clearPdfDrawingById(tomb.id)
+                    }
                 }
             }
         }
@@ -330,13 +413,17 @@ export const applyMergedPayload = async mergedPayload => {
         }
     }
 
-    // C. Apply books progress, reading times, favorite & lists
+    // C. Apply books progress, reading times, favorite & lists (with BookId Remapping for multi-device sync)
+    const bookIdRemap = new Map()
     if (Array.isArray(mergedPayload.booksMeta)) {
         const allLocalBooks = await db.getAllBooks()
         for (const meta of mergedPayload.booksMeta) {
             let localBook = allLocalBooks.find(b => b.id === meta.id)
             if (!localBook && meta.stableKey) {
                 localBook = allLocalBooks.find(b => (b.stableKey && b.stableKey === meta.stableKey) || (b.title === meta.title && b.size === meta.size))
+            }
+            if (localBook && localBook.id !== meta.id) {
+                bookIdRemap.set(meta.id, localBook.id)
             }
             if (localBook) {
                 let changed = false
@@ -364,29 +451,39 @@ export const applyMergedPayload = async mergedPayload => {
                 }
                 if (changed) {
                     localBook.updatedAt = meta.updatedAt || Date.now()
+                    localBook._preserveUpdatedAt = true
                     await db.saveBook(localBook)
                 }
             }
         }
     }
 
-    // D. Apply Highlights
+    // D. Apply Highlights (with BookId Remapping)
     if (Array.isArray(mergedPayload.highlights)) {
         for (const hl of mergedPayload.highlights) {
+            if (hl && hl.bookId && bookIdRemap.has(hl.bookId)) {
+                hl.bookId = bookIdRemap.get(hl.bookId)
+            }
             await db.saveHighlight(hl)
         }
     }
 
-    // E. Apply Bookmarks
+    // E. Apply Bookmarks (with BookId Remapping)
     if (Array.isArray(mergedPayload.bookmarks)) {
         for (const bm of mergedPayload.bookmarks) {
+            if (bm && bm.bookId && bookIdRemap.has(bm.bookId)) {
+                bm.bookId = bookIdRemap.get(bm.bookId)
+            }
             await db.saveBookmark(bm)
         }
     }
 
-    // F. Apply Reading Sessions (Pass false to prevent duplicate duration addition to books)
+    // F. Apply Reading Sessions (with BookId Remapping, pass false to prevent duplicate duration addition to books)
     if (Array.isArray(mergedPayload.readingSessions)) {
         for (const sess of mergedPayload.readingSessions) {
+            if (sess && sess.bookId && bookIdRemap.has(sess.bookId)) {
+                sess.bookId = bookIdRemap.get(sess.bookId)
+            }
             await db.saveReadingSession(sess, false)
         }
     }
@@ -396,6 +493,30 @@ export const applyMergedPayload = async mergedPayload => {
         const localSettings = (await db.getSetting('readerSettings')) || {}
         const mergedSettings = { ...localSettings, ...mergedPayload.settings }
         await db.setSetting('readerSettings', mergedSettings)
+    }
+
+    // H. Apply PDF Drawings (with BookId Remapping)
+    if (Array.isArray(mergedPayload.pdfDrawings) && mergedPayload.pdfDrawings.length > 0) {
+        const dbInstance = await db.openDB()
+        if (dbInstance.objectStoreNames.contains('pdf_drawings')) {
+            const tx = dbInstance.transaction('pdf_drawings', 'readwrite')
+            const store = tx.objectStore('pdf_drawings')
+            mergedPayload.pdfDrawings.forEach(d => {
+                if (d && d.bookId && bookIdRemap.has(d.bookId)) {
+                    const targetBookId = bookIdRemap.get(d.bookId)
+                    d.bookId = targetBookId
+                    if (d.id && d.id.includes('_page_')) {
+                        const parts = d.id.split('_page_')
+                        d.id = `${targetBookId}_page_${parts[1]}`
+                    }
+                }
+                store.put(d)
+            })
+            await new Promise((res) => {
+                tx.oncomplete = res
+                tx.onerror = res
+            })
+        }
     }
 
     return true
@@ -427,12 +548,31 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {} } = {
         const remoteEtag = remoteRes.etag || null
 
         onProgress('正在执行多端数据智能合并...', 'merge')
-        const { merged, stats } = mergeSyncData(localPayload, remoteData)
+        let { merged, stats } = mergeSyncData(localPayload, remoteData)
 
-        onProgress('正在上传合并数据至云端...', 'upload')
-        const saveRes = await window.electronAPI.syncSaveRemote(config, merged, remoteEtag)
-        if (!saveRes.success) {
-            throw new Error(`云端保存失败: ${saveRes.error || '未知网络错误'}`)
+        let maxRetries = 2
+        let currentRemoteEtag = remoteEtag
+        let lastSaveRes = null
+
+        while (maxRetries >= 0) {
+            onProgress('正在上传合并数据至云端...', 'upload')
+            lastSaveRes = await window.electronAPI.syncSaveRemote(config, merged, currentRemoteEtag)
+            if (lastSaveRes.success) break
+
+            if (lastSaveRes.isConflict && maxRetries > 0) {
+                maxRetries--
+                onProgress('检测到云端并发更新，正在自动合并最新数据...', 'merge')
+                await new Promise(r => setTimeout(r, 600 * (2 - maxRetries)))
+                const reFetch = await window.electronAPI.syncFetchRemote(config)
+                if (reFetch.error) throw new Error(`云端重新拉取失败: ${reFetch.error}`)
+                currentRemoteEtag = reFetch.etag || null
+                const reMergedResult = mergeSyncData(localPayload, reFetch.exists ? reFetch.data : null)
+                merged = reMergedResult.merged
+                stats = reMergedResult.stats
+                continue
+            }
+
+            throw new Error(`云端保存失败: ${lastSaveRes.error || '未知网络错误'}`)
         }
 
         onProgress('正在更新本地书库与阅读记录...', 'apply')

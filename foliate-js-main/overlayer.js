@@ -60,16 +60,47 @@ const getTextRects = range => {
             node = treeWalker.nextNode()
         }
 
-        if (textRects.length > 0) return mergeLineRects(textRects)
+        if (textRects.length > 0) return mergeLineRects(textRects, writingMode)
     } catch (e) {
         console.warn('getTextRects error:', e)
     }
 
-    return mergeLineRects(extractFromList(Array.from(range.getClientRects())))
+    return mergeLineRects(extractFromList(Array.from(range.getClientRects())), writingMode)
 }
 
-const mergeLineRects = rects => {
+const mergeLineRects = (rects, writingMode) => {
     if (!rects || rects.length <= 1) return rects || []
+    const isVertical = writingMode === 'vertical-rl' || writingMode === 'vertical-lr'
+
+    if (isVertical) {
+        const sorted = [...rects].sort((a, b) => {
+            const colDiff = writingMode === 'vertical-rl' ? b.right - a.right : a.left - b.left
+            return Math.abs(colDiff) > 6 ? colDiff : a.top - b.top
+        })
+        const merged = []
+        let current = null
+        for (const r of sorted) {
+            if (!current) {
+                current = { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }
+                continue
+            }
+            const sameColumn = Math.abs(r.left - current.left) < Math.max(r.width, current.width) * 0.55
+            const contiguous = r.top <= current.bottom + 6 && r.bottom >= current.top
+            if (sameColumn && contiguous) {
+                current.left = Math.min(current.left, r.left)
+                current.right = Math.max(current.right, r.right)
+                current.top = Math.min(current.top, r.top)
+                current.bottom = Math.max(current.bottom, r.bottom)
+                current.width = current.right - current.left
+                current.height = current.bottom - current.top
+            } else {
+                merged.push(current)
+                current = { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }
+            }
+        }
+        if (current) merged.push(current)
+        return merged
+    }
     
     // Sort in natural reading order
     const sorted = [...rects].sort((a, b) => (Math.abs(a.top - b.top) > 4 ? a.top - b.top : a.left - b.left))
@@ -117,22 +148,31 @@ export class Overlayer {
     add(key, range, draw, options = {}) {
         if (this.#map.has(key)) this.remove(key)
         if (typeof range === 'function') range = range(this.#svg.getRootNode())
-        const rects = getTextRects(range)
+        const rects = getTextRects(range, options?.writingMode)
         const element = draw(rects, options)
         this.#svg.append(element)
         this.#map.set(key, { range, draw, options, element, rects })
     }
     remove(key) {
         if (!this.#map.has(key)) return
-        this.#svg.removeChild(this.#map.get(key).element)
+        const el = this.#map.get(key)?.element
+        if (el && el.parentNode === this.#svg) {
+            this.#svg.removeChild(el)
+        }
         this.#map.delete(key)
+    }
+    clear() {
+        while (this.#svg.firstChild) this.#svg.removeChild(this.#svg.firstChild)
+        this.#map.clear()
     }
     redraw() {
         for (const obj of this.#map.values()) {
             const { range, draw, options, element } = obj
-            this.#svg.removeChild(element)
+            if (element && element.parentNode === this.#svg) {
+                this.#svg.removeChild(element)
+            }
             const r = typeof range === 'function' ? range(this.#svg.getRootNode()) : range
-            const rects = getTextRects(r)
+            const rects = getTextRects(r, options?.writingMode)
             const el = draw(rects, options)
             this.#svg.append(el)
             obj.element = el
@@ -193,13 +233,24 @@ export class Overlayer {
         g.setAttribute('stroke-width', strokeWidth)
         g.setAttribute('stroke-dasharray', '4,3')
         g.setAttribute('stroke-linecap', 'round')
-        for (const { left, bottom, width } of rects) {
-            const el = createSVGElement('line')
-            el.setAttribute('x1', left)
-            el.setAttribute('y1', bottom - 1)
-            el.setAttribute('x2', left + width)
-            el.setAttribute('y2', bottom - 1)
-            g.append(el)
+        if (writingMode === 'vertical-rl' || writingMode === 'vertical-lr') {
+            for (const { right, top, height } of rects) {
+                const el = createSVGElement('line')
+                el.setAttribute('x1', right - 1)
+                el.setAttribute('y1', top)
+                el.setAttribute('x2', right - 1)
+                el.setAttribute('y2', top + height)
+                g.append(el)
+            }
+        } else {
+            for (const { left, bottom, width } of rects) {
+                const el = createSVGElement('line')
+                el.setAttribute('x1', left)
+                el.setAttribute('y1', bottom - 1)
+                el.setAttribute('x2', left + width)
+                el.setAttribute('y2', bottom - 1)
+                g.append(el)
+            }
         }
         return g
     }
@@ -263,6 +314,25 @@ export class Overlayer {
         const g = createSVGElement('g')
         g.style.mixBlendMode = 'var(--overlayer-highlight-blend-mode, multiply)'
 
+        const filterId = 'wechat-subtle-soak'
+        if (g.getRootNode) {
+            const root = g.getRootNode()
+            const svgEl = root?.querySelector ? root.querySelector('svg') : null
+            if (svgEl && !svgEl.querySelector('#' + filterId)) {
+                const defs = createSVGElement('defs')
+                defs.innerHTML = `
+                    <filter id="${filterId}" x="-3%" y="-8%" width="106%" height="116%">
+                        <feGaussianBlur in="SourceGraphic" stdDeviation="0.4" result="soak"/>
+                        <feMerge>
+                            <feMergeNode in="soak" opacity="0.32"/>
+                            <feMergeNode in="SourceGraphic"/>
+                        </feMerge>
+                    </filter>
+                `
+                svgEl.prepend(defs)
+            }
+        }
+
         const total = rects.length
         for (let i = 0; i < total; i++) {
             const rect = rects[i]
@@ -304,24 +374,23 @@ export class Overlayer {
                                  Q ${left},${top} ${left + 3.5},${top + 0.5} Z`
                             break
 
-                        case 1: // 2. WeChat Line 2 classic: 45° Chisel cut entry, right side gentle forward tilt
-                            d = `M ${left + 5.5},${top}
+                        case 1: // 2. WeChat Line 2 classic: Soft chisel entry, right side gentle forward tilt with water-meniscus curve
+                            d = `M ${left + 4.5},${top}
                                  Q ${left + width * 0.5},${top + 0.3} ${right - 2},${top}
-                                 Q ${right + 1},${top + 2} ${right + 1.5},${top + 4}
-                                 L ${right + 2.5},${bottom - 3.5}
-                                 Q ${right + 2.5},${bottom} ${right - 1},${bottom}
+                                 Q ${right + 1.2},${top + 1.8} ${right + 1.5},${midY}
+                                 Q ${right + 1.2},${bottom - 1.8} ${right - 1},${bottom}
                                  Q ${left + width * 0.5},${bottom - 0.3} ${left + 2},${bottom}
-                                 Q ${left - 0.5},${bottom} ${left},${bottom - 3}
-                                 L ${left + 3},${top + 2}
-                                 Q ${left + 4},${top} ${left + 5.5},${top} Z`
+                                 Q ${left - 0.2},${bottom} ${left + 0.5},${bottom - 2.5}
+                                 Q ${left + 2.0},${midY} ${left + 3.5},${top + 1.5}
+                                 Q ${left + 4.0},${top} ${left + 4.5},${top} Z`
                             break
 
-                        case 2: // 3. WeChat Line 3 classic: Soft vertical entry, right side 35° chisel slant with rounded corners
+                        case 2: // 3. WeChat Line 3 classic: Soft vertical entry, right side gentle tilt with rounded corners
                             d = `M ${left + 3.5},${top + 0.5}
                                  Q ${left + width * 0.5},${top - 0.3} ${right + 0.5},${top}
-                                 Q ${right + 2.5},${top + 1} ${right + 2.5},${top + 3}
-                                 L ${right - 2.5},${bottom - 2.5}
-                                 Q ${right - 4},${bottom} ${right - 6},${bottom}
+                                 Q ${right + 1.8},${top + 1} ${right + 1.5},${top + 3}
+                                 Q ${right + 0.2},${midY} ${right - 1.5},${bottom - 2.5}
+                                 Q ${right - 2.5},${bottom} ${right - 4},${bottom}
                                  Q ${left + width * 0.5},${bottom + 0.4} ${left + 3.5},${bottom}
                                  Q ${left},${bottom} ${left},${bottom - 3.5}
                                  L ${left},${top + 3.5}
@@ -336,28 +405,28 @@ export class Overlayer {
                                  Q ${left},${midY} ${left + 3.5},${top} Z`
                             break
 
-                        case 4: // 5. Line 5: Reverse Chisel Tilt (top-right overhang with smooth round tip)
+                        case 4: // 5. Line 5: Reverse Chisel Tilt with smooth round tip
                             d = `M ${left + 2},${top + 1}
                                  Q ${left + width * 0.5},${top - 0.4} ${right - 2},${top}
-                                 Q ${right + 1},${top} ${right + 1.5},${top + 2.5}
-                                 L ${right - 2.5},${bottom - 2}
-                                 Q ${right - 3.5},${bottom} ${right - 5.5},${bottom}
+                                 Q ${right + 0.8},${top} ${right + 1.0},${top + 2.5}
+                                 Q ${right + 0.5},${midY} ${right - 1.5},${bottom - 2}
+                                 Q ${right - 2.5},${bottom} ${right - 4.5},${bottom}
                                  Q ${left + width * 0.5},${bottom + 0.3} ${left + 3},${bottom}
                                  Q ${left},${bottom} ${left + 0.5},${bottom - 3}
                                  L ${left + 1},${top + 3}
                                  Q ${left + 1},${top} ${left + 2},${top + 1} Z`
                             break
 
-                        case 5: // 6. Line 6: Dual 35° Parallel Slanted Marker Stroke
-                            d = `M ${left + 5},${top}
-                                 Q ${left + width * 0.5},${top + 0.2} ${right + 1},${top}
-                                 Q ${right + 2.5},${top + 1.5} ${right + 2},${top + 3.5}
-                                 L ${right - 2.5},${bottom - 2}
-                                 Q ${right - 3.5},${bottom} ${right - 5.5},${bottom}
+                        case 5: // 6. Line 6: Dual Parallel Soft Stroke with smooth water tension
+                            d = `M ${left + 4.5},${top}
+                                 Q ${left + width * 0.5},${top + 0.2} ${right + 0.5},${top}
+                                 Q ${right + 1.8},${top + 1.5} ${right + 1.5},${top + 3.5}
+                                 Q ${right + 0.5},${midY} ${right - 1.5},${bottom - 2}
+                                 Q ${right - 2.5},${bottom} ${right - 4.5},${bottom}
                                  Q ${left + width * 0.5},${bottom - 0.2} ${left},${bottom}
-                                 Q ${left - 1.5},${bottom} ${left - 1},${bottom - 3}
-                                 L ${left + 3},${top + 2}
-                                 Q ${left + 3.5},${top} ${left + 5},${top} Z`
+                                 Q ${left - 1.0},${bottom} ${left - 0.5},${bottom - 3}
+                                 Q ${left + 1.5},${midY} ${left + 3},${top + 2}
+                                 Q ${left + 3.5},${top} ${left + 4.5},${top} Z`
                             break
 
                         case 6: // 7. Line 7: Subtle S-Curve Waist Squeeze
@@ -387,7 +456,7 @@ export class Overlayer {
                                  Q ${left + width * 0.5},${top} ${right - 2},${top}
                                  Q ${right + 1},${midY} ${right - 4.5},${bottom}
                                  Q ${left + width * 0.5},${bottom} ${left + 2},${bottom}
-                                 Q ${left},\${midY} ${left + 3},${top + 0.8} Z`
+                                 Q ${left},${midY} ${left + 3},${top + 0.8} Z`
                             break
 
                         case 9: // 10. Line 10: Heavy solid stroke with soft rounded corners
@@ -442,6 +511,7 @@ export class Overlayer {
                 const path = createSVGElement('path')
                 path.setAttribute('d', d)
                 path.setAttribute('fill', color)
+                path.setAttribute('filter', `url(#${filterId})`)
                 path.style.opacity = 'var(--overlayer-highlight-opacity, .26)'
                 g.append(path)
 

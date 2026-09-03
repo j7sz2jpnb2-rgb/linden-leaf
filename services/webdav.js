@@ -15,13 +15,15 @@ class WebDAVService {
         }
 
         const baseUrlObj = new URL(base)
+        const isDir = typeof subPath === 'string' && subPath.endsWith('/')
         const segments = (subPath || '')
             .split('/')
             .map(s => s.trim())
             .filter(s => s.length > 0 && s !== '.' && s !== '..')
 
         const basePath = baseUrlObj.pathname.endsWith('/') ? baseUrlObj.pathname : baseUrlObj.pathname + '/'
-        const combinedPath = basePath + segments.map(encodeURIComponent).join('/')
+        let combinedPath = basePath + segments.map(encodeURIComponent).join('/')
+        if (isDir && !combinedPath.endsWith('/')) combinedPath += '/'
         baseUrlObj.pathname = combinedPath.replace(/\/+/g, '/')
         return baseUrlObj.toString()
     }

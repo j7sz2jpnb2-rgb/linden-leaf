@@ -132,6 +132,9 @@ export const saveBook = async bookData => {
 
     return new Promise((resolve, reject) => {
         const storeNames = blob ? ['books', 'book_files'] : ['books']
+        if (db.objectStoreNames.contains('deleted_records')) {
+            storeNames.push('deleted_records')
+        }
         const tx = db.transaction(storeNames, 'readwrite')
         const bookStore = tx.objectStore('books')
 
@@ -139,6 +142,10 @@ export const saveBook = async bookData => {
             if (meta.totalReadingSeconds == null) meta.totalReadingSeconds = 0
             if (!meta.addedAt) meta.addedAt = Date.now()
             if (meta.lastReadAt === undefined || meta.lastReadAt === null) meta.lastReadAt = 0
+            if (!meta._preserveUpdatedAt || !meta.updatedAt) {
+                meta.updatedAt = Date.now()
+            }
+            delete meta._preserveUpdatedAt
             bookStore.put(meta)
         } else if (meta.id) {
             // Partial metadata update or only file blob update
@@ -147,6 +154,8 @@ export const saveBook = async bookData => {
                 const existing = getReq.result
                 if (existing) {
                     Object.assign(existing, meta)
+                    existing.updatedAt = meta._preserveUpdatedAt ? (meta.updatedAt || Date.now()) : Date.now()
+                    delete existing._preserveUpdatedAt
                     bookStore.put(existing)
                 }
             }
@@ -154,6 +163,9 @@ export const saveBook = async bookData => {
 
         if (blob && meta.id) {
             tx.objectStore('book_files').put({ id: meta.id, blob })
+        }
+        if (storeNames.includes('deleted_records') && meta.id) {
+            tx.objectStore('deleted_records').delete(meta.id)
         }
         tx.oncomplete = () => resolve(meta.id)
         tx.onerror = () => reject(tx.error || new Error('Failed to save book'))
@@ -332,10 +344,12 @@ export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Dat
                     const req = index.getAllKeys(id)
                     req.onsuccess = () => {
                         const keys = req.result || []
+                        const typeMap = { bookmarks: 'bookmark', highlights: 'highlight', books: 'book', pdf_drawings: 'pdfDrawing' }
+                        const recType = typeMap[storeName] || storeName
                         for (const key of keys) {
                             store.delete(key)
-                            if (recordTombstone && storeNames.includes('deleted_records') && storeName !== 'pdf_drawings') {
-                                tx.objectStore('deleted_records').put({ id: key, type: storeName, deletedAt: tombstoneTime })
+                            if (recordTombstone && storeNames.includes('deleted_records')) {
+                                tx.objectStore('deleted_records').put({ id: key, type: recType, deletedAt: tombstoneTime })
                             }
                         }
                     }
@@ -756,6 +770,15 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
                 isCurrent: y === endY
             })
         }
+        if (finalTotalSeconds > viewTotalSeconds) {
+            const diff = finalTotalSeconds - viewTotalSeconds
+            const curYearItem = chartData.find(c => c.isCurrent) || chartData[chartData.length - 1]
+            if (curYearItem) {
+                curYearItem.seconds += diff
+                curYearItem.minutes = Math.floor(curYearItem.seconds / 60)
+            }
+            viewTotalSeconds = finalTotalSeconds
+        }
     }
 
     // Filter sessions belonging to the current viewMode period
@@ -786,21 +809,25 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
     })
 
     let periodBooks = []
-    if (periodBookDurationMap.size > 0) {
+    if (viewMode === 'total') {
+        // In 'total' view, reflect all books that have either session duration or totalReadingSeconds
+        periodBooks = books
+            .map(b => {
+                const sessDur = periodBookDurationMap.get(b.id) || 0
+                const bookDur = b.totalReadingSeconds || 0
+                return {
+                    ...b,
+                    periodReadingSeconds: Math.max(sessDur, bookDur)
+                }
+            })
+            .filter(b => b.periodReadingSeconds > 0)
+            .sort((a, b) => b.periodReadingSeconds - a.periodReadingSeconds)
+    } else if (periodBookDurationMap.size > 0) {
         periodBooks = books
             .filter(b => periodBookDurationMap.has(b.id))
             .map(b => ({
                 ...b,
                 periodReadingSeconds: periodBookDurationMap.get(b.id) || 0
-            }))
-            .sort((a, b) => b.periodReadingSeconds - a.periodReadingSeconds)
-    } else if (viewMode === 'total') {
-        // Fallback ONLY for 'total' view when sessions store is completely empty
-        periodBooks = books
-            .filter(b => (b.totalReadingSeconds || 0) > 0)
-            .map(b => ({
-                ...b,
-                periodReadingSeconds: b.totalReadingSeconds || 0
             }))
             .sort((a, b) => b.periodReadingSeconds - a.periodReadingSeconds)
     }
@@ -1034,17 +1061,24 @@ export const removeBookFromList = async (bookId, listId) => {
 export const savePdfPageDrawing = async (bookId, pageIndex, strokes) => {
     if (!bookId || pageIndex == null) return false
     const db = await openDB()
+    const drawingId = `${bookId}_page_${pageIndex}`
     return new Promise((resolve, reject) => {
-        const tx = db.transaction('pdf_drawings', 'readwrite')
+        const storeNames = db.objectStoreNames.contains('deleted_records')
+            ? ['pdf_drawings', 'deleted_records']
+            : ['pdf_drawings']
+        const tx = db.transaction(storeNames, 'readwrite')
         const store = tx.objectStore('pdf_drawings')
         const record = {
-            id: `${bookId}_page_${pageIndex}`,
+            id: drawingId,
             bookId,
             pageIndex,
             strokes: strokes || [],
             updatedAt: Date.now()
         }
         store.put(record)
+        if (storeNames.includes('deleted_records')) {
+            tx.objectStore('deleted_records').delete(drawingId)
+        }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to save PDF drawing'))
     })
@@ -1062,14 +1096,58 @@ export const getPdfPageDrawing = async (bookId, pageIndex) => {
     })
 }
 
-export const clearPdfPageDrawing = async (bookId, pageIndex) => {
+export const clearPdfPageDrawing = async (bookId, pageIndex, recordTombstone = true, tombstoneTime = Date.now()) => {
     if (!bookId || pageIndex == null) return false
     const db = await openDB()
+    const drawingId = `${bookId}_page_${pageIndex}`
     return new Promise((resolve, reject) => {
-        const tx = db.transaction('pdf_drawings', 'readwrite')
-        const store = tx.objectStore('pdf_drawings')
-        store.delete(`${bookId}_page_${pageIndex}`)
+        const storeNames = recordTombstone && db.objectStoreNames.contains('deleted_records')
+            ? ['pdf_drawings', 'deleted_records']
+            : ['pdf_drawings']
+        const tx = db.transaction(storeNames, 'readwrite')
+        tx.objectStore('pdf_drawings').delete(drawingId)
+        if (recordTombstone && storeNames.includes('deleted_records')) {
+            tx.objectStore('deleted_records').put({
+                id: drawingId,
+                type: 'pdfDrawing',
+                deletedAt: tombstoneTime
+            })
+        }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to clear PDF drawing'))
     })
 }
+
+export const clearPdfDrawingById = async (drawingId, recordTombstone = false, tombstoneTime = Date.now()) => {
+    if (!drawingId) return false
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const storeNames = recordTombstone && db.objectStoreNames.contains('deleted_records')
+            ? ['pdf_drawings', 'deleted_records']
+            : ['pdf_drawings']
+        const tx = db.transaction(storeNames, 'readwrite')
+        tx.objectStore('pdf_drawings').delete(drawingId)
+        if (recordTombstone && storeNames.includes('deleted_records')) {
+            tx.objectStore('deleted_records').put({
+                id: drawingId,
+                type: 'pdfDrawing',
+                deletedAt: tombstoneTime
+            })
+        }
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error || new Error(`Failed to clear PDF drawing ${drawingId}`))
+    })
+}
+
+export const getAllPdfDrawings = async () => {
+    const db = await openDB()
+    if (!db.objectStoreNames.contains('pdf_drawings')) return []
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('pdf_drawings', 'readonly')
+        const store = tx.objectStore('pdf_drawings')
+        const req = store.getAll()
+        req.onsuccess = () => resolve(req.result || [])
+        req.onerror = () => reject(req.error || new Error('Failed to get all PDF drawings'))
+    })
+}
+

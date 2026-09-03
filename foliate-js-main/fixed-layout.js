@@ -31,7 +31,7 @@ const getViewport = (doc, viewport) => {
 
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom']
-    #root = this.attachShadow({ mode: 'closed' })
+    #root = this.attachShadow({ mode: 'open' })
     #observer = new ResizeObserver(() => this.#render())
     #spreads
     #index = -1
@@ -61,6 +61,18 @@ export class FixedLayout extends HTMLElement {
         :host([data-theme="dark"]) iframe,
         :host([data-theme="black"]) iframe {
             filter: invert(0.90) hue-rotate(180deg) contrast(1.1) brightness(0.95);
+        }
+        :host([data-theme="sepia"]) iframe {
+            filter: sepia(0.38) contrast(0.95) brightness(0.98);
+        }
+        :host([data-theme="green"]) iframe {
+            filter: sepia(0.20) hue-rotate(60deg) contrast(0.92) brightness(0.96);
+        }
+        :host([data-theme="warm"]) iframe {
+            filter: sepia(0.25) contrast(0.95) brightness(0.98);
+        }
+        :host([data-theme="eink"]) iframe {
+            filter: grayscale(1) contrast(1.25) brightness(1.05);
         }`)
 
         this.#observer.observe(this)

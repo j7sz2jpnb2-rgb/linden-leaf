@@ -5,7 +5,7 @@ const MIME = {
     SVG: 'image/svg+xml',
 }
 
-const escapeHTML = str => str
+const escapeHTML = str => (str != null ? String(str) : '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -129,7 +129,8 @@ const renderContentToHTML = (lines, isPoetryMode = false) => {
         }
     }
     const avgLen = lineCount > 0 ? (totalLen / lineCount) : 50
-    const isPoetry = isPoetryMode || avgLen < 32 || blocks.some(b => b.length >= 3 && b.length <= 15)
+    // Poetry requires short average line length and genuine multi-stanza structure
+    const isPoetry = isPoetryMode || (avgLen < 26 && lineCount >= 4 && blocks.length >= 2)
 
     const htmlParts = []
 
@@ -139,8 +140,20 @@ const renderContentToHTML = (lines, isPoetryMode = false) => {
             const verseText = blk.map(l => escapeHTML(l.trim())).join('<br/>\n')
             htmlParts.push(`<p class="verse-stanza">\n${verseText}\n</p>`)
         } else {
-            // Render as prose paragraph
-            const paraText = blk.map(l => l.trim()).join('')
+            // Render as prose paragraph with smart spacing for English/Latin words
+            let paraText = ''
+            for (let i = 0; i < blk.length; i++) {
+                const line = blk[i].trim()
+                if (!line) continue
+                if (!paraText) {
+                    paraText = line
+                } else {
+                    const prevChar = paraText.slice(-1)
+                    const nextChar = line.charAt(0)
+                    const needsSpace = /[a-zA-Z0-9,.:;!?)]/.test(prevChar) && /[a-zA-Z0-9(]/.test(nextChar)
+                    paraText += (needsSpace ? ' ' : '') + line
+                }
+            }
             htmlParts.push(`<p class="prose-p">${escapeHTML(paraText)}</p>`)
         }
     }
@@ -329,7 +342,7 @@ export const makeTXT = async file => {
             title,
             author,
             language: 'zh-CN',
-            identifier: `txt-${Date.now()}`
+            identifier: null
         },
         sections: sectionData.map(s => ({
             id: s.id,

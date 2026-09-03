@@ -4,7 +4,7 @@
 
 export class AppUpdater {
     constructor() {
-        this.currentVersion = '1.1.0'
+        this.currentVersion = '1.1.5'
         this.defaultRepo = 'j7sz2jpnb2-rgb/linden-leaf'
         this.lastCheckTime = 0
         this.latestRelease = null
@@ -13,7 +13,7 @@ export class AppUpdater {
     async init() {
         if (window.electronAPI?.getVersion) {
             try {
-                this.currentVersion = await window.electronAPI.getVersion() || '1.1.0'
+                this.currentVersion = await window.electronAPI.getVersion() || '1.1.5'
             } catch (e) {
                 console.warn('Failed to get app version from electron:', e)
             }

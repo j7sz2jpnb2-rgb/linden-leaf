@@ -888,20 +888,35 @@ class MOBI6 {
         return url
     }
     resolveHref(href) {
-        const filepos = href.match(/filepos:(.*)/)[1]
+        if (!href) return { index: 0 }
+        const match = href.match(/filepos:(.*)/)
+        if (!match) {
+            if (href.startsWith('#')) {
+                const id = href.slice(1)
+                return { index: 0, anchor: doc => doc.getElementById(id) }
+            }
+            return { index: 0 }
+        }
+        const filepos = match[1]
         const number = Number(filepos)
         const index = this.#sections.findIndex(section => section.end > number)
         const anchor = doc => doc.getElementById(`filepos${filepos}`)
-        return { index, anchor }
+        return { index: Math.max(0, index), anchor }
     }
     splitTOCHref(href) {
-        const filepos = href.match(/filepos:(.*)/)[1]
+        if (!href) return [0, '']
+        const match = href.match(/filepos:(.*)/)
+        if (!match) {
+            if (href.startsWith('#')) return [0, href.slice(1)]
+            return [0, '']
+        }
+        const filepos = match[1]
         const number = Number(filepos)
         const index = this.#sections.findIndex(section => section.end > number)
-        return [index, `filepos${filepos}`]
+        return [Math.max(0, index), `filepos${filepos}`]
     }
     getTOCFragment(doc, id) {
-        return doc.getElementById(id)
+        return doc ? doc.getElementById(id) : null
     }
     isExternal(uri) {
         return /^(?!blob|filepos)\w+:/i.test(uri)
@@ -916,11 +931,15 @@ class MOBI6 {
 const kindleResourceRegex = /kindle:(flow|embed):(\w+)(?:\?mime=(\w+\/[-+.\w]+))?/
 const kindlePosRegex = /kindle:pos:fid:(\w+):off:(\w+)/
 const parseResourceURI = str => {
-    const [resourceType, id, type] = str.match(kindleResourceRegex).slice(1)
+    const match = str ? str.match(kindleResourceRegex) : null
+    if (!match) return { resourceType: '', id: 0, type: '' }
+    const [resourceType, id, type] = match.slice(1)
     return { resourceType, id: parseInt(id, 32), type }
 }
 const parsePosURI = str => {
-    const [fid, off] = str.match(kindlePosRegex).slice(1)
+    const match = str ? str.match(kindlePosRegex) : null
+    if (!match) return { fid: 0, off: 0 }
+    const [fid, off] = match.slice(1)
     return { fid: parseInt(fid, 32), off: parseInt(off, 32) }
 }
 const makePosURI = (fid = 0, off = 0) =>

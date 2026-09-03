@@ -632,11 +632,11 @@ export class Paginator extends HTMLElement {
             case 'gap':
             case 'margin':
             case 'max-block-size':
-            case 'max-column-count':
                 this.#top.style.setProperty('--_' + name, value)
                 break
+            case 'max-column-count':
             case 'max-inline-size':
-                // needs explicit `render()` as it doesn't necessarily resize
+                // needs explicit `render()` as changing column count or inline size doesn't necessarily resize the container
                 this.#top.style.setProperty('--_' + name, value)
                 this.render()
                 break

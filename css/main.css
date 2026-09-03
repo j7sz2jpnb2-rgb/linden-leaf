@@ -1,8 +1,5 @@
 /* main.css - Linden Leaf Pixel-Perfect Styles with Open Source Fonts */
 
-@import url('https://fonts.font.im/css2?family=Noto+Serif+SC:wght@300;400;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
-@import url('https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont@1.1.0/style.css');
-
 :root {
   /* Fonts - Modern CJK Open Source Fonts with complete Western Extended Latin Support */
   --font-serif: "Noto Serif SC", "Source Han Serif SC", "思源宋体", "Songti SC", "STSong", "SimSun", "宋体", serif;
@@ -39,6 +36,7 @@
 [data-theme="light"] {
   --bg-app: #ffffff;
   --bg-sidebar: #f8f9fa;
+  --bg-card: #ffffff;
   --text-main: #212529;
   --text-muted: #6c757d;
   --book-bg: #ffffff;
@@ -49,6 +47,7 @@
 [data-theme="sepia"] {
   --bg-app: #f4ecd8;
   --bg-sidebar: #ebdcb9;
+  --bg-card: #fdf6e2;
   --text-main: #3b2e1e;
   --text-muted: #79664f;
   --book-bg: #f8f1e3;
@@ -61,6 +60,7 @@
   --bg-sidebar: #1e1e1e;
   --bg-sidebar-hover: #2a2a2a;
   --bg-sidebar-active: #333333;
+  --bg-card: #1e1e1e;
   --border-subtle: #2a2a2a;
   --border-color: #333333;
   --text-main: #f1f3f5;
@@ -75,6 +75,7 @@
   --bg-sidebar: #0a0a0a;
   --bg-sidebar-hover: #171717;
   --bg-sidebar-active: #262626;
+  --bg-card: #141414;
   --border-subtle: #171717;
   --border-color: #262626;
   --text-main: #d4d4d8;
@@ -87,6 +88,7 @@
 [data-theme="green"] {
   --bg-app: #eef7ee;
   --bg-sidebar: #e0eee0;
+  --bg-card: #f4faf4;
   --text-main: #1b4d1d;
   --text-muted: #33691e;
   --book-bg: #eef7ee;
@@ -97,6 +99,7 @@
 [data-theme="eink"] {
   --bg-app: #ffffff;
   --bg-sidebar: #f5f5f5;
+  --bg-card: #ffffff;
   --text-main: #000000;
   --text-muted: #444444;
   --book-bg: #ffffff;
@@ -3053,10 +3056,36 @@ foliate-view {
   font-size: 0.88rem;
   line-height: 1.65;
   color: var(--text-main, #1e293b);
-  max-height: 240px;
+  max-height: 280px;
   overflow-y: auto;
   font-family: var(--font-serif, "Noto Serif SC", serif);
   word-break: break-word;
+  white-space: pre-wrap;
+}
+
+[data-theme="dark"] .footnote-popup,
+[data-theme="black"] .footnote-popup {
+  background: var(--bg-card, #1e1e1e);
+  border-color: var(--border-color, #333333);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+[data-theme="dark"] .footnote-popup-header,
+[data-theme="black"] .footnote-popup-header {
+  border-bottom-color: var(--border-subtle, #2a2a2a);
+}
+[data-theme="dark"] .footnote-popup-content,
+[data-theme="black"] .footnote-popup-content {
+  color: var(--text-main, #f1f3f5);
+}
+[data-theme="sepia"] .footnote-popup {
+  background: var(--bg-card, #fdf6e2);
+  border-color: #ebdcb9;
+}
+[data-theme="sepia"] .footnote-popup-header {
+  border-bottom-color: #ebdcb9;
+}
+[data-theme="sepia"] .footnote-popup-content {
+  color: var(--text-main, #3b2e1e);
 }
 
 /* ==========================================================================
@@ -3113,10 +3142,16 @@ foliate-view {
   pointer-events: auto;
 }
 
-#modal-webdav-sync {
+#modal-webdav-sync,
+#quote-card-backdrop,
+#modal-pdf-ocr,
+#modal-update-dialog {
   z-index: 99999 !important;
 }
-#modal-webdav-sync.show {
+#modal-webdav-sync.show,
+#quote-card-backdrop.show,
+#modal-pdf-ocr.show,
+#modal-update-dialog.show {
   opacity: 1 !important;
   pointer-events: auto !important;
 }
@@ -3150,6 +3185,12 @@ foliate-view {
   font-size: 1rem;
   font-weight: 700;
   color: var(--text-main, #0f172a);
+}
+
+/* Fixed-layout (PDF) books: greyed-out settings that don't apply */
+.ll-fixed-disabled {
+  opacity: 0.4;
+  pointer-events: none;
 }
 
 .global-modal-body {

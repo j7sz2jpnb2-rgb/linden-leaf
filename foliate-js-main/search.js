@@ -6,7 +6,7 @@ const normalizeWhitespace = str => str.replace(/\s+/g, ' ')
 const makeExcerpt = (strs, { startIndex, startOffset, endIndex, endOffset }) => {
     const start = strs[startIndex]
     const end = strs[endIndex]
-    const match = start === end
+    const match = startIndex === endIndex
         ? start.slice(startOffset, endOffset)
         : start.slice(startOffset)
             + strs.slice(startIndex + 1, endIndex).join('')

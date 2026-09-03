@@ -1,7 +1,0 @@
-﻿node_modules/
-dist/
-.git/
-.pup_*
-*.log
-scratch_*
-generate_*.py

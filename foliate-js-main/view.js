@@ -11,27 +11,28 @@ const isZip = async file => {
 }
 
 const isPDF = async file => {
-    if (file?.name?.toLowerCase().endsWith('.pdf') || file?.type?.toLowerCase().includes('pdf')) return true
+    if (file?.name?.toLowerCase().endsWith('.pdf') || file?.type?.toLowerCase().includes('pdf') || file?.format === 'pdf') return true
     try {
-        const buf = await file.slice(0, 1024).arrayBuffer()
+        const sliceLen = Math.min(file.size || 8192, 8192)
+        const buf = await file.slice(0, sliceLen).arrayBuffer()
         const arr = new Uint8Array(buf)
         let str = ''
-        for (let i = 0; i < Math.min(arr.length, 1024); i++) str += String.fromCharCode(arr[i])
+        for (let i = 0; i < arr.length; i++) str += String.fromCharCode(arr[i])
         return str.includes('%PDF-')
     } catch {
         return false
     }
 }
 
-const isCBZ = ({ name, type }) =>
-    type === 'application/vnd.comicbook+zip' || name.endsWith('.cbz')
+const isCBZ = file =>
+    file?.type === 'application/vnd.comicbook+zip' || (typeof file?.name === 'string' && file.name.toLowerCase().endsWith('.cbz'))
 
-const isFB2 = ({ name, type }) =>
-    type === 'application/x-fictionbook+xml' || name.endsWith('.fb2')
+const isFB2 = file =>
+    file?.type === 'application/x-fictionbook+xml' || (typeof file?.name === 'string' && file.name.toLowerCase().endsWith('.fb2'))
 
-const isFBZ = ({ name, type }) =>
-    type === 'application/x-zip-compressed-fb2'
-    || name.endsWith('.fb2.zip') || name.endsWith('.fbz')
+const isFBZ = file =>
+    file?.type === 'application/x-zip-compressed-fb2'
+    || (typeof file?.name === 'string' && (file.name.toLowerCase().endsWith('.fb2.zip') || file.name.toLowerCase().endsWith('.fbz')))
 
 export const makeZipLoader = async file => {
     const { configure, ZipReader, BlobReader, TextWriter, BlobWriter } =
@@ -228,7 +229,7 @@ const languageInfo = lang => {
 }
 
 export class View extends HTMLElement {
-    #root = this.attachShadow({ mode: 'closed' })
+    #root = this.attachShadow({ mode: 'open' })
     #sectionProgress
     #tocProgress
     #pageProgress
@@ -393,7 +394,9 @@ export class View extends HTMLElement {
         const { value } = annotation
         if (value.startsWith(SEARCH_PREFIX)) {
             const cfi = value.replace(SEARCH_PREFIX, '')
-            const { index, anchor } = await this.resolveNavigation(cfi)
+            const resolved = await this.resolveNavigation(cfi)
+            if (!resolved) return
+            const { index, anchor } = resolved
             const obj = this.#getOverlayer(index)
             if (obj) {
                 const { overlayer, doc } = obj
@@ -408,7 +411,9 @@ export class View extends HTMLElement {
         }
         const rawCFI = value.includes('::') ? value.split('::')[0] : value
         const annotKey = annotation.id || value
-        const { index, anchor } = await this.resolveNavigation(rawCFI)
+        const resolved = await this.resolveNavigation(rawCFI)
+        if (!resolved) return null
+        const { index, anchor } = resolved
         const obj = this.#getOverlayer(index)
         if (obj) {
             const { overlayer, doc } = obj
@@ -419,7 +424,7 @@ export class View extends HTMLElement {
                 this.#emit('draw-annotation', { draw, annotation, doc, range })
             }
         }
-        const label = this.#tocProgress.getProgress(index)?.label ?? ''
+        const label = this.#tocProgress?.getProgress(index)?.label ?? ''
         return { index, label }
     }
     deleteAnnotation(annotation) {
@@ -472,8 +477,11 @@ export class View extends HTMLElement {
     resolveNavigation(target) {
         try {
             if (target == null) return { index: 0 }
-            if (typeof target === 'number') return { index: Math.max(0, Math.min(this.book.sections.length - 1, target)) }
-            if (typeof target?.index === 'number') return { index: Math.max(0, Math.min(this.book.sections.length - 1, target.index)) }
+            if (typeof target === 'number') {
+                if (target > 0 && target < 1) return this.resolveNavigation({ fraction: target })
+                return { index: Math.max(0, Math.min(this.book.sections.length - 1, Math.floor(target))) }
+            }
+            if (typeof target?.index === 'number') return { index: Math.max(0, Math.min(this.book.sections.length - 1, Math.floor(target.index))) }
             if (typeof target.fraction === 'number') {
                 if (this.#sectionProgress) {
                     const [index, anchor] = this.#sectionProgress.getSection(target.fraction)
@@ -539,13 +547,16 @@ export class View extends HTMLElement {
     }
     async getTOCItemOf(target) {
         try {
-            const { index, anchor } = await this.resolveNavigation(target)
-            const doc = await this.book.sections[index].createDocument()
+            const resolved = await this.resolveNavigation(target)
+            if (!resolved) return null
+            const { index, anchor } = resolved
+            const doc = await this.book.sections[index]?.createDocument?.()
+            if (!doc) return null
             const frag = anchor(doc)
             const isRange = frag instanceof Range
             const range = isRange ? frag : doc.createRange()
             if (!isRange) range.selectNodeContents(frag)
-            return this.#tocProgress.getProgress(index, range)
+            return this.#tocProgress?.getProgress(index, range) || null
         } catch(e) {
             console.error(e)
             console.error(`Could not get ${target}`)

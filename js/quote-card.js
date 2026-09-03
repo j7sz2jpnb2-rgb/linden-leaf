@@ -73,7 +73,63 @@ const VERTICAL_PUNCT_MAP = {
 
 function mapVerticalPunctuation(text) {
     if (!text) return ''
-    return text.replace(/[，。、；：！？“”‘’《》〈〉（）【】〔〕…—]/g, char => VERTICAL_PUNCT_MAP[char] || char)
+    const preprocessed = text
+        .replace(/——/g, '︱︱')
+        .replace(/……/g, '︙︙')
+        .replace(/—/g, '︱')
+        .replace(/…/g, '︙')
+    return preprocessed.replace(/[，。、；：！？“”‘’《》〈〉（）【】〔〕]/g, char => VERTICAL_PUNCT_MAP[char] || char)
+}
+
+/**
+ * Intelligent Vertical Title Column Splitter (WeChat Read Proportions)
+ * - <= 4 chars: single column
+ * - 5 chars: single column (or split if punctuation)
+ * - 6-12 chars: split into double columns (by punctuation or mid-point)
+ * - Latin / English titles: automatic horizontal fallback
+ */
+function splitVerticalTitle(title) {
+    const raw = (title || '未命名书籍').trim()
+    const cjkCount = (raw.match(/[\u4e00-\u9fa5]/g) || []).length
+    const latinCount = (raw.match(/[a-zA-Z]/g) || []).length
+    const isMainlyLatin = latinCount > 0 && cjkCount === 0
+
+    if (isMainlyLatin) {
+        return { isLatin: true, columns: [raw] }
+    }
+
+    const cleanTitle = raw.replace(/^《+|》+$/g, '').trim()
+
+    if (cleanTitle.length <= 4) {
+        return { isLatin: false, columns: [cleanTitle] }
+    }
+
+    if (cleanTitle.length === 5) {
+        if (/[:：\s\-—_]/.test(cleanTitle)) {
+            const parts = cleanTitle.split(/[:：\s\-—_]+/).filter(Boolean)
+            if (parts.length >= 2) return { isLatin: false, columns: parts.slice(0, 2) }
+        }
+        return { isLatin: false, columns: [cleanTitle] }
+    }
+
+    if (/[:：\s\-—_]/.test(cleanTitle)) {
+        const parts = cleanTitle.split(/[:：\s\-—_]+/).filter(Boolean)
+        if (parts.length >= 2) {
+            let col1 = parts[0]
+            let col2 = parts.slice(1).join(' ')
+            if (col1.length > 7) col1 = col1.slice(0, 6) + '…'
+            if (col2.length > 7) col2 = col2.slice(0, 6) + '…'
+            return { isLatin: false, columns: [col1, col2] }
+        }
+    }
+
+    const len = Math.min(cleanTitle.length, 12)
+    const mid = Math.ceil(len / 2)
+    const col1 = cleanTitle.slice(0, mid)
+    let col2 = cleanTitle.slice(mid, 12)
+    if (cleanTitle.length > 12) col2 += '…'
+
+    return { isLatin: false, columns: [col1, col2] }
 }
 
 export class QuoteCardGenerator {
@@ -115,7 +171,7 @@ export class QuoteCardGenerator {
     }
 
     /**
-     * Measure and wrap text for canvas with paragraph support
+     * Measure and wrap text for canvas with paragraph and word boundary support
      */
     wrapText(ctx, text, maxWidth) {
         const lines = []
@@ -126,14 +182,64 @@ export class QuoteCardGenerator {
                 lines.push('')
                 continue
             }
+
+            // Segment by word boundaries for Latin words and characters for CJK
+            const tokens = []
+            if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+                const segmenter = new Intl.Segmenter('zh', { granularity: 'word' })
+                for (const seg of segmenter.segment(para)) {
+                    tokens.push(seg.segment)
+                }
+            } else {
+                const re = /[\u4e00-\u9fff]|[a-zA-Z0-9]+(?:'[a-zA-Z0-9]+)?|\s+|[^\s\w\u4e00-\u9fff]/g
+                let match
+                while ((match = re.exec(para)) !== null) {
+                    tokens.push(match[0])
+                }
+            }
+
+            const NO_START_PUNCT = '，。、；：？！…—）》〉】｝〕’”·,.!?:;)]}'
             let currentLine = ''
-            for (let i = 0; i < para.length; i++) {
-                const char = para[i]
-                const testLine = currentLine + char
+            for (const token of tokens) {
+                const testLine = currentLine ? currentLine + token : token
                 const metrics = ctx.measureText(testLine)
                 if (metrics.width > maxWidth && currentLine.length > 0) {
+                    const firstChar = token.trimStart()[0]
+                    if (firstChar && NO_START_PUNCT.includes(firstChar)) {
+                        const trimmed = currentLine.trimEnd()
+                        const latinMatch = trimmed.match(/[a-zA-Z0-9]+$/)
+                        if (latinMatch) {
+                            const word = latinMatch[0]
+                            const remainder = trimmed.slice(0, -word.length).trimEnd()
+                            if (remainder.length > 0) {
+                                lines.push(remainder)
+                                currentLine = word + token
+                                continue
+                            }
+                        } else if (trimmed.length > 1) {
+                            const lastChar = trimmed.slice(-1)
+                            const remainder = trimmed.slice(0, -1)
+                            lines.push(remainder)
+                            currentLine = lastChar + token
+                            continue
+                        }
+                    }
+
                     lines.push(currentLine)
-                    currentLine = char
+                    if (ctx.measureText(token).width > maxWidth) {
+                        let chunk = ''
+                        for (const ch of token) {
+                            if (ctx.measureText(chunk + ch).width > maxWidth && chunk) {
+                                lines.push(chunk)
+                                chunk = ch
+                            } else {
+                                chunk += ch
+                            }
+                        }
+                        currentLine = chunk
+                    } else {
+                        currentLine = token.trimStart()
+                    }
                 } else {
                     currentLine = testLine
                 }
@@ -162,7 +268,7 @@ export class QuoteCardGenerator {
         const logicalWidth = 640
         const padding = 54
         const contentWidth = logicalWidth - padding * 2
-        const scale = 2.5 // WeChat Read Ultra-HD 2.5x HiDPI scale (1600px width output)
+        const scale = 3.0 // Ultra-HD 3.0x HiDPI integer pixel alignment scale (1920px Full HD width output)
 
         // Create measurement context
         const measureCanvas = document.createElement('canvas')
@@ -174,23 +280,21 @@ export class QuoteCardGenerator {
         // 1. Measure Header Height
         let headerHeight = 0
         const rawTitle = this.bookTitle || '未命名'
-        const titleChars = (rawTitle.length > 12 ? rawTitle.slice(0, 11) + '…' : rawTitle).split('')
-        const authorChars = ((this.author || '').length > 12 ? (this.author || '').slice(0, 11) + '…' : (this.author || '')).split('')
-        const titleCharGap = 44
-        const authorCharGap = 24
+        const titleInfo = splitVerticalTitle(rawTitle)
+        const isVerticalActive = this.titleLayout === 'vertical' && !titleInfo.isLatin
+        const titleCharGap = 40
+        const authorCharGap = 22
 
-        if (this.titleLayout === 'vertical') {
-            const displayTitle = rawTitle.length > 16 ? rawTitle.slice(0, 15) + '…' : rawTitle
-            const displayAuthor = (this.author || '').length > 14 ? (this.author || '').slice(0, 13) + '…' : (this.author || '')
-            const mappedTitle = mapVerticalPunctuation(displayTitle)
-            const mappedAuthor = mapVerticalPunctuation(displayAuthor)
-            const titleH = mappedTitle.length * titleCharGap
-            const authorH = mappedAuthor.length * authorCharGap
-            headerHeight = Math.max(titleH, authorH, 130)
+        if (isVerticalActive) {
+            const maxColChars = Math.max(...titleInfo.columns.map(c => c.length))
+            const titleH = maxColChars * titleCharGap
+            const authorLen = Math.min((this.author || '').length, 10)
+            const authorH = authorLen * authorCharGap
+            headerHeight = Math.max(titleH, authorH, 110)
         } else {
-            mctx.font = `bold 30px ${serifFont}`
+            mctx.font = `bold 28px ${serifFont}`
             const titleLines = this.wrapText(mctx, this.bookTitle, contentWidth)
-            headerHeight = titleLines.length * 38 + (this.author ? 40 : 16)
+            headerHeight = titleLines.length * 36 + (this.author ? 36 : 14)
         }
 
         // 2. Measure Quote Body Text
@@ -240,25 +344,33 @@ export class QuoteCardGenerator {
         // 2. Draw Header Section (Book Title & Author)
         let currentY = topPadding
 
-        if (this.titleLayout === 'vertical') {
-            // Vertical Layout (WeChat Read Classic)
-            ctx.font = `bold 36px ${serifFont}`
+        if (isVerticalActive) {
+            // Vertical Layout (Double-column aware, classical right-to-left progression)
+            ctx.font = `bold 32px ${serifFont}`
             ctx.fillStyle = theme.titleColor
             ctx.textAlign = 'center'
             ctx.textBaseline = 'middle'
 
-            const titleX = padding + 22
-            const vTitleChars = mapVerticalPunctuation(rawTitle.length > 16 ? rawTitle.slice(0, 15) + '…' : rawTitle).split('')
-            for (let i = 0; i < vTitleChars.length; i++) {
-                ctx.fillText(vTitleChars[i], titleX, currentY + i * titleCharGap + 18)
-            }
+            const colWidth = 42
+            const numCols = titleInfo.columns.length
+            const titleBlockWidth = (numCols - 1) * colWidth
+            const authorGap = this.author ? 26 : 0
+            const rightmostColX = padding + 20 + titleBlockWidth + authorGap
 
-            // Author Vertically adjacent
+            titleInfo.columns.forEach((colText, colIdx) => {
+                const colX = rightmostColX - colIdx * colWidth
+                const vChars = mapVerticalPunctuation(colText).split('')
+                for (let i = 0; i < vChars.length; i++) {
+                    ctx.fillText(vChars[i], colX, currentY + i * titleCharGap + 18)
+                }
+            })
+
+            // Author Vertically adjacent on the left side of the title
             if (this.author) {
-                ctx.font = `16px ${serifFont}`
+                ctx.font = `15px ${serifFont}`
                 ctx.fillStyle = theme.authorColor
-                const authorX = titleX + 42
-                const vAuthorChars = mapVerticalPunctuation((this.author || '').length > 14 ? (this.author || '').slice(0, 13) + '…' : (this.author || '')).split('')
+                const authorX = rightmostColX - numCols * colWidth + 14
+                const vAuthorChars = mapVerticalPunctuation((this.author || '').slice(0, 10)).split('')
                 for (let i = 0; i < vAuthorChars.length; i++) {
                     ctx.fillText(vAuthorChars[i], authorX, currentY + i * authorCharGap + 12)
                 }
@@ -266,20 +378,20 @@ export class QuoteCardGenerator {
 
             currentY += headerHeight + headerToQuoteGap
         } else {
-            // Horizontal Layout with auto-wrapping for long titles
-            ctx.font = `bold 30px ${serifFont}`
+            // Horizontal Layout with auto-wrapping for long titles / Latin books
+            ctx.font = `bold 28px ${serifFont}`
             ctx.fillStyle = theme.titleColor
             ctx.textAlign = 'left'
             ctx.textBaseline = 'alphabetic'
             const titleLines = this.wrapText(ctx, this.bookTitle, contentWidth)
             titleLines.forEach((tLine, tIdx) => {
-                ctx.fillText(tLine, padding, currentY + 28 + tIdx * 38)
+                ctx.fillText(tLine, padding, currentY + 28 + tIdx * 36)
             })
 
             if (this.author) {
-                ctx.font = `17px ${serifFont}`
+                ctx.font = `16px ${serifFont}`
                 ctx.fillStyle = theme.authorColor
-                ctx.fillText(this.author, padding, currentY + 28 + titleLines.length * 38)
+                ctx.fillText(this.author, padding, currentY + 26 + titleLines.length * 36)
             }
 
             currentY += headerHeight + headerToQuoteGap
@@ -382,7 +494,8 @@ export class QuoteCardGenerator {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = filename || `书摘_${this.bookTitle || 'LindenLeaf'}_${Date.now()}.png`
+        const cleanTitle = (this.bookTitle || 'LindenLeaf').replace(/[\\/:*?"<>|\uFF1A\uFF1F]/g, '_').trim()
+        a.download = filename || `书摘_${cleanTitle}_${Date.now()}.png`
         document.body.appendChild(a)
         a.click()
         document.body.removeChild(a)

@@ -23,7 +23,7 @@ class DictZip {
         if (header.getUint8(0) !== 31 || header.getUint8(1) !== 139
         || header.getUint8(2) !== 8) throw new Error('Not a DictZip file')
         const flg = header.getUint8(3)
-        if (!flg & 0b100) throw new Error('Missing FEXTRA flag')
+        if (!(flg & 0b100)) throw new Error('Missing FEXTRA flag')
 
         const xlen = header.getUint16(10, true)
         const extra = new DataView(await file.slice(12, 12 + xlen).arrayBuffer())
@@ -78,6 +78,8 @@ class Index {
     strcmp = strcmp
     // binary search
     bisect(query, start = 0, end = this.words.length - 1) {
+        if (start > end) return null
+        if (start === end) return !this.strcmp(query, this.getWord(start)) ? start : null
         if (end - start === 1) {
             if (!this.strcmp(query, this.getWord(start))) return start
             if (!this.strcmp(query, this.getWord(end))) return end
@@ -85,8 +87,8 @@ class Index {
         }
         const mid = Math.floor(start + (end - start) / 2)
         const cmp = this.strcmp(query, this.getWord(mid))
-        if (cmp < 0) return this.bisect(query, start, mid)
-        if (cmp > 0) return this.bisect(query, mid, end)
+        if (cmp < 0) return this.bisect(query, start, mid - 1)
+        if (cmp > 0) return this.bisect(query, mid + 1, end)
         return mid
     }
     // check for multiple definitions

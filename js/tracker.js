@@ -191,6 +191,31 @@ export class ReadingTracker {
         }
 
         if (!this.isIdle && document.visibilityState === 'visible') {
+            // Midnight rollover check: if calendar date crossed during active reading,
+            // gracefully commit yesterday's slice and start a new slice for today.
+            const todayStr = db.toLocalDateKey(now)
+            const sessionDateStr = db.toLocalDateKey(this.sessionStartTime || now)
+            if (todayStr !== sessionDateStr && this.sessionCumulativeSeconds > 0) {
+                const prevFinalRecord = {
+                    id: this.currentSessionId,
+                    bookId: this.currentBookId,
+                    bookTitle: this.currentBookTitle,
+                    date: sessionDateStr,
+                    startTime: this.sessionStartTime || now,
+                    endTime: now - 1,
+                    durationSeconds: this.sessionCumulativeSeconds,
+                    startProgress: this.sessionStartFraction,
+                    endProgress: this.sessionStartFraction
+                }
+                if (this.sessionCumulativeSeconds >= 60) {
+                    db.recordReadingSession(prevFinalRecord).catch(err => console.warn('[Tracker] Midnight flush error:', err))
+                }
+                this.currentSessionId = `sess_${now}_${Math.random().toString(36).slice(2, 7)}`
+                this.sessionStartTime = now
+                this.sessionCumulativeSeconds = 0
+                this.lastFlushTime = now
+            }
+
             // Check Foreground Single Page Clamping (> 130s)
             if (this.timeOnCurrentPageSecs < MAX_PAGE_FOREGROUND_SECS) {
                 this.sessionCumulativeSeconds++
@@ -280,6 +305,9 @@ export class ReadingTracker {
 
         try {
             await db.recordReadingSession(sessionRecord)
+            if (isFinal) {
+                try { localStorage.removeItem('linden_pending_session_backup') } catch (e) {}
+            }
         } catch (err) {
             console.warn('Failed to record reading session:', err)
         }

@@ -7,7 +7,8 @@
   <title>Linden Leaf - 现代化全格式电子书阅读器</title>
   <link rel="preconnect" href="https://fonts.font.im">
   <link rel="preconnect" href="https://fonts.gstatic.font.im" crossorigin>
-  <link rel="stylesheet" href="https://fonts.font.im/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"/>
+  <link rel="stylesheet" href="https://fonts.font.im/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" media="print" onload="this.media='all'"/>
+  <noscript><link rel="stylesheet" href="https://fonts.font.im/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap"/></noscript>
   <link rel="stylesheet" href="./css/main.css"/>
   <link rel="icon" type="image/png" href="./assets/icon.png"/>
   <script src="./vendor/tesseract/tesseract.min.js"></script>
@@ -147,7 +148,7 @@
           <div class="sidebar-brand">
             <img class="brand-icon-img" src="./assets/logo-leaf.png" alt="Linden Leaf" />
             <div class="brand-name">Linden Leaf</div>
-            <div class="brand-version">1.0</div>
+            <div id="brand-version-display" class="brand-version">v1.1.5</div>
           </div>
 
           <!-- Search Box -->
@@ -717,7 +718,7 @@
           <div class="setting-section" id="about-settings-section">
             <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
               <span>关于与版本更新</span>
-              <span id="app-version-badge-sidebar" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple); font-weight: 600;">v1.0.0</span>
+              <span id="app-version-badge-sidebar" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple); font-weight: 600;">v1.1.5</span>
             </div>
             <p style="font-size: 0.76rem; color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
               Linden Leaf 现代化全格式开源电子书阅读器。
@@ -791,7 +792,7 @@
   </div> <!-- #app-container end -->
 
     <!-- Quote Card Modal (WeChat Read style share card generator) -->
-    <div id="quote-card-backdrop" class="global-modal-backdrop" style="display: none; z-index: 9999;">
+    <div id="quote-card-backdrop" class="global-modal-backdrop" style="display: none; z-index: 99999;">
       <div id="quote-card-dialog" class="global-modal-card" style="max-width: 900px; width: 92vw; display: flex; flex-direction: row; padding: 0; position: relative; max-height: 90vh;">
         <button id="btn-quote-close" class="footnote-popup-close" style="position: absolute; right: 15px; top: 15px; z-index: 10;" title="关闭">×</button>
         
@@ -1112,7 +1113,7 @@
         <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(139, 92, 246, 0.08); border: 1px solid rgba(139, 92, 246, 0.2); border-radius: 8px; padding: 10px 14px; margin-bottom: 1rem;">
           <div>
             <div style="font-size: 0.75rem; color: var(--text-tertiary);">当前版本</div>
-            <div id="update-current-version" style="font-size: 0.95rem; font-weight: 600; color: var(--text-main);">v1.0.0</div>
+            <div id="update-current-version" style="font-size: 0.95rem; font-weight: 600; color: var(--text-main);">v1.1.5</div>
           </div>
           <div style="font-size: 1.2rem; color: var(--accent-purple);">➔</div>
           <div>
@@ -1179,6 +1180,6 @@
   </div>
 
   <script src="./vendor/mammoth/mammoth.browser.min.js"></script>
-  <script type="module" src="./js/app.js?v=20260829_v110"></script>
+  <script type="module" src="./js/app.js?v=20260902_v114"></script>
 </body>
 </html>

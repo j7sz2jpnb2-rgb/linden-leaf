@@ -83,7 +83,6 @@ function createWindow() {
         minHeight: 640,
         title: 'Linden Leaf - 现代化全格式电子书阅读器',
         backgroundColor: '#f5efe6',
-        autoHideMenuBar: true,
         show: false,
         icon: path.join(__dirname, 'assets', 'icon.png'),
         webPreferences: {
@@ -105,12 +104,37 @@ function createWindow() {
         mainWindow.show()
     })
 
+    mainWindow.on('enter-full-screen', () => {
+        mainWindow?.webContents?.send('window:fullscreen-change', true)
+    })
+
+    mainWindow.on('leave-full-screen', () => {
+        mainWindow?.webContents?.send('window:fullscreen-change', false)
+    })
+
     mainWindow.webContents.on('did-finish-load', () => {
         isRendererReady = false
     })
 
-    mainWindow.on('close', () => {
+    let isFlushed = false
+    let isFlushPending = false
+    const finishClose = () => {
+        isFlushed = true
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close()
+    }
+    mainWindow.on('close', (event) => {
         saveWindowState()
+        // Give the renderer one short chance to persist reading progress /
+        // session time before the window actually closes
+        if (isFlushed || isFlushPending || !isRendererReady) return
+        event.preventDefault()
+        isFlushPending = true
+        const timeout = setTimeout(finishClose, 1500)
+        ipcMain.once('app:flush-complete', () => {
+            clearTimeout(timeout)
+            finishClose()
+        })
+        mainWindow.webContents.send('app:flush-before-quit')
     })
 
     mainWindow.on('closed', () => {
@@ -412,7 +436,7 @@ ipcMain.handle('updater:checkRelease', async (_event, repo) => {
             path: `/repos/${targetRepo}/releases/latest`,
             method: 'GET',
             headers: {
-                'User-Agent': 'LindenLeaf-Desktop/1.1.0',
+                'User-Agent': 'LindenLeaf-Desktop/1.1.5',
                 'Accept': 'application/vnd.github.v3+json'
             }
         }, res => {
@@ -490,5 +514,6 @@ if (!gotTheLock) {
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
         app.quit()
+        setTimeout(() => process.exit(0), 150)
     }
 })

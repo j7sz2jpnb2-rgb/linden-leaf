@@ -19,7 +19,8 @@ export const makeComicBook = ({ entries, loadBlob, getSize }, file) => {
     const exts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.jxl', '.avif']
     const files = entries
         .map(entry => entry.filename)
-        .filter(name => exts.some(ext => name.endsWith(ext)))
+        .filter(name => !name.startsWith('__MACOSX/') && !name.includes('/._') && !name.startsWith('._'))
+        .filter(name => exts.some(ext => name.toLowerCase().endsWith(ext)))
         .sort(new Intl.Collator([], { numeric: true }).compare)
     if (!files.length) throw new Error('No supported image files in archive')
 
@@ -30,7 +31,7 @@ export const makeComicBook = ({ entries, loadBlob, getSize }, file) => {
         id: name,
         load: () => load(name),
         unload: () => unload(name),
-        size: getSize(name),
+        size: getSize ? getSize(name) : 1000,
     }))
     book.toc = files.map(name => ({ label: name, href: name }))
     book.rendition = { layout: 'pre-paginated' }

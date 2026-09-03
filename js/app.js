@@ -148,6 +148,25 @@ const buildContentCSS = (settings) => {
             -webkit-column-break-before: auto !important;
             max-height: none !important;
         }
+        /* Prevent forced blank pages on section start (Fixes blank first page on Kindle/Epubor books like 《大师》) */
+        body > :first-child,
+        body > :first-child > :first-child,
+        body > div:first-child > :first-child,
+        h1.kindle-cn-copyright-title,
+        [class*="copyright-title"],
+        [class*="copyright_title"] {
+            page-break-before: avoid !important;
+            break-before: avoid !important;
+            -webkit-column-break-before: avoid !important;
+        }
+        /* SVG & Cover Image Proportion Preservation (Prevents squat/fat cover distortion in 《通向巴塔耶》《小说修辞学》) */
+        svg, svg:has(image) {
+            max-width: 100% !important;
+            max-height: 100% !important;
+        }
+        svg image {
+            object-fit: contain !important;
+        }
         h1.chapter-title {
             margin-top: 1.5em !important;
             margin-bottom: 0.5em !important;
@@ -187,12 +206,16 @@ const buildContentCSS = (settings) => {
         @import url('https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont@1.1.0/style.css');
         @import url('https://fonts.font.im/css2?family=Noto+Serif+SC:wght@300;400;500;600;700;900&family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap');
         @namespace epub "http://www.idpf.org/2007/ops";
+        ${verticalStyles}
         html {
             color-scheme: light dark;
         }
         *, *::before, *::after, body, p, div, span, li, blockquote, dd, dt, h1, h2, h3, h4, h5, h6, em, strong, i, b, a, section, article {
             font-family: ${fontFamily} !important;
             letter-spacing: ${letterSpacing}px !important;
+        }
+        pre, code, kbd, samp {
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace !important;
         }
         body, p, div, span, li, blockquote, dd, dt, a, section, article {
             font-weight: ${safeWeight} !important;
@@ -229,7 +252,10 @@ const buildContentCSS = (settings) => {
         /* Elements that must NEVER have 2em text-indent (Center, Right, Headings, Poetry, Captions) */
         p.no-indent, .no-indent,
         [data-align="center"], [data-align="right"],
-        [data-reader-heading], [data-poetry-line], [data-has-media],
+        [data-reader-heading], [data-poetry-line], [data-has-media], [data-has-dropcap],
+        p:has(> img), p:has(> svg), p:has(> picture), div:has(> img), div:has(> svg),
+        p:has(> .dropcap), p:has(> [class*="dropcap" i]), p:has(> [class*="first-letter" i]),
+        .dropcap, [class*="dropcap" i], [class*="first-letter" i],
         h1, h2, h3, h4, h5, h6,
         blockquote, pre, figure, figcaption,
         .poetry, .verse, .subtitle, .author, .date, [class*="sequence"],
@@ -302,10 +328,13 @@ const buildContentCSS = (settings) => {
             padding-bottom: 0 !important;
         }
 
-        /* 4. Target Calibre / Pandoc dummy page-break markers directly in CSS as well */
+        /* 4. Target Calibre / Pandoc / Kindle dummy page-break markers directly in CSS */
         [id*="calibre_pb" i],
         [class*="calibre_pb" i],
         .calibre_pb,
+        .mbp_pagebreak,
+        [class*="mbp_pagebreak" i],
+        div.mbp_pagebreak,
         h1:empty, h2:empty, h3:empty, h4:empty, h5:empty, h6:empty,
         [data-reader-heading]:empty {
             display: none !important;
@@ -324,6 +353,26 @@ const buildContentCSS = (settings) => {
             max-width: 100% !important;
             max-height: 100% !important;
             box-sizing: border-box !important;
+        }
+
+        /* Clean responsive table layout inside multi-column pages */
+        table {
+            max-width: 100% !important;
+            border-collapse: collapse !important;
+            margin: 1.2em auto !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+        }
+        th, td {
+            padding: 0.35em 0.6em;
+            word-break: break-word;
+        }
+
+        /* Preformatted code & verse wrapping */
+        pre, code {
+            white-space: pre-wrap !important;
+            word-break: break-all !important;
+            overflow-wrap: break-word !important;
         }
 
         blockquote {
@@ -353,6 +402,20 @@ const buildContentCSS = (settings) => {
             color: ${textColor} !important;
             filter: none !important;
         }
+        [style*="color:#000" i], [style*="color: #000" i],
+        [style*="color:#111" i], [style*="color: #111" i],
+        [style*="color:#222" i], [style*="color: #222" i],
+        [style*="color:#333" i], [style*="color: #333" i],
+        [style*="color:black" i], [style*="color: black" i] {
+            color: ${textColor} !important;
+        }
+        [style*="background:white" i], [style*="background: white" i],
+        [style*="background:#fff" i], [style*="background: #fff" i],
+        [style*="background-color:white" i], [style*="background-color: white" i],
+        [style*="background-color:#fff" i], [style*="background-color: #fff" i] {
+            background-color: transparent !important;
+            background: transparent !important;
+        }
         ` : ''}
 
         h1, h2, h3, h4, h5, h6 {
@@ -365,7 +428,14 @@ const buildContentCSS = (settings) => {
         }
         img {
             max-width: 100% !important;
+            max-height: 92vh !important;
             height: auto !important;
+            object-fit: contain !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+        }
+        img[id*="filepos"], img[id^="fn"], img[id^="note"], [id*="filepos"]:not(body):not(html) {
+            cursor: pointer !important;
         }
         ::selection, *::selection {
             background: ${selectionBg} !important;
@@ -481,11 +551,15 @@ class UniversalReaderApp {
         this.pdfDrawTool = null // 'marker' | 'pen' | 'eraser' | null
         this.pdfDrawColor = 'rgba(250, 204, 21, 0.45)'
         this.pdfDrawWidth = 18
-        this.currentPdfPageIndex = 1
+        this.currentPdfPageIndex = 0
         this.pdfOverlayCanvas = null
 
         this.initDOM()
         this.bindEvents()
+
+        // Persist reading progress & session time when the window is closed
+        // directly (main process waits briefly for this before destroying)
+        window.electronAPI?.onFlushBeforeQuit?.(() => this.flushReaderStateOnExit())
 
         this.checkFirstTimeUser()
         this.loadSettings().then(async () => {
@@ -562,8 +636,6 @@ class UniversalReaderApp {
             btnShelfSettings: document.getElementById('btn-shelf-settings'),
             btnNavLeft: document.getElementById('btn-nav-left'),
             btnNavRight: document.getElementById('btn-nav-right'),
-            btnPrevPage: document.getElementById('btn-nav-left'),
-            btnNextPage: document.getElementById('btn-nav-right'),
             btnToggleTOC: document.getElementById('btn-toggle-toc'),
             btnToggleSearch: document.getElementById('btn-toggle-search'),
             btnToggleNotes: document.getElementById('btn-toggle-notes'),
@@ -756,6 +828,7 @@ class UniversalReaderApp {
             syncStatusDesc: document.getElementById('sync-status-desc'),
 
             // Update & About Elements
+            brandVersionDisplay: document.getElementById('brand-version-display'),
             btnCheckUpdates: document.getElementById('btn-check-updates'),
             btnCheckUpdatesText: document.getElementById('btn-check-updates-text'),
             btnOpenGithubRepo: document.getElementById('btn-open-github-repo'),
@@ -816,17 +889,23 @@ class UniversalReaderApp {
         }, duration)
     }
 
-    showInputDialog({ title = '输入内容', placeholder = '', value = '', isMultiline = false }) {
+    showInputDialog({ title = '输入内容', placeholder = '', value = '', isMultiline = false, hideInput = false, confirmText = '确定', cancelText = '取消' }) {
         return new Promise(resolve => {
             if (!this.dom.globalModalBackdrop) {
                 const res = prompt(title, value)
                 return resolve(res)
             }
 
-            // Cleanup any previously active instance
+            // Cleanup any previously active instance and resolve its pending
+            // promise with null, so awaiters never hang forever
             if (this._inputDialogCleanup) {
                 this._inputDialogCleanup()
                 this._inputDialogCleanup = null
+                if (this._inputDialogActiveClose) {
+                    const prevClose = this._inputDialogActiveClose
+                    this._inputDialogActiveClose = null
+                    prevClose(null)
+                }
             }
 
             if (this.dom.globalModalTitle) this.dom.globalModalTitle.innerText = title
@@ -834,12 +913,16 @@ class UniversalReaderApp {
                 this.dom.globalModalInput.placeholder = placeholder
                 this.dom.globalModalInput.value = value || ''
                 this.dom.globalModalInput.rows = isMultiline ? 4 : 2
+                this.dom.globalModalInput.style.display = hideInput ? 'none' : ''
             }
+            if (this.dom.globalModalConfirm) this.dom.globalModalConfirm.innerText = confirmText
+            if (this.dom.globalModalCancel) this.dom.globalModalCancel.innerText = cancelText
 
             let isResolved = false
             const close = (result) => {
                 if (isResolved) return
                 isResolved = true
+                if (this._inputDialogActiveClose === close) this._inputDialogActiveClose = null
                 this.dom.globalModalBackdrop?.classList.remove('show')
                 setTimeout(() => {
                     if (this.dom.globalModalBackdrop && !this.dom.globalModalBackdrop.classList.contains('show')) {
@@ -849,6 +932,7 @@ class UniversalReaderApp {
                 cleanup()
                 resolve(result)
             }
+            this._inputDialogActiveClose = close
 
             const onConfirm = () => {
                 const val = this.dom.globalModalInput?.value ?? ''
@@ -889,6 +973,15 @@ class UniversalReaderApp {
                 this.dom.globalModalInput?.select()
             })
         })
+    }
+
+    showConfirmDialog(title, message = '') {
+        return this.showInputDialog({
+            title: message ? `${title}\n${message}` : title,
+            hideInput: true,
+            confirmText: '确定',
+            cancelText: '取消'
+        }).then(result => result != null)
     }
 
     async loadSettings() {
@@ -1148,15 +1241,17 @@ class UniversalReaderApp {
             searchTimer = setTimeout(() => this.refreshBookshelf(), 150)
         })
 
-        // Window resize adaptive layout for skeuomorphic shelf
+        // Window resize adaptive layout for shelf and PDF drawing overlay
         let resizeTimer = null
         window.addEventListener('resize', () => {
-            if (this.shelfViewMode === 'shelf' && this.dom.bookshelfView?.style.display !== 'none') {
-                clearTimeout(resizeTimer)
-                resizeTimer = setTimeout(() => {
+            clearTimeout(resizeTimer)
+            resizeTimer = setTimeout(() => {
+                if (this.shelfViewMode === 'shelf' && this.dom.bookshelfView?.style.display !== 'none') {
                     if (this.currentBooksList) this.renderBooksShelf(this.currentBooksList)
-                }, 100)
-            }
+                } else if (this.currentBookId && (this.foliateView?.isFixedLayout || this.currentBookData?.format === 'pdf')) {
+                    this.renderPdfDrawingOverlayForCurrentPage()
+                }
+            }, 120)
         })
 
         // Category switching
@@ -1357,33 +1452,25 @@ class UniversalReaderApp {
         this.dom.btnBackToShelf?.addEventListener('click', () => this.closeReader())
         this.dom.btnNavLeft?.addEventListener('click', () => this.turnPagePrev())
         this.dom.btnNavRight?.addEventListener('click', () => this.turnPageNext())
-        this.dom.btnPrevPage?.addEventListener('click', () => this.turnPagePrev())
-        this.dom.btnNextPage?.addEventListener('click', () => this.turnPageNext())
 
         this.dom.readerContentArea?.addEventListener('click', e => {
             if (e.target.closest('button') || e.target.closest('a') || e.target.closest('.selection-popup') || e.target.closest('.highlight-action-popup') || e.target.closest('input') || e.target.closest('.nav-arrow-left') || e.target.closest('.nav-arrow-right')) return
             this.toggleReaderUI()
         })
 
-        // Progress Slider (Smooth debounced seeking and guaranteed change commit)
-        let progressSeekTimer = null
-        const executeSeek = fraction => {
-            if (this.foliateView) {
-                this.foliateView.goToFraction(fraction)
-            }
-        }
+        // Progress Slider (text updates live; actual seek happens on release to avoid
+        // re-render storms on large PDFs while dragging)
         this.dom.progressSlider?.addEventListener('input', e => {
             const fraction = parseFloat(e.target.value) / 100
             if (this.dom.progressText) {
                 this.dom.progressText.innerText = `${Math.round(fraction * 100)}%`
             }
-            clearTimeout(progressSeekTimer)
-            progressSeekTimer = setTimeout(() => executeSeek(fraction), 80)
         })
         this.dom.progressSlider?.addEventListener('change', e => {
-            clearTimeout(progressSeekTimer)
             const fraction = parseFloat(e.target.value) / 100
-            executeSeek(fraction)
+            if (this.foliateView) {
+                this.foliateView.goToFraction(fraction)
+            }
         })
 
         // Drawer toggles
@@ -1508,7 +1595,7 @@ class UniversalReaderApp {
         this.dom.letterSpacingSlider?.addEventListener('input', e => {
             this.settings.letterSpacing = parseFloat(e.target.value) || 0
             this.dom.letterSpacingValue.innerText = `${this.settings.letterSpacing}px`
-            this.saveSettings()
+            this.saveSettingsDebounced()
         })
 
         
@@ -1516,10 +1603,14 @@ class UniversalReaderApp {
         const writingModeSelect = document.getElementById('setting-writing-mode')
         if (writingModeSelect) {
             writingModeSelect.value = this.settings.writingMode || 'horizontal'
-            writingModeSelect.addEventListener('change', e => {
+            writingModeSelect.addEventListener('change', async e => {
                 this.settings.writingMode = e.target.value
                 this.saveSettings()
                 this.applySettingsToReader()
+                if (this.foliateView && this.currentBookId) {
+                    const loc = this.currentLocation?.cfi || this.currentLocation?.fraction || 0
+                    await this.foliateView.goTo(loc)
+                }
             })
         }
 
@@ -1736,10 +1827,11 @@ class UniversalReaderApp {
 
 
         // Fullscreen Toggle
+        this.isCurrentlyFullscreen = false
         this.dom.btnToggleFullscreen?.addEventListener('click', () => this.toggleFullscreen())
 
-        document.addEventListener('fullscreenchange', () => {
-            const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement)
+        const updateFullscreenUI = (isFs) => {
+            this.isCurrentlyFullscreen = isFs
             if (this.dom.btnToggleFullscreen) {
                 if (isFs) {
                     this.dom.btnToggleFullscreen.title = '退出全屏 (快捷键 F / Esc)'
@@ -1765,19 +1857,31 @@ class UniversalReaderApp {
             } else {
                 this.toggleReaderUI(true)
             }
+        }
+
+        document.addEventListener('fullscreenchange', () => {
+            const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement)
+            updateFullscreenUI(isFs)
         })
+
+        if (window.electronAPI?.onFullscreenChange) {
+            window.electronAPI.onFullscreenChange(isFs => {
+                updateFullscreenUI(isFs)
+            })
+        }
 
         // Edge proximity handler when in fullscreen with autohide enabled
         const handleFullscreenProximity = (clientY) => {
-            if (!document.fullscreenElement && !document.webkitFullscreenElement) return
-            if (!this.settings.fullscreenAutohide) return
+            const isFs = this.isCurrentlyFullscreen || !!(document.fullscreenElement || document.webkitFullscreenElement)
+            if (!isFs || !this.settings.fullscreenAutohide) return
             const winH = window.innerHeight
 
             if (clientY <= 50) {
                 this.dom.readerTopBar?.classList.remove('autohide')
                 clearTimeout(this._fsTopTimer)
                 this._fsTopTimer = setTimeout(() => {
-                    if ((document.fullscreenElement || document.webkitFullscreenElement) && this.settings.fullscreenAutohide) {
+                    const stillFs = this.isCurrentlyFullscreen || !!(document.fullscreenElement || document.webkitFullscreenElement)
+                    if (stillFs && this.settings.fullscreenAutohide) {
                         this.dom.readerTopBar?.classList.add('autohide')
                     }
                 }, 3000)
@@ -1787,7 +1891,8 @@ class UniversalReaderApp {
                 this.dom.pdfZoomBar?.classList.remove('autohide')
                 clearTimeout(this._fsBottomTimer)
                 this._fsBottomTimer = setTimeout(() => {
-                    if ((document.fullscreenElement || document.webkitFullscreenElement) && this.settings.fullscreenAutohide) {
+                    const stillFs = this.isCurrentlyFullscreen || !!(document.fullscreenElement || document.webkitFullscreenElement)
+                    if (stillFs && this.settings.fullscreenAutohide) {
                         this.dom.readerBottomBar?.classList.add('autohide')
                         this.dom.pdfZoomBar?.classList.add('autohide')
                     }
@@ -1858,6 +1963,7 @@ class UniversalReaderApp {
                     this.pdfDrawWidth = tool === 'marker' ? 18 : (tool === 'pen' ? 3 : 26)
                     pdfToolBtns.forEach(b => b?.classList.remove('active'))
                     btn.classList.add('active')
+                    this.renderPdfDrawingOverlayForCurrentPage()
                     this.setPdfOverlayDrawingActive(true)
                     const toolName = tool === 'marker' ? '🖍️ 荧光马克笔 (半透明)' : (tool === 'pen' ? '✏️ 批注笔' : '🧹 橡皮擦')
                     this.showToast(`已开启 ${toolName}，可在页面上自由绘制`)
@@ -1867,10 +1973,20 @@ class UniversalReaderApp {
 
         // PDF Clear Page Drawing
         this.dom.btnPdfClearDraw?.addEventListener('click', async () => {
-            if (!this.currentBookId || this.currentPdfPageIndex == null) return
-            await db.clearPdfPageDrawing(this.currentBookId, this.currentPdfPageIndex)
-            this.redrawPdfPageOverlay()
-            this.showToast('🗑️ 已清空当前页手绘批注')
+            if (!this.currentBookId) return
+            const allTargets = this.getAllPdfActiveDocsAndTargets()
+            if (allTargets.length > 1) {
+                for (const target of allTargets) {
+                    const pIdx = target.index != null ? target.index : this.currentPdfPageIndex
+                    if (pIdx != null) await db.clearPdfPageDrawing(this.currentBookId, pIdx)
+                }
+                this.redrawPdfPageOverlay()
+                this.showToast('🗑️ 已清空当前双页手绘批注')
+            } else if (this.currentPdfPageIndex != null) {
+                await db.clearPdfPageDrawing(this.currentBookId, this.currentPdfPageIndex)
+                this.redrawPdfPageOverlay()
+                this.showToast('🗑️ 已清空当前页手绘批注')
+            }
         })
 
         // PDF OCR Extract Button
@@ -1906,7 +2022,13 @@ class UniversalReaderApp {
                 const targetPage = parseInt(targetStr, 10)
                 if (!isNaN(targetPage) && targetPage >= 1 && targetPage <= total) {
                     if (this.foliateView) {
-                        this.foliateView.goTo(targetPage - 1)
+                        if (this.foliateView.isFixedLayout) {
+                            // Fixed layout: page N maps 1:1 to section index N-1
+                            this.foliateView.goTo(targetPage - 1)
+                        } else {
+                            // Reflow layout: total is paginator screen count, jump by fraction
+                            this.foliateView.goToFraction((targetPage - 1) / total)
+                        }
                     }
                 } else if (targetStr.trim() !== '') {
                     this.showToast('请输入有效的页码数字', '⚠️')
@@ -1955,6 +2077,11 @@ class UniversalReaderApp {
 
         if (this.dom.pdfZoomSlider) this.dom.pdfZoomSlider.value = sliderVal
         if (this.dom.pdfZoomPercentInput) this.dom.pdfZoomPercentInput.value = displayStr
+
+        clearTimeout(this._pdfZoomOverlayTimer)
+        this._pdfZoomOverlayTimer = setTimeout(() => {
+            this.renderPdfDrawingOverlayForCurrentPage?.()
+        }, 120)
     }
 
     stepPDFZoom(deltaPct) {
@@ -1983,10 +2110,25 @@ class UniversalReaderApp {
     // ==========================================================
     // PDF Freehand Drawing & Light OCR Annotation Engine
     // ==========================================================
-    getPdfActiveDocAndTarget() {
-        if (!this.foliateView) return null
-        
-        // Find iframes in shadow roots or documents
+    getAllPdfActiveDocsAndTargets() {
+        if (!this.foliateView) return []
+        const results = []
+
+        // 1. Primary: Use Foliate's official public renderer.getContents()
+        const contents = this.foliateView.renderer?.getContents?.() || []
+        for (const item of contents) {
+            if (item?.doc) {
+                const doc = item.doc
+                const canvas = doc.querySelector('canvas')
+                const img = doc.querySelector('img')
+                const svg = doc.querySelector('svg')
+                const container = doc.getElementById('page-container') || doc.body || doc.documentElement
+                results.push({ iframe: item.iframe || null, doc, canvas, img, svg, container, index: item.index })
+            }
+        }
+        if (results.length > 0) return results
+
+        // 2. Fallback: Query iframes in open shadow roots or documents
         const renderer = this.foliateView.renderer
         let iframes = []
         if (renderer?.shadowRoot) {
@@ -1999,97 +2141,146 @@ class UniversalReaderApp {
             iframes = Array.from(document.querySelectorAll('foliate-fxl iframe, foliate-view iframe'))
         }
 
-        for (const iframe of iframes) {
+        for (let idx = 0; idx < iframes.length; idx++) {
             try {
+                const iframe = iframes[idx]
                 const doc = iframe.contentDocument
                 if (doc) {
                     const canvas = doc.querySelector('canvas')
                     const img = doc.querySelector('img')
                     const svg = doc.querySelector('svg')
                     const container = doc.getElementById('page-container') || doc.body || doc.documentElement
-                    return { iframe, doc, canvas, img, svg, container }
+                    results.push({ iframe, doc, canvas, img, svg, container, index: idx })
                 }
             } catch (e) {}
         }
-        return null
+        return results
+    }
+
+    getPdfActiveDocAndTarget() {
+        const list = this.getAllPdfActiveDocsAndTargets()
+        return list[0] || null
     }
 
     setPdfOverlayDrawingActive(isActive) {
-        const activeObj = this.getPdfActiveDocAndTarget()
-        if (!activeObj?.doc) return
-        const overlayCanvases = activeObj.doc.querySelectorAll('.pdf-draw-overlay-canvas')
-        overlayCanvases.forEach(cvs => {
-            if (isActive) {
-                cvs.classList.add('is-drawing-active')
-                cvs.style.pointerEvents = 'auto'
-            } else {
-                cvs.classList.remove('is-drawing-active')
-                cvs.style.pointerEvents = 'none'
-            }
+        const allTargets = this.getAllPdfActiveDocsAndTargets()
+        allTargets.forEach(activeObj => {
+            if (!activeObj?.doc) return
+            const overlayCanvases = activeObj.doc.querySelectorAll('.pdf-draw-overlay-canvas')
+            overlayCanvases.forEach(cvs => {
+                if (isActive) {
+                    cvs.classList.add('is-drawing-active')
+                    cvs.style.pointerEvents = 'auto'
+                    cvs.style.cursor = 'crosshair'
+                } else {
+                    cvs.classList.remove('is-drawing-active')
+                    cvs.style.pointerEvents = 'none'
+                    cvs.style.cursor = 'default'
+                }
+            })
         })
     }
 
     async renderPdfDrawingOverlayForCurrentPage() {
-        const activeObj = this.getPdfActiveDocAndTarget()
-        if (!activeObj?.doc || !this.currentBookId) return
+        const allTargets = this.getAllPdfActiveDocsAndTargets()
+        if (allTargets.length === 0 || !this.currentBookId) return
 
-        const { doc, container, canvas, img, svg } = activeObj
-        const targetElement = canvas || img || svg || container
-        if (!targetElement) return
+        for (const activeObj of allTargets) {
+            const { doc, container, canvas, img, svg, index } = activeObj
+            const targetElement = canvas || img || svg || container
+            if (!targetElement || !doc) continue
 
-        // Ensure container position relative
-        container.style.position = 'relative'
+            const targetPageIndex = (index != null) ? index : this.currentPdfPageIndex
+            if (targetPageIndex == null) continue
 
-        let overlayCanvas = doc.getElementById('pdf-page-draw-overlay')
-        if (!overlayCanvas) {
-            overlayCanvas = doc.createElement('canvas')
-            overlayCanvas.id = 'pdf-page-draw-overlay'
-            overlayCanvas.className = 'pdf-draw-overlay-canvas'
-            if (this.pdfDrawTool) {
-                overlayCanvas.classList.add('is-drawing-active')
-                overlayCanvas.style.pointerEvents = 'auto'
+            container.style.position = 'relative'
+
+            let overlayCanvas = doc.getElementById('pdf-page-draw-overlay')
+            if (!overlayCanvas) {
+                overlayCanvas = doc.createElement('canvas')
+                overlayCanvas.id = 'pdf-page-draw-overlay'
+                overlayCanvas.className = 'pdf-draw-overlay-canvas'
+                if (this.pdfDrawTool) {
+                    overlayCanvas.classList.add('is-drawing-active')
+                    overlayCanvas.style.pointerEvents = 'auto'
+                    overlayCanvas.style.cursor = 'crosshair'
+                } else {
+                    overlayCanvas.style.pointerEvents = 'none'
+                    overlayCanvas.style.cursor = 'default'
+                }
+                overlayCanvas.style.touchAction = 'none'
+                container.appendChild(overlayCanvas)
+                this.attachPdfDrawingPointerEvents(overlayCanvas, doc)
             } else {
-                overlayCanvas.style.pointerEvents = 'none'
+                if (this.pdfDrawTool) {
+                    overlayCanvas.classList.add('is-drawing-active')
+                    overlayCanvas.style.pointerEvents = 'auto'
+                    overlayCanvas.style.cursor = 'crosshair'
+                } else {
+                    overlayCanvas.style.pointerEvents = 'none'
+                    overlayCanvas.style.cursor = 'default'
+                }
             }
-            container.appendChild(overlayCanvas)
-            this.attachPdfDrawingPointerEvents(overlayCanvas, doc)
+
+            overlayCanvas.dataset.pageIndex = targetPageIndex
+
+            // Match dimensions to target
+            const rect = targetElement.getBoundingClientRect()
+            const targetWidth = canvas?.width || Math.round(rect.width) || 800
+            const targetHeight = canvas?.height || Math.round(rect.height) || 1100
+
+            overlayCanvas.width = targetWidth
+            overlayCanvas.height = targetHeight
+            overlayCanvas.style.position = 'absolute'
+            overlayCanvas.style.top = (targetElement.offsetTop || 0) + 'px'
+            overlayCanvas.style.left = (targetElement.offsetLeft || 0) + 'px'
+            overlayCanvas.style.width = (targetElement.style.width || (rect.width ? `${rect.width}px` : '100%'))
+            overlayCanvas.style.height = (targetElement.style.height || (rect.height ? `${rect.height}px` : '100%'))
+            overlayCanvas.style.zIndex = '50'
+
+            this.pdfOverlayCanvas = overlayCanvas
+
+            // Load and draw saved strokes for this page
+            const ctx = overlayCanvas.getContext('2d')
+            ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
+            const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, targetPageIndex)
+            const strokes = drawingRecord?.strokes || []
+            if (targetPageIndex === this.currentPdfPageIndex) {
+                this._currentPdfPageStrokes = strokes
+            }
+            strokes.forEach(stroke => {
+                this.drawSingleStrokeOnCanvas(ctx, stroke, overlayCanvas.width, overlayCanvas.height)
+            })
         }
-
-        // Match dimensions to target
-        const rect = targetElement.getBoundingClientRect()
-        const targetWidth = canvas?.width || Math.round(rect.width) || 800
-        const targetHeight = canvas?.height || Math.round(rect.height) || 1100
-
-        overlayCanvas.width = targetWidth
-        overlayCanvas.height = targetHeight
-        overlayCanvas.style.position = 'absolute'
-        overlayCanvas.style.top = (targetElement.offsetTop || 0) + 'px'
-        overlayCanvas.style.left = (targetElement.offsetLeft || 0) + 'px'
-        overlayCanvas.style.width = (targetElement.style.width || (rect.width ? `${rect.width}px` : '100%'))
-        overlayCanvas.style.height = (targetElement.style.height || (rect.height ? `${rect.height}px` : '100%'))
-        overlayCanvas.style.zIndex = '30'
-
-        this.pdfOverlayCanvas = overlayCanvas
-
-        // Load saved strokes from IndexedDB
-        await this.redrawPdfPageOverlay()
     }
 
     async redrawPdfPageOverlay() {
-        const activeObj = this.getPdfActiveDocAndTarget()
-        if (!activeObj?.doc || !this.currentBookId || this.currentPdfPageIndex == null) return
-        const overlayCanvas = activeObj.doc.getElementById('pdf-page-draw-overlay')
-        if (!overlayCanvas) return
+        const allTargets = this.getAllPdfActiveDocsAndTargets()
+        if (allTargets.length === 0 || !this.currentBookId) return
 
-        const ctx = overlayCanvas.getContext('2d')
-        ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
+        for (const activeObj of allTargets) {
+            if (!activeObj?.doc) continue
+            const overlayCanvas = activeObj.doc.getElementById('pdf-page-draw-overlay')
+            if (!overlayCanvas) continue
 
-        const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, this.currentPdfPageIndex)
-        const strokes = drawingRecord?.strokes || []
+            const targetPageIndex = overlayCanvas.dataset.pageIndex != null 
+                ? parseInt(overlayCanvas.dataset.pageIndex, 10) 
+                : (activeObj.index != null ? activeObj.index : this.currentPdfPageIndex)
+            if (targetPageIndex == null) continue
 
-        strokes.forEach(stroke => {
-            this.drawSingleStrokeOnCanvas(ctx, stroke, overlayCanvas.width, overlayCanvas.height)
-        })
+            const ctx = overlayCanvas.getContext('2d')
+            ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
+
+            const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, targetPageIndex)
+            const strokes = drawingRecord?.strokes || []
+            if (targetPageIndex === this.currentPdfPageIndex) {
+                this._currentPdfPageStrokes = strokes
+            }
+
+            strokes.forEach(stroke => {
+                this.drawSingleStrokeOnCanvas(ctx, stroke, overlayCanvas.width, overlayCanvas.height)
+            })
+        }
     }
 
     drawSingleStrokeOnCanvas(ctx, stroke, w, h) {
@@ -2127,10 +2318,34 @@ class UniversalReaderApp {
         ctx.restore()
     }
 
+    drawStrokeSegment(ctx, stroke, p1, p2, w, h) {
+        if (!p1 || !p2) return
+        ctx.save()
+        if (stroke.tool === 'eraser') {
+            ctx.globalCompositeOperation = 'destination-out'
+            ctx.strokeStyle = 'rgba(0,0,0,1)'
+            ctx.lineWidth = (stroke.width || 24) * (w / 800)
+        } else if (stroke.tool === 'marker') {
+            ctx.globalCompositeOperation = 'source-over'
+            ctx.strokeStyle = stroke.color || 'rgba(250, 204, 21, 0.45)'
+            ctx.lineWidth = (stroke.width || 18) * (w / 800)
+        } else {
+            ctx.globalCompositeOperation = 'source-over'
+            ctx.strokeStyle = stroke.color || '#ef4444'
+            ctx.lineWidth = (stroke.width || 3) * (w / 800)
+        }
+        ctx.lineCap = 'round'
+        ctx.lineJoin = 'round'
+        ctx.beginPath()
+        ctx.moveTo(p1[0] * w, p1[1] * h)
+        ctx.lineTo(p2[0] * w, p2[1] * h)
+        ctx.stroke()
+        ctx.restore()
+    }
+
     attachPdfDrawingPointerEvents(canvasElement, doc) {
         let isDrawing = false
         let currentStroke = null
-        let currentStrokesList = []
         let gestureBookId = null
         let gesturePageIndex = null
 
@@ -2142,17 +2357,22 @@ class UniversalReaderApp {
             ]
         }
 
-        const handlePointerDown = async e => {
-            if (!this.pdfDrawTool || !this.currentBookId || this.currentPdfPageIndex == null) return
+        const handlePointerDown = e => {
+            if (!this.pdfDrawTool || !this.currentBookId) return
+            const targetPageIndex = canvasElement.dataset.pageIndex != null 
+                ? parseInt(canvasElement.dataset.pageIndex, 10) 
+                : this.currentPdfPageIndex
+            if (targetPageIndex == null) return
+
             e.preventDefault()
             e.stopPropagation()
-            isDrawing = true
-            gestureBookId = this.currentBookId
-            gesturePageIndex = this.currentPdfPageIndex
+            try {
+                canvasElement.setPointerCapture(e.pointerId)
+            } catch (err) {}
 
-            // Fetch current strokes for this specific book & page
-            const drawingRecord = await db.getPdfPageDrawing(gestureBookId, gesturePageIndex)
-            currentStrokesList = drawingRecord?.strokes || []
+            gestureBookId = this.currentBookId
+            gesturePageIndex = targetPageIndex
+            isDrawing = true
 
             const [nx, ny] = getCoords(e)
             currentStroke = {
@@ -2172,20 +2392,29 @@ class UniversalReaderApp {
             e.stopPropagation()
 
             const [nx, ny] = getCoords(e)
+            const prevPt = currentStroke.points[currentStroke.points.length - 1]
             currentStroke.points.push([nx, ny])
 
             const ctx = canvasElement.getContext('2d')
-            // Draw latest segment
-            this.drawSingleStrokeOnCanvas(ctx, currentStroke, canvasElement.width, canvasElement.height)
+            // Draw ONLY latest segment to prevent compounding opacity
+            this.drawStrokeSegment(ctx, currentStroke, prevPt, [nx, ny], canvasElement.width, canvasElement.height)
         }
 
         const handlePointerUp = async e => {
             if (!isDrawing || !currentStroke) return
             isDrawing = false
+            try {
+                canvasElement.releasePointerCapture(e.pointerId)
+            } catch (err) {}
 
             if (currentStroke.points.length > 0 && gestureBookId && gesturePageIndex != null) {
-                currentStrokesList.push(currentStroke)
-                await db.savePdfPageDrawing(gestureBookId, gesturePageIndex, currentStrokesList)
+                const drawingRecord = await db.getPdfPageDrawing(gestureBookId, gesturePageIndex)
+                const existingStrokes = drawingRecord?.strokes || []
+                existingStrokes.push(currentStroke)
+                await db.savePdfPageDrawing(gestureBookId, gesturePageIndex, existingStrokes)
+                if (gesturePageIndex === this.currentPdfPageIndex) {
+                    this._currentPdfPageStrokes = existingStrokes
+                }
             }
             currentStroke = null
             gestureBookId = null
@@ -2206,6 +2435,9 @@ class UniversalReaderApp {
         if (!this.dom.modalPdfOcr) return
 
         this.dom.modalPdfOcr.style.display = 'flex'
+        requestAnimationFrame(() => {
+            this.dom.modalPdfOcr?.classList.add('show')
+        })
         if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⏳'
         if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '正在提取当前页面图像并进行文字识别...'
         if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = ''
@@ -2213,20 +2445,39 @@ class UniversalReaderApp {
 
         try {
             const activeObj = this.getPdfActiveDocAndTarget()
-            let imageSource = null
 
-            if (activeObj?.canvas) {
+            // 1. Instant extraction: Check if page already has an embedded/OCR text layer
+            const textLayerEl = activeObj?.doc?.querySelector('.textLayer')
+            const existingText = (textLayerEl ? textLayerEl.innerText : '').trim()
+            if (existingText.length > 5) {
+                if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = existingText
+                if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = `共 ${existingText.length} 字`
+                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '✅'
+                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '已提取页面内嵌文本！可在上方选择或点击下方快速复制'
+                return
+            }
+
+            // 2. Pure scanned bitmap OCR
+            let imageSource = null
+            if (activeObj?.img) {
+                try {
+                    const offCanvas = document.createElement('canvas')
+                    offCanvas.width = activeObj.img.naturalWidth || activeObj.img.width || 1200
+                    offCanvas.height = activeObj.img.naturalHeight || activeObj.img.height || 1600
+                    const offCtx = offCanvas.getContext('2d')
+                    offCtx.drawImage(activeObj.img, 0, 0)
+                    imageSource = offCanvas.toDataURL('image/png')
+                } catch (imgErr) {
+                    imageSource = activeObj.img.src
+                }
+            } else if (activeObj?.canvas) {
                 imageSource = activeObj.canvas
-            } else if (activeObj?.img) {
-                imageSource = activeObj.img.src
             } else if (activeObj?.doc) {
-                // Fallback: search any canvas in document
                 const anyCanvas = activeObj.doc.querySelector('canvas')
                 if (anyCanvas) imageSource = anyCanvas
             }
 
             if (!imageSource) {
-                // Check if any canvas in reader content area
                 const readerCanvas = document.querySelector('#reader-content-area canvas')
                 if (readerCanvas) imageSource = readerCanvas
             }
@@ -2246,7 +2497,9 @@ class UniversalReaderApp {
             if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = 'OCR 引擎分析识别中 (中文/英文)...'
             
             const result = await Tesseract.recognize(imageSource, 'chi_sim+eng', {
-                workerPath: './vendor/tesseract/worker.min.js'
+                workerPath: './vendor/tesseract/worker.min.js',
+                corePath: 'https://npmmirror.com/mirrors/tesseract.js-core/v4.0.4/tesseract-core.wasm.js',
+                langPath: 'https://npmmirror.com/mirrors/tessdata/4.0.0'
             })
 
             const recognizedText = (result?.data?.text || '').trim()
@@ -2263,14 +2516,67 @@ class UniversalReaderApp {
         } catch (err) {
             console.error('PDF OCR error:', err)
             if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
-            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = `识别出错: ${err.message || '未知错误'}`
+            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = `识别提示: ${err.message || '网络连接超时或语言包加载受限'}`
         }
     }
 
     closePdfOcrModal() {
         if (this.dom.modalPdfOcr) {
-            this.dom.modalPdfOcr.style.display = 'none'
+            this.dom.modalPdfOcr.classList.remove('show')
+            setTimeout(() => {
+                if (this.dom.modalPdfOcr) this.dom.modalPdfOcr.style.display = 'none'
+            }, 200)
         }
+    }
+
+    extractFootnoteFromTarget(targetEl, anchorEl = null) {
+        if (!targetEl) return ''
+
+        // Never treat chapter headings or TOC navigation containers as footnotes
+        if (targetEl.matches?.('h1, h2, h3, h4, h5, h6') || targetEl.closest?.('h1, h2, h3, h4, h5, h6, nav, .toc, #toc')) {
+            return ''
+        }
+
+        // 1. If target element is an empty anchor/span or inline tag with text <= 4, climb up to enclosing block
+        let containerEl = targetEl
+        const isInline = ['a', 'span', 'small', 'sup', 'sub', 'b', 'i', 'strong', 'em', 'img'].includes(targetEl.tagName?.toLowerCase())
+        const textLen = (targetEl.textContent || '').trim().length
+        if (isInline || textLen <= 4) {
+            const parentBlock = targetEl.closest('li, p, blockquote, dd, aside, div.footnote, div.note, [class*="note" i], [class*="fn" i], div')
+            if (parentBlock && (parentBlock.textContent || '').trim().length > 4) {
+                containerEl = parentBlock
+            } else if (targetEl.matches('dt') && targetEl.nextElementSibling?.matches('dd')) {
+                containerEl = targetEl.nextElementSibling
+            }
+        } else if (targetEl.matches('dt') && targetEl.nextElementSibling?.matches('dd')) {
+            containerEl = targetEl.nextElementSibling
+        }
+
+        // 2. Clone to safely manipulate DOM without mutating reader document
+        const clone = containerEl.cloneNode(true)
+
+        // 3. Strip backlink anchors, return arrows, and tiny nav markers
+        clone.querySelectorAll('a[href]').forEach(bl => {
+            const txt = (bl.textContent || '').trim()
+            const h = bl.getAttribute('href') || ''
+            if (txt.length <= 6 || h.includes('#') || /[\u21a9\u2190\u23ce\^↩←↑]/.test(txt)) {
+                bl.remove()
+            }
+        })
+
+        // 4. Extract text preserving multi-paragraph structure if present
+        const pEls = Array.from(clone.querySelectorAll('p, div, li, dd'))
+        let raw = ''
+        if (pEls.length > 1) {
+            raw = pEls.map(p => (p.textContent || '').trim()).filter(Boolean).join('\n\n')
+        } else {
+            raw = (clone.textContent || '').trim()
+        }
+
+        // 5. Clean leading bracketed/circled numbers (e.g. [1], 1., ㉗, 45.)
+        raw = raw.replace(/^[\[（(]?(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021])[\]）)]?\s*[.、:：\-]?\s*/, '').trim()
+
+        return raw || (containerEl.textContent || containerEl.innerText || '').trim()
     }
 
     showFootnotePopup({ title, text, rect }) {
@@ -2308,6 +2614,7 @@ class UniversalReaderApp {
     }
 
     turnPageNext() {
+        this.hideFootnotePopup()
         if (!this.foliateView) return
         if (typeof this.foliateView.goRight === 'function') {
             this.foliateView.goRight()
@@ -2317,6 +2624,7 @@ class UniversalReaderApp {
     }
 
     turnPagePrev() {
+        this.hideFootnotePopup()
         if (!this.foliateView) return
         if (typeof this.foliateView.goLeft === 'function') {
             this.foliateView.goLeft()
@@ -2330,6 +2638,10 @@ class UniversalReaderApp {
 
         // Global Escape dismissal for any active modals or drawers
         if (e.key === 'Escape') {
+            if (this.dom.footnotePopup && this.dom.footnotePopup.style.display !== 'none') {
+                this.hideFootnotePopup()
+                return
+            }
             const statsDetailModal = document.getElementById('modal-stats-detail')
             if (statsDetailModal && (statsDetailModal.classList.contains('show') || statsDetailModal.style.display !== 'none')) {
                 this.closeStatsDetailModal()
@@ -2358,7 +2670,7 @@ class UniversalReaderApp {
                 return
             }
             if (this.dom.modalBatchAddToList && this.dom.modalBatchAddToList.style.display !== 'none') {
-                this.closeBatchAddModal()
+                this.closeBatchAddToListModal()
                 return
             }
             if (this.activeDrawer) {
@@ -2381,7 +2693,7 @@ class UniversalReaderApp {
                     document.getElementById('quote-card-backdrop'),
                     document.getElementById('modal-pdf-ocr')
                 ]
-                return modalBackdrops.some(m => m && (m.classList?.contains('show') || (m.style.display !== 'none' && m.style.display !== '')))
+                return modalBackdrops.some(m => m && m.classList?.contains('show'))
             }
 
             if (isModalActive()) {
@@ -2415,6 +2727,7 @@ class UniversalReaderApp {
                 case 'H':
                 case 'k':
                 case 'K':
+                    if (e.ctrlKey || e.metaKey || e.altKey) return
                     e.preventDefault()
                     this.turnPagePrev()
                     break
@@ -2426,13 +2739,18 @@ class UniversalReaderApp {
                 case 'j':
                 case 'J':
                 case 'Enter':
+                    if (e.ctrlKey || e.metaKey || e.altKey) return
                     e.preventDefault()
                     this.turnPageNext()
                     break
                 case 'f':
                 case 'F':
                     e.preventDefault()
-                    this.toggleFullscreen()
+                    if (e.ctrlKey || e.metaKey) {
+                        this.openDrawer('search')
+                    } else {
+                        this.toggleFullscreen()
+                    }
                     break
                 case 'F3':
                     e.preventDefault()
@@ -2450,8 +2768,8 @@ class UniversalReaderApp {
                     }
                     if (this.activeDrawer) {
                         this.closeDrawer()
-                    } else if (document.fullscreenElement) {
-                        document.exitFullscreen()
+                    } else if (this.isCurrentlyFullscreen || document.fullscreenElement || document.webkitFullscreenElement) {
+                        this.toggleFullscreen()
                     }
                     this.hideSelectionPopup()
                     this.hideHighlightActionPopup()
@@ -2503,7 +2821,7 @@ class UniversalReaderApp {
 
         const bookTitle = this.currentBookData?.title || '未命名书籍'
         const author = this.currentBookData?.author || '未知作者'
-        const pageIndex = this.currentLocation?.pageNumber || ''
+        const pageIndex = this.currentLocation?.page || (this.currentLocation?.location?.current != null ? this.currentLocation.location.current + 1 : '')
 
         quoteCard.setData({
             bookTitle,
@@ -2533,6 +2851,8 @@ class UniversalReaderApp {
         // Show Modal
         if (this.dom.quoteCardBackdrop) {
             this.dom.quoteCardBackdrop.style.display = 'flex'
+            void this.dom.quoteCardBackdrop.offsetHeight
+            this.dom.quoteCardBackdrop.classList.add('show')
         }
 
         // Render Canvas Preview
@@ -2541,7 +2861,10 @@ class UniversalReaderApp {
 
     closeQuoteCardModal() {
         if (this.dom.quoteCardBackdrop) {
-            this.dom.quoteCardBackdrop.style.display = 'none'
+            this.dom.quoteCardBackdrop.classList.remove('show')
+            setTimeout(() => {
+                if (this.dom.quoteCardBackdrop) this.dom.quoteCardBackdrop.style.display = 'none'
+            }, 200)
         }
         if (this.dom.quoteCopyToast) {
             this.dom.quoteCopyToast.style.display = 'none'
@@ -2721,12 +3044,15 @@ class UniversalReaderApp {
             return match.id
         }
 
-        const stableKey = metadata.identifier || `${metadata.title || ''}_${file.size || 0}_${format}`.replace(/\s+/g, '').toLowerCase()
+        const rawIdent = metadata.identifier
+        const isEphemeral = typeof rawIdent === 'string' && /^(txt|docx|pdf)-\d{10,}$/.test(rawIdent)
+        const validIdent = isEphemeral ? null : rawIdent
+        const stableKey = validIdent || `${metadata.title || ''}_${file.size || 0}_${format}`.replace(/\s+/g, '').toLowerCase()
         const bookId = `book_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
         const bookRecord = {
             id: bookId,
             stableKey,
-            identifier: metadata.identifier || null,
+            identifier: validIdent,
             title: metadata.title,
             author: metadata.author,
             language: metadata.language || '中文',
@@ -2865,13 +3191,33 @@ class UniversalReaderApp {
 
         // 3. Sort books
         books.sort((a, b) => {
-            let valA = a[this.sortField] ?? ''
-            let valB = b[this.sortField] ?? ''
-            if (typeof valA === 'string') {
-                const res = valA.localeCompare(valB, 'zh-CN')
-                return this.sortOrder === 'asc' ? res : -res
+            let valA = a[this.sortField]
+            let valB = b[this.sortField]
+
+            if (this.sortField === 'progress') {
+                valA = a.progress?.fraction ?? 0
+                valB = b.progress?.fraction ?? 0
+            } else if (this.sortField === 'lastReadAt') {
+                valA = a.lastReadAt || a.updatedAt || a.addedAt || 0
+                valB = b.lastReadAt || b.updatedAt || b.addedAt || 0
+            } else if (this.sortField === 'addedAt') {
+                valA = a.addedAt || a.createdAt || a.updatedAt || 0
+                valB = b.addedAt || b.createdAt || b.updatedAt || 0
             }
-            return this.sortOrder === 'asc' ? (valA - valB) : (valB - valA)
+
+            const isNullA = valA == null || valA === ''
+            const isNullB = valB == null || valB === ''
+            if (isNullA && isNullB) return 0
+            if (isNullA) return 1
+            if (isNullB) return -1
+
+            let res = 0
+            if (typeof valA === 'string' || typeof valB === 'string') {
+                res = String(valA).localeCompare(String(valB), 'zh-CN')
+            } else {
+                res = (valA > valB ? 1 : (valA < valB ? -1 : 0))
+            }
+            return this.sortOrder === 'asc' ? res : -res
         })
 
         this.currentBooksList = books
@@ -2971,7 +3317,8 @@ class UniversalReaderApp {
         card.dataset.id = book.id
 
         const fraction = book.progress?.fraction || 0
-        const progressPct = (fraction * 100).toFixed(fraction > 0 && fraction < 0.1 ? 2 : (fraction % 1 === 0 ? 0 : 2))
+        const rawPct = fraction * 100
+        const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
         
         let coverUrl = ''
         const isRealImageCover = book.coverBlob && book.coverBlob.type !== 'image/svg+xml'
@@ -3076,7 +3423,8 @@ class UniversalReaderApp {
         card.dataset.id = book.id
 
         const fraction = book.progress?.fraction || 0
-        const progressPct = (fraction * 100).toFixed(fraction > 0 && fraction < 0.1 ? 2 : (fraction % 1 === 0 ? 0 : 2))
+        const rawPct = fraction * 100
+        const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
         
         let coverUrl = ''
         if (book.coverBlob) {
@@ -3177,7 +3525,7 @@ class UniversalReaderApp {
         if (books.length === 0) {
             const isFavView = this.shelfCategory === 'favorite'
             const isCustomList = this.shelfCategory.startsWith('list_')
-            let emptyMsg = isFavView ? '暂无收藏图书，点击图书 ★ 按钮即可加入收藏' : (isCustomList ? '此书单暂无图书，点击右上角「+」即可添加图书' : '暂无符合条件的图书')
+            let emptyMsg = isFavView ? '暂无收藏图书，点击图书 ★ 按钮即可加入收藏' : (isCustomList ? '此书单暂无图书，点击右上角「+」即可添加图书' : '书架空空如也，暂无图书')
             this.dom.booksTableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-tertiary);">${emptyMsg}</td></tr>`
             return
         }
@@ -3189,7 +3537,8 @@ class UniversalReaderApp {
             row.dataset.id = book.id
 
             const fraction = book.progress?.fraction || 0
-            const progressPct = (fraction * 100).toFixed(fraction > 0 && fraction < 0.1 ? 2 : (fraction % 1 === 0 ? 0 : 2))
+            const rawPct = fraction * 100
+            const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
             const sizeStr = formatFileSize(book.size)
             const dateStr = book.addedAt ? new Date(book.addedAt).toLocaleDateString('zh-CN') : '-'
 
@@ -3242,7 +3591,11 @@ class UniversalReaderApp {
 
     async handleDeleteBook(book) {
         if (!book || !book.id) return
-        if (!confirm(`确定要从书架中删除《${book.title}》吗？`)) return
+        const confirmed = await this.showConfirmDialog(
+            `删除《${book.title}》？`,
+            '确定要从书架中删除这本书吗？'
+        )
+        if (!confirmed) return
         try {
             await db.deleteBook(book.id)
             coverUrlPool.revoke(book.id)
@@ -3331,7 +3684,11 @@ class UniversalReaderApp {
     }
 
     async handleDeleteCustomList(list) {
-        if (!confirm(`确定要删除书单「${list.name}」吗？\n（书单内的图书不会被删除，仅移除该分类）`)) return
+        const confirmed = await this.showConfirmDialog(
+            `删除书单「${list.name}」？`,
+            '书单内的图书不会被删除，仅移除该分类'
+        )
+        if (!confirmed) return
         await db.deleteCustomList(list.id)
         this.showToast(`已删除书单「${list.name}」`, '🗑️')
         if (this.shelfCategory === list.id) {
@@ -3526,6 +3883,10 @@ class UniversalReaderApp {
         }
     }
 
+    closeBatchAddModal() {
+        this.closeBatchAddToListModal()
+    }
+
     async handleConfirmBatchAddList() {
         if (!this.shelfCategory.startsWith('list_')) return
         const listId = this.shelfCategory
@@ -3603,7 +3964,7 @@ class UniversalReaderApp {
         this.foliateView.addEventListener('link', async e => {
             if (this._currentBookEpoch !== currentEpoch) return
             const { a, href, href_ } = e.detail || {}
-            const targetHref = href_ || href || ''
+            const targetHref = href || href_ || ''
             
             // 1. Handle external web links safely without hijacking reader iframe
             if (targetHref.startsWith('http://') || targetHref.startsWith('https://') || targetHref.startsWith('mailto:')) {
@@ -3617,33 +3978,83 @@ class UniversalReaderApp {
             }
 
             // 2. Check for Footnote / Annotation popups
-            const isSup = a?.closest('sup')
+            const cleanText = (a?.textContent || '').trim().replace(/^[\[（(【]|[\]）)】]$/g, '')
+            const isNumericOrSymbolMark = /^[\[（(【]?\s*(?:\d{1,4}|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注)\s*[\]）)】]?$/.test(cleanText)
+            const isSup = !!(a?.closest('sup, sub, .math-super') || 
+                             a?.querySelector('sup, sub, .math-super') || 
+                             a?.classList?.contains('math-super'))
+            const isSourceInFootnote = !!a?.closest?.('.note, .footnote, [class*="footnote"], [class*="note"], aside, dd')
+            
+            // If the user clicked a return backlink inside the footnote section, allow normal jump back to story
+            if (isSourceInFootnote) {
+                return
+            }
+
+            const targetId = targetHref.includes('#') ? targetHref.split('#')[1] : null
+            const isNoteIdPattern = targetId ? /(?:filepos|fn|footnote|note|nt|ftn|ref|[mfw])\d+/i.test(targetId) : false
+
             const isNoteref = a?.getAttribute('epub:type') === 'noteref' ||
                               a?.getAttribute('role') === 'doc-noteref' ||
                               a?.classList?.contains('epub-footnote') ||
                               a?.classList?.contains('footnote-ref') ||
-                              (isSup && /(?:foot)?note|fn|ref/i.test(targetHref))
+                              a?.classList?.contains('duokan-footnote') ||
+                              a?.classList?.contains('note') ||
+                              isSup ||
+                              (targetId && isNoteIdPattern && isNumericOrSymbolMark)
 
-            if (isNoteref) {
-                const targetId = targetHref.includes('#') ? targetHref.split('#')[1] : null
+            if (isNoteref && targetId) {
                 const doc = a?.ownerDocument
-                let targetEl = targetId && doc ? doc.getElementById(targetId) : null
+                let targetEl = doc ? (doc.getElementById(targetId) || doc.querySelector(`[name="${CSS.escape(targetId)}"]`)) : null
                 
-                let footnoteText = targetEl ? (targetEl.textContent || targetEl.innerText || '').trim() : ''
+                // If target is inside <sup> in story text, this is a return backlink; do NOT show popup!
+                const isTargetBacklink = targetEl && (targetEl.closest('sup, sub, .math-super') || targetEl.tagName === 'SUP' || targetEl.querySelector('sup, sub'))
+                if (isTargetBacklink) {
+                    this.hideFootnotePopup()
+                    return
+                }
+
+                let footnoteText = this.extractFootnoteFromTarget(targetEl, a)
+
                 if (!footnoteText && a) {
                     const img = a.querySelector('img')
                     footnoteText = (img?.getAttribute('alt') || a.getAttribute('title') || '').trim()
                 }
 
-                // ONLY intercept if valid popup footnote text was actually found in the current doc!
+                // Cross-file footnote resolution for link event
+                if (!footnoteText && this.foliateView?.book) {
+                    try {
+                        const book = this.foliateView.book
+                        const resolved = book.resolveHref ? (book.resolveHref(targetHref) || (href_ ? book.resolveHref(href_) : null)) : null
+                        if (resolved && resolved.index != null) {
+                            const targetSec = book.sections[resolved.index]
+                            const secDoc = await targetSec?.createDocument?.()
+                            if (secDoc) {
+                                const extEl = secDoc.getElementById(targetId) || secDoc.querySelector(`[name="${CSS.escape(targetId)}"]`)
+                                if (extEl) {
+                                    if (extEl.closest('sup, sub, .math-super') || extEl.tagName === 'SUP') {
+                                        this.hideFootnotePopup()
+                                        return
+                                    }
+                                    footnoteText = this.extractFootnoteFromTarget(extEl, a)
+                                }
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('External footnote lookup error in link event:', err)
+                    }
+                }
+
+                // ONLY intercept if valid popup footnote text was actually found!
                 if (footnoteText) {
                     e.preventDefault()
                     const rect = a.getBoundingClientRect()
                     const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
                     const iframeRect = (iframe || this.foliateView).getBoundingClientRect()
+                    const anchorLabel = (a.textContent || '').trim().replace(/^[\[（(]|[\]）)]$/g, '')
+                    const popupTitle = anchorLabel && anchorLabel.length <= 6 ? `💡 译注与说明 [${anchorLabel}]` : '💡 译注与说明'
                     
                     this.showFootnotePopup({
-                        title: '💡 译注与说明',
+                        title: popupTitle,
                         text: footnoteText,
                         rect: {
                             top: rect.top + iframeRect.top,
@@ -3663,16 +4074,17 @@ class UniversalReaderApp {
             if (this._currentBookEpoch !== currentEpoch) return
             const { draw, annotation } = e.detail
             const { color = '#facc15', style = 'highlight' } = annotation
+            const writingMode = this.settings.writingMode || 'horizontal'
             if (style === 'underline') {
-                draw(Overlayer.underline, { color, width: 2.6 })
+                draw(Overlayer.underline, { color, width: 2.6, writingMode })
             } else if (style === 'dashed') {
-                draw(Overlayer.dashed, { color: color === '#facc15' ? '#64748b' : color, width: 2 })
+                draw(Overlayer.dashed, { color: color === '#facc15' ? '#64748b' : color, width: 2, writingMode })
             } else if (style === 'squiggly') {
-                draw(Overlayer.squiggly, { color, width: 2.2 })
+                draw(Overlayer.squiggly, { color, width: 2.2, writingMode })
             } else if (style === 'strikethrough') {
-                draw(Overlayer.strikethrough, { color, width: 2.5 })
+                draw(Overlayer.strikethrough, { color, width: 2.5, writingMode })
             } else {
-                draw(Overlayer.highlight, { color, realisticPen: this.settings.realisticPen !== false })
+                draw(Overlayer.highlight, { color, realisticPen: this.settings.realisticPen !== false, writingMode })
             }
         })
 
@@ -3710,14 +4122,20 @@ class UniversalReaderApp {
                 this.showToast('无法读取书籍文件数据', '⚠️')
                 return this.closeReader()
             }
-            await this.foliateView.open(targetBlob)
+            const safeFormat = (bookData.format || 'pdf').toLowerCase()
+            const safeFileName = bookData.filename || `${bookData.title || 'document'}.${safeFormat}`
+            const safeFileType = safeFormat === 'pdf' || safeFileName.endsWith('.pdf') ? 'application/pdf' : (targetBlob.type || '')
+            const fileObj = (targetBlob instanceof File && targetBlob.name)
+                ? targetBlob
+                : new File([targetBlob], safeFileName, { type: safeFileType })
+            await this.foliateView.open(fileObj)
             if (this._currentBookEpoch !== currentEpoch) return
             
             // Set initial styles & flow
             this.applySettingsToReader()
 
             // Restore location
-            const lastLoc = bookData.progress?.cfi || bookData.progress?.fraction || 0
+            const lastLoc = bookData.progress?.cfi || (bookData.progress?.fraction != null ? { fraction: bookData.progress.fraction } : 0)
             await this.foliateView.init({ lastLocation: lastLoc })
             if (this._currentBookEpoch !== currentEpoch) return
 
@@ -3762,6 +4180,28 @@ class UniversalReaderApp {
         }
     }
 
+    // Flush pending progress + session time on direct window close (no UI teardown)
+    async flushReaderStateOnExit() {
+        try {
+            if (this._progressDebounceTimer) {
+                clearTimeout(this._progressDebounceTimer)
+                this._progressDebounceTimer = null
+            }
+            if (this.currentBookId && this.currentLocation) {
+                await db.updateBookProgress(this.currentBookId, {
+                    fraction: this.currentLocation.fraction || 0,
+                    cfi: this.currentLocation.cfi,
+                    tocItem: this.currentLocation.tocItem ? { label: this.currentLocation.tocItem.label, href: this.currentLocation.tocItem.href } : null
+                })
+            }
+            await tracker.endSession(this.currentLocation?.fraction ?? null)
+        } catch (err) {
+            console.warn('flushReaderStateOnExit:', err)
+        } finally {
+            window.electronAPI?.flushComplete?.()
+        }
+    }
+
     async closeReader() {
         // Immediately flush any pending progress debounce save before closing
         if (this._progressDebounceTimer) {
@@ -3800,11 +4240,16 @@ class UniversalReaderApp {
         this.closeDrawer()
         this.hideSelectionPopup()
         this.hideHighlightActionPopup()
+        this.toggleReaderUI(true)
         this.dom.readerView.classList.remove('active')
         this.dom.bookshelfView.style.display = 'flex'
         this.currentBookId = null
         this.currentBookData = null
         this.currentLocation = null
+        // Reset PDF drawing state so the pen tool never leaks into the next book
+        this.pdfDrawTool = null
+        this.pdfOverlayCanvas = null
+        this.currentPdfPageIndex = 0
         this.refreshBookshelf()
 
         if (this.syncConfig?.enabled && this.syncConfig?.autoSyncOnBookClose) {
@@ -3814,6 +4259,7 @@ class UniversalReaderApp {
 
     onReaderRelocate(detail) {
         if (!this.currentBookId) return
+        this.hideFootnotePopup()
         const activeBookId = this.currentBookId
         const activeEpoch = this._currentBookEpoch
 
@@ -3857,7 +4303,7 @@ class UniversalReaderApp {
         // PDF Page Index Tracking and Overlay Mount
         const isPdfMode = this.foliateView?.isFixedLayout || this.currentBookData?.format === 'pdf'
         if (isPdfMode) {
-            this.currentPdfPageIndex = detail.page || (detail.location?.current != null ? detail.location.current + 1 : 1)
+            this.currentPdfPageIndex = (detail.index != null) ? detail.index : (detail.page != null ? detail.page - 1 : 0)
             setTimeout(() => {
                 if (this.currentBookId === activeBookId && this._currentBookEpoch === activeEpoch) {
                     this.renderPdfDrawingOverlayForCurrentPage()
@@ -3915,6 +4361,28 @@ class UniversalReaderApp {
         const win = doc.defaultView || window
 
         try {
+            // Fix distorted/squashed Calibre SVG covers (preserveAspectRatio="none")
+            doc.querySelectorAll('svg').forEach(svg => {
+                const par = svg.getAttribute('preserveAspectRatio')
+                if (par === 'none' || (!par && svg.querySelector('image'))) {
+                    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet')
+                }
+                svg.style.maxWidth = '100%'
+                svg.style.maxHeight = '100%'
+            })
+
+            // Prevent empty first page: Neutralize page-break-before on first visible elements
+            const firstChild = doc.body.firstElementChild
+            if (firstChild) {
+                firstChild.style.setProperty('page-break-before', 'avoid', 'important')
+                firstChild.style.setProperty('break-before', 'avoid', 'important')
+                const grandChild = firstChild.firstElementChild
+                if (grandChild) {
+                    grandChild.style.setProperty('page-break-before', 'avoid', 'important')
+                    grandChild.style.setProperty('break-before', 'avoid', 'important')
+                }
+            }
+
             // 1. Safe Non-Destructive Hiding of Calibre Dummy Page Breaks & Ghost Elements
             // (Preserve element IDs for TOC / CFI / Footnote jumping, but eliminate all visual footprint)
             const calibrePbs = doc.querySelectorAll('[id*="calibre_pb" i], [class*="calibre_pb" i], .calibre_pb')
@@ -4036,6 +4504,19 @@ class UniversalReaderApp {
                     return
                 }
 
+                // Mark dropcaps to prevent awkward double indent
+                if (el.querySelector('.dropcap, [class*="dropcap" i], [class*="first-letter" i]')) {
+                    el.dataset.hasDropcap = 'true'
+                }
+
+                // Normalize hardcoded full-width leading spaces (\u3000\u3000) so text-indent: 2em standardizes layout
+                if (el.tagName?.toLowerCase() === 'p' && el.firstChild && el.firstChild.nodeType === 3) {
+                    const val = el.firstChild.nodeValue
+                    if (val && /^[\u3000\u00a0\s]{1,4}/.test(val)) {
+                        el.firstChild.nodeValue = val.replace(/^[\u3000\u00a0\s]{1,4}/, '')
+                    }
+                }
+
                 const rawText = (el.textContent || '').replace(/[\s\u00a0\u3000\ufeff\u200b\u200c\u200d]/g, '')
                 if (!rawText && !el.dataset.readerHidden) {
                     el.dataset.emptyLine = 'true'
@@ -4124,16 +4605,16 @@ class UniversalReaderApp {
 
         const iframeKeyHandler = e => {
             if (e.key === 'Control' || e.key === 'Meta') isCtrlActive = true
-            if (['ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'h', 'H', 'l', 'L', 'j', 'J', 'k', 'K', ' ', 'Enter'].includes(e.key)) {
+            if (!e.ctrlKey && !e.metaKey && !e.altKey && ['ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'h', 'H', 'l', 'L', 'j', 'J', 'k', 'K', ' ', 'Enter'].includes(e.key)) {
                 e.preventDefault()
                 e.stopPropagation()
             }
             this.handleGlobalKeydown(e)
         }
+        // Register on the iframe document only. Adding the same handler to
+        // doc.defaultView as well made every keydown fire twice (capture order
+        // Window -> Document), double-toggling fullscreen and skipping search matches.
         doc.addEventListener('keydown', iframeKeyHandler, true)
-        if (doc.defaultView) {
-            doc.defaultView.addEventListener('keydown', iframeKeyHandler, true)
-        }
         doc.addEventListener('keyup', e => {
             if (e.key === 'Control' || e.key === 'Meta') isCtrlActive = false
         })
@@ -4261,44 +4742,71 @@ class UniversalReaderApp {
             const a = e.target.closest('a[href]') || e.target.closest('a')
             if (a) {
                 const href = a.getAttribute('href') || ''
+                const cleanText = (a.textContent || '').trim().replace(/^[\[（(【]|[\]）)】]$/g, '')
+                const isNumericOrSymbolMark = /^[\[（(【]?\s*(?:\d{1,4}|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注)\s*[\]）)】]?$/.test(cleanText)
+                const isSup = !!(a.closest('sup, sub, .math-super') || 
+                                 a.querySelector('sup, sub, .math-super') || 
+                                 a.classList.contains('math-super'))
+                const isSourceInFootnote = !!a.closest?.('.note, .footnote, [class*="footnote"], [class*="note"], aside, dd')
+                
+                // If the user clicked a return backlink inside the footnote section, allow normal jump back to story
+                if (isSourceInFootnote) {
+                    return
+                }
+
+                const targetId = href.includes('#') ? href.split('#')[1] : null
+                const isNoteIdPattern = targetId ? /(?:filepos|fn|footnote|note|nt|ftn|ref|[mfw])\d+/i.test(targetId) : false
+
                 const isNoteref = a.getAttribute('epub:type') === 'noteref' || 
                                   a.getAttribute('role') === 'doc-noteref' || 
-                                  href.startsWith('#footnote') || 
-                                  href.startsWith('#note') ||
-                                  href.includes('footnote') ||
-                                  href.includes('note') ||
                                   a.classList.contains('epub-footnote') ||
+                                  a.classList.contains('footnote-ref') ||
                                   a.querySelector('img.epub-footnote') ||
-                                  a.querySelector('img')
+                                  a.classList.contains('note') ||
+                                  isSup ||
+                                  (targetId && isNoteIdPattern && isNumericOrSymbolMark)
 
-                if (isNoteref || (href.startsWith('#') && href.length > 1 && !href.includes('chapter') && !href.includes('cover'))) {
-                    const targetId = href.startsWith('#') ? href.slice(1) : href.split('#')[1]
-                    let targetEl = targetId ? doc.getElementById(targetId) : null
+                if (isNoteref && targetId) {
+                    let targetEl = doc.getElementById(targetId) || doc.querySelector(`[name="${CSS.escape(targetId)}"]`)
                     
-                    // NOTE: display:none elements return empty string on innerText, MUST use textContent!
-                    let footnoteText = targetEl ? (targetEl.textContent || targetEl.innerText || '').trim() : ''
+                    // If target is inside <sup> in story text, this is a backlink returning to main text; do NOT show popup!
+                    const isTargetBacklink = targetEl && (targetEl.closest('sup, sub, .math-super') || targetEl.tagName === 'SUP' || targetEl.querySelector('sup, sub'))
+                    if (isTargetBacklink) {
+                        this.hideFootnotePopup()
+                        return
+                    }
+
+                    let footnoteText = this.extractFootnoteFromTarget(targetEl, a)
                     
                     // Fallback to img alt or title or text
-                    if (!footnoteText) {
+                    if (!footnoteText && a) {
                         const img = a.querySelector('img')
                         footnoteText = (img?.getAttribute('alt') || a.getAttribute('title') || '').trim()
                     }
 
                     // If still empty and link points to another file in book, resolve external section
-                    if (!footnoteText && targetId && this.foliateView?.book?.resolveHref) {
+                    if (!footnoteText && this.foliateView?.book) {
                         try {
-                            const resolved = this.foliateView.book.resolveHref(href)
+                            const book = this.foliateView.book
+                            const section = book.sections[index]
+                            const fullHref = section?.resolveHref?.(href) ?? href
+                            const resolved = book.resolveHref ? (book.resolveHref(fullHref) || book.resolveHref(href)) : null
                             if (resolved && resolved.index != null && resolved.index !== index) {
-                                const targetSec = this.foliateView.book.sections[resolved.index]
-                                const loaded = await targetSec?.load?.()
-                                const secDoc = typeof loaded === 'string' ? new DOMParser().parseFromString(loaded, 'text/html') : (loaded?.doc || loaded)
-                                if (secDoc && typeof secDoc.getElementById === 'function') {
-                                    const extEl = secDoc.getElementById(targetId)
-                                    if (extEl) footnoteText = (extEl.textContent || extEl.innerText || '').trim()
+                                const targetSec = book.sections[resolved.index]
+                                const secDoc = await targetSec?.createDocument?.()
+                                if (secDoc) {
+                                    const extEl = secDoc.getElementById(targetId) || secDoc.querySelector(`[name="${CSS.escape(targetId)}"]`)
+                                    if (extEl) {
+                                        if (extEl.closest('sup, sub, .math-super') || extEl.tagName === 'SUP') {
+                                            this.hideFootnotePopup()
+                                            return
+                                        }
+                                        footnoteText = this.extractFootnoteFromTarget(extEl, a)
+                                    }
                                 }
                             }
                         } catch (err) {
-                            console.warn('External footnote lookup error:', err)
+                            console.warn('External footnote lookup error in doc click:', err)
                         }
                     }
                     
@@ -4308,17 +4816,22 @@ class UniversalReaderApp {
                         e.stopImmediatePropagation()
                         
                         const rect = a.getBoundingClientRect()
-                        const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
+                        const doc = a.ownerDocument
+                        const iframe = doc?.defaultView?.frameElement || this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView
                         const iframeRect = (iframe || this.foliateView).getBoundingClientRect()
+                        const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
+                        const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
+                        const anchorLabel = (a.textContent || '').trim().replace(/^[\[（(]|[\]）)]$/g, '')
+                        const popupTitle = anchorLabel && anchorLabel.length <= 6 ? `💡 译注与说明 [${anchorLabel}]` : '💡 译注与说明'
                         
                         this.showFootnotePopup({
-                            title: '💡 译注与说明',
+                            title: popupTitle,
                             text: footnoteText,
                             rect: {
-                                top: rect.top + iframeRect.top,
-                                left: rect.left + iframeRect.left,
-                                width: rect.width,
-                                height: rect.height
+                                top: iframeRect.top + ((rect.top || 0) * scaleY),
+                                left: iframeRect.left + ((rect.left || 0) * scaleX),
+                                width: (rect.width || 40) * scaleX,
+                                height: (rect.height || 20) * scaleY
                             }
                         })
                         return
@@ -4328,6 +4841,38 @@ class UniversalReaderApp {
                 // If 'a' has a real external or cross-chapter link (not dummy #, not javascript:, not pure name anchor), let Foliate handle navigation
                 if (href && href !== '#' && !href.startsWith('javascript:')) {
                     return
+                }
+            }
+
+            // Reverse footnote lookup: when user clicks an in-text mark with id (e.g. <img id="filepos70497"> in Kindle books)
+            if (!a && e.target) {
+                const targetMark = e.target.closest('[id*="filepos"], [id^="fn"], [id^="note"]') || (e.target.id && /(?:filepos|fn|note)\d+/i.test(e.target.id) ? e.target : null)
+                if (targetMark && targetMark.id) {
+                    const noteAnchor = doc.querySelector(`a[href="#${targetMark.id}"]`)
+                    if (noteAnchor) {
+                        const footnoteText = this.extractFootnoteFromTarget(noteAnchor.closest('li, p, blockquote, dd') || noteAnchor, noteAnchor)
+                        if (footnoteText) {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            e.stopImmediatePropagation()
+                            const rect = targetMark.getBoundingClientRect()
+                            const iframe = doc?.defaultView?.frameElement || this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView
+                            const iframeRect = (iframe || this.foliateView).getBoundingClientRect()
+                            const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
+                            const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
+                            this.showFootnotePopup({
+                                title: '💡 译注与说明',
+                                text: footnoteText,
+                                rect: {
+                                    top: iframeRect.top + ((rect.top || 0) * scaleY),
+                                    left: iframeRect.left + ((rect.left || 0) * scaleX),
+                                    width: (rect.width || 20) * scaleX,
+                                    height: (rect.height || 20) * scaleY
+                                }
+                            })
+                            return
+                        }
+                    }
                 }
             }
 
@@ -4349,6 +4894,15 @@ class UniversalReaderApp {
         // Mouse wheel / trackpad scrolling handler
         let wheelCooldown = false
         doc.addEventListener('wheel', e => {
+            if (e.ctrlKey || e.metaKey) {
+                if (this.foliateView?.isFixedLayout || this.currentBookData?.format === 'pdf') {
+                    e.preventDefault()
+                    this.stepPDFZoom(e.deltaY < 0 ? 10 : -10)
+                    return
+                }
+                return
+            }
+
             if (this.settings.layout === 'scrolled') return
             // In PDF / Fixed-layout mode, wheel / trackpad must scroll the container for free panning!
             if (this.foliateView?.isFixedLayout || this.currentBookData?.format === 'pdf') {
@@ -4362,6 +4916,7 @@ class UniversalReaderApp {
             // In paginated EPUB mode, wheel flips pages
             if (wheelCooldown) return
             if (Math.abs(e.deltaY) > 25 || Math.abs(e.deltaX) > 25) {
+                e.preventDefault()
                 wheelCooldown = true
                 if (e.deltaY > 0 || e.deltaX > 0) {
                     this.turnPageNext()
@@ -4372,7 +4927,7 @@ class UniversalReaderApp {
                     if (this.foliateView) wheelCooldown = false
                 }, 250)
             }
-        }, { passive: true })
+        }, { passive: false })
 
         // Multi-event listeners for robust text selection with debounce
         let selectionDebounceTimer = null
@@ -4476,13 +5031,16 @@ class UniversalReaderApp {
         if (!range) return
         try {
             const rect = range.getBoundingClientRect()
-            const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
+            const doc = range.startContainer?.ownerDocument
+            const iframe = doc?.defaultView?.frameElement || this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView
             const iframeRect = (iframe || this.foliateView).getBoundingClientRect()
+            const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
+            const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
             const absRect = {
-                top: rect.top + iframeRect.top,
-                left: rect.left + iframeRect.left,
-                width: rect.width,
-                height: rect.height
+                top: iframeRect.top + ((rect.top || 0) * scaleY),
+                left: iframeRect.left + ((rect.left || 0) * scaleX),
+                width: (rect.width || 80) * scaleX,
+                height: (rect.height || 24) * scaleY
             }
             this.clickedHighlightInfo = { value, range, rect: absRect }
             this.showHighlightActionPopup(absRect)
@@ -4669,17 +5227,57 @@ class UniversalReaderApp {
         if (!this.currentBookId || !value) return null
         const rawCFI = value.includes('::') ? value.split('::')[0] : value
         const notes = await db.getHighlightsByBook(this.currentBookId)
-        return notes.find(n => n.id === value || n.cfi === rawCFI || n.cfi === value || `${n.cfi}::${n.style}` === value)
+        // 1. Exact ID or exact CFI+style match
+        const exactMatch = notes.find(n => n.id === value || `${n.cfi}::${n.style}` === value || n.cfi === value)
+        if (exactMatch) return exactMatch
+        // 2. Fallback to raw CFI
+        return notes.find(n => n.cfi === rawCFI) || null
     }
 
     // ==========================================
     // Drawer Management (TOC, Notes, Search, Settings)
     // ==========================================
     openDrawer(tab) {
+        if (tab === 'settings') this.updateSettingsPanelAvailability()
         this.dom.sidebarDrawer.classList.add('open')
         this.dom.drawerBackdrop.classList.add('active')
         this.activeDrawer = true
         this.switchTab(tab)
+    }
+
+    // Fixed-layout books (PDF / comic) ignore typography & theme settings, so grey
+    // those controls out instead of silently doing nothing
+    updateSettingsPanelAvailability() {
+        const panel = this.dom.tabPanels?.settings
+        if (!panel) return
+        const fixed = !!(this.foliateView && this.foliateView.isFixedLayout)
+
+        panel.querySelectorAll('[data-ll-fixed-note]').forEach(el => el.remove())
+        panel.querySelectorAll('.ll-fixed-disabled').forEach(el => el.classList.remove('ll-fixed-disabled'))
+        panel.querySelectorAll('input, select, button').forEach(el => { el.disabled = false })
+
+        if (!fixed) return
+
+        const ineffectiveSelectors = [
+            '.theme-grid',
+            '.font-select-grid',
+            '#setting-font-size', '#setting-font-weight', '#setting-line-height',
+            '#setting-margin', '#setting-max-width', '#setting-gap', '#setting-letter-spacing',
+            '#setting-chinese-quotes', '#setting-writing-mode', '#setting-layout-mode'
+        ]
+        ineffectiveSelectors.forEach(sel => {
+            panel.querySelectorAll(sel).forEach(el => {
+                const row = el.closest('.control-row') || el.closest('.setting-section')
+                if (row) row.classList.add('ll-fixed-disabled')
+                if ('disabled' in el) el.disabled = true
+            })
+        })
+
+        const note = document.createElement('div')
+        note.setAttribute('data-ll-fixed-note', '')
+        note.style.cssText = 'margin: 0 0 0.75rem; padding: 0.55rem 0.75rem; border-radius: 8px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); color: #b45309; font-size: 0.78rem; line-height: 1.5;'
+        note.innerText = '当前是 PDF / 固定版式图书：主题、字体与排版设置不适用（已置灰）。单双页、手绘笔痕等选项仍然有效。'
+        panel.insertBefore(note, panel.firstChild)
     }
 
     closeDrawer() {
@@ -4708,6 +5306,9 @@ class UniversalReaderApp {
         }
 
         if (tabName === 'notes') this.loadNotesList()
+        if (tabName === 'toc' && this.currentLocation?.tocItem?.href) {
+            setTimeout(() => this.highlightActiveTOCItem(this.currentLocation.tocItem.href), 50)
+        }
     }
 
     renderTOC(toc) {
@@ -4738,7 +5339,8 @@ class UniversalReaderApp {
                 li.className = 'toc-item'
                 li.dataset.href = item.href
                 li.innerText = label
-                li.addEventListener('click', () => {
+                li.addEventListener('click', e => {
+                    e.stopPropagation()
                     this.foliateView?.goTo(item.href)
                     this.closeDrawer()
                 })
@@ -4757,10 +5359,19 @@ class UniversalReaderApp {
     }
 
     highlightActiveTOCItem(href) {
-        if (!href) return
+        if (!href || !this.dom.tocContainer) return
+        const hrefBase = href.split('#')[0]
+        let found = null
         this.dom.tocContainer.querySelectorAll('.toc-item').forEach(el => {
-            el.classList.toggle('active', el.dataset.href === href)
+            const elHref = el.dataset.href || ''
+            const elBase = elHref.split('#')[0]
+            const isActive = elHref === href || (hrefBase && elBase === hrefBase)
+            el.classList.toggle('active', isActive)
+            if (isActive && !found) found = el
         })
+        if (found) {
+            found.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+        }
     }
 
     async loadNotesList() {
@@ -4838,7 +5449,8 @@ class UniversalReaderApp {
         notes.forEach((n, idx) => {
             const chap = n.chapterTitle && n.chapterTitle !== 'undefined' ? n.chapterTitle : '划线片段'
             md += `### ${idx + 1}. ${chap}\n\n`
-            md += `> ${n.text}\n\n`
+            const quoteText = (n.text || '').split('\n').map(l => `> ${l}`).join('\n')
+            md += `${quoteText}\n\n`
             if (n.note) md += `**批注**：${n.note}\n\n`
             md += `*时间：${new Date(n.createdAt).toLocaleString()}*\n\n`
         })
@@ -4847,7 +5459,8 @@ class UniversalReaderApp {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `${this.currentBookData.title || '电子书'}_读书笔记.md`
+        const safeTitle = (this.currentBookData.title || '电子书').replace(/[\\/:*?"<>|]/g, '_').trim()
+        a.download = `${safeTitle}_读书笔记.md`
         a.click()
         setTimeout(() => URL.revokeObjectURL(url), 60000)
     }
@@ -4869,6 +5482,7 @@ class UniversalReaderApp {
         try {
             const matches = []
             let totalCount = 0
+            let truncated = false
 
             const iter = this.foliateView.search({ query })
             for await (const result of iter) {
@@ -4880,7 +5494,10 @@ class UniversalReaderApp {
                         items: result.subitems
                     })
                     totalCount += result.subitems.length
-                    if (totalCount >= 100) break
+                    if (totalCount >= 100) {
+                        truncated = true
+                        break
+                    }
                 }
             }
 
@@ -4897,7 +5514,9 @@ class UniversalReaderApp {
             summaryEl.style.marginBottom = '0.75rem'
             summaryEl.style.paddingBottom = '0.4rem'
             summaryEl.style.borderBottom = '1px solid var(--border-subtle)'
-            summaryEl.innerText = `共检索到 ${totalCount} 处匹配结果：`
+            summaryEl.innerText = truncated
+                ? `匹配结果过多，仅显示前 ${totalCount} 处：`
+                : `共检索到 ${totalCount} 处匹配结果：`
             container.appendChild(summaryEl)
 
             const flatMatches = []
@@ -4985,71 +5604,6 @@ class UniversalReaderApp {
     // Safe no-op deduplication helper (never cascade delete user books)
     async deduplicateBooks() {
         return 0
-    }
-
-    async loadSampleBooks() {
-        if (this.dom.btnLoadSamples) this.dom.btnLoadSamples.disabled = true
-
-        try {
-            const existingBooks = await db.getAllBooks()
-            const existingTitles = new Set(existingBooks.map(b => b.title?.trim()))
-
-            const samples = [
-                {
-                    name: '现代化电子书阅读器设计白皮书.docx',
-                    url: './samples/sample_whitepaper.docx'
-                },
-                {
-                    name: '三国演义（精选前三回）.txt',
-                    url: './samples/sample_sanguo.txt'
-                },
-                {
-                    name: 'Alice_in_Wonderland.epub',
-                    url: './samples/sample_alice.epub'
-                },
-                {
-                    name: 'Universal_Reader_PDF_Test.pdf',
-                    url: './samples/sample_doc.pdf'
-                },
-                {
-                    name: 'Comic_Adventure.cbz',
-                    url: './samples/sample_comic.cbz'
-                },
-                {
-                    name: 'Universal_Reader_Guide.txt',
-                    url: './samples/sample_guide.txt'
-                }
-            ]
-
-            let addedCount = 0
-            for (const sample of samples) {
-                const baseTitle = sample.name.replace(/\.[^/.]+$/, '').trim()
-                if (existingTitles.has(baseTitle)) {
-                    continue // Skip books that are already in bookshelf!
-                }
-                const res = await fetch(sample.url)
-                if (res.ok) {
-                    const blob = await res.blob()
-                    const file = new File([blob], sample.name)
-                    await this.processAndSaveBook(file)
-                    addedCount++
-                }
-            }
-
-            if (addedCount === 0) {
-                this.showToast('ℹ️ 预置样例图书均已在书架中')
-            } else {
-                this.showToast(`📚 成功载入 ${addedCount} 本预置演示图书`)
-            }
-
-            await this.renderCustomListsSidebar()
-            await this.refreshBookshelf()
-        } catch (e) {
-            console.error('Failed to load sample books:', e)
-            this.showToast('⚠️ 加载样例图书失败: ' + e.message)
-        } finally {
-            if (this.dom.btnLoadSamples) this.dom.btnLoadSamples.disabled = false
-        }
     }
 
     // ==========================================
@@ -5288,7 +5842,8 @@ class UniversalReaderApp {
             }
 
             const fraction = book.progress?.fraction || 0
-            const progressPct = (fraction * 100).toFixed(fraction > 0 && fraction < 0.1 ? 2 : (fraction % 1 === 0 ? 0 : 2))
+            const rawPct = fraction * 100
+            const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
             const timeStr = tracker.formatDuration(book.totalReadingSeconds || 0)
 
             item.innerHTML = `
@@ -5379,10 +5934,11 @@ class UniversalReaderApp {
 
                     const progressPct = b.progress?.fraction ? Math.round(b.progress.fraction * 100) : 0
                     const durStr = tracker.formatDuration(b.periodReadingSeconds || b.totalReadingSeconds || 0)
+                    const coverUrl = b.coverBlob ? coverUrlPool.get(b.id, b.coverBlob) : null
 
                     row.innerHTML = `
                         <div style="width: 44px; height: 60px; border-radius: 4px; overflow: hidden; background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                            ${b.coverUrl ? `<img src="${b.coverUrl}" style="width: 100%; height: 100%; object-fit: cover;" />` : `<span style="font-size: 1.25rem;">📖</span>`}
+                            ${coverUrl ? `<img src="${coverUrl}" style="width: 100%; height: 100%; object-fit: cover;" />` : `<span style="font-size: 1.25rem;">📖</span>`}
                         </div>
                         <div style="flex: 1; min-width: 0;">
                             <div style="font-size: 0.92rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(b.title)}</div>
@@ -5415,10 +5971,11 @@ class UniversalReaderApp {
                     row.style.cssText = 'display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); cursor: pointer;'
 
                     const durStr = tracker.formatDuration(b.periodReadingSeconds || b.totalReadingSeconds || 0)
+                    const coverUrl = b.coverBlob ? coverUrlPool.get(b.id, b.coverBlob) : null
 
                     row.innerHTML = `
                         <div style="width: 44px; height: 60px; border-radius: 4px; overflow: hidden; background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                            ${b.coverUrl ? `<img src="${b.coverUrl}" style="width: 100%; height: 100%; object-fit: cover;" />` : `<span style="font-size: 1.25rem;">🏆</span>`}
+                            ${coverUrl ? `<img src="${coverUrl}" style="width: 100%; height: 100%; object-fit: cover;" />` : `<span style="font-size: 1.25rem;">🏆</span>`}
                         </div>
                         <div style="flex: 1; min-width: 0;">
                             <div style="font-size: 0.92rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(b.title)}</div>
@@ -5481,7 +6038,9 @@ class UniversalReaderApp {
             const highlights = await db.getHighlightsByBook(this.currentBookId)
             const contents = this.foliateView.renderer?.getContents?.() || []
             for (const content of contents) {
-                if (content.overlayer?.element) {
+                if (content.overlayer?.clear) {
+                    content.overlayer.clear()
+                } else if (content.overlayer?.element) {
                     while (content.overlayer.element.firstChild) {
                         content.overlayer.element.removeChild(content.overlayer.element.firstChild)
                     }
@@ -5839,14 +6398,21 @@ class UniversalReaderApp {
 
     async triggerSilentBackgroundSync() {
         if (!this.syncConfig?.enabled || !this.syncConfig?.username || (!this.syncConfig?.password && !this.syncConfig?.hasPassword)) return
+        const now = Date.now()
+        if (this._lastSilentSyncAttempt && (now - this._lastSilentSyncAttempt < 10000)) {
+            return // Cooldown 10s
+        }
+        this._lastSilentSyncAttempt = now
         try {
-            console.log('[CloudSync] Starting silent background sync...')
-            const res = await syncEngine.executeSyncLifecycle(this.syncConfig)
+            console.log('[CloudSync] Starting silent background sync with 12s timeout...')
+            const syncPromise = syncEngine.executeSyncLifecycle(this.syncConfig)
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Silent background sync timeout (12s)')), 12000))
+            const res = await Promise.race([syncPromise, timeoutPromise])
             this.syncConfig.lastSyncTime = Date.now()
             this.syncConfig.lastSyncStatus = 'success'
             await this.saveSyncConfig()
             this.renderSyncUI()
-            console.log('[CloudSync] Silent background sync completed successfully:', res.stats)
+            console.log('[CloudSync] Silent background sync completed successfully:', res?.stats)
         } catch (e) {
             console.warn('[CloudSync] Silent background sync error (ignored):', e.message)
         }
@@ -5884,6 +6450,9 @@ class UniversalReaderApp {
 
     async initUpdateService() {
         await updater.init()
+        if (this.dom.brandVersionDisplay) {
+            this.dom.brandVersionDisplay.innerText = `v${updater.currentVersion}`
+        }
         if (this.dom.appVersionBadgeSidebar) {
             this.dom.appVersionBadgeSidebar.innerText = `v${updater.currentVersion}`
         }

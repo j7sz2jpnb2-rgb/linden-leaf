@@ -388,12 +388,13 @@ export const makePDF = async file => {
         book.toc = []
     }
 
-    // High-performance LRU Cache for PDF Pages (capacity 8) to prevent memory leaks and GC pauses
-    const MAX_PAGE_CACHE = 8
-    const MAX_DOC_CACHE = 15
+    // High-performance LRU Cache for PDF Pages (capacity 24) with Active Viewport Lock
+    const MAX_PAGE_CACHE = 24
+    const MAX_DOC_CACHE = 30
     const pageCache = new Map() // index -> { src, imgUrl, getCurrentImgUrl, onZoom, timestamp }
     const inFlightRequests = new Map() // index -> Promise
     const docCache = new Map()
+    let activePageIndex = 0
 
     const revokePageUrls = (item) => {
         if (!item) return
@@ -411,19 +412,34 @@ export const makePDF = async file => {
 
     const evictOldestIfNeeded = (excludeIndex = -1) => {
         if (pageCache.size <= MAX_PAGE_CACHE) return
+        // Active Viewport Lock: Never evict pages within [activePageIndex - 2, activePageIndex + 2]
+        const lockedMin = Math.max(0, activePageIndex - 2)
+        const lockedMax = activePageIndex + 2
+
         let oldestIndex = -1
         let oldestTime = Infinity
         for (const [idx, item] of pageCache.entries()) {
             if (idx === excludeIndex) continue
+            if (idx >= lockedMin && idx <= lockedMax) continue // Protected from eviction
             if (item.timestamp < oldestTime) {
                 oldestTime = item.timestamp
                 oldestIndex = idx
             }
         }
+        if (oldestIndex === -1) {
+            for (const [idx, item] of pageCache.entries()) {
+                if (idx === excludeIndex || idx === activePageIndex) continue
+                if (item.timestamp < oldestTime) {
+                    oldestTime = item.timestamp
+                    oldestIndex = idx
+                }
+            }
+        }
         if (oldestIndex !== -1) {
             const item = pageCache.get(oldestIndex)
             pageCache.delete(oldestIndex)
-            revokePageUrls(item)
+            // Graceful delayed revocation: allow 20 seconds for pending browser paints
+            setTimeout(() => revokePageUrls(item), 20000)
         }
     }
 
@@ -437,6 +453,7 @@ export const makePDF = async file => {
     }
 
     const loadPage = async (i) => {
+        activePageIndex = i
         const existing = pageCache.get(i)
         if (existing) {
             existing.timestamp = Date.now()
@@ -465,6 +482,7 @@ export const makePDF = async file => {
 
     // Predictive pre-rendering in background
     const schedulePreRender = (currentIndex) => {
+        activePageIndex = currentIndex
         const prefetchIndices = [currentIndex + 1, currentIndex + 2, currentIndex - 1].filter(
             idx => idx >= 0 && idx < pdf.numPages
         )
@@ -535,7 +553,27 @@ export const makePDF = async file => {
         }
     }
     book.getTOCFragment = doc => doc.documentElement
-    book.getCover = async () => renderPage(await pdf.getPage(1), true)
+    book.getCover = async () => {
+        try {
+            const p1 = await pdf.getPage(1)
+            const blob1 = await renderPage(p1, true)
+            // If page 1 is small (< 15KB for WebP, typically a blank white lining paper/flyleaf),
+            // and PDF has multiple pages, check page 2 for the true graphical book cover
+            if (pdf.numPages > 1 && blob1 && blob1.size < 15000) {
+                try {
+                    const p2 = await pdf.getPage(2)
+                    const blob2 = await renderPage(p2, true)
+                    if (blob2 && blob2.size > blob1.size) return blob2
+                } catch (err2) {
+                    console.warn('PDF getCover page 2 fallback error:', err2)
+                }
+            }
+            return blob1
+        } catch (e) {
+            console.warn('PDF getCover error:', e)
+            return null
+        }
+    }
     book.destroy = () => {
         try {
             for (const item of pageCache.values()) {

@@ -674,6 +674,45 @@ class Resources {
             ?? this.getItemByHref(this.guide
                 ?.find(ref => ref.type.includes('cover'))?.href)
 
+        // 1. Detect Calibre duplicate cover in spine (e.g. titlepage.xhtml followed by index_split_000.html)
+        if (this.spine.length > 1) {
+            const firstItem = this.manifestById.get(this.spine[0].idref)
+            const secondItem = this.manifestById.get(this.spine[1].idref)
+            if (firstItem && secondItem) {
+                const isFirstTitlepage = /titlepage|calibre/i.test(firstItem.href) || firstItem.id === 'titlepage'
+                const isSecondCover = /split_000|cover/i.test(secondItem.href) || secondItem.id === 'cover'
+                if (isFirstTitlepage && isSecondCover) {
+                    this.spine[1].linear = 'no'
+                }
+            }
+        }
+
+        // 2. Detect missing cover in spine (manifest has cover image, but spine omitted it, e.g. 《大师》)
+        if (this.cover && this.cover.href) {
+            const hasCoverInSpine = this.spine.some(item => {
+                const manifestItem = this.manifestById.get(item.idref)
+                return manifestItem && (manifestItem.href === this.cover.href || /cover|titlepage/i.test(manifestItem.href))
+            })
+            if (!hasCoverInSpine) {
+                const syntheticId = '__linden_synthetic_cover__'
+                const coverHref = this.cover.href
+                const syntheticItem = {
+                    href: coverHref,
+                    id: syntheticId,
+                    mediaType: this.cover.mediaType || 'image/jpeg',
+                    properties: ['cover-image']
+                }
+                this.manifest.unshift(syntheticItem)
+                this.manifestById.set(syntheticId, syntheticItem)
+                this.spine.unshift({
+                    idref: syntheticId,
+                    id: '__linden_synthetic_spine__',
+                    linear: 'yes',
+                    properties: ['cover-image']
+                })
+            }
+        }
+
         this.cfis = CFI.fromElements($$itemref)
     }
     getItemByID(id) {
@@ -1059,12 +1098,29 @@ ${doc.querySelector('parsererror').innerText}`)
         return this
     }
     async loadDocument(item) {
+        if (item.mediaType?.startsWith('image/')) {
+            const blob = await this.getCover()
+            const url = blob ? URL.createObjectURL(blob) : ''
+            const doc = document.implementation.createHTMLDocument('Cover')
+            doc.body.style.cssText = 'margin: 0; padding: 0; height: 100vh; display: flex; align-items: center; justify-content: center; background-color: transparent;'
+            const img = doc.createElement('img')
+            img.src = url
+            img.style.cssText = 'max-width: 100%; max-height: 100%; object-fit: contain;'
+            doc.body.appendChild(img)
+            return doc
+        }
         const str = await this.loadText(item.href)
         if (!str) return null
         let doc = this.parser.parseFromString(str, item.mediaType || 'application/xhtml+xml')
         if (doc.querySelector('parsererror')) {
             doc = this.parser.parseFromString(str, 'text/html')
         }
+        // Normalize Calibre SVG preserveAspectRatio="none" at parse time to prevent cover distortion
+        doc?.querySelectorAll?.('svg')?.forEach(svg => {
+            if (svg.getAttribute('preserveAspectRatio') === 'none') {
+                svg.setAttribute('preserveAspectRatio', 'xMidYMid meet')
+            }
+        })
         return doc
     }
     getMediaOverlay() {

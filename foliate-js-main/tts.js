@@ -218,7 +218,7 @@ export class TTS {
     }
     #getMarkElement(doc, mark) {
         if (!mark) return null
-        return doc.querySelector(`mark[name="${CSS.escape(mark)}"`)
+        return doc.querySelector(`mark[name="${CSS.escape(mark)}"]`)
     }
     #speak(doc, getNode) {
         if (!doc) return

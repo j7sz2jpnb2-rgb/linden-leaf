@@ -428,7 +428,7 @@ export const makeDOCX = async (loader, file) => {
             author,
             description: meta.description || '',
             language: 'zh-CN',
-            identifier: `docx-${Date.now()}`,
+            identifier: null,
             format: 'docx'
         },
         sections: sectionData.map(s => ({

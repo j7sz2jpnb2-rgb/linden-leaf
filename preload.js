@@ -15,6 +15,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
     toggleFullscreen: () => ipcRenderer.send('window:toggleFullscreen'),
     isFullscreen: () => ipcRenderer.invoke('window:isFullscreen'),
+    onFullscreenChange: (callback) => {
+        const listener = (_event, isFs) => callback(isFs)
+        ipcRenderer.on('window:fullscreen-change', listener)
+        return () => ipcRenderer.removeListener('window:fullscreen-change', listener)
+    },
 
     // App events (e.g. OS file association open)
     onOpenFile: (callback) => {
@@ -22,6 +27,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.on('app:open-file', listener)
         return () => ipcRenderer.removeListener('app:open-file', listener)
     },
+
+    // Flush-then-close handshake: renderer persists state, then acks
+    onFlushBeforeQuit: (callback) => {
+        ipcRenderer.on('app:flush-before-quit', () => callback())
+    },
+    flushComplete: () => ipcRenderer.send('app:flush-complete'),
 
     // WebDAV / Nutstore Cloud Sync APIs
     syncTestConnection: (config) => ipcRenderer.invoke('sync:testConnection', config),
