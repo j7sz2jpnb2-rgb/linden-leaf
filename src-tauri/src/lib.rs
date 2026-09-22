@@ -81,40 +81,50 @@ pub fn run() {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     eprintln!("[WINDOW EVENT] {:?} CloseRequested", window.label());
                     let state = window.state::<AppState>();
-                    let mut permitted = state.close_permitted.lock().unwrap();
-                    if *permitted {
-                        eprintln!("[WINDOW EVENT] Close already permitted, closing now.");
-                        return;
-                    }
-                    api.prevent_close();
-
-                    let mut closing_id = state.closing_request_id.lock().unwrap();
-                    if closing_id.is_some() {
-                        eprintln!("[WINDOW EVENT] Flush already in progress for {:?}", *closing_id);
-                        return;
-                    }
-                    let req_id = format!("flush_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-                    *closing_id = Some(req_id.clone());
-                    drop(closing_id);
-                    drop(permitted);
-
-                    use tauri::Emitter;
-                    let _ = window.emit("app:request-flush", serde_json::json!({ "requestId": req_id }));
-
-                    let window_clone = window.clone();
-                    let req_id_clone = req_id.clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
-                        let state = window_clone.state::<AppState>();
-                        let mut closing_id = state.closing_request_id.lock().unwrap();
-                        if closing_id.as_ref() == Some(&req_id_clone) {
-                            eprintln!("[WINDOW EVENT] Flush timeout for {:?}; forcing close fallback", req_id_clone);
-                            *closing_id = None;
-                            let mut permitted = state.close_permitted.lock().unwrap();
-                            *permitted = true;
-                            let _ = window_clone.close();
+                    let (should_prevent, req_id) = {
+                        let mut close_state = state.close_state.lock().unwrap();
+                        if close_state.close_permitted {
+                            eprintln!("[WINDOW EVENT] Close already permitted, closing now.");
+                            (false, None)
+                        } else if close_state.pending_request_id.is_some() {
+                            eprintln!("[WINDOW EVENT] Flush already in progress for {:?}", close_state.pending_request_id);
+                            (true, None)
+                        } else {
+                            let id = format!("flush_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                            close_state.pending_request_id = Some(id.clone());
+                            (true, Some(id))
                         }
-                    });
+                    };
+
+                    if should_prevent {
+                        api.prevent_close();
+                    }
+                    if let Some(id) = req_id {
+                        use tauri::Emitter;
+                        let _ = window.emit("app:request-flush", serde_json::json!({ "requestId": id }));
+
+                        let window_clone = window.clone();
+                        let id_clone = id.clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+                            let state = window_clone.state::<AppState>();
+                            let should_force_close = {
+                                let mut close_state = state.close_state.lock().unwrap();
+                                if close_state.pending_request_id.as_ref() == Some(&id_clone) {
+                                    eprintln!("[WINDOW EVENT] Flush timeout for {:?}; forcing close fallback", id_clone);
+                                    close_state.pending_request_id = None;
+                                    close_state.close_permitted = true;
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+
+                            if should_force_close {
+                                let _ = window_clone.close();
+                            }
+                        });
+                    }
                 }
                 tauri::WindowEvent::Destroyed => {
                     eprintln!("[WINDOW EVENT] {:?} Destroyed", window.label());

@@ -408,27 +408,25 @@ export const mergeSyncData = (localPayload, remotePayload) => {
     const drawingMap = new Map()
     ;(remotePayload.pdfDrawings || []).forEach(d => {
         if (d && d.id) {
-            let targetId = d.id
             let targetBookId = d.bookId
             if (d.bookId && bookIdRemap.has(d.bookId)) {
                 targetBookId = bookIdRemap.get(d.bookId)
-                if (d.id.includes('_page_')) {
-                    const parts = d.id.split('_page_')
-                    targetId = `${targetBookId}_page_${parts[1]}`
-                }
             }
+            const targetId = db.remapPdfDrawingId ? db.remapPdfDrawingId(d, targetBookId) : d.id
             drawingMap.set(targetId, { ...d, id: targetId, bookId: targetBookId, updatedAt: clampTime(d.updatedAt) })
         }
     })
     ;(localPayload.pdfDrawings || []).forEach(d => {
         if (!d || !d.id) return
         const localUpdated = clampTime(d.updatedAt)
-        if (!drawingMap.has(d.id)) {
-            drawingMap.set(d.id, { ...d, updatedAt: localUpdated })
+        const localId = db.remapPdfDrawingId ? db.remapPdfDrawingId(d, d.bookId) : d.id
+        const localRecord = { ...d, id: localId, updatedAt: localUpdated }
+        if (!drawingMap.has(localId)) {
+            drawingMap.set(localId, localRecord)
         } else {
-            const remoteD = drawingMap.get(d.id)
+            const remoteD = drawingMap.get(localId)
             if (localUpdated >= (remoteD.updatedAt || 0)) {
-                drawingMap.set(d.id, { ...d, updatedAt: localUpdated })
+                drawingMap.set(localId, localRecord)
             }
         }
     })
@@ -660,14 +658,12 @@ export const applyMergedPayload = async mergedPayload => {
             const store = tx.objectStore('pdf_drawings')
             mergedPayload.pdfDrawings.forEach(d => {
                 if (!d) return
+                let targetBookId = d.bookId
                 if (d.bookId && bookIdRemap.has(d.bookId)) {
-                    const targetBookId = bookIdRemap.get(d.bookId)
-                    d.bookId = targetBookId
-                    if (d.id && d.id.includes('_page_')) {
-                        const parts = d.id.split('_page_')
-                        d.id = `${targetBookId}_page_${parts[1]}`
-                    }
+                    targetBookId = bookIdRemap.get(d.bookId)
                 }
+                d.bookId = targetBookId
+                d.id = db.remapPdfDrawingId ? db.remapPdfDrawingId(d, targetBookId) : d.id
                 if (d.bookId && deletedBookIds.includes(d.bookId)) {
                     return
                 }

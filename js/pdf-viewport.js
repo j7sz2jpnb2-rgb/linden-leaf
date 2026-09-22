@@ -147,9 +147,17 @@ export class PdfViewport {
     }
 
     async load(engineDriver, source, { initialPage = 0, initialYRatio = 0, snapshot = null } = {}) {
+        if (this._destroyed) return { numPages: 0, title: '', author: '', toc: [] }
+        this._loadGeneration = (this._loadGeneration || 0) + 1
+        const currentGen = this._loadGeneration
+
         this.driver = engineDriver
         if (snapshot) this.currentSnapshot = snapshot
         const info = await this.driver.open(source)
+        if (this._destroyed || this._loadGeneration !== currentGen) {
+            try { engineDriver?.destroy?.() } catch {}
+            return { numPages: 0, title: '', author: '', toc: [] }
+        }
         this.numPages = info.numPages || 1
         this.pageSizes = info.pageSizes?.length
             ? info.pageSizes.map(x => ({ x0: 0, y0: 0, ...x }))
@@ -746,7 +754,9 @@ export class PdfViewport {
     }
 
     destroy() {
+        if (this._destroyed) return
         this._destroyed = true
+        this._loadGeneration = (this._loadGeneration || 0) + 1
         this._geometryAbort?.abort()
         this._renderQueue.length = 0
         for (const slot of this.activeSlots.values()) slot.renderAbort?.abort()

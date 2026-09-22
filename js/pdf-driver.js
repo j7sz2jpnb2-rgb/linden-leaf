@@ -20,6 +20,8 @@ export class PdfJsDriver {
         this.pdfDoc = null
         this.pdfjsLib = null
         this.numPages = 0
+        this.loadingTask = null
+        this._destroyed = false
     }
 
     async init() {
@@ -31,8 +33,11 @@ export class PdfJsDriver {
     }
 
     async open(source) {
+        if (this._destroyed) throw new Error('Driver is destroyed')
         await this.init()
+        if (this._destroyed) throw new Error('Driver is destroyed')
         const data = await normalizeSource(source)
+        if (this._destroyed) throw new Error('Driver is destroyed')
         const loadingTask = this.pdfjsLib.getDocument({
             data,
             cMapUrl: new URL('../foliate-js-main/vendor/pdfjs/cmaps/', import.meta.url).toString(),
@@ -42,22 +47,70 @@ export class PdfJsDriver {
             // separately caps output backing pixels.
             canvasMaxAreaInBytes: 64 * 1024 * 1024,
         })
-        this.pdfDoc = await loadingTask.promise
+        this.loadingTask = loadingTask
+        let doc = null
+        try {
+            doc = await loadingTask.promise
+        } catch (err) {
+            if (this._destroyed) {
+                try { loadingTask.destroy?.() } catch {}
+            }
+            throw err
+        }
+        if (this._destroyed) {
+            try { doc?.destroy?.() } catch {}
+            try { loadingTask?.destroy?.() } catch {}
+            this.pdfDoc = null
+            this.loadingTask = null
+            throw new Error('Driver was destroyed while opening document')
+        }
+        this.pdfDoc = doc
         this.numPages = this.pdfDoc.numPages
 
         // First page is enough to construct the initial virtual layout. Other
         // geometry is refined in background batches by PdfViewport.
-        const first = await this.pdfDoc.getPage(1)
+        let first = null
+        try {
+            first = await this.pdfDoc.getPage(1)
+        } catch (err) {
+            if (this._destroyed) {
+                try { doc?.destroy?.() } catch {}
+                throw new Error('Driver was destroyed while opening document')
+            }
+            throw err
+        }
+        if (this._destroyed) {
+            try { first?.cleanup?.() } catch {}
+            try { doc?.destroy?.() } catch {}
+            this.pdfDoc = null
+            throw new Error('Driver was destroyed while opening document')
+        }
         const firstVp = first.getViewport({ scale: 1 })
         const firstSize = { width: firstVp.width, height: firstVp.height }
         first.cleanup()
         const pageSizes = Array.from({ length: this.numPages }, () => ({ ...firstSize }))
 
         // Outline/metadata no longer wait on an O(N) page-size scan.
-        const [toc, meta] = await Promise.all([
-            this._loadOutline().catch(() => []),
-            this.pdfDoc.getMetadata().catch(() => ({})),
-        ])
+        let toc = [], meta = {}
+        try {
+            const [t, m] = await Promise.all([
+                this._loadOutline().catch(() => []),
+                this.pdfDoc ? this.pdfDoc.getMetadata().catch(() => ({})) : Promise.resolve({}),
+            ])
+            toc = t
+            meta = m
+        } catch (err) {
+            if (this._destroyed) {
+                try { doc?.destroy?.() } catch {}
+                throw new Error('Driver was destroyed while opening document')
+            }
+            throw err
+        }
+        if (this._destroyed) {
+            try { doc?.destroy?.() } catch {}
+            this.pdfDoc = null
+            throw new Error('Driver was destroyed while opening document')
+        }
         return {
             numPages: this.numPages,
             pageSizes,
@@ -68,8 +121,9 @@ export class PdfJsDriver {
     }
 
     async _loadOutline() {
+        if (!this.pdfDoc || this._destroyed) return []
         const outline = await this.pdfDoc.getOutline()
-        if (!outline) return []
+        if (!outline || this._destroyed) return []
         const format = async items => {
             const result = []
             for (const item of items) {
@@ -175,8 +229,15 @@ export class PdfJsDriver {
     }
 
     destroy() {
-        this.pdfDoc?.destroy?.()
-        this.pdfDoc = null
+        this._destroyed = true
+        if (this.loadingTask) {
+            try { this.loadingTask.destroy?.() } catch {}
+            this.loadingTask = null
+        }
+        if (this.pdfDoc) {
+            try { this.pdfDoc.destroy?.() } catch {}
+            this.pdfDoc = null
+        }
         this.numPages = 0
     }
 }
@@ -358,5 +419,9 @@ export class AdaptivePdfDriver {
     getTextLayer(...args) { return this.backend.getTextLayer(...args) }
     getTextGeometry(...args) { return this.backend.getTextGeometry?.(...args) }
     select(...args) { return this.backend.select?.(...args) }
-    destroy() { this.backend?.destroy?.(); this.backend = null }
+    destroy() {
+        this._destroyed = true
+        this.backend?.destroy?.()
+        this.backend = null
+    }
 }

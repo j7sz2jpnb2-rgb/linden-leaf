@@ -2670,16 +2670,20 @@ class UniversalReaderApp {
         // PDF Clear Page Drawing
         this.dom.btnPdfClearDraw?.addEventListener('click', async () => {
             if (!this.currentBookId) return
+            const activeSession = this._activeSession
+            const snapshot = this._currentSnapshot || {}
             const allTargets = this.getAllPdfActiveDocsAndTargets()
             if (allTargets.length > 1) {
                 for (const target of allTargets) {
                     const pIdx = target.index != null ? target.index : this.currentPdfPageIndex
-                    if (pIdx != null) await db.clearPdfPageDrawing(this.currentBookId, pIdx)
+                    if (pIdx != null) await db.clearPdfPageDrawing(this.currentBookId, pIdx, true, Date.now(), snapshot)
                 }
+                if (activeSession && !activeSession.isCurrent()) return
                 this.redrawPdfPageOverlay()
                 this.showToast('🗑️ 已清空当前双页手绘批注')
             } else if (this.currentPdfPageIndex != null) {
-                await db.clearPdfPageDrawing(this.currentBookId, this.currentPdfPageIndex)
+                await db.clearPdfPageDrawing(this.currentBookId, this.currentPdfPageIndex, true, Date.now(), snapshot)
+                if (activeSession && !activeSession.isCurrent()) return
                 this.redrawPdfPageOverlay()
                 this.showToast('🗑️ 已清空当前页手绘批注')
             }
@@ -3053,7 +3057,12 @@ class UniversalReaderApp {
             // Load and draw saved strokes for this page
             const ctx = overlayCanvas.getContext('2d')
             ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
-            const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, targetPageIndex, this._currentSnapshot || {})
+            const session = this._activeSession
+            const currentBookId = this.currentBookId
+            const currentSnapshot = this._currentSnapshot || {}
+            const drawingRecord = await db.getPdfPageDrawing(currentBookId, targetPageIndex, currentSnapshot)
+            if (session && !session.isCurrent()) return
+            if (this.currentBookId !== currentBookId) return
             const strokes = drawingRecord?.strokes || []
             if (targetPageIndex === this.currentPdfPageIndex) {
                 this._currentPdfPageStrokes = strokes
@@ -3081,7 +3090,12 @@ class UniversalReaderApp {
             const ctx = overlayCanvas.getContext('2d')
             ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
 
-            const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, targetPageIndex, this._currentSnapshot || {})
+            const session = this._activeSession
+            const currentBookId = this.currentBookId
+            const currentSnapshot = this._currentSnapshot || {}
+            const drawingRecord = await db.getPdfPageDrawing(currentBookId, targetPageIndex, currentSnapshot)
+            if (session && !session.isCurrent()) return
+            if (this.currentBookId !== currentBookId) return
             const strokes = drawingRecord?.strokes || []
             if (targetPageIndex === this.currentPdfPageIndex) {
                 this._currentPdfPageStrokes = strokes
@@ -3182,6 +3196,8 @@ class UniversalReaderApp {
             e.preventDefault()
             e.stopPropagation()
 
+            const session = this._activeSession
+            const snapshot = this._currentSnapshot || {}
             gestureBookId = this.currentBookId
             gesturePageIndex = targetPageIndex
             isDrawing = true
@@ -3219,18 +3235,27 @@ class UniversalReaderApp {
                 if (!isDrawing || !currentStroke) return
                 isDrawing = false
 
-                if (currentStroke.points.length > 0 && gestureBookId && gesturePageIndex != null) {
-                    const drawingRecord = await db.getPdfPageDrawing(gestureBookId, gesturePageIndex, this._currentSnapshot || {})
-                    const existingStrokes = drawingRecord?.strokes || []
-                    existingStrokes.push(currentStroke)
-                    await db.savePdfPageDrawing(gestureBookId, gesturePageIndex, existingStrokes, this._currentSnapshot || {})
-                    if (gesturePageIndex === this.currentPdfPageIndex) {
-                        this._currentPdfPageStrokes = existingStrokes
-                    }
-                }
+                const strokeToSave = currentStroke
+                const saveBookId = gestureBookId
+                const savePageIndex = gesturePageIndex
                 currentStroke = null
                 gestureBookId = null
                 gesturePageIndex = null
+
+                if (session && !session.isCurrent()) return
+
+                if (strokeToSave.points.length > 0 && saveBookId && savePageIndex != null) {
+                    const drawingRecord = await db.getPdfPageDrawing(saveBookId, savePageIndex, snapshot)
+                    if (session && !session.isCurrent()) return
+                    const existingStrokes = drawingRecord?.strokes || []
+                    existingStrokes.push(strokeToSave)
+                    await db.savePdfPageDrawing(saveBookId, savePageIndex, existingStrokes, snapshot)
+                    if (session && !session.isCurrent()) return
+                    if (savePageIndex === this.currentPdfPageIndex) {
+                        this._currentPdfPageStrokes = existingStrokes
+                    }
+                }
+                if (session && !session.isCurrent()) return
                 await this.redrawPdfPageOverlay()
             }
 
@@ -5538,14 +5563,15 @@ class UniversalReaderApp {
      * Ensures consistent structure across debounce, closeReader, and flushReaderStateOnExit
      */
     makeProgressSnapshot(session) {
-        if (!session || !this.currentLocation) return null
-        const loc = this.currentLocation
+        if (!session || !session.location || !session.snapshot) return null
+        const loc = session.location
         const fraction = Number.isFinite(loc.fraction) ? Math.min(1, Math.max(0, loc.fraction)) : 0
         const page = typeof loc.page === 'number' && loc.page >= 1 ? Math.round(loc.page) : null
         const totalPages = typeof loc.totalPages === 'number' && loc.totalPages >= 1 ? Math.round(loc.totalPages) : null
         const cfi = typeof loc.cfi === 'string' ? loc.cfi : null
         const tocItem = loc.tocItem ? { label: loc.tocItem.label || '', href: loc.tocItem.href || '' } : null
-        const format = session.bookData?.format || this.currentBookData?.format || ''
+        const format = session.bookData?.format || ''
+        const snapshot = session.snapshot
 
         return {
             fraction,
@@ -5554,6 +5580,10 @@ class UniversalReaderApp {
             cfi,
             tocItem,
             format,
+            yRatio: typeof loc.yRatio === 'number' ? loc.yRatio : null,
+            blobRevision: snapshot.blobRevision || null,
+            revisionOrigin: snapshot.revisionOrigin || null,
+            documentHash: snapshot.documentHash || null,
             updatedAt: Date.now()
         }
     }
@@ -5585,28 +5615,56 @@ class UniversalReaderApp {
             epoch: currentEpoch,
             bookId,
             abortController,
-            isCurrent: () => this._currentBookEpoch === currentEpoch && !abortController.signal.aborted
+            isCurrent: () => this._currentBookEpoch === currentEpoch && !abortController.signal.aborted,
+            view: null,
+            driver: null,
+            viewport: null,
+            location: null,
+            snapshot: null,
+            bookData: null,
+            toc: null
         }
         const prevSession = this._activeSession
         this._activeSession = readerSession
 
-        // 3. Tear down previous session resources without hiding readerView or resetting currentBookId
+        // 3. Tear down previous session resources without hiding readerView; synchronously capture and flush prev session progress
         if (prevSession && prevSession !== readerSession) {
+            const prevBookId = prevSession.bookId
+            const prevProgress = this.makeProgressSnapshot(prevSession)
+            const prevLoc = prevSession.location
+
             prevSession.abortController?.abort()
-            if (this.foliateView) {
-                try { this.foliateView.close?.() } catch (e) {}
-                try { this.foliateView.remove() } catch (e) {}
-                this.foliateView = null
+            if (prevSession.view) {
+                try { prevSession.view.close?.() } catch (e) {}
+                try { prevSession.view.remove?.() } catch (e) {}
+                if (this.foliateView === prevSession.view) this.foliateView = null
             }
-            if (this.pdfViewport) {
-                try { this.pdfViewport.destroy() } catch (e) {}
-                this.pdfViewport = null
+            if (prevSession.viewport) {
+                try { prevSession.viewport.destroy?.() } catch (e) {}
+                if (this.pdfViewport === prevSession.viewport) this.pdfViewport = null
             }
-            if (this.pdfDriver) {
-                try { this.pdfDriver.destroy() } catch (e) {}
-                this.pdfDriver = null
+            if (prevSession.driver) {
+                try { prevSession.driver.destroy?.() } catch (e) {}
+                if (this.pdfDriver === prevSession.driver) this.pdfDriver = null
+            }
+
+            if (prevBookId && prevProgress) {
+                db.updateBookProgress(prevBookId, prevProgress).catch(err => {
+                    console.warn('Failed to flush previous book progress on switch:', err)
+                })
+            }
+            if (prevLoc?.fraction != null) {
+                tracker.endSession(prevLoc.fraction).catch(() => {})
+            } else {
+                tracker.endSession().catch(() => {})
             }
         }
+
+        // Synchronously detach old display state immediately upon entering new session
+        this.currentLocation = null
+        this.currentBookData = null
+        this._currentSnapshot = null
+        this.currentBookId = null
 
         if (this.dom.welcomeModalBackdrop) {
             this.dom.welcomeModalBackdrop.style.display = 'none'
@@ -5629,6 +5687,37 @@ class UniversalReaderApp {
             return this.handleCloudBookClick(bookData)
         }
 
+        const targetBlob = snapshot.blob
+        if (!targetBlob) {
+            this.showToast('无法读取书籍文件数据', '⚠️')
+            return this.closeReader()
+        }
+
+        // Accurately resolve book format - fallback to 'epub', NEVER default to 'pdf'
+        let safeFormat = (bookData.format || snapshot.format || '').trim().toLowerCase()
+        if (!safeFormat) {
+            const candidateName = (bookData.filename || snapshot.filename || bookData.title || (targetBlob instanceof File ? targetBlob.name : '') || '').toLowerCase()
+            const extMatch = candidateName.match(/\.([a-z0-9]+)$/i)
+            if (extMatch) {
+                safeFormat = extMatch[1].toLowerCase()
+            } else if (targetBlob?.type === 'application/pdf') {
+                safeFormat = 'pdf'
+            } else if (targetBlob?.type === 'application/epub+zip') {
+                safeFormat = 'epub'
+            } else {
+                safeFormat = 'epub'
+            }
+        }
+
+        const baseTitle = (bookData.title || snapshot.title || 'document').replace(/\.[^/.]+$/, '').trim() || 'document'
+        const safeFileName = bookData.filename || snapshot.filename || `${baseTitle}.${safeFormat}`
+        const isPdf = safeFormat === 'pdf' || safeFileName.toLowerCase().endsWith('.pdf')
+        const safeFileType = isPdf ? 'application/pdf' : (safeFormat === 'epub' ? 'application/epub+zip' : (targetBlob.type || ''))
+
+        const fileObj = (targetBlob instanceof File && targetBlob.name && !targetBlob.name.toLowerCase().endsWith('.pdf') && !isPdf)
+            ? targetBlob
+            : new File([targetBlob], safeFileName, { type: safeFileType })
+
         readerSession.bookData = bookData
         readerSession.snapshot = snapshot
         this.currentBookId = bookId
@@ -5645,296 +5734,63 @@ class UniversalReaderApp {
         this.dom.readerBookTitle.innerText = bookData.title || snapshot.title || '阅读'
 
         // Clean up previous views if any
-        if (this.pdfViewport) {
+        if (this.pdfViewport && this.pdfViewport !== readerSession.viewport) {
             this.pdfViewport.destroy()
             this.pdfViewport = null
         }
         if (this.dom.pdfZoomBar) {
             this.dom.pdfZoomBar.style.display = 'none'
         }
-        if (this.foliateView) {
+        if (this.foliateView && this.foliateView !== readerSession.view) {
             this.foliateView.close?.()
-            this.foliateView.remove()
+            this.foliateView.remove?.()
             this.foliateView = null
         }
 
-        this.foliateView = document.createElement('foliate-view')
-        this.dom.readerContentArea.appendChild(this.foliateView)
-
-        // Pre-register ALL Events BEFORE calling open / init so the initial section load event is never missed!
-        this.foliateView.addEventListener('relocate', e => {
-            if (this._currentBookEpoch === currentEpoch) {
-                this.onReaderRelocate(e.detail)
-            }
-        })
-        this.foliateView.addEventListener('load', e => {
-            if (this._currentBookEpoch === currentEpoch) {
-                this.onSectionLoaded(e.detail)
-            }
-        })
-
-        // Intercept Footnote / Anchor links so Foliate doesn't jump to hidden footnote elements
-        this.foliateView.addEventListener('link', async e => {
-            if (this._currentBookEpoch !== currentEpoch) return
-            const { a, href, href_ } = e.detail || {}
-            const targetHref = href || href_ || ''
-            
-            // 1. Handle external web links safely without hijacking reader iframe
-            if (targetHref.startsWith('http://') || targetHref.startsWith('https://') || targetHref.startsWith('mailto:')) {
-                e.preventDefault()
-                try {
-                    platformBridge.openExternal(targetHref)
-                } catch (openErr) {
-                    console.warn('Failed to open external link:', targetHref, openErr)
-                }
-                return
-            }
-
-            // 2. Check for Footnote / Annotation popups
-            const cleanText = (a?.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^[\[（(【]|[\]）)】]$/g, '')
-            const isNumericOrSymbolMark = /^[\[（(【]?\s*(?:\d{1,4}|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注)\s*[\]）)】]?$/.test(cleanText)
-            const isSup = !!(a?.closest('sup, sub, .math-super') || 
-                             a?.querySelector('sup, sub, .math-super') || 
-                             a?.classList?.contains('math-super'))
-            // Check if clicked anchor is located inside an actual footnote container (a return backlink from notes to body)
-            const footnoteContainer = a?.parentElement?.closest?.(
-                'ol.duokan-footnote-content, ol.footnotes, ul.footnotes, ' +
-                'li.duokan-footnote-item, li.footnote, li.endnote, ' +
-                'aside[epub\\:type~="footnote"], aside[epub\\:type~="endnote"], ' +
-                'aside[role~="doc-footnote"], aside[role~="doc-endnote"], ' +
-                'aside.footnote, section.footnotes, [role~="doc-footnote"]'
-            )
-            const isSourceInFootnote = !!footnoteContainer && !a?.matches?.('.duokan-footnote, .epub-footnote, .footnote-ref, [epub\\:type~="noteref"], [role~="doc-noteref"]')
-            
-            // If the user clicked a return backlink inside the footnote section, allow normal jump back to story
-            if (isSourceInFootnote) {
-                return
-            }
-
-            const targetId = targetHref.includes('#') ? targetHref.split('#')[1] : null
-            const isNoteIdPattern = targetId ? /(?:filepos|fn|footnote|note|nt|ftn|ref|[mfw])\d+/i.test(targetId) : false
-
-            const isNoteref = a?.getAttribute('epub:type') === 'noteref' ||
-                              a?.getAttribute('role') === 'doc-noteref' ||
-                              a?.classList?.contains('epub-footnote') ||
-                              a?.classList?.contains('footnote-ref') ||
-                              a?.classList?.contains('duokan-footnote') ||
-                              a?.hasAttribute('data-wr-footernote') ||
-                              a?.hasAttribute('zy-footnote') ||
-                              a?.hasAttribute('data-note') ||
-                              a?.querySelector?.('img.duokan-footnote, img.epub-footnote, img.qqreader-footnote, img.zy-footnote, img.dd-footnote') ||
-                              a?.classList?.contains('note') ||
-                              isSup ||
-                              (targetId && isNoteIdPattern && (isNumericOrSymbolMark || !cleanText))
-
-            if (isNoteref && targetId) {
-                const doc = a?.ownerDocument
-                let targetEl = doc ? (doc.getElementById(targetId) || doc.querySelector(`[name="${CSS.escape(targetId)}"]`)) : null
-                
-                // If target is inside <sup> in story text, this is a return backlink; do NOT show popup!
-                const isTargetBacklink = targetEl && (targetEl.closest('sup, sub, .math-super') || targetEl.tagName === 'SUP' || targetEl.querySelector('sup, sub'))
-                if (isTargetBacklink) {
-                    this.hideFootnotePopup()
-                    return
-                }
-
-                let footnoteText = (a?.getAttribute('data-wr-footernote') || a?.getAttribute('zy-footnote') || a?.getAttribute('data-note') || '').trim()
-                if (!footnoteText) {
-                    footnoteText = this.extractFootnoteFromTarget(targetEl, a)
-                }
-
-                if (!footnoteText && a) {
-                    const img = a.querySelector('img')
-                    footnoteText = (img?.getAttribute('alt') || a.getAttribute('title') || '').trim()
-                }
-
-                // Cross-file footnote resolution for link event
-                if (!footnoteText && this.foliateView?.book) {
-                    try {
-                        const book = this.foliateView.book
-                        const resolved = book.resolveHref ? (book.resolveHref(targetHref) || (href_ ? book.resolveHref(href_) : null)) : null
-                        if (resolved && resolved.index != null) {
-                            const targetSec = book.sections[resolved.index]
-                            const secDoc = await targetSec?.createDocument?.()
-                            if (secDoc) {
-                                const extEl = secDoc.getElementById(targetId) || secDoc.querySelector(`[name="${CSS.escape(targetId)}"]`)
-                                if (extEl) {
-                                    if (extEl.closest('sup, sub, .math-super') || extEl.tagName === 'SUP') {
-                                        this.hideFootnotePopup()
-                                        return
-                                    }
-                                    footnoteText = this.extractFootnoteFromTarget(extEl, a)
-                                }
-                            }
-                        }
-                    } catch (err) {
-                        console.warn('External footnote lookup error in link event:', err)
-                    }
-                }
-
-                // ONLY intercept if valid popup footnote text was actually found!
-                if (footnoteText) {
-                    e.preventDefault()
-                    const rect = a.getBoundingClientRect()
-                    const doc = a.ownerDocument
-                    const iframe = doc?.defaultView?.frameElement || this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView
-                    const iframeRect = (iframe || this.foliateView).getBoundingClientRect()
-                    const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
-                    const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
-                    let anchorLabel = (a.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^[\[（(]|[\]）)]$/g, '')
-                    if (!anchorLabel && targetId) {
-                        const m = targetId.match(/(?:fn|footnote|note|ref)?([0-9\.]+)/i)
-                        if (m) anchorLabel = m[1]
-                    }
-                    const popupTitle = anchorLabel && anchorLabel.length <= 8 ? `💡 译注与说明 [${anchorLabel}]` : '💡 译注与说明'
-                    
-                    this.showFootnotePopup({
-                        title: popupTitle,
-                        text: footnoteText,
-                        rect: {
-                            top: iframeRect.top + ((rect.top || 0) * scaleY),
-                            left: iframeRect.left + ((rect.left || 0) * scaleX),
-                            width: (rect.width || 40) * scaleX,
-                            height: (rect.height || 20) * scaleY
-                        }
-                    })
-                    return
-                }
-            }
-            // Normal navigation (TOC links, cross-chapter jumps) will proceed via Foliate goTo!
-        })
-
-        // Overlayer Annotation Rendering
-        this.foliateView.addEventListener('draw-annotation', e => {
-            if (this._currentBookEpoch !== currentEpoch) return
-            const { draw, annotation } = e.detail
-            const { color = '#facc15', style = 'highlight' } = annotation
-            const writingMode = this.settings.writingMode || 'horizontal'
-            if (style === 'underline') {
-                draw(Overlayer.underline, { color, width: 2.6, writingMode })
-            } else if (style === 'dashed') {
-                draw(Overlayer.dashed, { color: color === '#facc15' ? '#64748b' : color, width: 2, writingMode })
-            } else if (style === 'squiggly') {
-                draw(Overlayer.squiggly, { color, width: 2.2, writingMode })
-            } else if (style === 'strikethrough') {
-                draw(Overlayer.strikethrough, { color, width: 2.5, writingMode })
-            } else {
-                draw(Overlayer.highlight, { color, realisticPen: this.settings.realisticPen !== false, writingMode })
-            }
-        })
-
-        // When new section overlay is mounted, draw all saved highlights!
-        this.foliateView.addEventListener('create-overlay', async () => {
-            if (this.currentBookId && this._currentBookEpoch === currentEpoch) {
-                const highlights = await db.getHighlightsByBook(this.currentBookId)
-                if (this._currentBookEpoch !== currentEpoch) return
-                for (const hl of highlights) {
-                    try {
-                        await this.foliateView.addAnnotation({
-                            value: `${hl.cfi}::${hl.style || 'highlight'}`,
-                            id: hl.id,
-                            color: hl.color,
-                            style: hl.style || 'highlight'
-                        })
-                    } catch (err) {
-                        // Section index mismatch handled internally by foliate-js
-                    }
-                }
-            }
-        })
-
-        // Clicked an existing highlight on the page!
-        this.foliateView.addEventListener('show-annotation', e => {
-            if (this._currentBookEpoch !== currentEpoch) return
-            const { value, range } = e.detail
-            this.onHighlightClicked(value, range)
-        })
-
         try {
-            const targetBlob = snapshot.blob
-            if (!targetBlob) {
-                this.showToast('无法读取书籍文件数据', '⚠️')
-                return this.closeReader()
-            }
-            // Accurately resolve book format - fallback to 'epub', NEVER default to 'pdf'
-            let safeFormat = (bookData.format || snapshot.format || '').trim().toLowerCase()
-            if (!safeFormat) {
-                const candidateName = (bookData.filename || snapshot.filename || bookData.title || (targetBlob instanceof File ? targetBlob.name : '') || '').toLowerCase()
-                const extMatch = candidateName.match(/\.([a-z0-9]+)$/i)
-                if (extMatch) {
-                    safeFormat = extMatch[1].toLowerCase()
-                } else if (targetBlob?.type === 'application/pdf') {
-                    safeFormat = 'pdf'
-                } else if (targetBlob?.type === 'application/epub+zip') {
-                    safeFormat = 'epub'
-                } else {
-                    safeFormat = 'epub'
-                }
-            }
-
-            const baseTitle = (bookData.title || snapshot.title || 'document').replace(/\.[^/.]+$/, '').trim() || 'document'
-            const safeFileName = bookData.filename || snapshot.filename || `${baseTitle}.${safeFormat}`
-            const isPdf = safeFormat === 'pdf' || safeFileName.toLowerCase().endsWith('.pdf')
-            const safeFileType = isPdf ? 'application/pdf' : (safeFormat === 'epub' ? 'application/epub+zip' : (targetBlob.type || ''))
-
-            const fileObj = (targetBlob instanceof File && targetBlob.name && !targetBlob.name.toLowerCase().endsWith('.pdf') && !isPdf)
-                ? targetBlob
-                : new File([targetBlob], safeFileName, { type: safeFileType })
-
             if (isPdf) {
-                // 彻底脱离 iframe 沙箱，由独立原生视口接管
-                if (this.foliateView) {
-                    this.foliateView.close?.()
-                    this.foliateView.remove()
-                    this.foliateView = null
-                }
-                if (this.pdfViewport) {
-                    this.pdfViewport.destroy()
-                    this.pdfViewport = null
-                }
-
-                // Prefer native MuPDF for local Tauri files, with PDF.js as a safe fallback.
+                // Independent PDF Viewport (no iframe sandbox)
                 const nativePath = snapshot.nativePath || await db.getBookNativePath(bookId)
                 if (!readerSession.isCurrent()) return
 
-                this.pdfDriver = new AdaptivePdfDriver({ nativePath, snapshot })
-
-                this.pdfViewport = new PdfViewport(this.dom.readerContentArea, {
+                const sessionDriver = new AdaptivePdfDriver({ nativePath, snapshot })
+                const sessionViewport = new PdfViewport(this.dom.readerContentArea, {
                     scale: 1.25,
+                    snapshot,
                     onPageChange: (pageIdx, total) => {
                         if (!readerSession.isCurrent()) return
-                        // 1. Reading tracker & pace statistics (Item 4)
                         tracker.resetActivity()
                         tracker.recordPageTurn()
 
-                        if (this.dom.readerPageNumber) {
-                            this.dom.readerPageNumber.innerText = `${pageIdx + 1} / ${total} 页`
-                            this.dom.readerPageNumber.title = `点击可输入页码快速跳转 (1 ~ ${total})`
-                        }
                         const frac = total > 0 ? (pageIdx + 1) / total : 0
-                        this.currentLocation = { fraction: frac, page: pageIdx + 1, totalPages: total }
-                        if (this.dom.progressSlider) {
-                            this.dom.progressSlider.value = (frac * 100).toFixed(1)
-                        }
-                        if (this.dom.progressText) {
-                            this.dom.progressText.innerText = `${Math.round(frac * 100)}%`
-                        }
-
-                        // 2. Smart ETA badge update in PDF (Item 5)
-                        if (this.dom.readerEtaBadge) {
-                            if (frac >= 0.99) {
-                                this.dom.readerEtaBadge.innerText = '🎉 即将读完'
-                            } else if (frac <= 0.005) {
-                                this.dom.readerEtaBadge.innerText = '预计还需 --'
-                            } else {
-                                const paceSecs = tracker.getCurrentPaceSecs()
-                                const remainingPages = Math.max(0, total - (pageIdx + 1))
-                                const remainingSecs = remainingPages * paceSecs
-                                this.dom.readerEtaBadge.innerText = `预计还需 ${tracker.formatDuration(remainingSecs)}`
+                        const loc = { fraction: frac, page: pageIdx + 1, totalPages: total }
+                        readerSession.location = loc
+                        if (this._activeSession === readerSession) {
+                            this.currentLocation = loc
+                            if (this.dom.readerPageNumber) {
+                                this.dom.readerPageNumber.innerText = `${pageIdx + 1} / ${total} 页`
+                                this.dom.readerPageNumber.title = `点击可输入页码快速跳转 (1 ~ ${total})`
+                            }
+                            if (this.dom.progressSlider) {
+                                this.dom.progressSlider.value = (frac * 100).toFixed(1)
+                            }
+                            if (this.dom.progressText) {
+                                this.dom.progressText.innerText = `${Math.round(frac * 100)}%`
+                            }
+                            if (this.dom.readerEtaBadge) {
+                                if (frac >= 0.99) {
+                                    this.dom.readerEtaBadge.innerText = '🎉 即将读完'
+                                } else if (frac <= 0.005) {
+                                    this.dom.readerEtaBadge.innerText = '预计还需 --'
+                                } else {
+                                    const paceSecs = tracker.getCurrentPaceSecs()
+                                    const remainingPages = Math.max(0, total - (pageIdx + 1))
+                                    const remainingSecs = remainingPages * paceSecs
+                                    this.dom.readerEtaBadge.innerText = `预计还需 ${tracker.formatDuration(remainingSecs)}`
+                                }
                             }
                         }
 
-                        // 3. Active TOC chapter auto-highlight during PDF scroll (Item 7)
                         if (this.currentPdfTOC && this.currentPdfTOC.length > 0) {
                             const flattenTOC = (items) => {
                                 let result = []
@@ -5956,11 +5812,11 @@ class UniversalReaderApp {
                                     break
                                 }
                             }
-                            if (activeItem?.href) {
+                            if (activeItem?.href && this._activeSession === readerSession) {
                                 this.highlightActiveTOCItem(activeItem.href)
                             }
                             if (activeItem) {
-                                this.currentLocation.tocItem = activeItem
+                                loc.tocItem = activeItem
                             }
                         }
 
@@ -5976,7 +5832,7 @@ class UniversalReaderApp {
                         }, 500)
                     },
                     onSelection: (selInfo) => {
-                        // Support normal text selection without forced auto-highlighting (Item 15)
+                        if (!readerSession.isCurrent()) return
                         this.selectedTextInfo = {
                             text: selInfo.text,
                             formatType: 'pdf',
@@ -5996,12 +5852,12 @@ class UniversalReaderApp {
                     onHighlightCreate: async (hl) => {
                         const newHl = {
                             id: 'hl_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
-                            bookId: this.currentBookId,
+                            bookId: readerSession.bookId,
                             formatType: 'pdf',
                             text: hl.text,
                             color: '#fef08a',
                             createdAt: Date.now(),
-                            chapterTitle: this.currentLocation?.tocItem?.label || '正文',
+                            chapterTitle: readerSession.location?.tocItem?.label || '正文',
                             blobRevision: snapshot.blobRevision,
                             revisionOrigin: snapshot.revisionOrigin,
                             documentHash: snapshot.documentHash,
@@ -6016,13 +5872,14 @@ class UniversalReaderApp {
                         }
                         await db.saveHighlight(newHl)
                         if (!readerSession.isCurrent()) return
-                        const allHls = await db.getHighlightsByBook(this.currentBookId)
+                        const allHls = await db.getHighlightsByBook(readerSession.bookId)
                         if (!readerSession.isCurrent()) return
-                        this.pdfViewport?.setHighlights(allHls, snapshot)
+                        sessionViewport.setHighlights(allHls, snapshot)
                         this.loadNotesList()
                         this.showToast('已添加高亮笔记', '✓')
                     },
                     onHighlightClick: (hl, event, customRect) => {
+                        if (!readerSession.isCurrent()) return
                         let targetRect = customRect
                         if (!targetRect && event?.target?.classList?.contains('pdf-highlight-rect')) {
                             targetRect = event.target.getBoundingClientRect()
@@ -6041,36 +5898,52 @@ class UniversalReaderApp {
                     }
                 })
 
+                readerSession.driver = sessionDriver
+                readerSession.viewport = sessionViewport
+                this.pdfDriver = sessionDriver
+                this.pdfViewport = sessionViewport
+
                 const initialPageFn = (totalPages) => {
-                    const decoded = decodePdfProgress(bookData?.progress, totalPages)
+                    const progressMeta = bookData?.progress
+                    if (progressMeta?.blobRevision && !db.isContentIdentityMatching(progressMeta, snapshot).matches) {
+                        return 0 // Content replaced, do not reuse old page
+                    }
+                    const decoded = decodePdfProgress(progressMeta, totalPages)
                     return decoded.page - 1
                 }
 
-                const docInfo = await this.pdfViewport.load(
-                    this.pdfDriver,
+                const docInfo = await sessionViewport.load(
+                    sessionDriver,
                     { blob: fileObj, nativePath },
                     { initialPage: initialPageFn, snapshot }
                 )
                 if (!readerSession.isCurrent()) {
-                    this.pdfViewport?.destroy()
-                    this.pdfViewport = null
-                    this.pdfDriver?.destroy()
-                    this.pdfDriver = null
+                    sessionViewport.destroy()
+                    sessionDriver.destroy()
+                    if (this.pdfViewport === sessionViewport) this.pdfViewport = null
+                    if (this.pdfDriver === sessionDriver) this.pdfDriver = null
                     return
                 }
 
                 this.currentPdfTOC = docInfo.toc || []
+                readerSession.toc = docInfo.toc || []
 
                 // Restore saved progress display accurately
-                const decodedInitial = decodePdfProgress(bookData?.progress, docInfo.numPages)
+                const progressMeta = bookData?.progress
+                const isProgressIdentityMatching = !progressMeta || !progressMeta.blobRevision || db.isContentIdentityMatching(progressMeta, snapshot).matches
+                const decodedInitial = isProgressIdentityMatching
+                    ? decodePdfProgress(progressMeta, docInfo.numPages)
+                    : { page: 1, fraction: 0 }
                 const displayPage = decodedInitial.page
                 const initialFrac = decodedInitial.fraction
-                this.currentLocation = { fraction: initialFrac, page: displayPage, totalPages: docInfo.numPages }
+                const initLoc = { fraction: initialFrac, page: displayPage, totalPages: docInfo.numPages }
+                readerSession.location = initLoc
+                this.currentLocation = initLoc
 
                 // 加载已有高亮 (filtered by content identity)
                 const existingHls = await db.getHighlightsByBook(bookId)
                 if (!readerSession.isCurrent()) return
-                this.pdfViewport.setHighlights(existingHls, snapshot)
+                sessionViewport.setHighlights(existingHls, snapshot)
 
                 if (this.dom.pdfZoomBar) this.dom.pdfZoomBar.style.display = 'flex'
                 if (this.dom.readerPageNumber) {
@@ -6103,7 +5976,6 @@ class UniversalReaderApp {
                     if (readerSession.isCurrent() && this.currentBookId === bookId) {
                         this.renderTOC(this.currentPdfTOC)
                         this.loadNotesList()
-                        // 高亮初始活跃目录章节
                         if (this.currentPdfTOC && this.currentPdfTOC.length > 0) {
                             const flattenTOC = (items) => {
                                 let result = []
@@ -6125,11 +5997,11 @@ class UniversalReaderApp {
                                     break
                                 }
                             }
-                            if (activeItem?.href) {
+                            if (activeItem?.href && this._activeSession === readerSession) {
                                 this.highlightActiveTOCItem(activeItem.href)
                             }
-                            if (activeItem) {
-                                this.currentLocation.tocItem = activeItem
+                            if (activeItem && readerSession.location) {
+                                readerSession.location.tocItem = activeItem
                             }
                         }
                     }
@@ -6138,42 +6010,241 @@ class UniversalReaderApp {
                 return
             }
 
-            await this.foliateView.open(fileObj)
+            // EPUB / Reflow format
+            const sessionView = document.createElement('foliate-view')
+            readerSession.view = sessionView
+            this.foliateView = sessionView
+            this.dom.readerContentArea.appendChild(sessionView)
+
+            // Pre-register ALL Events BEFORE calling open / init
+            sessionView.addEventListener('relocate', e => {
+                if (readerSession.isCurrent()) {
+                    readerSession.location = e.detail
+                    this.onReaderRelocate(e.detail, readerSession)
+                }
+            })
+            sessionView.addEventListener('load', e => {
+                if (readerSession.isCurrent()) {
+                    this.onSectionLoaded(e.detail)
+                }
+            })
+
+            sessionView.addEventListener('link', async e => {
+                if (!readerSession.isCurrent()) return
+                const { a, href, href_ } = e.detail || {}
+                const targetHref = href || href_ || ''
+                
+                if (targetHref.startsWith('http://') || targetHref.startsWith('https://') || targetHref.startsWith('mailto:')) {
+                    e.preventDefault()
+                    try {
+                        platformBridge.openExternal(targetHref)
+                    } catch (openErr) {
+                        console.warn('Failed to open external link:', targetHref, openErr)
+                    }
+                    return
+                }
+
+                const cleanText = (a?.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^[\[（(【]|[\]）)】]$/g, '')
+                const isNumericOrSymbolMark = /^[\[（(【]?\s*(?:\d{1,4}|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注)\s*[\]）)】]?$/.test(cleanText)
+                const isSup = !!(a?.closest('sup, sub, .math-super') || 
+                                 a?.querySelector('sup, sub, .math-super') || 
+                                 a?.classList?.contains('math-super'))
+                const footnoteContainer = a?.parentElement?.closest?.(
+                    'ol.duokan-footnote-content, ol.footnotes, ul.footnotes, ' +
+                    'li.duokan-footnote-item, li.footnote, li.endnote, ' +
+                    'aside[epub\\:type~="footnote"], aside[epub\\:type~="endnote"], ' +
+                    'aside[role~="doc-footnote"], aside[role~="doc-endnote"], ' +
+                    'aside.footnote, section.footnotes, [role~="doc-footnote"]'
+                )
+                const isSourceInFootnote = !!footnoteContainer && !a?.matches?.('.duokan-footnote, .epub-footnote, .footnote-ref, [epub\\:type~="noteref"], [role~="doc-noteref"]')
+                
+                if (isSourceInFootnote) {
+                    return
+                }
+
+                const targetId = targetHref.includes('#') ? targetHref.split('#')[1] : null
+                const isNoteIdPattern = targetId ? /(?:filepos|fn|footnote|note|nt|ftn|ref|[mfw])\d+/i.test(targetId) : false
+
+                const isNoteref = a?.getAttribute('epub:type') === 'noteref' ||
+                                  a?.getAttribute('role') === 'doc-noteref' ||
+                                  a?.classList?.contains('epub-footnote') ||
+                                  a?.classList?.contains('footnote-ref') ||
+                                  a?.classList?.contains('duokan-footnote') ||
+                                  a?.hasAttribute('data-wr-footernote') ||
+                                  a?.hasAttribute('zy-footnote') ||
+                                  a?.hasAttribute('data-note') ||
+                                  a?.querySelector?.('img.duokan-footnote, img.epub-footnote, img.qqreader-footnote, img.zy-footnote, img.dd-footnote') ||
+                                  a?.classList?.contains('note') ||
+                                  isSup ||
+                                  (targetId && isNoteIdPattern && (isNumericOrSymbolMark || !cleanText))
+
+                if (isNoteref && targetId) {
+                    const doc = a?.ownerDocument
+                    let targetEl = doc ? (doc.getElementById(targetId) || doc.querySelector(`[name="${CSS.escape(targetId)}"]`)) : null
+                    
+                    const isTargetBacklink = targetEl && (targetEl.closest('sup, sub, .math-super') || targetEl.tagName === 'SUP' || targetEl.querySelector('sup, sub'))
+                    if (isTargetBacklink) {
+                        this.hideFootnotePopup()
+                        return
+                    }
+
+                    let footnoteText = (a?.getAttribute('data-wr-footernote') || a?.getAttribute('zy-footnote') || a?.getAttribute('data-note') || '').trim()
+                    if (!footnoteText) {
+                        footnoteText = this.extractFootnoteFromTarget(targetEl, a)
+                    }
+
+                    if (!footnoteText && a) {
+                        const img = a.querySelector('img')
+                        footnoteText = (img?.getAttribute('alt') || a.getAttribute('title') || '').trim()
+                    }
+
+                    if (!footnoteText && sessionView?.book) {
+                        try {
+                            const book = sessionView.book
+                            const resolved = book.resolveHref ? (book.resolveHref(targetHref) || (href_ ? book.resolveHref(href_) : null)) : null
+                            if (resolved && resolved.index != null) {
+                                const targetSec = book.sections[resolved.index]
+                                const secDoc = await targetSec?.createDocument?.()
+                                if (secDoc) {
+                                    const extEl = secDoc.getElementById(targetId) || secDoc.querySelector(`[name="${CSS.escape(targetId)}"]`)
+                                    if (extEl) {
+                                        if (extEl.closest('sup, sub, .math-super') || extEl.tagName === 'SUP') {
+                                            this.hideFootnotePopup()
+                                            return
+                                        }
+                                        footnoteText = this.extractFootnoteFromTarget(extEl, a)
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            console.warn('External footnote lookup error in link event:', err)
+                        }
+                    }
+
+                    if (footnoteText) {
+                        e.preventDefault()
+                        const rect = a.getBoundingClientRect()
+                        const doc = a.ownerDocument
+                        const iframe = doc?.defaultView?.frameElement || sessionView?.shadowRoot?.querySelector('iframe') || sessionView
+                        const iframeRect = (iframe || sessionView).getBoundingClientRect()
+                        const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
+                        const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
+                        let anchorLabel = (a.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^[\[（(]|[\]）)]$/g, '')
+                        if (!anchorLabel && targetId) {
+                            const m = targetId.match(/(?:fn|footnote|note|ref)?([0-9\.]+)/i)
+                            if (m) anchorLabel = m[1]
+                        }
+                        const popupTitle = anchorLabel && anchorLabel.length <= 8 ? `💡 译注与说明 [${anchorLabel}]` : '💡 译注与说明'
+                        
+                        this.showFootnotePopup({
+                            title: popupTitle,
+                            text: footnoteText,
+                            rect: {
+                                top: iframeRect.top + ((rect.top || 0) * scaleY),
+                                left: iframeRect.left + ((rect.left || 0) * scaleX),
+                                width: (rect.width || 40) * scaleX,
+                                height: (rect.height || 20) * scaleY
+                            }
+                        })
+                        return
+                    }
+                }
+            })
+
+            // Overlayer Annotation Rendering
+            sessionView.addEventListener('draw-annotation', e => {
+                if (!readerSession.isCurrent()) return
+                const { draw, annotation } = e.detail
+                const { color = '#facc15', style = 'highlight' } = annotation
+                const writingMode = this.settings.writingMode || 'horizontal'
+                if (style === 'underline') {
+                    draw(Overlayer.underline, { color, width: 2.6, writingMode })
+                } else if (style === 'dashed') {
+                    draw(Overlayer.dashed, { color: color === '#facc15' ? '#64748b' : color, width: 2, writingMode })
+                } else if (style === 'squiggly') {
+                    draw(Overlayer.squiggly, { color, width: 2.2, writingMode })
+                } else if (style === 'strikethrough') {
+                    draw(Overlayer.strikethrough, { color, width: 2.5, writingMode })
+                } else {
+                    draw(Overlayer.highlight, { color, realisticPen: this.settings.realisticPen !== false, writingMode })
+                }
+            })
+
+            // When new section overlay is mounted, draw saved highlights that match current content identity!
+            sessionView.addEventListener('create-overlay', async () => {
+                if (!readerSession.isCurrent()) return
+                const highlights = await db.getHighlightsByBook(readerSession.bookId)
+                if (!readerSession.isCurrent()) return
+                for (const hl of highlights) {
+                    const match = db.isContentIdentityMatching(hl, snapshot)
+                    if (!match.matches) {
+                        // Do not silently draw unconfirmed or conflicting highlights
+                        continue
+                    }
+                    try {
+                        await sessionView.addAnnotation({
+                            value: `${hl.cfi}::${hl.style || 'highlight'}`,
+                            id: hl.id,
+                            color: hl.color,
+                            style: hl.style || 'highlight'
+                        })
+                    } catch (err) {
+                        // Section index mismatch handled internally by foliate-js
+                    }
+                }
+            })
+
+            // Clicked an existing highlight on the page!
+            sessionView.addEventListener('show-annotation', e => {
+                if (!readerSession.isCurrent()) return
+                const { value, range } = e.detail
+                this.onHighlightClicked(value, range)
+            })
+
+            await sessionView.open(fileObj)
             if (!readerSession.isCurrent()) {
-                this.foliateView?.close?.()
-                this.foliateView?.remove()
-                this.foliateView = null
+                sessionView?.close?.()
+                sessionView?.remove?.()
+                if (this.foliateView === sessionView) {
+                    this.foliateView = null
+                }
                 return
             }
             
             // Set initial styles & flow
             this.applySettingsToReader()
 
-            // Restore location with high accuracy
+            // Restore location with content identity check
             let lastLoc = 0
-            if (bookData.progress?.cfi && bookData.progress.cfi.split('!')[1]?.split('/').length > 2) {
-                lastLoc = bookData.progress.cfi
-            } else if (bookData.progress?.fraction != null && bookData.progress.fraction > 0) {
-                lastLoc = { fraction: bookData.progress.fraction }
-            } else if (bookData.progress?.cfi) {
-                lastLoc = bookData.progress.cfi
+            const progressMeta = bookData.progress
+            const isProgressIdentityMatching = !progressMeta || !progressMeta.blobRevision || db.isContentIdentityMatching(progressMeta, snapshot).matches
+            if (isProgressIdentityMatching) {
+                if (bookData.progress?.cfi && bookData.progress.cfi.split('!')[1]?.split('/').length > 2) {
+                    lastLoc = bookData.progress.cfi
+                } else if (bookData.progress?.fraction != null && bookData.progress.fraction > 0) {
+                    lastLoc = { fraction: bookData.progress.fraction }
+                } else if (bookData.progress?.cfi) {
+                    lastLoc = bookData.progress.cfi
+                }
             }
-            await this.foliateView.init({ lastLocation: lastLoc })
+            await sessionView.init({ lastLocation: lastLoc })
             if (!readerSession.isCurrent()) {
-                this.foliateView?.close?.()
-                this.foliateView?.remove()
-                this.foliateView = null
+                sessionView?.close?.()
+                sessionView?.remove?.()
+                if (this.foliateView === sessionView) {
+                    this.foliateView = null
+                }
                 return
             }
 
             // Ensure any already-loaded content doc is initialized
-            const contents = this.foliateView.renderer?.getContents?.() || []
+            const contents = sessionView.renderer?.getContents?.() || []
             for (const item of contents) {
                 if (item?.doc) this.onSectionLoaded(item)
             }
 
             // Start Reading Session & Timer
-            const startFrac = bookData.progress?.fraction || 0
+            const startFrac = (isProgressIdentityMatching && bookData.progress?.fraction) || 0
             tracker.startSession(bookId, bookData.title, startFrac)
             tracker.onTickCallback = ({ seconds, isIdle }) => {
                 if (this.dom.readerLiveTimer && readerSession.isCurrent()) {
@@ -6183,7 +6254,7 @@ class UniversalReaderApp {
             }
 
             // Display floating zoom bar for fixed-layout / comic formats (CBZ), hide for reflow formats (EPUB, MOBI, TXT, DOCX)
-            if (this.foliateView?.isFixedLayout || bookData?.format === 'cbz') {
+            if (sessionView?.isFixedLayout || bookData?.format === 'cbz') {
                 if (this.dom.pdfZoomBar) this.dom.pdfZoomBar.style.display = 'flex'
                 this.setPDFZoom('fit-page')
             } else {
@@ -6192,8 +6263,8 @@ class UniversalReaderApp {
 
             // Defer non-critical TOC and notes population so first page paints with zero delay
             setTimeout(() => {
-                if (readerSession.isCurrent() && this.currentBookId === bookId && this.foliateView) {
-                    this.renderTOC(this.foliateView.book?.toc || [])
+                if (readerSession.isCurrent() && this.currentBookId === bookId && this.foliateView === sessionView) {
+                    this.renderTOC(sessionView.book?.toc || [])
                     this.loadNotesList()
                 }
             }, 20)
@@ -6203,13 +6274,31 @@ class UniversalReaderApp {
                 console.error('Failed to open book in reader:', err)
                 this.showToast(`打开书籍失败: ${err.message}`, '⚠️')
                 this.closeReader()
+            } else {
+                try { readerSession.view?.close?.() } catch (e) {}
+                try { readerSession.view?.remove?.() } catch (e) {}
+                try { readerSession.viewport?.destroy?.() } catch (e) {}
+                try { readerSession.driver?.destroy?.() } catch (e) {}
             }
         }
     }
 
     // Flush pending progress + session time on direct window close (no UI teardown)
     async flushReaderStateOnExit(requestId = null) {
-        try {
+        if (typeof requestId === 'string' && requestId.length > 0) {
+            this._activeFlushRequests = this._activeFlushRequests || new Map()
+            if (this._activeFlushRequests.has(requestId)) {
+                return this._activeFlushRequests.get(requestId)
+            }
+        }
+
+        const doFlush = async () => {
+            let progressBackupSaved = false
+            let trackerBackupSaved = false
+            let progressSaved = false
+            let trackerSaved = false
+
+            // 1. Synchronous capture and pre-await backup
             try {
                 this.foliateView?.renderer?.settle?.()
             } catch (e) {}
@@ -6217,111 +6306,197 @@ class UniversalReaderApp {
                 clearTimeout(this._progressDebounceTimer)
                 this._progressDebounceTimer = null
             }
-            if (this._activeSession && this._activeSession.isCurrent() && this.currentBookId) {
-                const progressSnapshot = this.makeProgressSnapshot(this._activeSession)
+
+            const activeSession = this._activeSession
+            const activeBookId = this.currentBookId || activeSession?.bookId
+            const activeSnapshot = activeSession?.snapshot || this._currentSnapshot
+            const activeLocation = activeSession?.location || this.currentLocation
+            let progressSnapshot = null
+
+            if (activeSession && activeSession.isCurrent() && activeBookId && activeSnapshot) {
+                progressSnapshot = this.makeProgressSnapshot(activeSession)
                 if (progressSnapshot) {
-                    await db.updateBookProgress(this.currentBookId, progressSnapshot)
+                    try {
+                        progressBackupSaved = db.backupPendingProgress(activeBookId, progressSnapshot) === true
+                    } catch (bErr) {
+                        console.warn('flushReaderStateOnExit: progress backup failed:', bErr)
+                    }
                 }
             }
-            const endFrac = Number.isFinite(this.currentLocation?.fraction) ? this.currentLocation.fraction : null
-            await tracker.endSession(endFrac)
-        } catch (err) {
-            console.warn('flushReaderStateOnExit:', err)
-        } finally {
-            platformBridge.flushComplete(requestId)
+
+            const endFrac = Number.isFinite(activeLocation?.fraction) ? activeLocation.fraction : null
+            try {
+                trackerBackupSaved = tracker.backupPendingSession(endFrac) === true
+            } catch (tErr) {
+                console.warn('flushReaderStateOnExit: tracker backup failed:', tErr)
+            }
+
+            // 2. Decoupled asynchronous flushes
+            try {
+                if (activeBookId && progressSnapshot) {
+                    await db.updateBookProgress(activeBookId, progressSnapshot)
+                    progressSaved = true
+                    try {
+                        db.clearPendingProgressBackup(activeBookId, progressSnapshot.updatedAt)
+                    } catch (cErr) {}
+                }
+            } catch (pErr) {
+                console.warn('flushReaderStateOnExit: db.updateBookProgress failed:', pErr)
+            }
+
+            try {
+                await tracker.endSession(endFrac)
+                trackerSaved = true
+            } catch (eErr) {
+                console.warn('flushReaderStateOnExit: tracker.endSession failed:', eErr)
+            }
+
+            // 3. Status determination
+            let status = 'database_success'
+            if (progressSnapshot && !progressSaved) {
+                status = progressBackupSaved ? 'recovery_backup_success' : 'failed'
+            } else if (!trackerSaved && trackerBackupSaved) {
+                status = 'recovery_backup_success'
+            } else if (!progressSaved && !trackerSaved && !progressBackupSaved && !trackerBackupSaved) {
+                status = 'failed'
+            }
+
+            // 4. Close handshake completion: Only call if requestId is a non-empty string
+            if (typeof requestId === 'string' && requestId.length > 0) {
+                try {
+                    platformBridge.flushComplete(requestId)
+                } catch (fErr) {
+                    console.warn('flushReaderStateOnExit: flushComplete failed:', fErr)
+                }
+            }
+
+            return {
+                status,
+                progressSaved,
+                trackerSaved,
+                progressBackupSaved,
+                trackerBackupSaved
+            }
         }
+
+        if (typeof requestId === 'string' && requestId.length > 0) {
+            const flushPromise = doFlush()
+            this._activeFlushRequests.set(requestId, flushPromise)
+            try {
+                return await flushPromise
+            } finally {
+                this._activeFlushRequests.delete(requestId)
+            }
+        }
+
+        return await doFlush()
     }
 
     async closeReader() {
         const closingSession = this._activeSession
-        // Ensure any pending paginator fast-path is settled synchronously before closing
+        if (!closingSession) {
+            this.dom.readerView?.classList.remove('active')
+            if (this.dom.bookshelfView) this.dom.bookshelfView.style.display = 'flex'
+            return
+        }
+
+        // 1. Immediately and synchronously abort closing session so its callbacks become no-op
+        closingSession.abortController?.abort()
+
+        // 2. Synchronously capture session's fixed parameters and views
+        const closingBookId = closingSession.bookId
+        const closingProgress = this.makeProgressSnapshot(closingSession)
+        const closingLocation = closingSession.location || this.currentLocation
+        const closingFoliateView = closingSession.view || this.foliateView
+        const closingPdfViewport = closingSession.viewport || this.pdfViewport
+        const closingPdfDriver = closingSession.driver || this.pdfDriver
+
+        // 3. Synchronously detach views from `this` ONLY if they belong to closingSession
+        if (this.foliateView === closingFoliateView) this.foliateView = null
+        if (this.pdfViewport === closingPdfViewport) this.pdfViewport = null
+        if (this.pdfDriver === closingPdfDriver) this.pdfDriver = null
+        if (this._activeSession === closingSession) this.currentPdfTOC = null
+
+        // 4. Synchronously settle paginator and destroy closing views
         try {
-            this.foliateView?.renderer?.settle?.()
+            closingFoliateView?.renderer?.settle?.()
         } catch (e) {}
-        // Immediately flush any pending progress debounce save before closing
+        try { closingFoliateView?.close?.() } catch (e) {}
+        try { closingFoliateView?.remove?.() } catch (e) {}
+        try { closingPdfViewport?.destroy?.() } catch (e) {}
+        try { closingPdfDriver?.destroy?.() } catch (e) {}
+
+        // 5. Clear pending progress debounce timer
         if (this._progressDebounceTimer) {
             clearTimeout(this._progressDebounceTimer)
             this._progressDebounceTimer = null
         }
-        if (closingSession && this.currentBookId && this.currentLocation) {
-            try {
-                const progressSnapshot = this.makeProgressSnapshot(closingSession)
-                if (progressSnapshot) {
-                    await db.updateBookProgress(this.currentBookId, progressSnapshot)
-                }
-            } catch (err) {
-                console.warn('Failed to flush final book progress:', err)
-            }
-        }
 
-        if (this.currentLocation?.fraction != null) {
-            await tracker.endSession(this.currentLocation.fraction)
-        } else {
-            await tracker.endSession()
-        }
+        // 6. Stop reading tracker
         tracker.onTickCallback = null
+
+        // 7. If active session is still closingSession, clean up active state
+        if (this._activeSession === closingSession) {
+            this._activeSession = null
+            this.currentBookId = null
+            this.currentBookData = null
+            this._currentSnapshot = null
+            this.currentLocation = null
+        }
 
         if (this.dom.pdfZoomBar) {
             this.dom.pdfZoomBar.style.display = 'none'
         }
-
-        if (this.foliateView) {
-            this.foliateView.close?.()
-            this.foliateView.remove()
-            this.foliateView = null
-        }
-        if (this.pdfViewport) {
-            this.pdfViewport.destroy()
-            this.pdfViewport = null
-        }
-        this.currentPdfTOC = null
-        if (this.pdfDriver) {
-            this.pdfDriver.destroy()
-            this.pdfDriver = null
-        }
-        // tts removed
         this.clearSearchState(true)
         this.closeDrawer()
         this.hideSelectionPopup()
         this.hideHighlightActionPopup()
         this.toggleReaderUI(true)
-        this.dom.readerView.classList.remove('active')
-        this.dom.readerView.classList.add('closing')
-        this.dom.bookshelfView.style.display = 'flex'
-        this.dom.bookshelfView.classList.remove('view-spring-transition')
-        void this.dom.bookshelfView.offsetWidth
-        this.dom.bookshelfView.classList.add('view-spring-transition')
 
-        if (this._closeTimer) clearTimeout(this._closeTimer)
-        this._closeTimer = setTimeout(() => {
-            this._closeTimer = null
-            if (this._activeSession === closingSession) {
-                this.dom.readerView?.classList.remove('closing')
-                if (this.dom.readerView) this.dom.readerView.style.display = 'none'
-                this.dom.bookshelfView?.classList.remove('view-spring-transition')
+        // 8. Trigger UI transition only if no new session has started
+        if (!this._activeSession) {
+            this.dom.readerView.classList.remove('active')
+            this.dom.readerView.classList.add('closing')
+            this.dom.bookshelfView.style.display = 'flex'
+            this.dom.bookshelfView.classList.remove('view-spring-transition')
+            void this.dom.bookshelfView.offsetWidth
+            this.dom.bookshelfView.classList.add('view-spring-transition')
+
+            if (this._closeTimer) clearTimeout(this._closeTimer)
+            this._closeTimer = setTimeout(() => {
+                this._closeTimer = null
+                if (!this._activeSession) {
+                    this.dom.readerView?.classList.remove('closing')
+                    if (this.dom.readerView) this.dom.readerView.style.display = 'none'
+                    this.dom.bookshelfView?.classList.remove('view-spring-transition')
+                }
+            }, 240)
+
+            // Reset PDF drawing state so the pen tool never leaks into the next book
+            this.pdfDrawTool = null
+            this.pdfOverlayCanvas = null
+            this.currentPdfPageIndex = 0
+            this.shelfViewMode = 'grid'
+            this.shelfCategory = 'all'
+            this.sidebarUserCollapsed = true
+            document.getElementById('bookshelf-view')?.classList.add('sidebar-collapsed')
+            this.updateSettingsUI()
+            this.refreshBookshelf()
+            if (this.dom.booksWorkspace) {
+                this.dom.booksWorkspace.scrollTop = 0
             }
-        }, 240)
-
-        if (this._activeSession === closingSession) {
-            this.currentBookId = null
-            this.currentBookData = null
-            this._currentSnapshot = null
-            this.currentLocation = null
-            this._activeSession = null
         }
-        // Reset PDF drawing state so the pen tool never leaks into the next book
-        this.pdfDrawTool = null
-        this.pdfOverlayCanvas = null
-        this.currentPdfPageIndex = 0
-        // Always return to Modern Hero Lounge (p2) and collapsed sidebar upon closing reader
-        this.shelfViewMode = 'grid'
-        this.shelfCategory = 'all'
-        this.sidebarUserCollapsed = true
-        document.getElementById('bookshelf-view')?.classList.add('sidebar-collapsed')
-        this.updateSettingsUI()
-        this.refreshBookshelf()
-        if (this.dom.booksWorkspace) {
-            this.dom.booksWorkspace.scrollTop = 0
+
+        // 9. Asynchronously flush progress and end tracker using captured parameters
+        if (closingBookId && closingProgress) {
+            db.updateBookProgress(closingBookId, closingProgress).catch(err => {
+                console.warn('Failed to flush final book progress:', err)
+            })
+        }
+        if (closingLocation?.fraction != null) {
+            await tracker.endSession(closingLocation.fraction)
+        } else {
+            await tracker.endSession()
         }
 
         if (this.syncConfig?.enabled && this.syncConfig?.autoSyncOnBookClose) {
@@ -6329,8 +6504,13 @@ class UniversalReaderApp {
         }
     }
 
-    onReaderRelocate(detail) {
+    onReaderRelocate(detail, session = this._activeSession) {
+        if (session) {
+            session.location = detail
+            if (!session.isCurrent()) return
+        }
         if (!this.currentBookId) return
+        if (session && this._activeSession !== session) return
         this.hideFootnotePopup()
         const activeBookId = this.currentBookId
         const activeEpoch = this._currentBookEpoch
@@ -6438,8 +6618,8 @@ class UniversalReaderApp {
         // Save progress to IndexedDB with debounce using unified makeProgressSnapshot
         clearTimeout(this._progressDebounceTimer)
         this._progressDebounceTimer = setTimeout(() => {
-            if (this._activeSession && this._activeSession.epoch === activeEpoch && this.currentBookId === activeBookId) {
-                const progressSnapshot = this.makeProgressSnapshot(this._activeSession)
+            if (session && session.isCurrent() && this._activeSession === session && this.currentBookId === activeBookId) {
+                const progressSnapshot = this.makeProgressSnapshot(session)
                 if (progressSnapshot) {
                     db.updateBookProgress(activeBookId, progressSnapshot).catch(err => console.warn('Failed to update book progress:', err))
                 }
@@ -7246,7 +7426,11 @@ class UniversalReaderApp {
     }
 
     async createHighlight(color, style = 'highlight', note = '') {
-        if ((!this.selectedTextInfo && (!this.multiSelectedRanges || this.multiSelectedRanges.length === 0)) || !this.currentBookId) return
+        const activeSession = this._activeSession
+        const snapshot = this._currentSnapshot || {}
+        const bookId = activeSession?.bookId || this.currentBookId
+        if (!bookId || (activeSession && !activeSession.isCurrent())) return
+        if ((!this.selectedTextInfo && (!this.multiSelectedRanges || this.multiSelectedRanges.length === 0))) return
         
         const colorVal = color || '#facc15'
 
@@ -7255,12 +7439,13 @@ class UniversalReaderApp {
             const rangesToProcess = [...this.multiSelectedRanges]
             this.clearVirtualMultiSelections()
             for (const item of rangesToProcess) {
+                if (activeSession && !activeSession.isCurrent()) return
                 const cfi = item.cfi
                 const text = item.text.trim()
                 if (!text || !cfi) continue
                 const hl = {
                     id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                    bookId: this.currentBookId,
+                    bookId: bookId,
                     cfi: cfi,
                     text: text,
                     color: colorVal,
@@ -7268,11 +7453,12 @@ class UniversalReaderApp {
                     note: note,
                     chapterTitle: this.currentLocation?.tocItem?.label || '正文',
                     createdAt: Date.now(),
-                    blobRevision: this._currentSnapshot?.blobRevision,
-                    revisionOrigin: this._currentSnapshot?.revisionOrigin,
-                    documentHash: this._currentSnapshot?.documentHash
+                    blobRevision: snapshot.blobRevision,
+                    revisionOrigin: snapshot.revisionOrigin,
+                    documentHash: snapshot.documentHash
                 }
                 await db.saveHighlight(hl)
+                if (activeSession && !activeSession.isCurrent()) return
                 if (this.foliateView && cfi) {
                     try {
                         await this.foliateView.addAnnotation({
@@ -7284,6 +7470,7 @@ class UniversalReaderApp {
                     } catch (e) {}
                 }
             }
+            if (activeSession && !activeSession.isCurrent()) return
             this.showToast(`✨ 已为 ${rangesToProcess.length} 处选区添加标注`)
             this.multiSelectedRanges = []
             const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
@@ -7296,7 +7483,7 @@ class UniversalReaderApp {
         if (this.pdfViewport && (this.selectedTextInfo?.formatType === 'pdf' || this.selectedTextInfo?.pdfTarget)) {
             const hl = {
                 id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                bookId: this.currentBookId,
+                bookId: bookId,
                 formatType: 'pdf',
                 text: this.selectedTextInfo.text,
                 color: colorVal,
@@ -7304,14 +7491,16 @@ class UniversalReaderApp {
                 note: note,
                 chapterTitle: this.currentLocation?.tocItem?.label || '正文',
                 createdAt: Date.now(),
-                blobRevision: this._currentSnapshot?.blobRevision,
-                revisionOrigin: this._currentSnapshot?.revisionOrigin,
-                documentHash: this._currentSnapshot?.documentHash,
+                blobRevision: snapshot.blobRevision,
+                revisionOrigin: snapshot.revisionOrigin,
+                documentHash: snapshot.documentHash,
                 pdfTarget: this.selectedTextInfo.pdfTarget
             }
             await db.saveHighlight(hl)
-            const allHls = await db.getHighlightsByBook(this.currentBookId)
-            this.pdfViewport.setHighlights(allHls, this._currentSnapshot)
+            if (activeSession && !activeSession.isCurrent()) return
+            const allHls = await db.getHighlightsByBook(bookId)
+            if (activeSession && !activeSession.isCurrent()) return
+            this.pdfViewport.setHighlights(allHls, snapshot)
             window.getSelection()?.removeAllRanges()
             this.hideSelectionPopup()
             this.loadNotesList()
@@ -7322,14 +7511,16 @@ class UniversalReaderApp {
         const cfi = this.selectedTextInfo.cfi
         const text = this.selectedTextInfo.text.trim()
 
-        // 1. Check if an annotation of the EXACT SAME style already exists on this CFI
-        const existingNotes = await db.getHighlightsByBook(this.currentBookId)
-        const matched = existingNotes.find(n => n.cfi === cfi && (n.style || 'highlight') === style)
+        // 1. Check if an annotation of the EXACT SAME style already exists on this CFI for current content identity
+        const existingNotes = await db.getHighlightsByBook(bookId)
+        if (activeSession && !activeSession.isCurrent()) return
+        const matched = existingNotes.find(n => n.cfi === cfi && (n.style || 'highlight') === style && db.isContentIdentityMatching(n, snapshot).matches)
 
         if (matched) {
             // If user clicked the same color/style with no new note -> TOGGLE OFF / CANCEL THIS STYLE!
             if (!note && matched.color === colorVal) {
                 await db.deleteHighlight(matched.id)
+                if (activeSession && !activeSession.isCurrent()) return
                 if (this.foliateView && matched.cfi) {
                     await this.foliateView.deleteAnnotation({ value: `${matched.cfi}::${style}`, id: matched.id })
                 }
@@ -7345,6 +7536,7 @@ class UniversalReaderApp {
             if (note) matched.note = note
             if (cfi) matched.cfi = cfi
             await db.saveHighlight(matched)
+            if (activeSession && !activeSession.isCurrent()) return
 
             if (this.foliateView && matched.cfi) {
                 try {
@@ -7367,7 +7559,7 @@ class UniversalReaderApp {
         // 2. New Highlight Record (coexists with other styles like highlight + underline!)
         const hl = {
             id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            bookId: this.currentBookId,
+            bookId: bookId,
             cfi: cfi,
             text: text,
             color: colorVal,
@@ -7375,12 +7567,13 @@ class UniversalReaderApp {
             note: note,
             chapterTitle: this.currentLocation?.tocItem?.label || '正文',
             createdAt: Date.now(),
-            blobRevision: this._currentSnapshot?.blobRevision,
-            revisionOrigin: this._currentSnapshot?.revisionOrigin,
-            documentHash: this._currentSnapshot?.documentHash
+            blobRevision: snapshot.blobRevision,
+            revisionOrigin: snapshot.revisionOrigin,
+            documentHash: snapshot.documentHash
         }
 
         await db.saveHighlight(hl)
+        if (activeSession && !activeSession.isCurrent()) return
 
         // Draw annotation immediately onto foliate-view
         if (this.foliateView && cfi) {
@@ -7661,7 +7854,11 @@ class UniversalReaderApp {
             if (this.dom.btnExportNotes) this.dom.btnExportNotes.style.display = 'none'
             return
         }
-        const allNotes = await db.getHighlightsByBook(this.currentBookId)
+        const activeSession = this._activeSession
+        const snapshot = this._currentSnapshot
+        const bookId = this.currentBookId
+        const allNotes = await db.getHighlightsByBook(bookId)
+        if (activeSession && !activeSession.isCurrent()) return
         const container = this.dom.notesContainer
         container.innerHTML = ''
 
@@ -7682,15 +7879,25 @@ class UniversalReaderApp {
         if (this.dom.btnExportNotes) this.dom.btnExportNotes.style.display = 'inline-flex'
 
         notes.forEach(note => {
+            const match = snapshot ? db.isContentIdentityMatching(note, snapshot) : { matches: true }
+            const isUnconfirmed = !match.matches
+
             const card = document.createElement('div')
             card.className = 'highlight-card'
             card.style.borderLeftColor = note.color || '#facc15'
+            if (isUnconfirmed) {
+                card.style.opacity = '0.75'
+            }
+
+            const unconfirmedBadge = isUnconfirmed 
+                ? `<span class="note-unconfirmed-badge" style="margin-left: 6px; font-size: 0.7rem; color: #d97706; background: rgba(245, 158, 11, 0.12); padding: 1px 5px; border-radius: 4px; font-weight: 500;">⚠️ 待确认版本</span>` 
+                : ''
 
             card.innerHTML = `
                 <div class="highlight-text">“${escapeHTML(note.text)}”</div>
                 ${note.note ? `<div class="highlight-note">${escapeHTML(note.note)}</div>` : ''}
                 <div class="highlight-meta">
-                    <span>${escapeHTML(note.chapterTitle || '正文')} • ${new Date(note.createdAt).toLocaleDateString()}</span>
+                    <span>${escapeHTML(note.chapterTitle || '正文')} • ${new Date(note.createdAt).toLocaleDateString()}${unconfirmedBadge}</span>
                     <div style="display: flex; gap: 8px;">
                         <button class="btn-note-share" style="color: var(--accent-purple); font-size: 0.75rem; font-weight: 600; background: none; border: none; cursor: pointer;">📷 分享卡片</button>
                         <button class="btn-note-del" style="color: #ef4444; font-size: 0.75rem; background: none; border: none; cursor: pointer;">删除</button>
@@ -7700,6 +7907,10 @@ class UniversalReaderApp {
 
             card.addEventListener('click', e => {
                 if (e.target.classList.contains('btn-note-del') || e.target.classList.contains('btn-note-share')) return
+                if (isUnconfirmed) {
+                    this.showToast('该笔记关联的文档版本与当前文件不一致，无法准确定位', '⚠️')
+                    return
+                }
                 if (this.pdfViewport && (note.formatType === 'pdf' || note.pdfTarget)) {
                     const target = note.pdfTarget || {}
                     const firstSegment = Array.isArray(target.segments) ? target.segments[0] : null
@@ -7724,9 +7935,11 @@ class UniversalReaderApp {
             card.querySelector('.btn-note-del')?.addEventListener('click', async e => {
                 e.stopPropagation()
                 await db.deleteHighlight(note.id)
+                if (activeSession && !activeSession.isCurrent()) return
                 if (this.pdfViewport) {
-                    const allHls = await db.getHighlightsByBook(this.currentBookId)
-                    this.pdfViewport.setHighlights(allHls)
+                    const allHls = await db.getHighlightsByBook(bookId)
+                    if (activeSession && !activeSession.isCurrent()) return
+                    this.pdfViewport.setHighlights(allHls, snapshot)
                 }
                 if (this.foliateView && note.cfi) {
                     await this.foliateView.deleteAnnotation({ value: note.cfi, id: note.id })
@@ -9136,6 +9349,8 @@ class UniversalReaderApp {
         }
     }
 }
+
+export { UniversalReaderApp }
 
 // Expose modules to global window for accessibility and diagnostics
 window.db = db

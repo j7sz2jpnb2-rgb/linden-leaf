@@ -94,8 +94,8 @@ export class ReadingTracker {
         this.recoverPendingBackup()
     }
 
-    backupPendingSession() {
-        if (!this.isTracking || !this.currentBookId || this.sessionCumulativeSeconds <= 0) return
+    backupPendingSession(endProgress = null) {
+        if (!this.isTracking || !this.currentBookId) return false
         try {
             const backupData = {
                 sessionId: this.currentSessionId,
@@ -103,10 +103,15 @@ export class ReadingTracker {
                 bookTitle: this.currentBookTitle,
                 durationSeconds: this.sessionCumulativeSeconds,
                 startTime: this.sessionStartTime || Date.now(),
+                startProgress: this.sessionStartFraction || 0,
+                endProgress: endProgress != null ? endProgress : (this.sessionStartFraction || 0),
                 timestamp: Date.now()
             }
             localStorage.setItem('linden_pending_session_backup', JSON.stringify(backupData))
-        } catch (e) {}
+            return true
+        } catch (e) {
+            return false
+        }
     }
 
     async recoverPendingBackup() {
@@ -124,8 +129,8 @@ export class ReadingTracker {
                     startTime: data.startTime || Date.now(),
                     endTime: data.timestamp || Date.now(),
                     durationSeconds: data.durationSeconds,
-                    startProgress: 0,
-                    endProgress: 0
+                    startProgress: data.startProgress || 0,
+                    endProgress: data.endProgress != null ? data.endProgress : (data.startProgress || 0)
                 }
                 await db.recordReadingSession(recoveredRecord)
                 localStorage.removeItem('linden_pending_session_backup')
@@ -150,9 +155,9 @@ export class ReadingTracker {
     }
 
     async startSession(bookId, bookTitle, startFraction = 0) {
-        // Safely end existing session if any before starting new
+        // Safely end existing session if any before starting new (do not pass startFraction of new book!)
         if (this.isTracking) {
-            await this.endSession(startFraction)
+            await this.endSession()
         }
 
         this.sessionToken++
@@ -287,51 +292,84 @@ export class ReadingTracker {
         }
     }
 
-    async flush(isFinal = false, finalFraction = null) {
+    async flush(isFinal = false, finalFraction = null, sessionSnapshot = null) {
         // Discard sessions under 1 minute (< 60 seconds)
-        if (!this.isTracking || !this.currentBookId || this.sessionCumulativeSeconds < 60) return
+        const targetSessionId = sessionSnapshot?.sessionId || this.currentSessionId
+        const targetBookId = sessionSnapshot?.bookId || this.currentBookId
+        const targetTitle = sessionSnapshot?.bookTitle || this.currentBookTitle
+        const targetDuration = sessionSnapshot?.durationSeconds != null ? sessionSnapshot.durationSeconds : this.sessionCumulativeSeconds
+        const targetStartTime = sessionSnapshot?.startTime || this.sessionStartTime || Date.now()
+        const targetStartFrac = sessionSnapshot?.startFraction != null ? sessionSnapshot.startFraction : this.sessionStartFraction
 
-        const currentToken = this.sessionToken
+        if (!targetBookId || targetDuration < 60) {
+            if (isFinal && targetSessionId) {
+                try {
+                    const raw = localStorage.getItem('linden_pending_session_backup')
+                    if (raw) {
+                        const parsed = JSON.parse(raw)
+                        if (parsed?.sessionId === targetSessionId) {
+                            localStorage.removeItem('linden_pending_session_backup')
+                        }
+                    }
+                } catch (e) {}
+            }
+            return
+        }
+
         const now = Date.now()
         this.lastFlushTime = now
 
-        const sliceStartTime = this.sessionStartTime || now
+        const sliceStartTime = targetStartTime
         const dateStr = db.toLocalDateKey(sliceStartTime)
         const sessionRecord = {
-            id: this.currentSessionId || `sess_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-            bookId: this.currentBookId,
-            bookTitle: this.currentBookTitle,
+            id: targetSessionId || `sess_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            bookId: targetBookId,
+            bookTitle: targetTitle,
             date: dateStr,
             startTime: sliceStartTime,
             endTime: now,
-            durationSeconds: this.sessionCumulativeSeconds,
-            startProgress: this.sessionStartFraction,
-            endProgress: finalFraction != null ? finalFraction : this.sessionStartFraction
+            durationSeconds: targetDuration,
+            startProgress: targetStartFrac,
+            endProgress: finalFraction != null ? finalFraction : targetStartFrac
         }
 
         try {
             await db.recordReadingSession(sessionRecord)
             if (isFinal) {
-                try { localStorage.removeItem('linden_pending_session_backup') } catch (e) {}
+                try {
+                    const raw = localStorage.getItem('linden_pending_session_backup')
+                    if (raw) {
+                        const parsed = JSON.parse(raw)
+                        if (parsed?.sessionId === sessionRecord.id) {
+                            localStorage.removeItem('linden_pending_session_backup')
+                        }
+                    }
+                } catch (e) {}
             }
         } catch (err) {
             console.warn('Failed to record reading session:', err)
+            throw err
         }
     }
 
     async endSession(finalFraction = null) {
-        if (!this.isTracking) return
+        if (!this.isTracking) return this._sessionQueue || Promise.resolve()
         const token = this.sessionToken
         
         if (this.tickerInterval) {
             clearInterval(this.tickerInterval)
             this.tickerInterval = null
         }
-        
-        await this.flush(true, finalFraction)
-        try {
-            localStorage.removeItem('linden_pending_session_backup')
-        } catch (e) {}
+
+        // Synchronously capture session parameters so concurrent transitions cannot corrupt them
+        const sessionSnapshot = {
+            sessionId: this.currentSessionId,
+            bookId: this.currentBookId,
+            bookTitle: this.currentBookTitle,
+            durationSeconds: this.sessionCumulativeSeconds,
+            startTime: this.sessionStartTime,
+            startFraction: this.sessionStartFraction
+        }
         
         // Only clear state if no newer session has started in the meantime
         if (this.sessionToken === token) {
@@ -344,6 +382,16 @@ export class ReadingTracker {
             this.rollingPagePaces = []
             this.onTickCallback = null
         }
+
+        // Serialize DB flush onto session queue
+        this._sessionQueue = (this._sessionQueue || Promise.resolve()).then(() => {
+            return this.flush(true, finalFraction, sessionSnapshot)
+        }).catch(err => {
+            console.warn('[Tracker] endSession flush failed:', err)
+            throw err
+        })
+
+        return this._sessionQueue
     }
 
     formatDuration(totalSecs) {

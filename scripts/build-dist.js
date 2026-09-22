@@ -20,7 +20,37 @@ if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
     process.exit(1);
 }
 
-// Check for junction or symlink escape
+const requiredWhitelist = [
+    'index.html',
+    'js',
+    'css',
+    'assets',
+    'foliate-js-main',
+    'vendor',
+    'services'
+];
+
+// 1. Validate all required whitelist items exist BEFORE cleaning distDir
+for (const item of requiredWhitelist) {
+    const src = path.join(rootDir, item);
+    if (!fs.existsSync(src)) {
+        console.error(`[build-dist] FATAL: Required whitelist resource missing: ${item} at ${src}`);
+        process.exit(1);
+    }
+    try {
+        const realSrc = fs.realpathSync(src);
+        const rel = path.relative(rootDir, realSrc);
+        if (rel.startsWith('..') || path.isAbsolute(rel)) {
+            console.error(`[build-dist] FATAL: Whitelist resource points outside project root: ${item} -> ${realSrc}`);
+            process.exit(1);
+        }
+    } catch (err) {
+        console.error(`[build-dist] FATAL: Cannot resolve realpath for ${item}:`, err);
+        process.exit(1);
+    }
+}
+
+// 2. Safely clean and prepare distDir
 if (fs.existsSync(distDir)) {
     try {
         const stat = fs.lstatSync(distDir);
@@ -37,23 +67,10 @@ if (fs.existsSync(distDir)) {
 }
 fs.mkdirSync(distDir, { recursive: true });
 
-const requiredWhitelist = [
-    'index.html',
-    'js',
-    'css',
-    'assets',
-    'foliate-js-main',
-    'vendor',
-    'services'
-];
-
+// 3. Copy validated whitelist resources
 for (const item of requiredWhitelist) {
     const src = path.join(rootDir, item);
     const dest = path.join(distDir, item);
-    if (!fs.existsSync(src)) {
-        console.error(`[build-dist] FATAL: Required whitelist resource missing: ${item} at ${src}`);
-        process.exit(1);
-    }
     fs.cpSync(src, dest, { recursive: true, force: true });
     console.log(`[build-dist] Copied ${item} -> dist-tauri/${item}`);
 }
@@ -82,12 +99,33 @@ function hashDirectory(dir, baseDir = dir) {
 const allFileHashes = hashDirectory(distDir);
 const combinedDigest = crypto.createHash('sha256').update(allFileHashes.join('\n')).digest('hex');
 
-// Get git commit if possible
+// Helper to run git commands
+function runGit(args) {
+    const candidateGitPaths = [
+        'git',
+        'C:\\Users\\YONGHU\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\git\\cmd\\git.exe'
+    ];
+    for (const gitBin of candidateGitPaths) {
+        try {
+            return execSync(`"${gitBin}" ${args}`, { cwd: rootDir, stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
+        } catch (e) {}
+    }
+    return null;
+}
+
+// Get git commit and dirty status
 let commitHash = 'dev-baseline';
-try {
-    commitHash = execSync('git rev-parse --short HEAD', { cwd: rootDir, stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim() || 'dev-baseline';
-} catch (e) {
-    commitHash = 'dev-baseline';
+let isDirty = false;
+const rev = runGit('rev-parse --short HEAD');
+if (rev) {
+    commitHash = rev;
+}
+const status = runGit('status --porcelain');
+if (status !== null && status.length > 0) {
+    isDirty = true;
+    if (!commitHash.endsWith('-dirty')) {
+        commitHash = `${commitHash}-dirty`;
+    }
 }
 
 let pkgVersion = '1.2.3';
@@ -103,6 +141,7 @@ const buildInfo = {
     buildId,
     version: pkgVersion,
     commit: commitHash,
+    isDirty,
     resourceHash: combinedDigest,
     backend: 'pdfjs',
     timestamp: buildTimestamp,
