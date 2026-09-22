@@ -332,29 +332,24 @@ export class MuPdfTauriDriver {
 }
 
 export class AdaptivePdfDriver {
-    constructor({ nativePath = null } = {}) {
+    constructor({ nativePath = null, snapshot = null } = {}) {
         this.nativePath = nativePath
+        this.snapshot = snapshot
         this.backend = null
         this.kind = 'adaptive'
     }
 
     async open(source) {
-        if (this.nativePath && await MuPdfTauriDriver.isAvailable()) {
-            const native = new MuPdfTauriDriver()
-            try {
-                const info = await native.open({ nativePath: this.nativePath })
-                this.backend = native
-                this.kind = native.kind
-                return info
-            } catch (err) {
-                console.warn('[PDF] Native MuPDF open failed, falling back to PDF.js:', err)
-                native.destroy()
-            }
-        }
+        // Contract 1A:
+        // openBook captures snapshot and passes it to driver.
+        // If snapshot is passed, only use the content in snapshot.
+        // Default PDF.js reads this Blob. Native path is not used to auto-enable MuPDF
+        // without reliable proof of materialization.
+        const blobToOpen = this.snapshot?.blob || source?.blob || source?.file || source
         const fallback = new PdfJsDriver()
         this.backend = fallback
         this.kind = fallback.kind
-        return fallback.open(source?.blob || source?.file || source)
+        return fallback.open(blobToOpen)
     }
 
     getPageSizes(...args) { return this.backend.getPageSizes(...args) }

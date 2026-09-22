@@ -161,9 +161,86 @@ export const openDB = () => {
     return _openPromise
 }
 
+// Content Identity & Revision Management
+let _cachedRevisionOrigin = null
+
+export const getRevisionOrigin = async () => {
+    if (_cachedRevisionOrigin) return _cachedRevisionOrigin
+    try {
+        const saved = await getSetting('device_revision_origin')
+        if (saved && typeof saved === 'string') {
+            _cachedRevisionOrigin = saved
+            return saved
+        }
+        const generated = `orig_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+        await setSetting('device_revision_origin', generated)
+        _cachedRevisionOrigin = generated
+        return generated
+    } catch (e) {
+        if (!_cachedRevisionOrigin) {
+            _cachedRevisionOrigin = `orig_mem_${Date.now().toString(36)}`
+        }
+        return _cachedRevisionOrigin
+    }
+}
+
+export const generateRevision = () => {
+    return `rev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+export const isContentIdentityMatching = (item, currentSnapshot) => {
+    if (!item || !currentSnapshot) return { matches: false, status: 'unconfirmed', pendingConfirmation: true }
+
+    // Different bookId -> never matches
+    if (item.bookId && currentSnapshot.bookId && item.bookId !== currentSnapshot.bookId) {
+        return { matches: false, status: 'different_book', pendingConfirmation: false }
+    }
+
+    const itemOrigin = item.revisionOrigin || null
+    const itemRev = item.blobRevision || null
+    const itemHash = item.documentHash || null
+
+    const currentOrigin = currentSnapshot.revisionOrigin || null
+    const currentRev = currentSnapshot.blobRevision || null
+    const currentHash = currentSnapshot.documentHash || null
+
+    // 1. Both hashes known: compare byte identity directly
+    if (itemHash && currentHash) {
+        if (itemHash === currentHash) {
+            return { matches: true, status: 'matched_by_hash', pendingConfirmation: false }
+        } else {
+            return { matches: false, status: 'hash_conflict', pendingConfirmation: false }
+        }
+    }
+
+    // 2. Same origin and same revision
+    if (itemOrigin && currentOrigin && itemOrigin === currentOrigin) {
+        if (itemRev && currentRev) {
+            if (itemRev === currentRev) {
+                // If one has a hash and the other has a conflicting hash, reject!
+                if (itemHash && currentHash && itemHash !== currentHash) {
+                    return { matches: false, status: 'hash_conflict', pendingConfirmation: false }
+                }
+                return { matches: true, status: 'matched_by_revision', pendingConfirmation: false }
+            } else {
+                return { matches: false, status: 'revision_mismatch', pendingConfirmation: false }
+            }
+        }
+    }
+
+    // 3. Unconfirmed cases (different origin without matching hash, or legacy without revision/hash)
+    const isLegacy = !itemRev && !itemHash
+    return {
+        matches: false,
+        status: isLegacy ? 'legacy_unconfirmed' : 'unconfirmed',
+        pendingConfirmation: true
+    }
+}
+
 // Books CRUD
 export const saveBook = async bookData => {
     const db = await openDB()
+    const origin = await getRevisionOrigin()
     const { blob, nativePath, ...meta } = bookData
 
     return new Promise((resolve, reject) => {
@@ -211,8 +288,14 @@ export const saveBook = async bookData => {
                 const fileReq = fileStore.get(meta.id)
                 fileReq.onsuccess = () => {
                     const local = fileReq.result || { id: meta.id }
-                    if (blob) local.blob = blob
-                    if (nativePath) local.nativePath = nativePath
+                    if (blob) {
+                        local.blob = blob
+                        local.blobRevision = generateRevision()
+                        local.revisionOrigin = origin
+                        local.documentHash = null // Clear old hash association
+                    }
+                    if (nativePath !== undefined) local.nativePath = nativePath
+                    local.updatedAt = Date.now()
                     fileStore.put(local)
                 }
             }
@@ -305,6 +388,7 @@ export const hasBookFileBlob = async id => {
 export const saveBookFileBlob = async (id, blob) => {
     if (!id || !blob) return false
     const db = await openDB()
+    const origin = await getRevisionOrigin()
     return new Promise((resolve, reject) => {
         const tx = db.transaction(['books', 'book_files'], 'readwrite')
         const fileStore = tx.objectStore('book_files')
@@ -314,6 +398,10 @@ export const saveBookFileBlob = async (id, blob) => {
         localReq.onsuccess = () => {
             const local = localReq.result || { id }
             local.blob = blob
+            local.blobRevision = generateRevision()
+            local.revisionOrigin = origin
+            local.documentHash = null // Clear old hash association
+            local.updatedAt = Date.now()
             fileStore.put(local)
         }
 
@@ -330,6 +418,110 @@ export const saveBookFileBlob = async (id, blob) => {
 
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed saving book blob'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted'))
+    })
+}
+
+export const getBookFileSnapshot = async id => {
+    if (!id) return null
+    const db = await openDB()
+    const origin = await getRevisionOrigin()
+
+    return new Promise((resolve, reject) => {
+        try {
+            const tx = db.transaction(['book_files', 'books'], 'readwrite')
+            const fileStore = tx.objectStore('book_files')
+            const bookStore = tx.objectStore('books')
+
+            let fileRecord = null
+            let bookRecord = null
+
+            const fReq = fileStore.get(id)
+            const bReq = bookStore.get(id)
+
+            const maybeSyncBook = () => {
+                if (fileRecord?.blobRevision && bookRecord && !bookRecord.blobRevision) {
+                    bookRecord.blobRevision = fileRecord.blobRevision
+                    bookRecord.revisionOrigin = fileRecord.revisionOrigin
+                    bookRecord.documentHash = fileRecord.documentHash
+                    bookStore.put(bookRecord)
+                }
+            }
+
+            fReq.onsuccess = () => {
+                fileRecord = fReq.result || null
+                if (fileRecord && fileRecord.blob && !fileRecord.blobRevision) {
+                    // Legacy record backfill within transaction
+                    fileRecord.blobRevision = generateRevision()
+                    fileRecord.revisionOrigin = fileRecord.revisionOrigin || origin
+                    fileRecord.documentHash = fileRecord.documentHash || null
+                    fileRecord.updatedAt = Date.now()
+                    fileStore.put(fileRecord)
+                }
+                maybeSyncBook()
+            }
+
+            bReq.onsuccess = () => {
+                bookRecord = bReq.result || null
+                maybeSyncBook()
+            }
+
+            tx.oncomplete = () => {
+                if (!fileRecord || !fileRecord.blob) {
+                    // Fallback to legacy books table if blob was stored in books
+                    if (bookRecord && bookRecord.blob) {
+                        const migTx = db.transaction(['book_files', 'books'], 'readwrite')
+                        const migFileStore = migTx.objectStore('book_files')
+                        const newRecord = {
+                            id,
+                            blob: bookRecord.blob,
+                            blobRevision: generateRevision(),
+                            revisionOrigin: origin,
+                            documentHash: null,
+                            nativePath: bookRecord.nativePath || null,
+                            updatedAt: Date.now()
+                        }
+                        migFileStore.put(newRecord)
+                        migTx.oncomplete = () => {
+                            resolve(Object.freeze({
+                                bookId: id,
+                                blob: newRecord.blob,
+                                blobRevision: newRecord.blobRevision,
+                                revisionOrigin: newRecord.revisionOrigin,
+                                documentHash: newRecord.documentHash,
+                                nativePath: newRecord.nativePath,
+                                format: bookRecord.format || null,
+                                title: bookRecord.title || '',
+                                author: bookRecord.author || '',
+                                progress: bookRecord.progress || null
+                            }))
+                        }
+                        migTx.onerror = () => resolve(null)
+                        migTx.onabort = () => resolve(null)
+                        return
+                    }
+                    return resolve(null)
+                }
+
+                resolve(Object.freeze({
+                    bookId: id,
+                    blob: fileRecord.blob,
+                    blobRevision: fileRecord.blobRevision,
+                    revisionOrigin: fileRecord.revisionOrigin || origin,
+                    documentHash: fileRecord.documentHash || null,
+                    nativePath: fileRecord.nativePath || null,
+                    format: bookRecord?.format || null,
+                    title: bookRecord?.title || '',
+                    author: bookRecord?.author || '',
+                    progress: bookRecord?.progress || null
+                }))
+            }
+
+            tx.onerror = () => reject(tx.error || new Error(`Failed to get book file snapshot ${id}`))
+            tx.onabort = () => reject(tx.error || new Error(`Transaction aborted for snapshot ${id}`))
+        } catch (err) {
+            reject(err)
+        }
     })
 }
 
@@ -390,6 +582,7 @@ export const updateBookProgress = async (id, progressData) => {
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to update progress'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted updating progress'))
     })
 }
 
@@ -410,6 +603,7 @@ export const updateBookReadingTime = async (id, addedSeconds) => {
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to update reading time'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted updating reading time'))
     })
 }
 
@@ -430,6 +624,7 @@ export const updateBookMetadata = async (id, { title, author }) => {
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to update book metadata'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted updating book metadata'))
     })
 }
 
@@ -534,6 +729,7 @@ export const saveHighlight = async highlight => {
         }
         tx.oncomplete = () => resolve(highlight.id)
         tx.onerror = () => reject(tx.error || new Error('Failed to save highlight'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving highlight'))
     })
 }
 
@@ -573,6 +769,7 @@ export const deleteHighlight = async (id, recordTombstone = true, tombstoneTime 
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to delete highlight'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted deleting highlight'))
     })
 }
 
@@ -590,6 +787,7 @@ export const saveBookmark = async bookmark => {
         }
         tx.oncomplete = () => resolve(bookmark.id)
         tx.onerror = () => reject(tx.error || new Error('Failed to save bookmark'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving bookmark'))
     })
 }
 
@@ -629,6 +827,7 @@ export const deleteBookmark = async (id, recordTombstone = true, tombstoneTime =
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to delete bookmark'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted deleting bookmark'))
     })
 }
 
@@ -1272,10 +1471,14 @@ export const removeBookFromList = async (bookId, listId) => {
 // ==========================================================
 // PDF Freehand Drawing & Annotations CRUD
 // ==========================================================
-export const savePdfPageDrawing = async (bookId, pageIndex, strokes) => {
+export const savePdfPageDrawing = async (bookId, pageIndex, strokes, versionMeta = {}) => {
     if (!bookId || pageIndex == null) return false
     const db = await openDB()
-    const drawingId = `${bookId}_page_${pageIndex}`
+    const { blobRevision = null, revisionOrigin = null, documentHash = null } = versionMeta
+    const drawingId = blobRevision
+        ? `${bookId}_rev_${blobRevision}_page_${pageIndex}`
+        : `${bookId}_page_${pageIndex}`
+
     return new Promise((resolve, reject) => {
         const storeNames = db.objectStoreNames.contains('deleted_records')
             ? ['pdf_drawings', 'deleted_records']
@@ -1286,6 +1489,9 @@ export const savePdfPageDrawing = async (bookId, pageIndex, strokes) => {
             id: drawingId,
             bookId,
             pageIndex,
+            blobRevision,
+            revisionOrigin,
+            documentHash,
             strokes: strokes || [],
             updatedAt: Date.now()
         }
@@ -1295,25 +1501,53 @@ export const savePdfPageDrawing = async (bookId, pageIndex, strokes) => {
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to save PDF drawing'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving drawing'))
     })
 }
 
-export const getPdfPageDrawing = async (bookId, pageIndex) => {
+export const getPdfPageDrawing = async (bookId, pageIndex, versionMeta = {}) => {
     if (!bookId || pageIndex == null) return null
     const db = await openDB()
+    const { blobRevision = null, revisionOrigin = null, documentHash = null } = versionMeta
     return new Promise((resolve, reject) => {
         const tx = db.transaction('pdf_drawings', 'readonly')
         const store = tx.objectStore('pdf_drawings')
-        const req = store.get(`${bookId}_page_${pageIndex}`)
-        req.onsuccess = () => resolve(req.result || null)
-        req.onerror = () => reject(req.error || new Error('Failed to get PDF drawing'))
+
+        if (blobRevision) {
+            const versionedReq = store.get(`${bookId}_rev_${blobRevision}_page_${pageIndex}`)
+            versionedReq.onsuccess = () => {
+                if (versionedReq.result) {
+                    return resolve(versionedReq.result)
+                }
+                // Check legacy key if no versioned drawing exists
+                const legacyReq = store.get(`${bookId}_page_${pageIndex}`)
+                legacyReq.onsuccess = () => {
+                    const legacy = legacyReq.result
+                    if (!legacy) return resolve(null)
+                    const match = isContentIdentityMatching(legacy, { bookId, blobRevision, revisionOrigin, documentHash })
+                    if (match.matches) {
+                        return resolve(legacy)
+                    }
+                    return resolve(null)
+                }
+                legacyReq.onerror = () => resolve(null)
+            }
+            versionedReq.onerror = () => reject(versionedReq.error || new Error('Failed to get PDF drawing'))
+        } else {
+            const req = store.get(`${bookId}_page_${pageIndex}`)
+            req.onsuccess = () => resolve(req.result || null)
+            req.onerror = () => reject(req.error || new Error('Failed to get PDF drawing'))
+        }
     })
 }
 
-export const clearPdfPageDrawing = async (bookId, pageIndex, recordTombstone = true, tombstoneTime = Date.now()) => {
+export const clearPdfPageDrawing = async (bookId, pageIndex, recordTombstone = true, tombstoneTime = Date.now(), versionMeta = {}) => {
     if (!bookId || pageIndex == null) return false
     const db = await openDB()
-    const drawingId = `${bookId}_page_${pageIndex}`
+    const { blobRevision = null } = versionMeta
+    const drawingId = blobRevision
+        ? `${bookId}_rev_${blobRevision}_page_${pageIndex}`
+        : `${bookId}_page_${pageIndex}`
     return new Promise((resolve, reject) => {
         const storeNames = recordTombstone && db.objectStoreNames.contains('deleted_records')
             ? ['pdf_drawings', 'deleted_records']
@@ -1329,6 +1563,7 @@ export const clearPdfPageDrawing = async (bookId, pageIndex, recordTombstone = t
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to clear PDF drawing'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted clearing drawing'))
     })
 }
 
@@ -1350,6 +1585,7 @@ export const clearPdfDrawingById = async (drawingId, recordTombstone = false, to
         }
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error(`Failed to clear PDF drawing ${drawingId}`))
+        tx.onabort = () => reject(tx.error || new Error(`Transaction aborted clearing drawing ${drawingId}`))
     })
 }
 

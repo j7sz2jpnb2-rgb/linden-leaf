@@ -2,6 +2,8 @@
 // Rendering is virtualized/cancellable; PDF.js owns its TextLayer, while
 // MuPDF selection is based on engine character geometry in page coordinates.
 
+import { isContentIdentityMatching } from './db.js'
+
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
 const sleepFrame = () => new Promise(requestAnimationFrame)
 
@@ -20,6 +22,7 @@ export class PdfViewport {
             bufferPages: 2,
             maxCanvasEdge: 4096,
             maxCanvasPixels: 10_000_000,
+            snapshot: null,
             onPageChange: null,
             onSelection: null,
             onHighlightCreate: null,
@@ -28,6 +31,7 @@ export class PdfViewport {
 
         this.scale = this.options.scale
         this.driver = null
+        this.currentSnapshot = this.options.snapshot || null
         this.numPages = 0
         this.pageSizes = []
         this.pageOffsets = []
@@ -142,8 +146,9 @@ export class PdfViewport {
         })
     }
 
-    async load(engineDriver, source) {
+    async load(engineDriver, source, { initialPage = 0, initialYRatio = 0, snapshot = null } = {}) {
         this.driver = engineDriver
+        if (snapshot) this.currentSnapshot = snapshot
         const info = await this.driver.open(source)
         this.numPages = info.numPages || 1
         this.pageSizes = info.pageSizes?.length
@@ -151,6 +156,16 @@ export class PdfViewport {
             : Array.from({ length: this.numPages }, () => ({ x0: 0, y0: 0, width: 595, height: 842 }))
         this._renderConcurrency = this.driver.kind === 'mupdf' ? 1 : 2
         this._recomputeLayout()
+
+        // Contract 1D: Initial target page set before first render is queued
+        const resolvedInitialPage = typeof initialPage === 'function' ? initialPage(this.numPages) : initialPage
+        const targetPage = clamp(resolvedInitialPage, 0, this.numPages - 1)
+        this.currentPage = targetPage
+        const targetOffset = this.pageOffsets[targetPage]
+        if (targetOffset) {
+            this.scrollArea.scrollTop = Math.max(0, targetOffset.top + targetOffset.height * clamp(initialYRatio, 0, 1) - (initialYRatio ? this.scrollArea.clientHeight / 3 : 8))
+        }
+
         this._renderVisibleSlots(true)
         this._geometryAbort = new AbortController()
         this._refineGeometry(this._geometryAbort.signal).catch(err => {
@@ -707,10 +722,18 @@ export class PdfViewport {
         if(best!==this.currentPage){this.currentPage=best;this.options.onPageChange?.(best,this.numPages)}
     }
 
-    setHighlights(highlights) {
+    setHighlights(highlights, snapshot = null) {
+        if (snapshot) this.currentSnapshot = snapshot
         this.highlights = highlights || []
         this.highlightsByPage.clear()
         for (const hl of this.highlights) {
+            if (this.currentSnapshot) {
+                const match = isContentIdentityMatching(hl, this.currentSnapshot)
+                if (!match.matches) {
+                    // Do not silently paint unconfirmed or conflicting highlights
+                    continue
+                }
+            }
             const target = hl.pdfTarget
             if (!target) continue
             const pages = Array.isArray(target.segments) ? target.segments.map(x=>x.page) : [target.page]

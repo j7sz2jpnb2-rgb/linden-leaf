@@ -15,6 +15,8 @@ pub struct OpenFilePayload {
 pub struct AppState {
     pub pending_files: Mutex<Vec<String>>,
     pub is_renderer_ready: Mutex<bool>,
+    pub closing_request_id: Mutex<Option<String>>,
+    pub close_permitted: Mutex<bool>,
 }
 
 pub fn extract_book_path_from_args<I, S>(args: I) -> Option<String>
@@ -167,7 +169,6 @@ pub fn app_renderer_ready(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> bool {
-    let _ = std::fs::write("C:\\Users\\Administrator\\.gemini\\antigravity\\scratch\\renderer_ready.log", "renderer_ready called!\n");
     use tauri::Emitter;
     {
         let mut ready = state.is_renderer_ready.lock().unwrap();
@@ -194,7 +195,23 @@ pub fn app_renderer_ready(
 }
 
 #[tauri::command]
-pub fn app_flush_complete() -> bool {
+pub fn app_flush_complete(
+    request_id: Option<String>,
+    window: Window,
+    state: tauri::State<AppState>,
+) -> bool {
+    let mut closing_id = state.closing_request_id.lock().unwrap();
+    if let Some(ref req) = request_id {
+        if closing_id.as_ref().is_some() && closing_id.as_ref() != Some(req) {
+            eprintln!("[app_flush_complete] Ignored mismatched request_id: {:?} (expected {:?})", req, *closing_id);
+            return false;
+        }
+    }
+    *closing_id = None;
+    let mut permitted = state.close_permitted.lock().unwrap();
+    *permitted = true;
+    eprintln!("[app_flush_complete] Flush complete acknowledged. Permitting window close.");
+    let _ = window.close();
     true
 }
 

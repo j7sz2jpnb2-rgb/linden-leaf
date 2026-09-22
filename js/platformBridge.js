@@ -403,16 +403,20 @@ class PlatformBridge {
     /**
      * Listen to OS file association open event
      * @param {function(object): void} callback
-     * @returns {function(): void}
+     * @returns {function(): void & { ready: Promise<void> }}
      */
     onOpenFile(callback) {
         if (this._getNativeElectron()?.onOpenFile) {
-            return this._getNativeElectron().onOpenFile(callback);
+            const unsub = this._getNativeElectron().onOpenFile(callback);
+            if (typeof unsub === 'function' && !unsub.ready) {
+                unsub.ready = Promise.resolve();
+            }
+            return unsub;
         }
 
         if (this.isTauri && window.__TAURI__?.event?.listen) {
             let unlistenFn = null;
-            window.__TAURI__.event.listen('app:open-file', async (event) => {
+            const readyPromise = window.__TAURI__.event.listen('app:open-file', async (event) => {
                 const payload = event.payload;
                 if (payload && payload.buffer) {
                     let buf = payload.buffer;
@@ -430,16 +434,20 @@ class PlatformBridge {
                 callback(payload);
             }).then(unlisten => { unlistenFn = unlisten; });
 
-            return () => {
+            const unsub = () => {
                 if (unlistenFn) unlistenFn();
             };
+            unsub.ready = readyPromise;
+            return unsub;
         }
 
-        return () => {};
+        const noop = () => {};
+        noop.ready = Promise.resolve();
+        return noop;
     }
 
     /**
-     * Hook before application quits to flush state
+     * Hook before application quits to flush state (Electron / Web beforeunload)
      * @param {function(): void} callback
      */
     onFlushBeforeQuit(callback) {
@@ -456,15 +464,42 @@ class PlatformBridge {
     }
 
     /**
-     * Signal to backend that state flush is complete
+     * Listen to Tauri close-request flush signal
+     * @param {function(string|null): Promise<void>|void} callback
+     * @returns {function(): void}
      */
-    flushComplete() {
+    onFlushRequest(callback) {
+        if (this.isTauri && window.__TAURI__?.event?.listen) {
+            let unlistenFn = null;
+            window.__TAURI__.event.listen('app:request-flush', async (event) => {
+                const reqId = event.payload?.requestId || event.payload?.request_id || (typeof event.payload === 'string' ? event.payload : null);
+                try {
+                    await callback(reqId);
+                } catch (e) {
+                    console.error('[PlatformBridge] onFlushRequest callback failed:', e);
+                }
+            }).then(unlisten => { unlistenFn = unlisten; });
+
+            return () => {
+                if (unlistenFn) unlistenFn();
+            };
+        }
+        return () => {};
+    }
+
+    /**
+     * Signal to backend that state flush is complete
+     * @param {string|null} [requestId=null]
+     */
+    flushComplete(requestId = null) {
         if (this._getNativeElectron()?.flushComplete) {
-            this._getNativeElectron().flushComplete();
+            this._getNativeElectron().flushComplete(requestId);
             return;
         }
         if (this.isTauri) {
-            this._invokeTauri('app_flush_complete').catch(() => {});
+            this._invokeTauri('app_flush_complete', { requestId, request_id: requestId }).catch((err) => {
+                console.warn('[PlatformBridge] app_flush_complete invoke failed:', err);
+            });
         }
     }
 

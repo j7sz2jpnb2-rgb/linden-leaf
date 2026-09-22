@@ -71,6 +71,24 @@ const formatDateTime = ts => {
     return `${year}年${month}月${date}日 ${period} ${h12}:${minutes}:${seconds}`
 }
 
+/**
+ * Decode PDF saved progress with exact boundary math
+ * Ensures N=10, f=0.3 -> page 3; N=1, f=1 -> page 1; avoids floor offset
+ */
+export function decodePdfProgress(savedProgress, totalPages) {
+    if (!totalPages || totalPages <= 0) return { page: 1, fraction: 0 }
+    if (typeof savedProgress?.page === 'number' && savedProgress.page >= 1) {
+        const page = Math.min(totalPages, Math.max(1, Math.round(savedProgress.page)))
+        return { page, fraction: page / totalPages }
+    }
+    if (typeof savedProgress?.fraction === 'number' && savedProgress.fraction > 0) {
+        const f = Math.min(1, Math.max(0, savedProgress.fraction))
+        const page = Math.min(totalPages, Math.max(1, Math.ceil(f * totalPages - 1e-5)))
+        return { page, fraction: f }
+    }
+    return { page: 1, fraction: 0 }
+}
+
 // Object URL Lifecycle Pool with LRU Eviction to prevent Blob memory bloat
 class ObjectUrlPool {
     constructor(maxCapacity = 120) {
@@ -1435,14 +1453,23 @@ class UniversalReaderApp {
         })
         this.dom.fileInput?.addEventListener('change', e => this.handleFileSelect(e))
 
-        // Electron OS File Association Listener with complete UI & lifecycle tear-down
-        if (window.electronAPI?.onOpenFile) {
-            window.electronAPI.onOpenFile(async fileInfo => {
+        // Application Close & Flush Lifecycle Integration (Tauri & Electron)
+        platformBridge.onFlushRequest(async requestId => {
+            await this.flushReaderStateOnExit(requestId)
+        })
+        platformBridge.onFlushBeforeQuit(async () => {
+            await this.flushReaderStateOnExit()
+        })
+
+        // OS File Association Listener with complete UI & lifecycle tear-down and serialized queue
+        this._fileOpenQueue = Promise.resolve()
+        const handleOpenFile = (fileInfo) => {
+            this._fileOpenQueue = this._fileOpenQueue.then(async () => {
                 if (!fileInfo) return
                 try {
                     let buf = fileInfo.buffer
-                    if ((!buf || buf.byteLength === 0 || buf.length === 0) && fileInfo.filePath && window.electronAPI.readFileBuffer) {
-                        buf = await window.electronAPI.readFileBuffer(fileInfo.filePath)
+                    if ((!buf || buf.byteLength === 0 || buf.length === 0) && fileInfo.filePath && platformBridge.readFileBuffer) {
+                        buf = await platformBridge.readFileBuffer(fileInfo.filePath)
                     }
                     if (!buf || (buf.byteLength === 0 && buf.length === 0)) return
                     if (Array.isArray(buf)) {
@@ -1489,9 +1516,16 @@ class UniversalReaderApp {
                 } catch (err) {
                     console.error('Failed to open file from OS event:', err)
                 }
+            }).catch(err => {
+                console.error('[App] Error in file open queue:', err)
             })
+        }
 
-            // Notify main process that renderer is ready to receive and process file associations
+        const unsubOpenFile = platformBridge.onOpenFile(handleOpenFile)
+        // Ensure listener is registered before signaling backend readiness
+        if (unsubOpenFile?.ready) {
+            unsubOpenFile.ready.then(() => platformBridge.rendererReady().catch(() => {}))
+        } else {
             platformBridge.rendererReady().catch(() => {})
         }
         this.dom.btnShelfSettings?.addEventListener('click', () => this.openDrawer('settings'))
@@ -3019,7 +3053,7 @@ class UniversalReaderApp {
             // Load and draw saved strokes for this page
             const ctx = overlayCanvas.getContext('2d')
             ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
-            const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, targetPageIndex)
+            const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, targetPageIndex, this._currentSnapshot || {})
             const strokes = drawingRecord?.strokes || []
             if (targetPageIndex === this.currentPdfPageIndex) {
                 this._currentPdfPageStrokes = strokes
@@ -3047,7 +3081,7 @@ class UniversalReaderApp {
             const ctx = overlayCanvas.getContext('2d')
             ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
 
-            const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, targetPageIndex)
+            const drawingRecord = await db.getPdfPageDrawing(this.currentBookId, targetPageIndex, this._currentSnapshot || {})
             const strokes = drawingRecord?.strokes || []
             if (targetPageIndex === this.currentPdfPageIndex) {
                 this._currentPdfPageStrokes = strokes
@@ -3186,10 +3220,10 @@ class UniversalReaderApp {
                 isDrawing = false
 
                 if (currentStroke.points.length > 0 && gestureBookId && gesturePageIndex != null) {
-                    const drawingRecord = await db.getPdfPageDrawing(gestureBookId, gesturePageIndex)
+                    const drawingRecord = await db.getPdfPageDrawing(gestureBookId, gesturePageIndex, this._currentSnapshot || {})
                     const existingStrokes = drawingRecord?.strokes || []
                     existingStrokes.push(currentStroke)
-                    await db.savePdfPageDrawing(gestureBookId, gesturePageIndex, existingStrokes)
+                    await db.savePdfPageDrawing(gestureBookId, gesturePageIndex, existingStrokes, this._currentSnapshot || {})
                     if (gesturePageIndex === this.currentPdfPageIndex) {
                         this._currentPdfPageStrokes = existingStrokes
                     }
@@ -5499,39 +5533,118 @@ class UniversalReaderApp {
     // ==========================================
     // Reader Logic
     // ==========================================
+    /**
+     * Unified reader progress snapshot generator
+     * Ensures consistent structure across debounce, closeReader, and flushReaderStateOnExit
+     */
+    makeProgressSnapshot(session) {
+        if (!session || !this.currentLocation) return null
+        const loc = this.currentLocation
+        const fraction = Number.isFinite(loc.fraction) ? Math.min(1, Math.max(0, loc.fraction)) : 0
+        const page = typeof loc.page === 'number' && loc.page >= 1 ? Math.round(loc.page) : null
+        const totalPages = typeof loc.totalPages === 'number' && loc.totalPages >= 1 ? Math.round(loc.totalPages) : null
+        const cfi = typeof loc.cfi === 'string' ? loc.cfi : null
+        const tocItem = loc.tocItem ? { label: loc.tocItem.label || '', href: loc.tocItem.href || '' } : null
+        const format = session.bookData?.format || this.currentBookData?.format || ''
+
+        return {
+            fraction,
+            page,
+            totalPages,
+            cfi,
+            tocItem,
+            format,
+            updatedAt: Date.now()
+        }
+    }
+
     async openBook(bookOrId) {
         const bookId = (typeof bookOrId === 'object' && bookOrId !== null) ? bookOrId.id : bookOrId
         if (!bookId) return this.showToast('找不到该书籍！', '⚠️')
 
-        const bookData = (typeof bookOrId === 'object' && bookOrId !== null && bookOrId.fileBlob)
-            ? bookOrId
-            : await db.getBook(bookId)
-        if (!bookData) return this.showToast('找不到该书籍！', '⚠️')
+        // 1. Synchronously increment session epoch and clear pending timers
+        this._currentBookEpoch = (this._currentBookEpoch || 0) + 1
+        const currentEpoch = this._currentBookEpoch
 
-        if (bookData.isCloudOnly) {
-            return this.handleCloudBookClick(bookData)
+        if (this._closeTimer) {
+            clearTimeout(this._closeTimer)
+            this._closeTimer = null
+        }
+        if (this._loadingFadeTimer) {
+            clearTimeout(this._loadingFadeTimer)
+            this._loadingFadeTimer = null
+        }
+        if (this._progressDebounceTimer) {
+            clearTimeout(this._progressDebounceTimer)
+            this._progressDebounceTimer = null
         }
 
+        // 2. Create new session with AbortController
+        const abortController = new AbortController()
+        const readerSession = {
+            epoch: currentEpoch,
+            bookId,
+            abortController,
+            isCurrent: () => this._currentBookEpoch === currentEpoch && !abortController.signal.aborted
+        }
+        const prevSession = this._activeSession
+        this._activeSession = readerSession
+
+        // 3. Tear down previous session resources without hiding readerView or resetting currentBookId
+        if (prevSession && prevSession !== readerSession) {
+            prevSession.abortController?.abort()
+            if (this.foliateView) {
+                try { this.foliateView.close?.() } catch (e) {}
+                try { this.foliateView.remove() } catch (e) {}
+                this.foliateView = null
+            }
+            if (this.pdfViewport) {
+                try { this.pdfViewport.destroy() } catch (e) {}
+                this.pdfViewport = null
+            }
+            if (this.pdfDriver) {
+                try { this.pdfDriver.destroy() } catch (e) {}
+                this.pdfDriver = null
+            }
+        }
 
         if (this.dom.welcomeModalBackdrop) {
             this.dom.welcomeModalBackdrop.style.display = 'none'
         }
 
-        this._currentBookEpoch = (this._currentBookEpoch || 0) + 1
-        const currentEpoch = this._currentBookEpoch
+        // 4. Fetch snapshot with content identity
+        const snapshot = await db.getBookFileSnapshot(bookId)
+        if (!readerSession.isCurrent()) return
+        if (!snapshot || !snapshot.blob) {
+            this.showToast('无法读取书籍文件数据', '⚠️')
+            return this.closeReader()
+        }
 
+        const bookData = (typeof bookOrId === 'object' && bookOrId !== null && bookOrId.title)
+            ? { ...snapshot, ...bookOrId }
+            : (await db.getBook(bookId)) || snapshot
+        if (!readerSession.isCurrent()) return
+
+        if (bookData.isCloudOnly) {
+            return this.handleCloudBookClick(bookData)
+        }
+
+        readerSession.bookData = bookData
+        readerSession.snapshot = snapshot
         this.currentBookId = bookId
         this.currentBookData = bookData
+        this._currentSnapshot = snapshot
         this.currentLocation = null
         this.currentPdfPageIndex = 0
 
         // Switch View
+        this.dom.readerView?.classList.remove('closing')
         this.dom.bookshelfView.style.display = 'none'
         this.dom.readerView.style.display = 'block'
         this.dom.readerView.classList.add('active')
-        this.dom.readerBookTitle.innerText = bookData.title
+        this.dom.readerBookTitle.innerText = bookData.title || snapshot.title || '阅读'
 
-        // Clean up previous PDF viewport if switching directly between books
+        // Clean up previous views if any
         if (this.pdfViewport) {
             this.pdfViewport.destroy()
             this.pdfViewport = null
@@ -5539,11 +5652,10 @@ class UniversalReaderApp {
         if (this.dom.pdfZoomBar) {
             this.dom.pdfZoomBar.style.display = 'none'
         }
-
-        // Create or Reset Foliate View
         if (this.foliateView) {
             this.foliateView.close?.()
             this.foliateView.remove()
+            this.foliateView = null
         }
 
         this.foliateView = document.createElement('foliate-view')
@@ -5739,16 +5851,15 @@ class UniversalReaderApp {
         })
 
         try {
-            const fileBlob = await db.getBookFileBlob(bookId)
-            const targetBlob = fileBlob || bookData.blob
+            const targetBlob = snapshot.blob
             if (!targetBlob) {
                 this.showToast('无法读取书籍文件数据', '⚠️')
                 return this.closeReader()
             }
             // Accurately resolve book format - fallback to 'epub', NEVER default to 'pdf'
-            let safeFormat = (bookData.format || '').trim().toLowerCase()
+            let safeFormat = (bookData.format || snapshot.format || '').trim().toLowerCase()
             if (!safeFormat) {
-                const candidateName = (bookData.filename || bookData.title || (targetBlob instanceof File ? targetBlob.name : '') || '').toLowerCase()
+                const candidateName = (bookData.filename || snapshot.filename || bookData.title || (targetBlob instanceof File ? targetBlob.name : '') || '').toLowerCase()
                 const extMatch = candidateName.match(/\.([a-z0-9]+)$/i)
                 if (extMatch) {
                     safeFormat = extMatch[1].toLowerCase()
@@ -5761,8 +5872,8 @@ class UniversalReaderApp {
                 }
             }
 
-            const baseTitle = (bookData.title || 'document').replace(/\.[^/.]+$/, '').trim() || 'document'
-            const safeFileName = bookData.filename || `${baseTitle}.${safeFormat}`
+            const baseTitle = (bookData.title || snapshot.title || 'document').replace(/\.[^/.]+$/, '').trim() || 'document'
+            const safeFileName = bookData.filename || snapshot.filename || `${baseTitle}.${safeFormat}`
             const isPdf = safeFormat === 'pdf' || safeFileName.toLowerCase().endsWith('.pdf')
             const safeFileType = isPdf ? 'application/pdf' : (safeFormat === 'epub' ? 'application/epub+zip' : (targetBlob.type || ''))
 
@@ -5783,12 +5894,15 @@ class UniversalReaderApp {
                 }
 
                 // Prefer native MuPDF for local Tauri files, with PDF.js as a safe fallback.
-                const nativePath = await db.getBookNativePath(bookId)
-                this.pdfDriver = new AdaptivePdfDriver({ nativePath })
+                const nativePath = snapshot.nativePath || await db.getBookNativePath(bookId)
+                if (!readerSession.isCurrent()) return
+
+                this.pdfDriver = new AdaptivePdfDriver({ nativePath, snapshot })
 
                 this.pdfViewport = new PdfViewport(this.dom.readerContentArea, {
                     scale: 1.25,
                     onPageChange: (pageIdx, total) => {
+                        if (!readerSession.isCurrent()) return
                         // 1. Reading tracker & pace statistics (Item 4)
                         tracker.resetActivity()
                         tracker.recordPageTurn()
@@ -5850,15 +5964,14 @@ class UniversalReaderApp {
                             }
                         }
 
-                        // Debounce progress update to db (Item 9 & 14)
+                        // Debounce progress update to db using unified makeProgressSnapshot
                         clearTimeout(this._progressDebounceTimer)
                         this._progressDebounceTimer = setTimeout(() => {
-                            if (this.currentBookId === bookId && this._currentBookEpoch === currentEpoch) {
-                                db.updateBookProgress(bookId, {
-                                    fraction: frac,
-                                    page: pageIdx + 1,
-                                    totalPages: total
-                                }).catch(err => console.warn('Failed to update PDF progress:', err))
+                            if (readerSession.isCurrent() && this.currentBookId === bookId) {
+                                const progressSnapshot = this.makeProgressSnapshot(readerSession)
+                                if (progressSnapshot) {
+                                    db.updateBookProgress(bookId, progressSnapshot).catch(err => console.warn('Failed to update PDF progress:', err))
+                                }
                             }
                         }, 500)
                     },
@@ -5889,6 +6002,9 @@ class UniversalReaderApp {
                             color: '#fef08a',
                             createdAt: Date.now(),
                             chapterTitle: this.currentLocation?.tocItem?.label || '正文',
+                            blobRevision: snapshot.blobRevision,
+                            revisionOrigin: snapshot.revisionOrigin,
+                            documentHash: snapshot.documentHash,
                             pdfTarget: {
                                 page: hl.page,
                                 rects: hl.rects,
@@ -5899,8 +6015,10 @@ class UniversalReaderApp {
                             }
                         }
                         await db.saveHighlight(newHl)
+                        if (!readerSession.isCurrent()) return
                         const allHls = await db.getHighlightsByBook(this.currentBookId)
-                        this.pdfViewport.setHighlights(allHls)
+                        if (!readerSession.isCurrent()) return
+                        this.pdfViewport?.setHighlights(allHls, snapshot)
                         this.loadNotesList()
                         this.showToast('已添加高亮笔记', '✓')
                     },
@@ -5923,32 +6041,38 @@ class UniversalReaderApp {
                     }
                 })
 
-                const docInfo = await this.pdfViewport.load(this.pdfDriver, { blob: fileObj, nativePath })
-                if (this._currentBookEpoch !== currentEpoch) return
+                const initialPageFn = (totalPages) => {
+                    const decoded = decodePdfProgress(bookData?.progress, totalPages)
+                    return decoded.page - 1
+                }
+
+                const docInfo = await this.pdfViewport.load(
+                    this.pdfDriver,
+                    { blob: fileObj, nativePath },
+                    { initialPage: initialPageFn, snapshot }
+                )
+                if (!readerSession.isCurrent()) {
+                    this.pdfViewport?.destroy()
+                    this.pdfViewport = null
+                    this.pdfDriver?.destroy()
+                    this.pdfDriver = null
+                    return
+                }
 
                 this.currentPdfTOC = docInfo.toc || []
 
-                // Restore saved progress (Item 9)
-                let initialPage = 0
-                if (bookData?.progress) {
-                    if (typeof bookData.progress.page === 'number' && bookData.progress.page >= 1) {
-                        initialPage = Math.min(docInfo.numPages - 1, Math.max(0, bookData.progress.page - 1))
-                    } else if (typeof bookData.progress.fraction === 'number' && bookData.progress.fraction > 0) {
-                        initialPage = Math.min(docInfo.numPages - 1, Math.max(0, Math.floor(bookData.progress.fraction * docInfo.numPages)))
-                    }
-                }
-                if (initialPage > 0) {
-                    this.pdfViewport.goToPage(initialPage)
-                }
+                // Restore saved progress display accurately
+                const decodedInitial = decodePdfProgress(bookData?.progress, docInfo.numPages)
+                const displayPage = decodedInitial.page
+                const initialFrac = decodedInitial.fraction
+                this.currentLocation = { fraction: initialFrac, page: displayPage, totalPages: docInfo.numPages }
 
-                // 加载已有高亮
+                // 加载已有高亮 (filtered by content identity)
                 const existingHls = await db.getHighlightsByBook(bookId)
-                this.pdfViewport.setHighlights(existingHls)
+                if (!readerSession.isCurrent()) return
+                this.pdfViewport.setHighlights(existingHls, snapshot)
 
                 if (this.dom.pdfZoomBar) this.dom.pdfZoomBar.style.display = 'flex'
-                const displayPage = initialPage + 1
-                const initialFrac = docInfo.numPages > 0 ? displayPage / docInfo.numPages : 0
-                this.currentLocation = { fraction: initialFrac, page: displayPage, totalPages: docInfo.numPages }
                 if (this.dom.readerPageNumber) {
                     this.dom.readerPageNumber.innerText = `${displayPage} / ${docInfo.numPages} 页`
                     this.dom.readerPageNumber.title = `点击可输入页码快速跳转 (1 ~ ${docInfo.numPages})`
@@ -5973,10 +6097,10 @@ class UniversalReaderApp {
                 }
 
                 // 启动阅读计时
-                tracker.startSession(bookId, bookData.title, 0)
+                tracker.startSession(bookId, bookData.title, initialFrac)
 
                 setTimeout(() => {
-                    if (this.currentBookId === bookId && this._currentBookEpoch === currentEpoch) {
+                    if (readerSession.isCurrent() && this.currentBookId === bookId) {
                         this.renderTOC(this.currentPdfTOC)
                         this.loadNotesList()
                         // 高亮初始活跃目录章节
@@ -5995,9 +6119,9 @@ class UniversalReaderApp {
                             let activeItem = null
                             for (const it of flat) {
                                 const itemPage = typeof it.page === 'number' ? it.page : (parseInt(it.href?.replace(/[^0-9]/g, ''), 10) - 1)
-                                if (!isNaN(itemPage) && itemPage <= initialPage) {
+                                if (!isNaN(itemPage) && itemPage <= (displayPage - 1)) {
                                     activeItem = it
-                                } else if (!isNaN(itemPage) && itemPage > initialPage) {
+                                } else if (!isNaN(itemPage) && itemPage > (displayPage - 1)) {
                                     break
                                 }
                             }
@@ -6015,7 +6139,12 @@ class UniversalReaderApp {
             }
 
             await this.foliateView.open(fileObj)
-            if (this._currentBookEpoch !== currentEpoch) return
+            if (!readerSession.isCurrent()) {
+                this.foliateView?.close?.()
+                this.foliateView?.remove()
+                this.foliateView = null
+                return
+            }
             
             // Set initial styles & flow
             this.applySettingsToReader()
@@ -6030,7 +6159,12 @@ class UniversalReaderApp {
                 lastLoc = bookData.progress.cfi
             }
             await this.foliateView.init({ lastLocation: lastLoc })
-            if (this._currentBookEpoch !== currentEpoch) return
+            if (!readerSession.isCurrent()) {
+                this.foliateView?.close?.()
+                this.foliateView?.remove()
+                this.foliateView = null
+                return
+            }
 
             // Ensure any already-loaded content doc is initialized
             const contents = this.foliateView.renderer?.getContents?.() || []
@@ -6042,7 +6176,7 @@ class UniversalReaderApp {
             const startFrac = bookData.progress?.fraction || 0
             tracker.startSession(bookId, bookData.title, startFrac)
             tracker.onTickCallback = ({ seconds, isIdle }) => {
-                if (this.dom.readerLiveTimer && this._currentBookEpoch === currentEpoch) {
+                if (this.dom.readerLiveTimer && readerSession.isCurrent()) {
                     const timeText = seconds < 60 ? '< 1分钟' : `${Math.floor(seconds / 60)}分钟`
                     this.dom.readerLiveTimer.innerText = isIdle ? `⏱️ 暂停中 (${timeText})` : `⏱️ ${timeText}`
                 }
@@ -6058,15 +6192,15 @@ class UniversalReaderApp {
 
             // Defer non-critical TOC and notes population so first page paints with zero delay
             setTimeout(() => {
-                if (this.currentBookId === bookId && this._currentBookEpoch === currentEpoch && this.foliateView) {
+                if (readerSession.isCurrent() && this.currentBookId === bookId && this.foliateView) {
                     this.renderTOC(this.foliateView.book?.toc || [])
                     this.loadNotesList()
                 }
             }, 20)
 
         } catch (err) {
-            if (this._currentBookEpoch === currentEpoch) {
-                console.error('Failed to open book in foliate-view:', err)
+            if (readerSession.isCurrent()) {
+                console.error('Failed to open book in reader:', err)
                 this.showToast(`打开书籍失败: ${err.message}`, '⚠️')
                 this.closeReader()
             }
@@ -6074,7 +6208,7 @@ class UniversalReaderApp {
     }
 
     // Flush pending progress + session time on direct window close (no UI teardown)
-    async flushReaderStateOnExit() {
+    async flushReaderStateOnExit(requestId = null) {
         try {
             try {
                 this.foliateView?.renderer?.settle?.()
@@ -6083,24 +6217,23 @@ class UniversalReaderApp {
                 clearTimeout(this._progressDebounceTimer)
                 this._progressDebounceTimer = null
             }
-            if (this.currentBookId && this.currentLocation) {
-                const fractionToSave = Number.isFinite(this.currentLocation.fraction) ? this.currentLocation.fraction : 0
-                await db.updateBookProgress(this.currentBookId, {
-                    fraction: fractionToSave,
-                    cfi: this.currentLocation.cfi,
-                    tocItem: this.currentLocation.tocItem ? { label: this.currentLocation.tocItem.label, href: this.currentLocation.tocItem.href } : null
-                })
+            if (this._activeSession && this._activeSession.isCurrent() && this.currentBookId) {
+                const progressSnapshot = this.makeProgressSnapshot(this._activeSession)
+                if (progressSnapshot) {
+                    await db.updateBookProgress(this.currentBookId, progressSnapshot)
+                }
             }
             const endFrac = Number.isFinite(this.currentLocation?.fraction) ? this.currentLocation.fraction : null
             await tracker.endSession(endFrac)
         } catch (err) {
             console.warn('flushReaderStateOnExit:', err)
         } finally {
-            window.electronAPI?.flushComplete?.()
+            platformBridge.flushComplete(requestId)
         }
     }
 
     async closeReader() {
+        const closingSession = this._activeSession
         // Ensure any pending paginator fast-path is settled synchronously before closing
         try {
             this.foliateView?.renderer?.settle?.()
@@ -6110,14 +6243,12 @@ class UniversalReaderApp {
             clearTimeout(this._progressDebounceTimer)
             this._progressDebounceTimer = null
         }
-        if (this.currentBookId && this.currentLocation) {
+        if (closingSession && this.currentBookId && this.currentLocation) {
             try {
-                const fractionToSave = Number.isFinite(this.currentLocation.fraction) ? this.currentLocation.fraction : 0
-                await db.updateBookProgress(this.currentBookId, {
-                    fraction: fractionToSave,
-                    cfi: this.currentLocation.cfi,
-                    tocItem: this.currentLocation.tocItem ? { label: this.currentLocation.tocItem.label, href: this.currentLocation.tocItem.href } : null
-                })
+                const progressSnapshot = this.makeProgressSnapshot(closingSession)
+                if (progressSnapshot) {
+                    await db.updateBookProgress(this.currentBookId, progressSnapshot)
+                }
             } catch (err) {
                 console.warn('Failed to flush final book progress:', err)
             }
@@ -6160,14 +6291,24 @@ class UniversalReaderApp {
         this.dom.bookshelfView.classList.remove('view-spring-transition')
         void this.dom.bookshelfView.offsetWidth
         this.dom.bookshelfView.classList.add('view-spring-transition')
-        setTimeout(() => {
-            this.dom.readerView?.classList.remove('closing')
-            if (this.dom.readerView) this.dom.readerView.style.display = 'none'
-            this.dom.bookshelfView?.classList.remove('view-spring-transition')
+
+        if (this._closeTimer) clearTimeout(this._closeTimer)
+        this._closeTimer = setTimeout(() => {
+            this._closeTimer = null
+            if (this._activeSession === closingSession) {
+                this.dom.readerView?.classList.remove('closing')
+                if (this.dom.readerView) this.dom.readerView.style.display = 'none'
+                this.dom.bookshelfView?.classList.remove('view-spring-transition')
+            }
         }, 240)
-        this.currentBookId = null
-        this.currentBookData = null
-        this.currentLocation = null
+
+        if (this._activeSession === closingSession) {
+            this.currentBookId = null
+            this.currentBookData = null
+            this._currentSnapshot = null
+            this.currentLocation = null
+            this._activeSession = null
+        }
         // Reset PDF drawing state so the pen tool never leaks into the next book
         this.pdfDrawTool = null
         this.pdfOverlayCanvas = null
@@ -6294,17 +6435,14 @@ class UniversalReaderApp {
             this.highlightActiveTOCItem(detail.tocItem.href)
         }
 
-        // Save progress to IndexedDB with debounce
+        // Save progress to IndexedDB with debounce using unified makeProgressSnapshot
         clearTimeout(this._progressDebounceTimer)
         this._progressDebounceTimer = setTimeout(() => {
-            if (this.currentBookId === activeBookId && this._currentBookEpoch === activeEpoch) {
-                const cfiToSave = this.currentLocation?.cfi || detail.cfi || null
-                const fractionToSave = Number.isFinite(fraction) ? fraction : 0
-                db.updateBookProgress(activeBookId, {
-                    fraction: fractionToSave,
-                    cfi: cfiToSave,
-                    tocItem: detail.tocItem ? { label: detail.tocItem.label, href: detail.tocItem.href } : null
-                }).catch(err => console.warn('Failed to update book progress:', err))
+            if (this._activeSession && this._activeSession.epoch === activeEpoch && this.currentBookId === activeBookId) {
+                const progressSnapshot = this.makeProgressSnapshot(this._activeSession)
+                if (progressSnapshot) {
+                    db.updateBookProgress(activeBookId, progressSnapshot).catch(err => console.warn('Failed to update book progress:', err))
+                }
             }
         }, 500)
     }
@@ -7129,7 +7267,10 @@ class UniversalReaderApp {
                     style: style,
                     note: note,
                     chapterTitle: this.currentLocation?.tocItem?.label || '正文',
-                    createdAt: Date.now()
+                    createdAt: Date.now(),
+                    blobRevision: this._currentSnapshot?.blobRevision,
+                    revisionOrigin: this._currentSnapshot?.revisionOrigin,
+                    documentHash: this._currentSnapshot?.documentHash
                 }
                 await db.saveHighlight(hl)
                 if (this.foliateView && cfi) {
@@ -7163,11 +7304,14 @@ class UniversalReaderApp {
                 note: note,
                 chapterTitle: this.currentLocation?.tocItem?.label || '正文',
                 createdAt: Date.now(),
+                blobRevision: this._currentSnapshot?.blobRevision,
+                revisionOrigin: this._currentSnapshot?.revisionOrigin,
+                documentHash: this._currentSnapshot?.documentHash,
                 pdfTarget: this.selectedTextInfo.pdfTarget
             }
             await db.saveHighlight(hl)
             const allHls = await db.getHighlightsByBook(this.currentBookId)
-            this.pdfViewport.setHighlights(allHls)
+            this.pdfViewport.setHighlights(allHls, this._currentSnapshot)
             window.getSelection()?.removeAllRanges()
             this.hideSelectionPopup()
             this.loadNotesList()
@@ -7230,7 +7374,10 @@ class UniversalReaderApp {
             style: style,
             note: note,
             chapterTitle: this.currentLocation?.tocItem?.label || '正文',
-            createdAt: Date.now()
+            createdAt: Date.now(),
+            blobRevision: this._currentSnapshot?.blobRevision,
+            revisionOrigin: this._currentSnapshot?.revisionOrigin,
+            documentHash: this._currentSnapshot?.documentHash
         }
 
         await db.saveHighlight(hl)
@@ -7280,7 +7427,7 @@ class UniversalReaderApp {
             }
             if (this.pdfViewport) {
                 const allHls = await db.getHighlightsByBook(this.currentBookId)
-                this.pdfViewport.setHighlights(allHls)
+                this.pdfViewport.setHighlights(allHls, this._currentSnapshot)
             }
             this.loadNotesList()
             this.hideHighlightActionPopup()
@@ -7306,7 +7453,7 @@ class UniversalReaderApp {
             }
             if (this.pdfViewport) {
                 const allHls = await db.getHighlightsByBook(this.currentBookId)
-                this.pdfViewport.setHighlights(allHls)
+                this.pdfViewport.setHighlights(allHls, this._currentSnapshot)
             }
             this.loadNotesList()
         }

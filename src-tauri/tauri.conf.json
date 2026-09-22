@@ -4,8 +4,9 @@
   "version": "1.2.3",
   "identifier": "com.lindenleaf.reader",
   "build": {
+    "beforeDevCommand": "node scripts/build-dist.js",
     "beforeBuildCommand": "node scripts/build-dist.js",
-    "frontendDist": "../dist"
+    "frontendDist": "../dist-tauri"
   },
   "app": {
     "withGlobalTauri": true,
