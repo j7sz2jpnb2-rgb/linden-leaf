@@ -323,7 +323,7 @@ export class MuPdfTauriDriver {
         return out
     }
 
-    async renderPage(pageIndex, scale, signal) {
+    async renderPage(pageIndex, scale, signal, clip = null) {
         if (!this.docId) throw new Error('Document not loaded')
         if (signal?.aborted) throw abortError()
         const docId = this.docId
@@ -338,7 +338,7 @@ export class MuPdfTauriDriver {
                 pageIndex,
                 scale,
                 rotation: 0,
-                clip: null,
+                clip,
                 requestId,
             })
             if (signal?.aborted) throw abortError()
@@ -360,6 +360,8 @@ export class MuPdfTauriDriver {
         const width = view.getUint32(4, true)
         const height = view.getUint32(8, true)
         const stride = view.getUint32(12, true)
+        const offsetX = view.getInt32(16, true)
+        const offsetY = view.getInt32(20, true)
         const length = view.getUint32(48, true)
         if (!width || !height || stride !== width * 4 || length !== width * height * 4 || 52 + length > buffer.byteLength) {
             throw new Error('Invalid MuPDF RGBA packet geometry')
@@ -367,6 +369,10 @@ export class MuPdfTauriDriver {
         const canvas = document.createElement('canvas')
         canvas.width = width
         canvas.height = height
+        canvas.dataset.offsetX = String(offsetX)
+        canvas.dataset.offsetY = String(offsetY)
+        canvas.offsetX = offsetX
+        canvas.offsetY = offsetY
         const rgba = new Uint8ClampedArray(buffer, 52, length)
         canvas.getContext('2d', { alpha: false }).putImageData(new ImageData(rgba, width, height), 0, 0)
         return canvas

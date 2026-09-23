@@ -9507,6 +9507,16 @@ class UniversalReaderApp {
                 if (this.dom.btnCheckUpdatesText) this.dom.btnCheckUpdatesText.innerText = '检查更新'
             }
         }
+    async getBuildInfo() {
+        if (this._buildInfo) return this._buildInfo
+        try {
+            const res = await fetch('./build-info.json')
+            if (res.ok) {
+                this._buildInfo = await res.json()
+                return this._buildInfo
+            }
+        } catch {}
+        return null
     }
 }
 
