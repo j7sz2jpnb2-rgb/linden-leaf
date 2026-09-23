@@ -77,6 +77,7 @@ LL_API int ll_page_bounds_many(ll_doc *doc, int start_page, int count, float *bo
 
 LL_API ll_cancel *ll_cancel_new(void);
 LL_API void ll_cancel_abort(ll_cancel *cancel);
+LL_API int ll_cancel_is_aborted(ll_cancel *cancel);
 LL_API void ll_cancel_free(ll_cancel *cancel);
 
 /* clip is optional, in device pixels after matrix transformation. Output is
@@ -84,6 +85,8 @@ LL_API void ll_cancel_free(ll_cancel *cancel);
  * Returns LL_CANCELLED when the associated fz_cookie was aborted. */
 LL_API int ll_render(ll_doc *doc, int page, float scale, float rotation,
                      const float *clip, ll_cancel *cancel, ll_image *out);
+LL_API int ll_render_priority(ll_doc *doc, int page, float scale, float rotation,
+                              const float *clip, ll_cancel *cancel, int priority, ll_image *out);
 LL_API void ll_free_image(ll_doc *doc, ll_image *out);
 
 LL_API int ll_get_text(ll_doc *doc, int page, ll_text *out);

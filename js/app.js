@@ -5695,6 +5695,7 @@ class UniversalReaderApp {
         // 1. Synchronously increment session epoch and clear pending timers
         this._currentBookEpoch = (this._currentBookEpoch || 0) + 1
         const currentEpoch = this._currentBookEpoch
+        this.currentPdfPageIndex = 0
 
         if (this._closeTimer) {
             clearTimeout(this._closeTimer)
@@ -5765,6 +5766,7 @@ class UniversalReaderApp {
         this.currentBookData = null
         this._currentSnapshot = null
         this.currentBookId = null
+        this.currentPdfPageIndex = 0
 
         if (this.dom.welcomeModalBackdrop) {
             this.dom.welcomeModalBackdrop.style.display = 'none'

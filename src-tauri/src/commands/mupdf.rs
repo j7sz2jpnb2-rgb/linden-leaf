@@ -146,9 +146,13 @@ mod imp {
         fn ll_page_bounds_many(doc: *mut LlDoc, start_page: c_int, count: c_int, bounds4: *mut c_float) -> c_int;
         fn ll_cancel_new() -> *mut LlCancel;
         fn ll_cancel_abort(cancel: *mut LlCancel);
+        fn ll_cancel_is_aborted(cancel: *mut LlCancel) -> c_int;
         fn ll_cancel_free(cancel: *mut LlCancel);
+        #[allow(dead_code)]
         fn ll_render(doc: *mut LlDoc, page: c_int, scale: c_float, rotation: c_float,
                      clip: *const c_float, cancel: *mut LlCancel, out: *mut LlImage) -> c_int;
+        fn ll_render_priority(doc: *mut LlDoc, page: c_int, scale: c_float, rotation: c_float,
+                              clip: *const c_float, cancel: *mut LlCancel, priority: c_int, out: *mut LlImage) -> c_int;
         fn ll_free_image(doc: *mut LlDoc, out: *mut LlImage);
         fn ll_get_text(doc: *mut LlDoc, page: c_int, out: *mut LlText) -> c_int;
         fn ll_free_text(out: *mut LlText);
@@ -186,6 +190,7 @@ mod imp {
                 .ok_or_else(|| "Failed to allocate MuPDF cancel token".into())
         }
         fn abort(&self) { unsafe { ll_cancel_abort(self.0.as_ptr()) } }
+        fn is_aborted(&self) -> bool { unsafe { ll_cancel_is_aborted(self.0.as_ptr()) != 0 } }
         fn ptr(&self) -> *mut LlCancel { self.0.as_ptr() }
     }
     impl Drop for CancelHandle {
@@ -313,7 +318,8 @@ mod imp {
 
             let mut i = 0;
             while i < pending.len() {
-                let should_cancel = if let DocCommand::Render { page, generation, .. } = &pending[i] {
+                let should_cancel = if let DocCommand::Render { page, generation, cancel, .. } = &pending[i] {
+                    cancel.is_aborted() ||
                     pending.iter().skip(i + 1).any(|later| {
                         if let DocCommand::Render { page: later_page, generation: later_gen, .. } = later {
                             *later_page == *page && *later_gen > *generation
@@ -430,7 +436,7 @@ mod imp {
                     unsafe { ll_free_outline(&mut raw) };
                     let _ = reply.send(result);
                 }
-                DocCommand::Render { page, scale, rotation, clip, cancel, request_id, priority: _, generation: _, enqueued_at, reply } => {
+                DocCommand::Render { page, scale, rotation, clip, cancel, request_id, priority, generation: _, enqueued_at, reply } => {
                     let queue_wait_us = enqueued_at.elapsed().as_micros() as u64;
                     let mut raw = LlImage {
                         samples: std::ptr::null_mut(), length: 0, width: 0, height: 0,
@@ -439,7 +445,7 @@ mod imp {
                     let clip_ptr = clip.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
                     let t0_c = std::time::Instant::now();
                     let status = unsafe {
-                        ll_render(doc, page as i32, scale, rotation, clip_ptr, cancel.ptr(), &mut raw)
+                        ll_render_priority(doc, page as i32, scale, rotation, clip_ptr, cancel.ptr(), priority as c_int, &mut raw)
                     };
                     let c_total_us = t0_c.elapsed().as_micros() as u64;
                     let c_timings = unsafe { ll_get_last_render_timings(doc) };
@@ -477,6 +483,21 @@ mod imp {
                     let _ = reply.send(result);
                 }
                 DocCommand::Close => break,
+            }
+        }
+
+        for cmd in pending.drain(..) {
+            match cmd {
+                DocCommand::Bounds { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::Text { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::Select { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::Outline { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::Render { cancel, reply, request_id, .. } => {
+                    cancel.abort();
+                    if let Ok(mut map) = cancels.lock() { map.remove(&request_id); }
+                    let _ = reply.send(Err("Document closed".into()));
+                }
+                DocCommand::Close => {}
             }
         }
 

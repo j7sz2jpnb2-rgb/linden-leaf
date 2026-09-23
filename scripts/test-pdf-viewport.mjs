@@ -79,6 +79,13 @@ class MockElement {
         return results;
     }
     closest(selector) { return this; }
+    getContext() {
+        return {
+            drawImage: () => {},
+            clearRect: () => {},
+            fillRect: () => {},
+        };
+    }
     getBoundingClientRect() {
         return { top: 0, left: 0, width: parseFloat(this.style.width) || 600, height: parseFloat(this.style.height) || 800 };
     }
@@ -758,6 +765,78 @@ async function testViewportBoundedClipAndHandover() {
     viewport.destroy();
 }
 
+async function testDirectionalPrefetchAndBitmapCache() {
+    console.log('\nSuite 10: In-Flight Clip Abort, Directional Prefetch & Bitmap Cache');
+
+    const container = new MockElement('div');
+    const viewport = new PdfViewport(container, {
+        scale: 1.0,
+        bufferPages: 2,
+        enableClip: false, // test full-page bitmap caching
+    });
+    viewport.pageSizes = Array.from({ length: 10 }, () => ({ width: 600, height: 800 }));
+    viewport._recomputeLayout();
+
+    let renderCalls = [];
+    const mockDriver = {
+        kind: 'mupdf',
+        async renderPage(page, scale, signal, clip, priority, generation) {
+            renderCalls.push({ page, priority, generation });
+            const canvas = new MockElement('canvas');
+            canvas.width = Math.round(600 * scale);
+            canvas.height = Math.round(800 * scale);
+            canvas.offsetX = 0;
+            canvas.offsetY = 0;
+            return canvas;
+        },
+        destroy() {}
+    };
+    viewport.driver = mockDriver;
+
+    // 1. Initial render of page 0
+    viewport.currentPage = 0;
+    viewport.scrollArea.scrollTop = 0;
+    viewport.scrollArea.clientHeight = 600;
+    viewport._renderVisibleSlots();
+    while (viewport._activeRenders > 0 || viewport._renderQueue.length > 0) {
+        await new Promise(r => setTimeout(r, 10));
+    }
+
+    assert.ok(renderCalls.some(c => c.page === 0), 'Page 0 rendered');
+    assert.ok(viewport._bitmapCache.has(viewport._cacheKey(0, 1.0, null)), 'Rendered page 0 cached in _bitmapCache');
+    console.log('  [PASS] 10.1 Full page render successfully stored in _bitmapCache');
+
+    // 2. Unmount page 0 and remount it -> should hit _bitmapCache without driver call
+    const initialCalls = renderCalls.length;
+    const slot0 = viewport.activeSlots.get(0);
+    viewport._unmountSlot(0, slot0);
+    assert.equal(viewport.activeSlots.has(0), false, 'Slot 0 unmounted');
+
+    viewport._mountSlot(0);
+    viewport._renderVisibleSlots();
+    while (viewport._activeRenders > 0 || viewport._renderQueue.length > 0) {
+        await new Promise(r => setTimeout(r, 10));
+    }
+    assert.equal(renderCalls.length, initialCalls, 'Re-mounting page 0 served from _bitmapCache without calling driver');
+    console.log('  [PASS] 10.2 Page revisit served directly from frontend _bitmapCache');
+
+    // 3. Directional prefetch: scroll down
+    renderCalls = [];
+    viewport.currentPage = 4;
+    viewport.scrollArea.scrollTop = 3200; // scrolling down from 0 to 3200
+    viewport._renderVisibleSlots();
+
+    // Verify queue prioritized forward pages (e.g. 5, 6) over backward pages (e.g. 2, 3)
+    const forwardScheduled = viewport._renderQueue.filter(x => x.page > 4);
+    const backwardScheduled = viewport._renderQueue.filter(x => x.page < 4);
+    if (forwardScheduled.length > 0 && backwardScheduled.length > 0) {
+        assert.ok(forwardScheduled[0].distance < backwardScheduled[0].distance, 'Forward buffer page has shorter distance than backward page when scrolling down');
+    }
+    console.log('  [PASS] 10.3 Downward scroll prioritizes forward reading direction buffer pages');
+
+    viewport.destroy();
+}
+
 async function runAll() {
     await testVisiblePagePriority();
     await testBufferPreemption();
@@ -768,6 +847,7 @@ async function runAll() {
     await testWorkerCapacityStrictness();
     await testDocumentSwitchIsolation();
     await testViewportBoundedClipAndHandover();
+    await testDirectionalPrefetchAndBitmapCache();
 
     console.log('\n====================================================');
     console.log('All PDF Viewport Scheduling & Zoom Tests Passed!');

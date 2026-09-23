@@ -24,6 +24,7 @@ export class PdfViewport {
             maxCanvasPixels: 10_000_000,
             enableClip: true,
             clipPixelThreshold: 2_000_000,
+            bitmapCacheLimitBytes: 64 * 1024 * 1024,
             snapshot: null,
             onPageChange: null,
             onOutline: null,
@@ -56,6 +57,10 @@ export class PdfViewport {
         this._renderReqSeq = 0
         this._activeRenders = 0
         this._renderConcurrency = 2
+        this._bitmapCache = new Map()
+        this._bitmapCacheBytes = 0
+        this._bitmapCacheLimitBytes = this.options.bitmapCacheLimitBytes || (64 * 1024 * 1024)
+        this._lastScrollTop = 0
         this._outlineRequested = false
         this._outlineTimer = null
         this._nativeGeometry = new Map()
@@ -176,6 +181,9 @@ export class PdfViewport {
         for (const inflight of this._inFlightRenders.values()) inflight.abortController?.abort()
         this._inFlightRenders.clear()
         this._renderQueue.length = 0
+        this._bitmapCache.clear()
+        this._bitmapCacheBytes = 0
+        this._lastScrollTop = 0
         if (snapshot) this.currentSnapshot = snapshot
         const info = await this.driver.open(source)
         if (this._destroyed || this._loadGeneration !== currentGen) {
@@ -363,6 +371,8 @@ export class PdfViewport {
                     if (vTop < slot._renderedClip.top || vBottom > slot._renderedClip.bottom) {
                         needsRender = true
                         slot._renderToken = (slot._renderToken || 0) + 1
+                        slot.renderAbort?.abort()
+                        slot.renderAbort = new AbortController()
                     }
                 }
             }
@@ -379,18 +389,25 @@ export class PdfViewport {
             }
         }
 
+        const scrollDelta = top - (this._lastScrollTop ?? top)
+        this._lastScrollTop = top
+        const isScrollingDown = scrollDelta >= 0
+
         for (let i = start; i <= end; i++) {
             if (i >= first && i <= last) continue
             const slot = this.activeSlots.get(i)
             if (!slot) continue
             if (force || slot._renderedScale !== this.scale || !slot._renderedToken) {
                 if (!this._isPageQueuedOrRendering(i, slot._renderToken)) {
+                    let dist = i < first ? (first - i) : (i - last)
+                    if (isScrollingDown && i < first) dist += 2
+                    if (!isScrollingDown && i > last) dist += 2
                     toSchedule.push({
                         page: i,
                         slot,
                         token: slot._renderToken,
                         tier: 1,
-                        distance: i < first ? (first - i) : (i - last),
+                        distance: dist,
                     })
                 }
             }
@@ -506,6 +523,14 @@ export class PdfViewport {
             return a.distance - b.distance
         })
 
+        // 2.5 Abort obsolete in-flight renders if newer token for the same page is queued
+        for (const item of this._renderQueue) {
+            const inflight = this._inFlightRenders.get(item.page)
+            if (inflight && inflight.token < item.token && !inflight.abortController?.signal?.aborted) {
+                inflight.abortController?.abort()
+            }
+        }
+
         // 3. Preemption: If capacity is full and a Tier 0 (visible) task is waiting,
         // abort an active Tier 1 (buffer) task so the visible page can start immediately
         // as soon as the driver yields.
@@ -578,6 +603,36 @@ export class PdfViewport {
         return scale
     }
 
+    _cacheKey(page, scale, clip) {
+        const clipStr = clip ? `${clip[0]}_${clip[1]}_${clip[2]}_${clip[3]}` : 'full'
+        return `${this._loadGeneration || 0}:${page}:${Math.round(scale * 100)}:${clipStr}`
+    }
+
+    _cacheCanvas(page, scale, clip, canvas) {
+        if (!canvas || !canvas.width || !canvas.height) return
+        const bytes = canvas.width * canvas.height * 4
+        if (bytes > 16 * 1024 * 1024) return
+        const key = this._cacheKey(page, scale, clip)
+        if (this._bitmapCache.has(key)) {
+            this._bitmapCacheBytes -= this._bitmapCache.get(key).bytes
+            this._bitmapCache.delete(key)
+        }
+        while (this._bitmapCacheBytes + bytes > this._bitmapCacheLimitBytes && this._bitmapCache.size > 0) {
+            let victimKey = null
+            for (const [k, entry] of this._bitmapCache) {
+                if (entry.page === this.currentPage) continue
+                victimKey = k
+                break
+            }
+            if (!victimKey) victimKey = this._bitmapCache.keys().next().value
+            const victim = this._bitmapCache.get(victimKey)
+            this._bitmapCacheBytes -= victim.bytes
+            this._bitmapCache.delete(victimKey)
+        }
+        this._bitmapCache.set(key, { canvas, bytes, page, scale, clip, time: performance.now() })
+        this._bitmapCacheBytes += bytes
+    }
+
     async _renderPageContent(page, slot, token, signal, renderEntry = null) {
         if (!this.driver || signal.aborted || this._destroyed) return
         const activeRecord = renderEntry || { page, slot, token, abortController: slot.renderAbort }
@@ -642,17 +697,39 @@ export class PdfViewport {
                 }
             }
 
-            let canvas
-            try {
-                canvas = await this.driver.renderPage(page, scale, signal, clip, priority, generation)
-            } catch (err) {
-                if (clip && !signal.aborted && !/abort/i.test(String(err))) {
-                    console.warn('[PdfViewport] clipped render failed, falling back to full-page render:', err)
-                    clip = null
-                    requestedClip = null
-                    canvas = await this.driver.renderPage(page, scale, signal, null, priority, generation)
-                } else {
-                    throw err
+            let canvas = null
+            const cacheKey = this._cacheKey(page, scale, clip)
+            const cached = this._bitmapCache.get(cacheKey)
+            if (cached && cached.canvas && !clip) {
+                canvas = document.createElement('canvas')
+                canvas.width = cached.canvas.width
+                canvas.height = cached.canvas.height
+                canvas.offsetX = cached.canvas.offsetX || 0
+                canvas.offsetY = cached.canvas.offsetY || 0
+                canvas.dataset.offsetX = String(canvas.offsetX)
+                canvas.dataset.offsetY = String(canvas.offsetY)
+                const ctx = canvas.getContext ? canvas.getContext('2d', { alpha: false }) : null
+                if (ctx && ctx.drawImage) {
+                    ctx.drawImage(cached.canvas, 0, 0)
+                }
+                cached.time = performance.now()
+                this._bitmapCache.delete(cacheKey)
+                this._bitmapCache.set(cacheKey, cached)
+            } else {
+                try {
+                    canvas = await this.driver.renderPage(page, scale, signal, clip, priority, generation)
+                } catch (err) {
+                    if (clip && !signal.aborted && !/abort/i.test(String(err))) {
+                        console.warn('[PdfViewport] clipped render failed, falling back to full-page render:', err)
+                        clip = null
+                        requestedClip = null
+                        canvas = await this.driver.renderPage(page, scale, signal, null, priority, generation)
+                    } else {
+                        throw err
+                    }
+                }
+                if (!clip && canvas) {
+                    this._cacheCanvas(page, scale, clip, canvas)
                 }
             }
 
@@ -1178,6 +1255,8 @@ export class PdfViewport {
         for (const slot of this.activeSlots.values()) slot.renderAbort?.abort()
         this.activeSlots.clear()
         this.highlightsByPage.clear()
+        this._bitmapCache.clear()
+        this._bitmapCacheBytes = 0
         this._nativeGeometry.clear()
         this._nativeGeometryUse.clear()
         this.driver?.destroy?.()

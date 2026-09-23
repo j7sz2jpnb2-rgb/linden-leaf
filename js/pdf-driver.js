@@ -250,12 +250,18 @@ export class PdfJsDriver {
 }
 
 const normalizeBinaryResponse = async value => {
-    if (value instanceof ArrayBuffer) return value
-    if (ArrayBuffer.isView(value)) return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)
-    if (value?.body instanceof ArrayBuffer) return value.body
-    if (ArrayBuffer.isView(value?.body)) return value.body.buffer.slice(value.body.byteOffset, value.body.byteOffset + value.body.byteLength)
-    if (value?.arrayBuffer) return value.arrayBuffer()
-    if (Array.isArray(value)) return new Uint8Array(value).buffer
+    if (value instanceof ArrayBuffer) return { buffer: value, byteOffset: 0, byteLength: value.byteLength }
+    if (ArrayBuffer.isView(value)) return { buffer: value.buffer, byteOffset: value.byteOffset, byteLength: value.byteLength }
+    if (value?.body instanceof ArrayBuffer) return { buffer: value.body, byteOffset: 0, byteLength: value.body.byteLength }
+    if (ArrayBuffer.isView(value?.body)) return { buffer: value.body.buffer, byteOffset: value.body.byteOffset, byteLength: value.body.byteLength }
+    if (value?.arrayBuffer) {
+        const ab = await value.arrayBuffer()
+        return { buffer: ab, byteOffset: 0, byteLength: ab.byteLength }
+    }
+    if (Array.isArray(value)) {
+        const u8 = new Uint8Array(value)
+        return { buffer: u8.buffer, byteOffset: 0, byteLength: u8.byteLength }
+    }
     throw new Error('Unexpected native binary response')
 }
 
@@ -377,18 +383,35 @@ export class MuPdfTauriDriver {
         }
     }
 
-    _packetToCanvas(buffer) {
-        if (buffer.byteLength < 52) throw new Error('MuPDF render packet is truncated')
-        const bytes = new Uint8Array(buffer)
-        if (String.fromCharCode(...bytes.subarray(0, 4)) !== 'LLP2') throw new Error('Unknown MuPDF render packet')
-        const view = new DataView(buffer)
+    _packetToCanvas(packet) {
+        let buffer, byteOffset = 0, byteLength = 0
+        if (packet instanceof ArrayBuffer) {
+            buffer = packet
+            byteOffset = 0
+            byteLength = packet.byteLength
+        } else if (ArrayBuffer.isView(packet)) {
+            buffer = packet.buffer
+            byteOffset = packet.byteOffset
+            byteLength = packet.byteLength
+        } else if (packet && packet.buffer instanceof ArrayBuffer) {
+            buffer = packet.buffer
+            byteOffset = packet.byteOffset || 0
+            byteLength = packet.byteLength || buffer.byteLength
+        } else {
+            throw new Error('Unexpected packet buffer')
+        }
+
+        if (byteLength < 52) throw new Error('MuPDF render packet is truncated')
+        const bytes = new Uint8Array(buffer, byteOffset, Math.min(byteLength, 4))
+        if (String.fromCharCode(...bytes) !== 'LLP2') throw new Error('Unknown MuPDF render packet')
+        const view = new DataView(buffer, byteOffset, byteLength)
         const width = view.getUint32(4, true)
         const height = view.getUint32(8, true)
         const stride = view.getUint32(12, true)
         const offsetX = view.getInt32(16, true)
         const offsetY = view.getInt32(20, true)
         const length = view.getUint32(48, true)
-        if (!width || !height || stride !== width * 4 || length !== width * height * 4 || 52 + length > buffer.byteLength) {
+        if (!width || !height || stride !== width * 4 || length !== width * height * 4 || 52 + length > byteLength) {
             throw new Error('Invalid MuPDF RGBA packet geometry')
         }
         const canvas = document.createElement('canvas')
@@ -398,7 +421,7 @@ export class MuPdfTauriDriver {
         canvas.dataset.offsetY = String(offsetY)
         canvas.offsetX = offsetX
         canvas.offsetY = offsetY
-        const rgba = new Uint8ClampedArray(buffer, 52, length)
+        const rgba = new Uint8ClampedArray(buffer, byteOffset + 52, length)
         canvas.getContext('2d', { alpha: false }).putImageData(new ImageData(rgba, width, height), 0, 0)
         return canvas
     }

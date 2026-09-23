@@ -52,6 +52,7 @@ static uint64_t ll_now_us(void) {
 typedef struct {
     int page;
     uint64_t used;
+    int is_visible;
     fz_rect bounds;
     fz_display_list *list;
     fz_stext_page *text;
@@ -89,21 +90,41 @@ static void drop_page(ll_doc *d, ll_page *p) {
     p->page = -1;
 }
 
-static ll_page *get_page_internal(ll_doc *d, int number, int *hit) {
+static ll_page *get_page_internal(ll_doc *d, int number, int *hit, int priority) {
     if (hit) *hit = 0;
     if (number < 0 || number >= d->count)
         fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Page index out of range");
 
-    ll_page *entry = &d->pages[0];
+    ll_page *entry = NULL;
     for (int i = 0; i < CACHE_PAGES; ++i) {
         ll_page *p = &d->pages[i];
         if (p->page == number && p->list) {
             p->used = ++d->clock;
+            if (priority == 0) p->is_visible = 1;
             ++d->stats.list_hits;
             if (hit) *hit = 1;
             return p;
         }
-        if (p->used < entry->used) entry = p;
+    }
+
+    /* Cache miss: pick best eviction victim.
+     * Rule: Prefer unused (-1) -> then lowest 'used' among buffer pages (!is_visible) ->
+     *       then lowest 'used' among visible pages. */
+    for (int i = 0; i < CACHE_PAGES; ++i) {
+        ll_page *p = &d->pages[i];
+        if (p->page == -1) {
+            entry = p;
+            break;
+        }
+        if (!entry) {
+            entry = p;
+            continue;
+        }
+        if (entry->is_visible && !p->is_visible) {
+            entry = p;
+        } else if (entry->is_visible == p->is_visible && p->used < entry->used) {
+            entry = p;
+        }
     }
 
     drop_page(d, entry);
@@ -116,6 +137,7 @@ static ll_page *get_page_internal(ll_doc *d, int number, int *hit) {
         entry->list = fz_new_display_list_from_page(d->ctx, page);
         entry->page = number;
         entry->used = ++d->clock;
+        entry->is_visible = (priority == 0) ? 1 : 0;
         ++d->stats.list_builds;
     }
     fz_always(d->ctx) {
@@ -129,7 +151,7 @@ static ll_page *get_page_internal(ll_doc *d, int number, int *hit) {
 }
 
 static ll_page *get_page(ll_doc *d, int number) {
-    return get_page_internal(d, number, NULL);
+    return get_page_internal(d, number, NULL, 0);
 }
 
 static fz_stext_page *get_text(ll_doc *d, int number) {
@@ -365,12 +387,16 @@ void ll_cancel_abort(ll_cancel *cancel) {
     if (cancel) cancel->cookie.abort = 1;
 }
 
+int ll_cancel_is_aborted(ll_cancel *cancel) {
+    return (cancel && cancel->cookie.abort) ? 1 : 0;
+}
+
 void ll_cancel_free(ll_cancel *cancel) {
     free(cancel);
 }
 
-int ll_render(ll_doc *d, int number, float scale, float rotation,
-              const float *clip, ll_cancel *cancel, ll_image *out) {
+int ll_render_priority(ll_doc *d, int number, float scale, float rotation,
+                      const float *clip, ll_cancel *cancel, int priority, ll_image *out) {
     if (!d || !out) return LL_ERROR;
     clear_error(d);
     memset(out, 0, sizeof(*out));
@@ -390,7 +416,7 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
         } else {
             uint64_t t_list_start = ll_now_us();
             int list_hit = 0;
-            ll_page *page = get_page_internal(d, number, &list_hit);
+            ll_page *page = get_page_internal(d, number, &list_hit, priority);
             uint64_t list_time_us = ll_now_us() - t_list_start;
 
             fz_matrix m = fz_concat(fz_rotate(rotation), fz_scale(scale, scale));
@@ -491,6 +517,11 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
         return LL_CANCELLED;
     }
     return LL_OK;
+}
+
+int ll_render(ll_doc *d, int number, float scale, float rotation,
+              const float *clip, ll_cancel *cancel, ll_image *out) {
+    return ll_render_priority(d, number, scale, rotation, clip, cancel, 0, out);
 }
 
 void ll_free_image(ll_doc *d, ll_image *out) {
