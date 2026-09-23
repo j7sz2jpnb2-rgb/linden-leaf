@@ -37,6 +37,7 @@ typedef struct {
     size_t length;
     int width, height, stride, x, y;
     float matrix[6]; /* page -> device, including user rotation */
+    void *pixmap_owner; /* non-NULL when samples borrow the MuPDF pixmap */
 } ll_image;
 typedef struct { uint64_t list_builds, list_hits, text_builds; } ll_stats;
 typedef struct { char *title; int page, level; } ll_outline_item;
@@ -77,7 +78,7 @@ LL_API void ll_cancel_free(ll_cancel *cancel);
  * Returns LL_CANCELLED when the associated fz_cookie was aborted. */
 LL_API int ll_render(ll_doc *doc, int page, float scale, float rotation,
                      const float *clip, ll_cancel *cancel, ll_image *out);
-LL_API void ll_free_image(ll_image *out);
+LL_API void ll_free_image(ll_doc *doc, ll_image *out);
 
 LL_API int ll_get_text(ll_doc *doc, int page, ll_text *out);
 LL_API void ll_free_text(ll_text *out);

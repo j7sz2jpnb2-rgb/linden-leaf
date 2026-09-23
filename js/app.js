@@ -11,6 +11,7 @@ import * as syncEngine from './syncEngine.js?v=20260914_rel_v1'
 import { updater } from './updater.js?v=20260914_rel_v1'
 import { PdfViewport } from './pdf-viewport.js'
 import { AdaptivePdfDriver } from './pdf-driver.js'
+import { buildPdfTocIndex, pdfTocAtPage } from './pdf-toc.js'
 import { platformBridge } from './platformBridge.js'
 
 // Format language map helper
@@ -1451,7 +1452,12 @@ class UniversalReaderApp {
                                 if (total > 1) {
                                     this.showToast(`正在导入 (${i + 1}/${total}): ${f.filename}...`, '⏳')
                                 }
-                                let buffer = f.buffer || (window.electronAPI.readFileBuffer ? await window.electronAPI.readFileBuffer(f.filePath) : null)
+                                let nativeSnapshotPath = await platformBridge.stagePdfSource(f.filePath)
+                                let buffer = nativeSnapshotPath ? await platformBridge.readFileBuffer(nativeSnapshotPath) : null
+                                if (!buffer || buffer.byteLength === 0 || buffer.length === 0) {
+                                    nativeSnapshotPath = null
+                                    buffer = f.buffer || (window.electronAPI.readFileBuffer ? await window.electronAPI.readFileBuffer(f.filePath) : null)
+                                }
                                 if (buffer) {
                                     if (Array.isArray(buffer)) {
                                         buffer = new Uint8Array(buffer).buffer
@@ -1461,7 +1467,7 @@ class UniversalReaderApp {
                                         buffer = await buffer.arrayBuffer()
                                     }
                                     const fileObj = new File([buffer], f.filename)
-                                    await this.processAndSaveBook(fileObj, undefined, f.filePath)
+                                    await this.processAndSaveBook(fileObj, undefined, f.filePath, nativeSnapshotPath)
                                     successCount++
                                 } else {
                                     console.warn('[Import] Failed to read buffer for file:', f.filePath)
@@ -1501,7 +1507,9 @@ class UniversalReaderApp {
             this._fileOpenQueue = this._fileOpenQueue.then(async () => {
                 if (!fileInfo) return
                 try {
-                    let buf = fileInfo.buffer
+                    let nativeSnapshotPath = await platformBridge.stagePdfSource(fileInfo.filePath)
+                    let buf = nativeSnapshotPath ? await platformBridge.readFileBuffer(nativeSnapshotPath) : fileInfo.buffer
+                    if (!buf || buf.byteLength === 0 || buf.length === 0) nativeSnapshotPath = null
                     if ((!buf || buf.byteLength === 0 || buf.length === 0) && fileInfo.filePath && platformBridge.readFileBuffer) {
                         buf = await platformBridge.readFileBuffer(fileInfo.filePath)
                     }
@@ -1543,7 +1551,7 @@ class UniversalReaderApp {
                     }
 
                     const fileObj = new File([buf], fileInfo.filename)
-                    const bookId = await this.processAndSaveBook(fileObj, undefined, fileInfo.filePath)
+                    const bookId = await this.processAndSaveBook(fileObj, undefined, fileInfo.filePath, nativeSnapshotPath)
                     if (bookId) {
                         await this.openBook(bookId)
                     }
@@ -3858,7 +3866,7 @@ class UniversalReaderApp {
         }
     }
 
-    async processAndSaveBook(file, customFileName, nativePath = null) {
+    async processAndSaveBook(file, customFileName, nativePath = null, nativeSnapshotPath = null) {
         const fileName = customFileName || file.name || file.filename || (file.path ? file.path.split(/[\\/]/).pop() : '未命名电子书.txt')
         let ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : ''
         if (!ext) {
@@ -3968,7 +3976,7 @@ class UniversalReaderApp {
 
         if (match) {
             console.log(`[processAndSaveBook] Found existing book record: ${match.title} (${match.id})`)
-            await db.saveBook({ id: match.id, blob: file, nativePath, filename: fileName, isCloudOnly: false, hasLocalFile: true, updatedAt: Date.now() })
+            await db.saveBook({ id: match.id, blob: file, nativePath, nativeSnapshotPath, filename: fileName, isCloudOnly: false, hasLocalFile: true, updatedAt: Date.now() })
             if (!match.coverBlob && coverBlob) {
                 await db.saveBook({ id: match.id, coverBlob })
             }
@@ -3992,6 +4000,7 @@ class UniversalReaderApp {
             size: file.size,
             blob: file,
             nativePath,
+            nativeSnapshotPath,
             coverBlob: coverBlob,
             addedAt: Date.now(),
             lastReadAt: 0,
@@ -5801,6 +5810,16 @@ class UniversalReaderApp {
                 const sessionViewport = new PdfViewport(this.dom.readerContentArea, {
                     scale: 1.25,
                     snapshot,
+                    onOutline: toc => {
+                        if (!readerSession.isCurrent()) return
+                        this.currentPdfTOC = toc
+                        readerSession.toc = toc
+                        readerSession.tocIndex = buildPdfTocIndex(toc)
+                        this.renderTOC(toc)
+                        const active = pdfTocAtPage(readerSession.tocIndex, sessionViewport.currentPage)
+                        if (active?.href) this.highlightActiveTOCItem(active.href)
+                        if (active && readerSession.location) readerSession.location.tocItem = active
+                    },
                     onPageChange: (pageIdx, total) => {
                         if (!readerSession.isCurrent()) return
                         tracker.resetActivity()
@@ -5835,33 +5854,12 @@ class UniversalReaderApp {
                             }
                         }
 
-                        if (this.currentPdfTOC && this.currentPdfTOC.length > 0) {
-                            const flattenTOC = (items) => {
-                                let result = []
-                                for (const it of items) {
-                                    result.push(it)
-                                    if (it.subitems && it.subitems.length) {
-                                        result = result.concat(flattenTOC(it.subitems))
-                                    }
-                                }
-                                return result
-                            }
-                            const flat = flattenTOC(this.currentPdfTOC)
-                            let activeItem = null
-                            for (const it of flat) {
-                                const itemPage = typeof it.page === 'number' ? it.page : (parseInt(it.href?.replace(/[^0-9]/g, ''), 10) - 1)
-                                if (!isNaN(itemPage) && itemPage <= pageIdx) {
-                                    activeItem = it
-                                } else if (!isNaN(itemPage) && itemPage > pageIdx) {
-                                    break
-                                }
-                            }
-                            if (activeItem?.href && this._activeSession === readerSession) {
-                                this.highlightActiveTOCItem(activeItem.href)
-                            }
-                            if (activeItem) {
-                                loc.tocItem = activeItem
-                            }
+                        const activeItem = pdfTocAtPage(readerSession.tocIndex, pageIdx)
+                        if (activeItem?.href && this._activeSession === readerSession) {
+                            this.highlightActiveTOCItem(activeItem.href)
+                        }
+                        if (activeItem) {
+                            loc.tocItem = activeItem
                         }
 
                         // Debounce progress update to db using unified makeProgressSnapshot
@@ -6020,34 +6018,9 @@ class UniversalReaderApp {
                     if (readerSession.isCurrent() && this.currentBookId === bookId) {
                         this.renderTOC(this.currentPdfTOC)
                         this.loadNotesList()
-                        if (this.currentPdfTOC && this.currentPdfTOC.length > 0) {
-                            const flattenTOC = (items) => {
-                                let result = []
-                                for (const it of items) {
-                                    result.push(it)
-                                    if (it.subitems && it.subitems.length) {
-                                        result = result.concat(flattenTOC(it.subitems))
-                                    }
-                                }
-                                return result
-                            }
-                            const flat = flattenTOC(this.currentPdfTOC)
-                            let activeItem = null
-                            for (const it of flat) {
-                                const itemPage = typeof it.page === 'number' ? it.page : (parseInt(it.href?.replace(/[^0-9]/g, ''), 10) - 1)
-                                if (!isNaN(itemPage) && itemPage <= (displayPage - 1)) {
-                                    activeItem = it
-                                } else if (!isNaN(itemPage) && itemPage > (displayPage - 1)) {
-                                    break
-                                }
-                            }
-                            if (activeItem?.href && this._activeSession === readerSession) {
-                                this.highlightActiveTOCItem(activeItem.href)
-                            }
-                            if (activeItem && readerSession.location) {
-                                readerSession.location.tocItem = activeItem
-                            }
-                        }
+                        const activeItem = pdfTocAtPage(readerSession.tocIndex, displayPage - 1)
+                        if (activeItem?.href && this._activeSession === readerSession) this.highlightActiveTOCItem(activeItem.href)
+                        if (activeItem && readerSession.location) readerSession.location.tocItem = activeItem
                     }
                 }, 20)
 

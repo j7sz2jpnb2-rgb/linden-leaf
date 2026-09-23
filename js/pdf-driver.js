@@ -90,15 +90,11 @@ export class PdfJsDriver {
         first.cleanup()
         const pageSizes = Array.from({ length: this.numPages }, () => ({ ...firstSize }))
 
-        // Outline/metadata no longer wait on an O(N) page-size scan.
-        let toc = [], meta = {}
+        // The outline can contain thousands of destinations. It is loaded
+        // after the first visible page instead of delaying its first paint.
+        let meta = {}
         try {
-            const [t, m] = await Promise.all([
-                this._loadOutline().catch(() => []),
-                this.pdfDoc ? this.pdfDoc.getMetadata().catch(() => ({})) : Promise.resolve({}),
-            ])
-            toc = t
-            meta = m
+            meta = this.pdfDoc ? await this.pdfDoc.getMetadata().catch(() => ({})) : {}
         } catch (err) {
             if (this._destroyed) {
                 try { doc?.destroy?.() } catch {}
@@ -114,7 +110,7 @@ export class PdfJsDriver {
         return {
             numPages: this.numPages,
             pageSizes,
-            toc,
+            toc: [],
             title: meta?.info?.Title || 'PDF 文档',
             author: meta?.info?.Author || '未知作者',
         }
@@ -145,6 +141,8 @@ export class PdfJsDriver {
         }
         return format(outline)
     }
+
+    getOutline() { return this._loadOutline() }
 
     async getPageSizes(start, count, signal) {
         const out = []
@@ -258,7 +256,9 @@ export class MuPdfTauriDriver {
         this.docId = null
         this.numPages = 0
         this._seq = 0
+        this._destroyed = false
         this.geometryCache = new Map()
+        this.geometryCacheLimit = 8
     }
 
     static async isAvailable() {
@@ -268,17 +268,28 @@ export class MuPdfTauriDriver {
     }
 
     async open(source) {
+        if (this._destroyed) throw new Error('Driver is destroyed')
         const nativePath = source?.nativePath || source?.path
         if (!nativePath) throw new Error('Native MuPDF requires a local file path')
         const meta = await platformBridge._invokeTauri('mupdf_open_document', {
             filePath: nativePath,
             password: null,
+            expectedSize: source?.expectedSize ?? null,
         })
+        if (this._destroyed) {
+            platformBridge._invokeTauri('mupdf_close_document', { docId: meta.docId }).catch(() => {})
+            throw new Error('Driver was destroyed while opening document')
+        }
         this.docId = meta.docId
         this.numPages = meta.numPages || 0
         const first = { width: meta.defaultWidth || 595, height: meta.defaultHeight || 842 }
         const pageSizes = Array.from({ length: this.numPages }, () => ({ ...first }))
 
+        return { numPages: this.numPages, pageSizes, toc: [], title: meta.title || 'PDF 文档', author: meta.author || '未知作者' }
+    }
+
+    async getOutline() {
+        if (this._destroyed || !this.docId) return []
         let toc = []
         try {
             const flat = await platformBridge._invokeTauri('mupdf_get_outline_flat', { docId: this.docId })
@@ -292,7 +303,7 @@ export class MuPdfTauriDriver {
             }
             toc = root
         } catch {}
-        return { numPages: this.numPages, pageSizes, toc, title: meta.title || 'PDF 文档', author: meta.author || '未知作者' }
+        return this._destroyed ? [] : toc
     }
 
     async getPageSizes(start, count, signal) {
@@ -315,14 +326,15 @@ export class MuPdfTauriDriver {
     async renderPage(pageIndex, scale, signal) {
         if (!this.docId) throw new Error('Document not loaded')
         if (signal?.aborted) throw abortError()
-        const requestId = `${this.docId}:${pageIndex}:${++this._seq}`
+        const docId = this.docId
+        const requestId = `${docId}:${pageIndex}:${++this._seq}`
         const cancel = () => {
-            platformBridge._invokeTauri('mupdf_cancel_render', { docId: this.docId, requestId }).catch(() => {})
+            platformBridge._invokeTauri('mupdf_cancel_render', { docId, requestId }).catch(() => {})
         }
         signal?.addEventListener('abort', cancel, { once: true })
         try {
             const response = await platformBridge._invokeTauri('mupdf_render_page', {
-                docId: this.docId,
+                docId,
                 pageIndex,
                 scale,
                 rotation: 0,
@@ -361,11 +373,22 @@ export class MuPdfTauriDriver {
     }
 
     async getTextGeometry(pageIndex) {
-        if (this.geometryCache.has(pageIndex)) return this.geometryCache.get(pageIndex)
+        if (this.geometryCache.has(pageIndex)) {
+            const cached = this.geometryCache.get(pageIndex)
+            this.geometryCache.delete(pageIndex)
+            this.geometryCache.set(pageIndex, cached)
+            return cached
+        }
         const promise = platformBridge._invokeTauri('mupdf_get_text_layer', { docId: this.docId, pageIndex })
             .then(x => x?.chars || [])
-            .catch(err => { this.geometryCache.delete(pageIndex); throw err })
+            .catch(err => {
+                if (this.geometryCache.get(pageIndex) === promise) this.geometryCache.delete(pageIndex)
+                throw err
+            })
         this.geometryCache.set(pageIndex, promise)
+        while (this.geometryCache.size > this.geometryCacheLimit) {
+            this.geometryCache.delete(this.geometryCache.keys().next().value)
+        }
         return promise
     }
 
@@ -386,6 +409,7 @@ export class MuPdfTauriDriver {
     }
 
     destroy() {
+        this._destroyed = true
         if (this.docId) platformBridge._invokeTauri('mupdf_close_document', { docId: this.docId }).catch(() => {})
         this.docId = null
         this.geometryCache.clear()
@@ -401,11 +425,27 @@ export class AdaptivePdfDriver {
     }
 
     async open(source) {
-        // Contract 1A:
-        // openBook captures snapshot and passes it to driver.
-        // If snapshot is passed, only use the content in snapshot.
-        // Default PDF.js reads this Blob. Native path is not used to auto-enable MuPDF
-        // without reliable proof of materialization.
+        if (this._destroyed) throw new Error('Driver is destroyed')
+        // A staged native file and the IndexedDB Blob must have been created
+        // from the same immutable import snapshot and bound in one DB write.
+        const snap = this.snapshot
+        const nativeReady = snap?.nativeSnapshotPath && snap.blob &&
+            snap.nativeSnapshotRevision === snap.blobRevision &&
+            snap.nativeSnapshotOrigin === snap.revisionOrigin &&
+            snap.nativeSnapshotSize === snap.blob.size
+        if (nativeReady && await MuPdfTauriDriver.isAvailable()) {
+            if (this._destroyed) throw new Error('Driver is destroyed')
+            const native = new MuPdfTauriDriver()
+            this.backend = native
+            this.kind = native.kind
+            try {
+                return await native.open({ nativePath: snap.nativeSnapshotPath, expectedSize: snap.blob.size })
+            } catch (err) {
+                native.destroy()
+                if (this._destroyed) throw err
+                console.warn('[PDF] Native snapshot open failed; using PDF.js:', err)
+            }
+        }
         const blobToOpen = this.snapshot?.blob || source?.blob || source?.file || source
         const fallback = new PdfJsDriver()
         this.backend = fallback
@@ -419,6 +459,7 @@ export class AdaptivePdfDriver {
     getTextLayer(...args) { return this.backend.getTextLayer(...args) }
     getTextGeometry(...args) { return this.backend.getTextGeometry?.(...args) }
     select(...args) { return this.backend.select?.(...args) }
+    getOutline(...args) { return this.backend.getOutline?.(...args) }
     destroy() {
         this._destroyed = true
         this.backend?.destroy?.()

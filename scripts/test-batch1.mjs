@@ -470,8 +470,9 @@ const {
 } = db;
 
 const { decodePdfProgress, UniversalReaderApp } = await import('../js/app.js');
-const { AdaptivePdfDriver, PdfJsDriver } = await import('../js/pdf-driver.js');
+const { AdaptivePdfDriver, PdfJsDriver, MuPdfTauriDriver } = await import('../js/pdf-driver.js');
 const { PdfViewport } = await import('../js/pdf-viewport.js');
+const { buildPdfTocIndex, pdfTocAtPage } = await import('../js/pdf-toc.js');
 const { tracker } = await import('../js/tracker.js?v=20260914_rel_v1');
 const syncEngine = await import('../js/syncEngine.js?v=20260914_rel_v1');
 const { platformBridge } = await import('../js/platformBridge.js');
@@ -625,6 +626,25 @@ await runAsyncTest('2.2 Auto-backfill legacy records in getBookFileSnapshot', as
     assert.equal(inDb.blobRevision, snapshot.blobRevision);
 });
 
+await runAsyncTest('2.3 Native snapshot belongs to exactly one Blob revision', async () => {
+    const id = 'native-revision-boundary';
+    const first = new Blob(['A-PDF'], { type: 'application/pdf' });
+    await saveBook({ id, title: 'Native book', format: 'pdf', blob: first,
+        nativePath: 'D:/source.pdf', nativeSnapshotPath: 'D:/cache/snapshot-1.pdf' });
+    const a = await getBookFileSnapshot(id);
+    assert.equal(a.nativeSnapshotPath, 'D:/cache/snapshot-1.pdf');
+    assert.equal(a.nativeSnapshotRevision, a.blobRevision);
+    assert.equal(a.nativeSnapshotOrigin, a.revisionOrigin);
+    assert.equal(a.nativeSnapshotSize, first.size);
+
+    await saveBookFileBlob(id, new Blob(['B-PDF'], { type: 'application/pdf' }));
+    const b = await getBookFileSnapshot(id);
+    assert.notEqual(a.blobRevision, b.blobRevision);
+    assert.equal(b.nativeSnapshotPath, null);
+    assert.equal(b.nativeSnapshotRevision, null);
+    assert.equal(b.nativePath, 'D:/source.pdf', 'original path remains metadata only');
+});
+
 // ----------------------------------------------------------------------------
 // Suite 3: PDF Progress Calculation & Boundary Testing (Section 9 Test 4)
 // ----------------------------------------------------------------------------
@@ -738,6 +758,97 @@ await runAsyncTest('4.2 PdfViewport loads with functional initialPage and sets t
     assert.ok(viewport.scrollArea.scrollTop > 0, 'Scroll top must be positioned at page 3');
 
     viewport.destroy();
+});
+
+await runAsyncTest('4.4 Trusted native snapshot selects MuPDF; stale revision uses PDF.js', async () => {
+    const origAvailable = MuPdfTauriDriver.isAvailable;
+    const origNativeOpen = MuPdfTauriDriver.prototype.open;
+    const origNativeDestroy = MuPdfTauriDriver.prototype.destroy;
+    const origPdfOpen = PdfJsDriver.prototype.open;
+    let nativeCalls = 0, pdfCalls = 0;
+    MuPdfTauriDriver.isAvailable = async () => true;
+    MuPdfTauriDriver.prototype.open = async source => {
+        nativeCalls++;
+        assert.equal(source.nativePath, 'D:/cache/book.pdf');
+        return { numPages: 2, toc: [], pageSizes: [{ width: 600, height: 800 }] };
+    };
+    MuPdfTauriDriver.prototype.destroy = () => {};
+    PdfJsDriver.prototype.open = async () => {
+        pdfCalls++;
+        return { numPages: 2, toc: [], pageSizes: [{ width: 600, height: 800 }] };
+    };
+    try {
+        const blob = new Blob(['PDF']);
+        const trusted = { blob, blobRevision: 'rev-a', revisionOrigin: 'origin-a',
+            nativeSnapshotPath: 'D:/cache/book.pdf', nativeSnapshotRevision: 'rev-a',
+            nativeSnapshotOrigin: 'origin-a', nativeSnapshotSize: blob.size };
+        const native = new AdaptivePdfDriver({ snapshot: trusted });
+        await native.open({ blob });
+        assert.equal(native.kind, 'mupdf');
+        assert.equal(nativeCalls, 1);
+        native.destroy();
+
+        const stale = new AdaptivePdfDriver({ snapshot: { ...trusted, blobRevision: 'rev-b' } });
+        await stale.open({ blob });
+        assert.equal(stale.kind, 'pdfjs');
+        assert.equal(nativeCalls, 1);
+        assert.equal(pdfCalls, 1);
+        stale.destroy();
+    } finally {
+        MuPdfTauriDriver.isAvailable = origAvailable;
+        MuPdfTauriDriver.prototype.open = origNativeOpen;
+        MuPdfTauriDriver.prototype.destroy = origNativeDestroy;
+        PdfJsDriver.prototype.open = origPdfOpen;
+    }
+});
+
+runTest('4.5 Extreme page size never exceeds renderer pixel and edge budgets', () => {
+    const viewport = Object.create(PdfViewport.prototype);
+    viewport.pageSizes = [{ width: 20_000, height: 20_000 }];
+    viewport.scale = 3.5;
+    viewport.options = { maxCanvasEdge: 4096, maxCanvasPixels: 10_000_000 };
+    const scale = viewport._renderScale(0);
+    assert.ok(20_000 * scale <= 4096);
+    assert.ok((20_000 * scale) ** 2 <= 10_000_000);
+});
+
+runTest('4.6 Large PDF outline resolves current section by indexed predecessor', () => {
+    const toc = Array.from({ length: 12_000 }, (_, i) => ({ label: `Section ${i}`, page: i }));
+    const index = buildPdfTocIndex(toc);
+    assert.equal(index.length, 12_000);
+    assert.equal(pdfTocAtPage(index, 9_999)?.label, 'Section 9999');
+    assert.equal(pdfTocAtPage(index, 0)?.label, 'Section 0');
+    assert.equal(pdfTocAtPage(index, 15_000)?.label, 'Section 11999');
+});
+
+await runAsyncTest('4.7 Deep-link geometry asks only for the visible 8-page batch', async () => {
+    const viewport = Object.create(PdfViewport.prototype);
+    viewport._destroyed = false;
+    viewport._geometryAbort = new AbortController();
+    viewport._geometryQueue = [];
+    viewport._geometryQueued = new Set();
+    viewport._knownPageGeometry = new Set([0]);
+    viewport._geometryInFlight = null;
+    viewport.numPages = 12_000;
+    viewport.currentPage = 9_000;
+    viewport.scale = 1;
+    viewport.pageSizes = Array.from({ length: viewport.numPages }, () => ({ width: 600, height: 800 }));
+    viewport.pageOffsets = Array.from({ length: viewport.numPages }, (_, i) => ({ top: 16 + i * 816, width: 600, height: 800 }));
+    viewport.scrollArea = { scrollTop: viewport.pageOffsets[9_000].top, clientHeight: 800 };
+    viewport.spacer = { style: {} };
+    viewport.activeSlots = new Map();
+    viewport._syncActiveSlotGeometry = () => {};
+    viewport._renderVisibleSlots = () => {};
+    const calls = [];
+    viewport.driver = { kind: 'mupdf', getPageSizes: async (start, count) => {
+        calls.push([start, count]);
+        return Array.from({ length: count }, () => ({ width: 600, height: 800 }));
+    } };
+    viewport._enqueueGeometry(9_000);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.deepEqual(calls, [[9_000, 8]]);
+    assert.equal(viewport._knownPageGeometry.size, 9);
+    viewport._geometryAbort.abort();
 });
 
 await runAsyncTest('4.3 PdfViewport setHighlights filters highlights using isContentIdentityMatching', async () => {

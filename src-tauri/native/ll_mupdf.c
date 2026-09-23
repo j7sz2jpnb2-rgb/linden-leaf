@@ -1,13 +1,24 @@
 #include "ll_mupdf.h"
 #include <mupdf/fitz.h>
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _MSC_VER
+#include <float.h>
+#define ll_isfinite(value) _finite((double)(value))
+#else
+#define ll_isfinite(value) isfinite(value)
+#endif
 
 /* Small decoded working set. The application owns the larger byte-budgeted
  * bitmap/text caches; this cache only avoids repeatedly interpreting nearby
  * pages while zooming and turning pages. */
 #define CACHE_PAGES 3
+#define LL_MAX_RENDER_EDGE 4096
+#define LL_MAX_RENDER_PIXELS 10000000
 
 typedef struct {
     int page;
@@ -286,8 +297,7 @@ int ll_page_bounds_many(ll_doc *d, int start_page, int count, float *bounds4) {
     fz_try(d->ctx) {
         if (first < 0 || first >= d->count)
             fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Start page out of range");
-        int end = first + requested;
-        if (end > d->count) end = d->count;
+        int end = first + (requested > d->count - first ? d->count - first : requested);
         for (int i = first; i < end; ++i) {
             page = fz_load_page(d->ctx, d->document, i);
             fz_rect r = fz_bound_page(d->ctx, page);
@@ -337,8 +347,8 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
     fz_var(was_cancelled);
 
     fz_try(d->ctx) {
-        if (!(scale > 0))
-            fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Scale must be positive");
+        if (!ll_isfinite(scale) || scale <= 0 || !ll_isfinite(rotation))
+            fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Invalid render transform");
         if (cancel && cancel->cookie.abort) {
             was_cancelled = 1;
         } else {
@@ -347,11 +357,34 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
             fz_rect box = fz_transform_rect(page->bounds, m);
             m = fz_concat(m, fz_translate(-box.x0, -box.y0));
             box = fz_transform_rect(page->bounds, m);
-            if (clip)
+            if (clip) {
+                for (int i = 0; i < 4; ++i)
+                    if (!ll_isfinite(clip[i]))
+                        fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Invalid render clip");
                 box = fz_intersect_rect(box, (fz_rect){clip[0], clip[1], clip[2], clip[3]});
+            }
+            /* Check before fz_round_rect and the pixmap allocation. A corrupt
+             * MediaBox or extreme zoom must not allocate an unbounded bitmap. */
+            double box_width = (double)box.x1 - (double)box.x0;
+            double box_height = (double)box.y1 - (double)box.y0;
+            if (!ll_isfinite(box.x0) || !ll_isfinite(box.y0) ||
+                !ll_isfinite(box.x1) || !ll_isfinite(box.y1) ||
+                box.x0 < -INT_MAX / 4 || box.y0 < -INT_MAX / 4 ||
+                box.x1 > INT_MAX / 4 || box.y1 > INT_MAX / 4 ||
+                !ll_isfinite(box_width) || !ll_isfinite(box_height) ||
+                box_width <= 0 || box_height <= 0 ||
+                box_width > LL_MAX_RENDER_EDGE || box_height > LL_MAX_RENDER_EDGE ||
+                box_width * box_height > LL_MAX_RENDER_PIXELS)
+                fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
             fz_irect bbox = fz_round_rect(box);
-            if (bbox.x1 <= bbox.x0 || bbox.y1 <= bbox.y0)
+            int width = bbox.x1 - bbox.x0;
+            int height = bbox.y1 - bbox.y0;
+            if (width <= 0 || height <= 0)
                 fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Empty render region");
+            if (width > LL_MAX_RENDER_EDGE || height > LL_MAX_RENDER_EDGE ||
+                (size_t)width * (size_t)height > LL_MAX_RENDER_PIXELS ||
+                width > INT_MAX / 4)
+                fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
 
             pix = fz_new_pixmap_with_bbox(d->ctx, fz_device_rgb(d->ctx), bbox, NULL, 1);
             fz_clear_pixmap_with_value(d->ctx, pix, 255);
@@ -369,15 +402,25 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
                 out->x = bbox.x0;
                 out->y = bbox.y0;
                 out->length = (size_t)out->stride * (size_t)out->height;
-                out->samples = malloc(out->length);
-                if (!out->samples)
-                    fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
                 unsigned char *src = fz_pixmap_samples(d->ctx, pix);
                 int stride = fz_pixmap_stride(d->ctx, pix);
-                for (int y = 0; y < out->height; ++y)
-                    memcpy(out->samples + (size_t)y * (size_t)out->stride,
-                           src + (size_t)y * (size_t)stride,
-                           (size_t)out->stride);
+                if (!src || stride < out->stride)
+                    fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Invalid pixmap storage");
+                if (stride == out->stride) {
+                    /* Keep the pixmap alive through Rust packet assembly.
+                     * This removes a full-page C malloc and pixel copy. */
+                    out->samples = src;
+                    out->pixmap_owner = pix;
+                    pix = NULL;
+                } else {
+                    out->samples = malloc(out->length);
+                    if (!out->samples)
+                        fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
+                    for (int y = 0; y < out->height; ++y)
+                        memcpy(out->samples + (size_t)y * (size_t)out->stride,
+                               src + (size_t)y * (size_t)stride,
+                               (size_t)out->stride);
+                }
                 float matrix[6] = {m.a, m.b, m.c, m.d, m.e, m.f};
                 memcpy(out->matrix, matrix, sizeof(matrix));
             }
@@ -389,20 +432,24 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
     }
     fz_catch(d->ctx) {
         caught(d);
-        ll_free_image(out);
+        ll_free_image(d, out);
         return LL_ERROR;
     }
 
     if (was_cancelled) {
-        ll_free_image(out);
+        ll_free_image(d, out);
         return LL_CANCELLED;
     }
     return LL_OK;
 }
 
-void ll_free_image(ll_image *out) {
+void ll_free_image(ll_doc *d, ll_image *out) {
     if (!out) return;
-    free(out->samples);
+    if (out->pixmap_owner) {
+        if (d) fz_drop_pixmap(d->ctx, (fz_pixmap *)out->pixmap_owner);
+    } else {
+        free(out->samples);
+    }
     memset(out, 0, sizeof(*out));
 }
 

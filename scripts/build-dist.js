@@ -143,7 +143,9 @@ const buildInfo = {
     commit: commitHash,
     isDirty,
     resourceHash: combinedDigest,
-    backend: 'pdfjs',
+    // The frontend selects MuPDF per trusted snapshot only when the native
+    // bridge is compiled into the host; this asset build cannot prove that.
+    backend: 'adaptive',
     timestamp: buildTimestamp,
     resourceCount: allFileHashes.length
 };

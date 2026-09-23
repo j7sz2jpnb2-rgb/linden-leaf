@@ -27,6 +27,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LL_MUPDF_INCLUDE");
     println!("cargo:rerun-if-env-changed=LL_MUPDF_LIB_DIR");
     println!("cargo:rerun-if-env-changed=LL_MUPDF_LIBS");
+    println!("cargo:rerun-if-env-changed=LINDEN_NATIVE_CACHE_DIR");
 
     let include = env::var_os("LL_MUPDF_INCLUDE").map(PathBuf::from)
         .or_else(|| {

@@ -24,6 +24,7 @@ export class PdfViewport {
             maxCanvasPixels: 10_000_000,
             snapshot: null,
             onPageChange: null,
+            onOutline: null,
             onSelection: null,
             onHighlightCreate: null,
             onHighlightClick: null,
@@ -43,9 +44,15 @@ export class PdfViewport {
 
         this._destroyed = false
         this._geometryAbort = null
+        this._knownPageGeometry = new Set()
+        this._geometryQueue = []
+        this._geometryQueued = new Set()
+        this._geometryInFlight = null
         this._renderQueue = []
         this._activeRenders = 0
         this._renderConcurrency = 2
+        this._outlineRequested = false
+        this._outlineTimer = null
         this._nativeGeometry = new Map()
         this._nativeGeometryUse = new Map()
         this._nativeGeometryLimit = 16
@@ -152,6 +159,12 @@ export class PdfViewport {
         const currentGen = this._loadGeneration
 
         this.driver = engineDriver
+        this._outlineRequested = false
+        this._geometryAbort?.abort()
+        this._geometryInFlight = null
+        this._geometryQueue.length = 0
+        this._geometryQueued.clear()
+        this._knownPageGeometry.clear()
         if (snapshot) this.currentSnapshot = snapshot
         const info = await this.driver.open(source)
         if (this._destroyed || this._loadGeneration !== currentGen) {
@@ -162,6 +175,7 @@ export class PdfViewport {
         this.pageSizes = info.pageSizes?.length
             ? info.pageSizes.map(x => ({ x0: 0, y0: 0, ...x }))
             : Array.from({ length: this.numPages }, () => ({ x0: 0, y0: 0, width: 595, height: 842 }))
+        this._knownPageGeometry.add(0)
         this._renderConcurrency = this.driver.kind === 'mupdf' ? 1 : 2
         this._recomputeLayout()
 
@@ -176,40 +190,76 @@ export class PdfViewport {
 
         this._renderVisibleSlots(true)
         this._geometryAbort = new AbortController()
-        this._refineGeometry(this._geometryAbort.signal).catch(err => {
-            if (!this._geometryAbort?.signal.aborted) console.warn('[PDF] background page geometry failed:', err)
-        })
+        this._enqueueGeometry(targetPage)
         return { numPages: this.numPages, title: info.title || 'PDF 文档', author: info.author || '未知作者', toc: info.toc || [] }
     }
 
-    async _refineGeometry(signal) {
-        if (!this.driver?.getPageSizes || this.numPages <= 1) return
-        const batch = this.driver.kind === 'mupdf' ? 64 : 12
-        for (let start = 0; start < this.numPages; start += batch) {
-            if (signal.aborted || this._destroyed) return
-            const values = await this.driver.getPageSizes(start, Math.min(batch, this.numPages - start), signal)
-            if (!values?.length) continue
+    _enqueueGeometry(page) {
+        if (!this.driver?.getPageSizes || !this._geometryAbort || this._geometryAbort.signal.aborted) return
+        if (!Number.isInteger(page) || page < 0 || page >= this.numPages) return
+        const start = Math.floor(page / 8) * 8
+        const end = Math.min(this.numPages, start + 8)
+        if (this._geometryQueued.has(start) ||
+            Array.from({ length: end - start }, (_, i) => start + i).every(i => this._knownPageGeometry.has(i))) return
+        this._geometryQueued.add(start)
+        this._geometryQueue.push(start)
+        // A rapid scrollbar drag must not leave hundreds of obsolete batches.
+        this._geometryQueue.sort((a, b) => Math.abs(a - this.currentPage) - Math.abs(b - this.currentPage))
+        while (this._geometryQueue.length > 4) this._geometryQueued.delete(this._geometryQueue.pop())
+        this._drainGeometryQueue().catch(err => console.warn('[PDF] page geometry unavailable:', err))
+    }
 
-            const anchorPage = clamp(this.currentPage, 0, this.pageOffsets.length - 1)
-            const old = this.pageOffsets[anchorPage]
-            const ratio = old?.height ? clamp((this.scrollArea.scrollTop - old.top) / old.height, 0, 1) : 0
-            const changedActive = []
-            values.forEach((size, j) => {
-                const i = start + j
-                if (!this.pageSizes[i]) return
-                const prev = this.pageSizes[i]
-                const next = { ...prev, ...size }
-                if (Math.abs(prev.width - next.width) > .01 || Math.abs(prev.height - next.height) > .01 || prev.x0 !== next.x0 || prev.y0 !== next.y0) {
-                    this.pageSizes[i] = next
-                    if (this.activeSlots.has(i)) changedActive.push(i)
+    async _drainGeometryQueue() {
+        const signal = this._geometryAbort.signal
+        if (this._geometryInFlight === signal) return
+        this._geometryInFlight = signal
+        const driver = this.driver
+        try {
+            while (this._geometryQueue.length && !signal.aborted && !this._destroyed) {
+                this._geometryQueue.sort((a, b) => Math.abs(a - this.currentPage) - Math.abs(b - this.currentPage))
+                const start = this._geometryQueue.shift()
+                let values
+                try {
+                    values = await driver.getPageSizes(start, Math.min(8, this.numPages - start), signal)
+                } catch (err) {
+                    if (!signal.aborted) console.warn('[PDF] page geometry batch failed:', err)
+                    continue
+                } finally {
+                    this._geometryQueued.delete(start)
                 }
-            })
-            this._recomputeLayout()
-            const now = this.pageOffsets[anchorPage]
-            if (now) this.scrollArea.scrollTop = Math.max(0, now.top + now.height * ratio)
-            this._syncActiveSlotGeometry()
-            for (const page of changedActive) this._remountPage(page)
-            await sleepFrame()
+                if (signal.aborted || this._destroyed || driver !== this.driver || !values?.length) continue
+                const anchorPage = clamp(this.currentPage, 0, this.pageOffsets.length - 1)
+                const old = this.pageOffsets[anchorPage]
+                const ratio = old?.height ? clamp((this.scrollArea.scrollTop - old.top) / old.height, 0, 1) : 0
+                const changedActive = []
+                let changed = false
+                values.forEach((size, j) => {
+                    const i = start + j
+                    if (!this.pageSizes[i]) return
+                    this._knownPageGeometry.add(i)
+                    const prev = this.pageSizes[i]
+                    const next = { ...prev, ...size }
+                    if (Math.abs(prev.width - next.width) > .01 || Math.abs(prev.height - next.height) > .01 || prev.x0 !== next.x0 || prev.y0 !== next.y0) {
+                        this.pageSizes[i] = next
+                        changed = true
+                        if (this.activeSlots.has(i)) changedActive.push(i)
+                    }
+                })
+                if (changed) {
+                    this._recomputeLayout()
+                    const now = this.pageOffsets[anchorPage]
+                    if (now) this.scrollArea.scrollTop = Math.max(0, now.top + now.height * ratio)
+                    this._syncActiveSlotGeometry()
+                    for (const page of changedActive) this._remountPage(page)
+                    this._renderVisibleSlots()
+                }
+                await sleepFrame()
+            }
+        } finally {
+            if (this._geometryInFlight === signal) this._geometryInFlight = null
+            if (this._geometryQueue.length && !this._geometryAbort.signal.aborted && !this._destroyed && !this._geometryInFlight) {
+                this._drainGeometryQueue().catch(err => console.warn('[PDF] page geometry unavailable:', err))
+            }
         }
     }
 
@@ -254,6 +304,8 @@ export class PdfViewport {
         const first = this._firstPageAt(top)
         let last = first
         for (let i = first; i < this.pageOffsets.length && this.pageOffsets[i].top <= bottom; i++) last = i
+        this._enqueueGeometry(first)
+        if (last !== first) this._enqueueGeometry(last)
         const start = Math.max(0, first - this.options.bufferPages)
         const end = Math.min(this.pageOffsets.length - 1, last + this.options.bufferPages)
         const needed = new Set()
@@ -267,6 +319,8 @@ export class PdfViewport {
 
     _unmountSlot(page, slot) {
         slot.renderAbort?.abort()
+        if (slot.geometryIdleId != null) window.cancelIdleCallback?.(slot.geometryIdleId)
+        if (slot.geometryTimer != null) clearTimeout(slot.geometryTimer)
         slot.remove()
         this.activeSlots.delete(page)
     }
@@ -307,7 +361,6 @@ export class PdfViewport {
             queueMicrotask(() => this.pulseHighlight(p.pageIdx, p.highlightId, p.fallbackRects))
         }
 
-        if (this.driver?.kind === 'mupdf') this._ensureNativeGeometry(page).catch(() => {})
         this._scheduleRender(page, slot)
     }
 
@@ -340,10 +393,11 @@ export class PdfViewport {
         const size = this.pageSizes[page] || { width: 595, height: 842 }
         let scale = this.scale * Math.min(window.devicePixelRatio || 1, 2)
         let w = size.width * scale, h = size.height * scale
-        const edgeFactor = Math.min(1, this.options.maxCanvasEdge / Math.max(w, h))
-        const pixelFactor = Math.min(1, Math.sqrt(this.options.maxCanvasPixels / Math.max(1, w * h)))
+        // Leave a rounding pixel for both PDF.js Canvas and MuPDF's rounded bbox.
+        const edgeFactor = Math.min(1, (this.options.maxCanvasEdge - 2) / Math.max(w, h))
+        const pixelFactor = Math.min(1, Math.sqrt((this.options.maxCanvasPixels * .99) / Math.max(1, w * h)))
         scale *= Math.min(edgeFactor, pixelFactor)
-        return Math.max(.25, scale)
+        return scale
     }
 
     async _renderPageContent(page, slot) {
@@ -357,8 +411,30 @@ export class PdfViewport {
             canvas.classList.add('pdf-page-canvas')
             pixels.replaceChildren(canvas)
 
+            // Raster gets the document worker first. Selection still requests
+            // geometry immediately on pointerdown; this merely warms it later.
+            if (this.driver.kind === 'mupdf' && page === this.currentPage) {
+                const warm = () => { if (isCurrent()) this._ensureNativeGeometry(page).catch(() => {}) }
+                if (typeof window.requestIdleCallback === 'function') {
+                    slot.geometryIdleId = window.requestIdleCallback(warm, { timeout: 500 })
+                } else {
+                    slot.geometryTimer = setTimeout(warm, 0)
+                }
+            }
+
             if (this.driver.kind === 'pdfjs' && this.driver.renderTextLayer) {
                 await this.driver.renderTextLayer(page, text, this.scale, slot.renderAbort.signal)
+            }
+            if (isCurrent() && page === this.currentPage && !this._outlineRequested && this.driver.getOutline) {
+                this._outlineRequested = true
+                const generation = this._loadGeneration
+                this._outlineTimer = setTimeout(() => {
+                    this._outlineTimer = null
+                    if (this._destroyed || generation !== this._loadGeneration) return
+                    this.driver.getOutline().then(toc => {
+                        if (!this._destroyed && generation === this._loadGeneration) this.options.onOutline?.(toc || [])
+                    }).catch(err => console.warn('[PDF] outline unavailable:', err))
+                }, 0)
             }
         } catch (err) {
             if (slot.renderAbort.signal.aborted || err?.name === 'AbortError') return
@@ -758,6 +834,9 @@ export class PdfViewport {
         this._destroyed = true
         this._loadGeneration = (this._loadGeneration || 0) + 1
         this._geometryAbort?.abort()
+        this._geometryQueue.length = 0
+        this._geometryQueued.clear()
+        if (this._outlineTimer != null) clearTimeout(this._outlineTimer)
         this._renderQueue.length = 0
         for (const slot of this.activeSlots.values()) slot.renderAbort?.abort()
         this.activeSlots.clear()

@@ -160,6 +160,7 @@ pub fn run() {
             sync_delete_book_binary,
             // MuPDF Native Reader
             mupdf_is_available,
+            mupdf_stage_pdf,
             mupdf_open_document,
             mupdf_get_page_sizes,
             mupdf_get_page_bounds_range,

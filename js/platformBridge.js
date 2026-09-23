@@ -229,6 +229,19 @@ class PlatformBridge {
         return null;
     }
 
+    /** Copy a local PDF once into the app-owned native cache. The caller must
+     * read this returned path to create the IndexedDB Blob from the same bytes. */
+    async stagePdfSource(filePath) {
+        if (!this.isTauri || !filePath || !/\.pdf$/i.test(filePath)) return null;
+        try {
+            if (!await this._invokeTauri('mupdf_is_available')) return null;
+            return await this._invokeTauri('mupdf_stage_pdf', { filePath });
+        } catch (err) {
+            console.warn('[PlatformBridge] Native PDF staging unavailable:', err);
+            return null;
+        }
+    }
+
     // ==========================================
     // 2. Window Controls & States
     // ==========================================

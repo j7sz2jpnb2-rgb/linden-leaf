@@ -23,6 +23,7 @@ $env:PNPM_HOME = "D:\LindenLeaf-Dev\.pnpm-store"
 $env:RUSTUP_HOME = "D:\LindenLeaf-Toolchains\rustup"
 $env:CARGO_HOME = "D:\LindenLeaf-Toolchains\cargo"
 $env:CARGO_TARGET_DIR = "D:\LindenLeaf-Build\target"
+$env:LINDEN_NATIVE_CACHE_DIR = "D:\LindenLeaf-Data\development\pdf-native"
 
 Write-Host "[env.ps1] Project session environment configured." -ForegroundColor Green
 Write-Host "  Project root: $projectRoot"

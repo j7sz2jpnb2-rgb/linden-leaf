@@ -242,7 +242,7 @@ export const isContentIdentityMatching = (item, currentSnapshot) => {
 export const saveBook = async bookData => {
     const db = await openDB()
     const origin = await getRevisionOrigin()
-    const { blob, nativePath, ...meta } = bookData
+    const { blob, nativePath, nativeSnapshotPath, ...meta } = bookData
 
     return new Promise((resolve, reject) => {
         try {
@@ -294,6 +294,10 @@ export const saveBook = async bookData => {
                         local.blobRevision = generateRevision()
                         local.revisionOrigin = origin
                         local.documentHash = null // Clear old hash association
+                        local.nativeSnapshotPath = nativeSnapshotPath || null
+                        local.nativeSnapshotRevision = nativeSnapshotPath ? local.blobRevision : null
+                        local.nativeSnapshotOrigin = nativeSnapshotPath ? origin : null
+                        local.nativeSnapshotSize = nativeSnapshotPath ? blob.size : null
                     }
                     if (nativePath !== undefined) local.nativePath = nativePath
                     local.updatedAt = Date.now()
@@ -402,6 +406,10 @@ export const saveBookFileBlob = async (id, blob) => {
             local.blobRevision = generateRevision()
             local.revisionOrigin = origin
             local.documentHash = null // Clear old hash association
+            local.nativeSnapshotPath = null
+            local.nativeSnapshotRevision = null
+            local.nativeSnapshotOrigin = null
+            local.nativeSnapshotSize = null
             local.updatedAt = Date.now()
             fileStore.put(local)
         }
@@ -463,6 +471,10 @@ export const getBookFileSnapshot = async id => {
             revisionOrigin: fileRecord.revisionOrigin || origin,
             documentHash: fileRecord.documentHash || null,
             nativePath: fileRecord.nativePath || null,
+            nativeSnapshotPath: fileRecord.nativeSnapshotPath || null,
+            nativeSnapshotRevision: fileRecord.nativeSnapshotRevision || null,
+            nativeSnapshotOrigin: fileRecord.nativeSnapshotOrigin || null,
+            nativeSnapshotSize: fileRecord.nativeSnapshotSize ?? null,
             format: bookRecord?.format || null,
             title: bookRecord?.title || '',
             author: bookRecord?.author || '',
@@ -553,6 +565,10 @@ export const getBookFileSnapshot = async id => {
                     revisionOrigin: persistedFile.revisionOrigin || origin,
                     documentHash: persistedFile.documentHash || null,
                     nativePath: persistedFile.nativePath || null,
+                    nativeSnapshotPath: persistedFile.nativeSnapshotPath || null,
+                    nativeSnapshotRevision: persistedFile.nativeSnapshotRevision || null,
+                    nativeSnapshotOrigin: persistedFile.nativeSnapshotOrigin || null,
+                    nativeSnapshotSize: persistedFile.nativeSnapshotSize ?? null,
                     format: persistedBook?.format || null,
                     title: persistedBook?.title || '',
                     author: persistedBook?.author || '',

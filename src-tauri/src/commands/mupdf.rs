@@ -52,13 +52,15 @@ mod imp {
     use std::{
         collections::HashMap,
         ffi::{CStr, CString},
-        os::raw::{c_char, c_float, c_int},
-        path::Path,
+        os::raw::{c_char, c_float, c_int, c_void},
+        path::{Path, PathBuf},
         ptr::NonNull,
-        sync::{mpsc, Arc, Mutex, OnceLock},
+        sync::{atomic::{AtomicU64, Ordering}, mpsc, Arc, Mutex, OnceLock},
         thread,
         time::{SystemTime, UNIX_EPOCH},
     };
+    use std::io::Write;
+    use tauri::Manager;
     use tokio::sync::oneshot;
 
     const LL_OK: i32 = 0;
@@ -94,6 +96,7 @@ mod imp {
         x: c_int,
         y: c_int,
         matrix: [f32; 6],
+        pixmap_owner: *mut c_void,
     }
     #[repr(C)]
     struct LlOutlineItem { title: *mut c_char, page: c_int, level: c_int }
@@ -116,7 +119,7 @@ mod imp {
         fn ll_cancel_free(cancel: *mut LlCancel);
         fn ll_render(doc: *mut LlDoc, page: c_int, scale: c_float, rotation: c_float,
                      clip: *const c_float, cancel: *mut LlCancel, out: *mut LlImage) -> c_int;
-        fn ll_free_image(out: *mut LlImage);
+        fn ll_free_image(doc: *mut LlDoc, out: *mut LlImage);
         fn ll_get_text(doc: *mut LlDoc, page: c_int, out: *mut LlText) -> c_int;
         fn ll_free_text(out: *mut LlText);
         fn ll_select_mode(doc: *mut LlDoc, page: c_int, ax: c_float, ay: c_float,
@@ -165,16 +168,6 @@ mod imp {
         num_pages: usize,
     }
 
-    struct RenderedPage {
-        pixels: Vec<u8>,
-        width: i32,
-        height: i32,
-        stride: i32,
-        x: i32,
-        y: i32,
-        matrix: [f32; 6],
-    }
-
     enum DocCommand {
         Bounds {
             start: usize,
@@ -202,7 +195,7 @@ mod imp {
             clip: Option<[f32; 4]>,
             cancel: Arc<CancelHandle>,
             request_id: String,
-            reply: oneshot::Sender<Result<RenderedPage, String>>,
+            reply: oneshot::Sender<Result<Vec<u8>, String>>,
         },
         Close,
     }
@@ -341,15 +334,9 @@ mod imp {
                     } else if status != LL_OK {
                         Err(native_error(doc))
                     } else {
-                        let pixels = if raw.length > 0 && !raw.samples.is_null() {
-                            unsafe { std::slice::from_raw_parts(raw.samples, raw.length) }.to_vec()
-                        } else { Vec::new() };
-                        Ok(RenderedPage {
-                            pixels, width: raw.width, height: raw.height, stride: raw.stride,
-                            x: raw.x, y: raw.y, matrix: raw.matrix,
-                        })
+                        render_packet(&raw)
                     };
-                    unsafe { ll_free_image(&mut raw) };
+                    unsafe { ll_free_image(doc, &mut raw) };
                     if let Ok(mut map) = cancels.lock() { map.remove(&request_id); }
                     let _ = reply.send(result);
                 }
@@ -364,9 +351,20 @@ mod imp {
         unsafe { ll_close(doc) };
     }
 
-    fn render_packet(page: RenderedPage) -> Vec<u8> {
-        // LLP2 + fixed little-endian header + tightly packed RGBA.
-        let mut out = Vec::with_capacity(52 + page.pixels.len());
+    fn render_packet(page: &LlImage) -> Result<Vec<u8>, String> {
+        // Build the final IPC buffer directly from the C pixmap. A separate
+        // Rust pixel Vec followed by a second packet Vec doubled large-page
+        // transient allocations and memory traffic.
+        let stride = page.width.checked_mul(4).ok_or("Invalid MuPDF width")?;
+        let length = usize::try_from(stride).ok()
+            .and_then(|s| usize::try_from(page.height).ok().and_then(|h| s.checked_mul(h)))
+            .ok_or("Invalid MuPDF pixel length")?;
+        if page.width <= 0 || page.height <= 0 || page.stride != stride ||
+            page.length != length || page.samples.is_null() || length > 40_000_000 {
+            return Err("Invalid MuPDF pixel buffer".into());
+        }
+        let packet_len = 52usize.checked_add(length).ok_or("MuPDF packet too large")?;
+        let mut out = Vec::with_capacity(packet_len);
         out.extend_from_slice(b"LLP2");
         out.extend_from_slice(&(page.width as u32).to_le_bytes());
         out.extend_from_slice(&(page.height as u32).to_le_bytes());
@@ -374,18 +372,74 @@ mod imp {
         out.extend_from_slice(&page.x.to_le_bytes());
         out.extend_from_slice(&page.y.to_le_bytes());
         for v in page.matrix { out.extend_from_slice(&v.to_le_bytes()); }
-        out.extend_from_slice(&(page.pixels.len() as u32).to_le_bytes());
-        out.extend_from_slice(&page.pixels);
-        out
+        out.extend_from_slice(&(length as u32).to_le_bytes());
+        let pixels = unsafe { std::slice::from_raw_parts(page.samples, length) };
+        out.extend_from_slice(pixels);
+        Ok(out)
     }
 
     #[tauri::command]
     pub fn mupdf_is_available() -> bool { true }
 
+    fn native_snapshot_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+        // The project build records its D: cache location in the binary, so
+        // a desktop shortcut still resolves snapshots without a shell profile.
+        let configured = std::env::var_os("LINDEN_NATIVE_CACHE_DIR")
+            .or_else(|| option_env!("LINDEN_NATIVE_CACHE_DIR").map(std::ffi::OsString::from));
+        if let Some(configured) = configured {
+            let path = PathBuf::from(configured);
+            if !path.is_absolute() { return Err("LINDEN_NATIVE_CACHE_DIR must be absolute".into()); }
+            return Ok(path);
+        }
+        app.path().app_cache_dir().map(|p| p.join("pdf-native"))
+            .map_err(|e| format!("Cannot locate native PDF cache: {e}"))
+    }
+
     #[tauri::command]
-    pub async fn mupdf_open_document(file_path: String, password: Option<String>) -> Result<DocumentMetadata, String> {
+    pub async fn mupdf_stage_pdf(app: tauri::AppHandle, file_path: String) -> Result<String, String> {
+        tauri::async_runtime::spawn_blocking(move || {
+            let source = Path::new(&file_path);
+            if !source.is_file() || !source.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+                return Err("Native staging requires a local PDF file".into());
+            }
+            let root = native_snapshot_dir(&app)?;
+            std::fs::create_dir_all(&root).map_err(|e| format!("Cannot create PDF cache: {e}"))?;
+            static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
+            let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+            let name = format!("snapshot-{}-{nanos}-{}.pdf", std::process::id(), NEXT_STAGE.fetch_add(1, Ordering::Relaxed));
+            let final_path = root.join(name);
+            let temp_path = final_path.with_extension("part");
+            let mut input = std::fs::File::open(source).map_err(|e| format!("Cannot open PDF source: {e}"))?;
+            let mut output = std::fs::OpenOptions::new().write(true).create_new(true)
+                .open(&temp_path).map_err(|e| format!("Cannot stage PDF: {e}"))?;
+            let result = (|| -> Result<(), String> {
+                std::io::copy(&mut input, &mut output).map_err(|e| format!("Cannot copy PDF: {e}"))?;
+                output.flush().map_err(|e| format!("Cannot flush PDF: {e}"))?;
+                output.sync_all().map_err(|e| format!("Cannot sync PDF: {e}"))?;
+                drop(output);
+                std::fs::rename(&temp_path, &final_path).map_err(|e| format!("Cannot publish PDF snapshot: {e}"))
+            })();
+            if result.is_err() { let _ = std::fs::remove_file(&temp_path); }
+            result?;
+            Ok(final_path.to_string_lossy().into_owned())
+        }).await.map_err(|e| format!("PDF stage worker failed: {e}"))?
+    }
+
+    #[tauri::command]
+    pub async fn mupdf_open_document(app: tauri::AppHandle, file_path: String, password: Option<String>, expected_size: Option<u64>) -> Result<DocumentMetadata, String> {
         if file_path.is_empty() || !Path::new(&file_path).is_file() {
             return Err("MuPDF requires a readable local file path".into());
+        }
+        if let Some(size) = expected_size {
+            let root = std::fs::canonicalize(native_snapshot_dir(&app)?)
+                .map_err(|e| format!("Native PDF cache unavailable: {e}"))?;
+            let actual_path = std::fs::canonicalize(&file_path)
+                .map_err(|e| format!("Native PDF snapshot unavailable: {e}"))?;
+            if actual_path.parent() != Some(root.as_path()) {
+                return Err("Native PDF snapshot is outside the app cache".into());
+            }
+            let actual = std::fs::metadata(&file_path).map_err(|e| e.to_string())?.len();
+            if actual != size { return Err("Native PDF snapshot size differs from the indexed Blob".into()); }
         }
         let doc_id = make_doc_id();
         let (tx, rx) = mpsc::channel();
@@ -459,8 +513,8 @@ mod imp {
             if let Ok(mut m) = s.cancels.lock() { m.remove(&request_id); }
             return Err("MuPDF worker is closed".into());
         }
-        let rendered = rx.await.map_err(|_| "MuPDF worker dropped render request".to_string())??;
-        Ok(Response::new(render_packet(rendered)))
+        let packet = rx.await.map_err(|_| "MuPDF worker dropped render request".to_string())??;
+        Ok(Response::new(packet))
     }
 
     #[tauri::command]
@@ -498,7 +552,8 @@ mod imp {
     fn unavailable<T>() -> Result<T, String> { Err("MuPDF native backend is not compiled into this build".into()) }
 
     #[tauri::command] pub fn mupdf_is_available() -> bool { false }
-    #[tauri::command] pub async fn mupdf_open_document(_file_path: String, _password: Option<String>) -> Result<DocumentMetadata, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_stage_pdf(_app: tauri::AppHandle, _file_path: String) -> Result<String, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_open_document(_app: tauri::AppHandle, _file_path: String, _password: Option<String>, _expected_size: Option<u64>) -> Result<DocumentMetadata, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_bounds_range(_doc_id: String, _start_page: usize, _count: usize) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_sizes(_doc_id: String) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_text_layer(_doc_id: String, _page_index: usize) -> Result<TextLayerResponse, String> { unavailable() }
