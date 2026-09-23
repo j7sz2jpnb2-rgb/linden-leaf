@@ -22,6 +22,8 @@ export class PdfViewport {
             bufferPages: 2,
             maxCanvasEdge: 4096,
             maxCanvasPixels: 10_000_000,
+            enableClip: true,
+            clipPixelThreshold: 2_000_000,
             snapshot: null,
             onPageChange: null,
             onOutline: null,
@@ -86,6 +88,8 @@ export class PdfViewport {
         .pdf-page-slot{position:absolute;left:50%;transform:translateX(-50%);background:var(--book-bg,#fff);box-shadow:0 4px 18px #00000047;border-radius:2px;overflow:hidden;box-sizing:border-box;touch-action:pan-y}
         .pdf-img-wrapper{position:absolute;inset:0;overflow:hidden;pointer-events:none}
         .pdf-page-canvas{position:absolute;inset:0;width:100%;height:100%;filter:var(--reader-img-filter,none);pointer-events:none}
+        .pdf-page-preview{position:absolute;inset:0;width:100%;height:100%;filter:var(--reader-img-filter,none);pointer-events:none;z-index:1}
+        .pdf-clip-canvas{position:absolute;left:0;width:100%;filter:var(--reader-img-filter,none);pointer-events:none;z-index:2}
         .pdf-text-layer{position:absolute;inset:0;overflow:clip;z-index:4;opacity:1;line-height:1;text-size-adjust:none;transform-origin:0 0;user-select:text;-webkit-user-select:text;pointer-events:auto;--min-font-size:1;--text-scale-factor:calc(var(--total-scale-factor)*var(--min-font-size));--min-font-size-inv:calc(1/var(--min-font-size))}
         .pdf-text-layer :is(span,br){color:transparent;position:absolute;white-space:pre;cursor:text;transform-origin:0 0}
         .pdf-text-layer>:not(.markedContent),.pdf-text-layer .markedContent span:not(.markedContent){z-index:1;--font-height:0;font-size:calc(var(--text-scale-factor)*var(--font-height));--scale-x:1;--rotate:0deg;transform:rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv))}
@@ -350,7 +354,19 @@ export class PdfViewport {
         for (let i = first; i <= last; i++) {
             const slot = this.activeSlots.get(i)
             if (!slot) continue
-            if (force || slot._renderedScale !== this.scale || !slot._renderedToken) {
+            let needsRender = force || slot._renderedScale !== this.scale || !slot._renderedToken
+            if (!needsRender && slot._renderedClip) {
+                const p = this.pageOffsets[i]
+                if (p) {
+                    const vTop = Math.max(0, top - p.top)
+                    const vBottom = Math.min(p.height, bottom - p.top)
+                    if (vTop < slot._renderedClip.top || vBottom > slot._renderedClip.bottom) {
+                        needsRender = true
+                        slot._renderToken = (slot._renderToken || 0) + 1
+                    }
+                }
+            }
+            if (needsRender) {
                 if (!this._isPageQueuedOrRendering(i, slot._renderToken)) {
                     toSchedule.push({
                         page: i,
@@ -581,11 +597,110 @@ export class PdfViewport {
             const scale = this._renderScale(page)
             const priority = renderEntry?.tier ?? 0
             const generation = token
-            const canvas = await this.driver.renderPage(page, scale, signal, null, priority, generation)
+
+            // V1-B: Bounded Viewport High-Res Clip Calculation
+            let clip = null
+            let requestedClip = null
+            const size = this.pageSizes[page] || { width: 595, height: 842 }
+            const fullDevW = Math.round(size.width * scale)
+            const fullDevH = Math.round(size.height * scale)
+            const totalPixels = fullDevW * fullDevH
+            const threshold = this.options.clipPixelThreshold || 2_000_000
+            const pageOffset = this.pageOffsets[page]
+
+            if (this.options.enableClip !== false &&
+                this.driver.kind === 'mupdf' &&
+                priority === 0 &&
+                pageOffset &&
+                totalPixels >= threshold) {
+
+                const vTop = this.scrollArea.scrollTop
+                const vBottom = vTop + this.scrollArea.clientHeight
+                const visTop = Math.max(0, vTop - pageOffset.top)
+                const visBottom = Math.min(pageOffset.height, vBottom - pageOffset.top)
+                const visHeight = visBottom - visTop
+                const visRatio = visHeight / Math.max(1, pageOffset.height)
+
+                // Only clip if page is partially visible (< 85% visible in scroll area)
+                if (visRatio < 0.85 && visHeight > 0) {
+                    const bleed = Math.round(this.scrollArea.clientHeight * 0.20)
+                    let cssY0 = Math.max(0, visTop - bleed)
+                    let cssY1 = Math.min(pageOffset.height, visBottom + bleed)
+
+                    const GRID_STEP = 64
+                    cssY0 = Math.floor(cssY0 / GRID_STEP) * GRID_STEP
+                    cssY1 = Math.min(pageOffset.height, Math.ceil(cssY1 / GRID_STEP) * GRID_STEP)
+
+                    const cssToDev = scale / this.scale
+                    const devY0 = Math.max(0, Math.floor(cssY0 * cssToDev))
+                    const devY1 = Math.min(fullDevH, Math.ceil(cssY1 * cssToDev))
+
+                    if (devY1 - devY0 >= 64 && devY1 <= fullDevH) {
+                        clip = [0, devY0, fullDevW, devY1]
+                        requestedClip = { top: cssY0, bottom: cssY1, devY0, devY1 }
+                    }
+                }
+            }
+
+            let canvas
+            try {
+                canvas = await this.driver.renderPage(page, scale, signal, clip, priority, generation)
+            } catch (err) {
+                if (clip && !signal.aborted && !/abort/i.test(String(err))) {
+                    console.warn('[PdfViewport] clipped render failed, falling back to full-page render:', err)
+                    clip = null
+                    requestedClip = null
+                    canvas = await this.driver.renderPage(page, scale, signal, null, priority, generation)
+                } else {
+                    throw err
+                }
+            }
+
             if (!isCurrent()) return
 
-            canvas.classList.add('pdf-page-canvas')
-            pixels.replaceChildren(canvas)
+            const cssToDev = scale / this.scale
+
+            if (!clip) {
+                // Full page render
+                canvas.classList.add('pdf-page-canvas')
+                canvas.style.position = 'absolute'
+                canvas.style.inset = '0'
+                canvas.style.width = '100%'
+                canvas.style.height = '100%'
+                pixels.replaceChildren(canvas)
+                slot._renderedClip = null
+            } else {
+                // Clipped render with preview handover
+                canvas.classList.add('pdf-clip-canvas')
+                const cssTop = (canvas.offsetY ?? 0) / cssToDev
+                const cssHeight = canvas.height / cssToDev
+                canvas.style.position = 'absolute'
+                canvas.style.left = '0'
+                canvas.style.top = `${cssTop}px`
+                canvas.style.width = '100%'
+                canvas.style.height = `${cssHeight}px`
+                canvas.style.filter = 'var(--reader-img-filter,none)'
+                canvas.style.pointerEvents = 'none'
+                canvas.style.zIndex = '2'
+
+                const existingPageCanvas = pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')
+                pixels.querySelectorAll('.pdf-clip-canvas').forEach(c => c.remove())
+
+                if (existingPageCanvas) {
+                    existingPageCanvas.className = 'pdf-page-preview'
+                    existingPageCanvas.style.zIndex = '1'
+                    pixels.prepend(canvas)
+                } else {
+                    pixels.replaceChildren(canvas)
+                }
+
+                slot._renderedClip = {
+                    top: requestedClip ? requestedClip.top : cssTop,
+                    bottom: requestedClip ? requestedClip.bottom : (cssTop + cssHeight),
+                    scale: this.scale
+                }
+            }
+
             slot._renderedScale = this.scale
             slot._renderedToken = token
 
@@ -976,6 +1091,9 @@ export class PdfViewport {
         const now = this.pageOffsets[this.currentPage]
         if (now) this.scrollArea.scrollTop = Math.max(0, now.top + clamp(ratio,0,1)*now.height)
         this._syncActiveSlotGeometry()
+        for (const slot of this.activeSlots.values()) {
+            slot._renderedClip = null
+        }
         this._renderVisibleSlots(true)
         this._redrawNativePreview()
     }

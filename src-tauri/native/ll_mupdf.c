@@ -43,9 +43,9 @@ static uint64_t ll_now_us(void) {
 #endif
 
 /* Small decoded working set. The application owns the larger byte-budgeted
- * bitmap/text caches; this cache only avoids repeatedly interpreting nearby
- * pages while zooming and turning pages. */
-#define CACHE_PAGES 3
+ * bitmap/text caches; this cache avoids repeatedly interpreting nearby
+ * pages while zooming and turning pages. Capacity 6 matches 1 visible + 4 buffer pages. */
+#define CACHE_PAGES 6
 #define LL_MAX_RENDER_EDGE 4096
 #define LL_MAX_RENDER_PIXELS 10000000
 

@@ -646,6 +646,118 @@ async function testDocumentSwitchIsolation() {
     viewport.destroy();
 }
 
+async function testViewportBoundedClipAndHandover() {
+    console.log('\nSuite 9: Viewport Bounded Clip Rendering & Preview Handover');
+
+    const container = new MockElement('div');
+    const viewport = new PdfViewport(container, {
+        scale: 2.0,
+        enableClip: true,
+        clipPixelThreshold: 2_000_000,
+    });
+    viewport.pageSizes = [{ width: 600, height: 1000 }];
+    viewport._recomputeLayout();
+
+    let lastClip = null;
+    let clipCallCount = 0;
+
+    const mupdfDriver = {
+        kind: 'mupdf',
+        async renderPage(page, scale, signal, clip, priority, generation) {
+            lastClip = clip;
+            clipCallCount++;
+            const canvas = new MockElement('canvas');
+            canvas.dataset.page = String(page);
+            canvas.dataset.scale = String(scale);
+            if (clip) {
+                canvas.width = clip[2] - clip[0];
+                canvas.height = clip[3] - clip[1];
+                canvas.offsetX = clip[0];
+                canvas.offsetY = clip[1];
+            } else {
+                canvas.width = Math.round(600 * scale);
+                canvas.height = Math.round(1000 * scale);
+                canvas.offsetX = 0;
+                canvas.offsetY = 0;
+            }
+            return canvas;
+        },
+        destroy() {}
+    };
+
+    viewport.driver = mupdfDriver;
+    viewport.scrollArea.scrollTop = 0;
+    viewport.scrollArea.clientHeight = 600;
+    viewport.currentPage = 0;
+
+    // 1. Initial visible render at 2.0x
+    viewport._renderVisibleSlots();
+    while (viewport._activeRenders > 0 || viewport._renderQueue.length > 0) {
+        await new Promise(r => setTimeout(r, 10));
+    }
+
+    assert.ok(lastClip, 'MuPDF driver must receive a bounded clip rectangle for large visible page');
+    assert.equal(lastClip[0], 0, 'Clip starts at x=0');
+    assert.ok(lastClip[3] > lastClip[1], 'Clip height must be positive');
+    console.log(`  Clip computed: [${lastClip.join(', ')}]`);
+
+    const slot = viewport.activeSlots.get(0);
+    assert.ok(slot, 'Slot 0 must be active');
+    const wrapper = slot.querySelector('.pdf-img-wrapper');
+    assert.ok(wrapper, 'Wrapper must exist');
+    const clipCanvas = wrapper.children[0];
+    assert.ok(clipCanvas.classList.contains('pdf-clip-canvas'), 'Clipped canvas must have pdf-clip-canvas class');
+    assert.equal(clipCanvas.style.zIndex, '2', 'Clip canvas must have zIndex 2');
+    console.log('  [PASS] 9.1 Bounded clip calculated and positioned correctly');
+
+    // 2. Preview retention test
+    const initialClipCanvas = clipCanvas;
+    const initialCallCount = clipCallCount;
+
+    // Simulate small scroll within bleed margin (e.g. 20px)
+    viewport.scrollArea.scrollTop = 20;
+    viewport._renderVisibleSlots();
+    assert.equal(clipCallCount, initialCallCount, 'Scroll within bleed margin must NOT trigger re-render');
+    console.log('  [PASS] 9.2 Scrolling within bleed margin avoided redundant render');
+
+    // 3. Scroll beyond bleed margin (e.g. scroll down by 500px)
+    viewport.scrollArea.scrollTop = 500;
+    viewport._renderVisibleSlots();
+    while (viewport._activeRenders > 0 || viewport._renderQueue.length > 0) {
+        await new Promise(r => setTimeout(r, 10));
+    }
+    assert.ok(clipCallCount > initialCallCount, 'Scroll beyond bleed margin must trigger new clip render');
+    const newClipCanvas = wrapper.children[0];
+    assert.ok(newClipCanvas, 'New clip canvas must be mounted');
+    console.log('  [PASS] 9.3 Scrolling beyond bleed margin dynamically requested new visible clip');
+
+    // 4. Fallback on driver clip error
+    let failClipOnce = true;
+    mupdfDriver.renderPage = async (page, scale, signal, clip, priority, generation) => {
+        if (clip && failClipOnce) {
+            failClipOnce = false;
+            throw new Error('Simulated clip failure');
+        }
+        const canvas = new MockElement('canvas');
+        canvas.width = Math.round(600 * scale);
+        canvas.height = Math.round(1000 * scale);
+        canvas.offsetX = 0;
+        canvas.offsetY = 0;
+        return canvas;
+    };
+
+    slot._renderedScale = null;
+    viewport._renderVisibleSlots(true);
+    while (viewport._activeRenders > 0 || viewport._renderQueue.length > 0) {
+        await new Promise(r => setTimeout(r, 10));
+    }
+    const fallbackCanvas = wrapper.children[0];
+    assert.ok(fallbackCanvas.classList.contains('pdf-page-canvas'), 'Failed clip must cleanly fall back to full-page render');
+    console.log('  [PASS] 9.4 Driver clip exception cleanly fell back to full-page render');
+
+    viewport.destroy();
+}
+
 async function runAll() {
     await testVisiblePagePriority();
     await testBufferPreemption();
@@ -655,6 +767,7 @@ async function runAll() {
     await testMapOwnershipRace();
     await testWorkerCapacityStrictness();
     await testDocumentSwitchIsolation();
+    await testViewportBoundedClipAndHandover();
 
     console.log('\n====================================================');
     console.log('All PDF Viewport Scheduling & Zoom Tests Passed!');
