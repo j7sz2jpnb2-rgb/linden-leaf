@@ -983,6 +983,7 @@ class UniversalReaderApp {
             welcomeModalBackdrop: document.getElementById('welcome-modal-backdrop'),
             welcomeUsernameInput: document.getElementById('welcome-username-input'),
             btnWelcomeConfirm: document.getElementById('btn-welcome-confirm'),
+            btnWelcomeSkip: document.getElementById('btn-welcome-skip'),
             settingUserName: document.getElementById('setting-user-name'),
 
             // Custom Reading Lists Elements
@@ -1623,6 +1624,17 @@ class UniversalReaderApp {
         this.dom.welcomeUsernameInput?.addEventListener('keydown', e => {
             if (e.key === 'Enter') handleWelcomeSave()
         })
+        const handleWelcomeSkip = () => {
+            localStorage.setItem('linden_user_initialized', 'true')
+            if (this.dom.welcomeModalBackdrop) {
+                this.dom.welcomeModalBackdrop.classList.remove('show')
+                setTimeout(() => {
+                    this.dom.welcomeModalBackdrop.style.display = 'none'
+                }, 180)
+            }
+            this.updateUserProfileDisplay()
+        }
+        this.dom.btnWelcomeSkip?.addEventListener('click', handleWelcomeSkip)
 
         // Setting User Name Input
         this.dom.settingUserName?.addEventListener('input', e => {
@@ -4486,7 +4498,7 @@ class UniversalReaderApp {
 
         let skeuoCloudBadge = ''
         if (isCloud) {
-            const fmtStr = (book.format || 'doc').toUpperCase()
+            const fmtStr = escapeHTML((book.format || 'doc').toUpperCase())
             const sizeStr = book.size ? (book.size >= 1048576 ? (book.size / 1048576).toFixed(1) + 'MB' : (book.size / 1024).toFixed(0) + 'KB') : ''
             skeuoCloudBadge = `<div class="skeuo-cloud-badge ${book.format === 'pdf' ? 'is-pdf' : ''}"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" style="display:inline-block;vertical-align:middle;margin-right:3px;"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>待拉取 · ${fmtStr} ${sizeStr ? sizeStr : ''}</div>`
         }
@@ -4557,7 +4569,7 @@ class UniversalReaderApp {
 
         let cloudBadgeHtml = ''
         if (isCloud) {
-            const fmtStr = (book.format || 'doc').toUpperCase()
+            const fmtStr = escapeHTML((book.format || 'doc').toUpperCase())
             const sizeStr = book.size ? (book.size >= 1048576 ? (book.size / 1048576).toFixed(1) + 'MB' : (book.size / 1024).toFixed(0) + 'KB') : ''
             cloudBadgeHtml = `
                 <div class="cloud-book-badge ${book.format === 'pdf' ? 'is-pdf' : ''}">
@@ -5011,7 +5023,7 @@ class UniversalReaderApp {
                 </td>
                 <td class="jane-table-cell font-medium" style="font-weight: 600;">${cloudBadge}${escapeHTML(book.title)}</td>
                 <td class="jane-table-cell text-muted">${escapeHTML(book.author || '未知作者')}</td>
-                <td class="jane-table-cell text-muted">${(book.format || 'epub').toUpperCase()} · ${sizeStr}</td>
+                <td class="jane-table-cell text-muted">${escapeHTML((book.format || 'epub').toUpperCase())} · ${sizeStr}</td>
                 <td class="jane-table-cell text-muted">${progressPct}%</td>
                 <td class="jane-table-cell text-muted">${dateStr}</td>
                 <td class="jane-table-cell" style="text-align: center; white-space: nowrap;">
@@ -8318,7 +8330,7 @@ class UniversalReaderApp {
 
         } catch (e) {
             console.error('Search error:', e)
-            container.innerHTML = `<div style="color: #ef4444; font-size: 0.85rem;">搜索失败: ${e.message}</div>`
+            container.innerHTML = `<div style="color: #ef4444; font-size: 0.85rem;">搜索失败: ${escapeHTML(e.message)}</div>`
         }
     }
 
@@ -8804,7 +8816,7 @@ class UniversalReaderApp {
                         </div>
                         <div style="flex: 1; min-width: 0;">
                             <div style="font-size: 0.92rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(b.title)}</div>
-                            <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">${escapeHTML(b.author || '未知作者')} · ${(b.format || 'txt').toUpperCase()}</div>
+                            <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">${escapeHTML(b.author || '未知作者')} · ${escapeHTML((b.format || 'txt').toUpperCase())}</div>
                             <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
                                 <span style="font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; background: rgba(124, 58, 237, 0.1); color: var(--accent-purple); font-weight: 600;">本期阅读 ${durStr}</span>
                                 <span style="font-size: 0.72rem; color: var(--text-muted);">已读 ${progressPct}%</span>
@@ -8841,7 +8853,7 @@ class UniversalReaderApp {
                         </div>
                         <div style="flex: 1; min-width: 0;">
                             <div style="font-size: 0.92rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(b.title)}</div>
-                            <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">${escapeHTML(b.author || '未知作者')} · ${(b.format || 'txt').toUpperCase()}</div>
+                            <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">${escapeHTML(b.author || '未知作者')} · ${escapeHTML((b.format || 'txt').toUpperCase())}</div>
                             <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
                                 <span style="font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; background: rgba(34, 197, 94, 0.12); color: #16a34a; font-weight: 600;">已读完 · 共 ${durStr}</span>
                             </div>

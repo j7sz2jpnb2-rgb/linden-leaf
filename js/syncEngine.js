@@ -6,6 +6,23 @@ let _activeSyncPromise = null
 // Book Cloud Sync Safety Rules (Format & Size Defense)
 export const MAX_AUTO_SYNC_BYTES = 15 * 1024 * 1024 // 15MB safe threshold for auto download/upload
 
+export const ALLOWED_BOOK_FORMATS = new Set(['epub', 'pdf', 'mobi', 'azw', 'azw3', 'txt', 'cbz', 'docx', 'fb2', 'djvu', 'md'])
+
+export const sanitizeSyncFormat = (raw) => {
+    if (typeof raw !== 'string') return 'epub'
+    const clean = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+    return ALLOWED_BOOK_FORMATS.has(clean) ? clean : 'epub'
+}
+
+export const sanitizeCloudFileName = (raw) => {
+    if (typeof raw !== 'string') return null
+    const trimmed = raw.trim()
+    if (!trimmed || trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('..') || trimmed.includes('%') || trimmed.startsWith('.')) {
+        return null
+    }
+    return trimmed
+}
+
 export const isAutoDownloadEligible = (bookMeta) => {
     if (!bookMeta) return false
     const hasCloud = !!(bookMeta.cloudBackup?.hasBackup || bookMeta.hasCloudBackup)
@@ -204,14 +221,26 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         const rFavUpdated = clampTime(remoteBook.favoriteUpdatedAt)
         const rListsUpdated = clampTime(remoteBook.listsUpdatedAt)
 
-        let localBook = bookMap.get(remoteBook.id)
-        if (!localBook && remoteBook.stableKey) {
-            localBook = Array.from(bookMap.values()).find(b => b.isLocal && b.stableKey && b.stableKey === remoteBook.stableKey)
+        const safeFormat = sanitizeSyncFormat(remoteBook.format)
+        let safeCloud = remoteBook.cloudBackup
+        if (safeCloud) {
+            const safeName = sanitizeCloudFileName(safeCloud.fileName)
+            safeCloud = safeName ? { ...safeCloud, fileName: safeName } : { ...safeCloud, hasBackup: false, fileName: null }
+        }
+        const cleanRemoteBook = {
+            ...remoteBook,
+            format: safeFormat,
+            cloudBackup: safeCloud
+        }
+
+        let localBook = bookMap.get(cleanRemoteBook.id)
+        if (!localBook && cleanRemoteBook.stableKey) {
+            localBook = Array.from(bookMap.values()).find(b => b.isLocal && b.stableKey && b.stableKey === cleanRemoteBook.stableKey)
         }
 
         if (!localBook) {
-            bookMap.set(remoteBook.id, {
-                ...remoteBook,
+            bookMap.set(cleanRemoteBook.id, {
+                ...cleanRemoteBook,
                 lastReadAt: rLastRead,
                 updatedAt: rUpdated,
                 favoriteUpdatedAt: rFavUpdated,
@@ -229,14 +258,14 @@ export const mergeSyncData = (localPayload, remotePayload) => {
                 isRemoteReadNewer = remoteReadTime > localReadTime
             } else {
                 // If read timestamps tie (e.g. both 0 or same timestamp), higher reading fraction wins
-                isRemoteReadNewer = (remoteBook.progress?.fraction || 0) > (localBook.progress?.fraction || 0)
+                isRemoteReadNewer = (cleanRemoteBook.progress?.fraction || 0) > (localBook.progress?.fraction || 0)
             }
 
-            const newestProgress = isRemoteReadNewer ? (remoteBook.progress || localBook.progress) : (localBook.progress || remoteBook.progress)
+            const newestProgress = isRemoteReadNewer ? (cleanRemoteBook.progress || localBook.progress) : (localBook.progress || cleanRemoteBook.progress)
             const newestLastReadAt = Math.max(localReadTime, remoteReadTime)
 
             // Total Reading Seconds: max
-            const mergedTotalSeconds = Math.max(localBook.totalReadingSeconds || 0, remoteBook.totalReadingSeconds || 0)
+            const mergedTotalSeconds = Math.max(localBook.totalReadingSeconds || 0, cleanRemoteBook.totalReadingSeconds || 0)
 
             // Custom lists & Favorites: LWW based on explicit timestamp
             const localMetaTime = Math.max(localBook.updatedAt || 0, localBook.lastReadAt || 0)
@@ -244,15 +273,15 @@ export const mergeSyncData = (localPayload, remotePayload) => {
             const isRemoteMetaNewer = remoteMetaTime > localMetaTime
 
             const isFav = (rFavUpdated || localBook.favoriteUpdatedAt)
-                ? (rFavUpdated >= (localBook.favoriteUpdatedAt || 0) ? remoteBook.isFavorite : localBook.isFavorite)
-                : (isRemoteMetaNewer ? remoteBook.isFavorite : localBook.isFavorite)
+                ? (rFavUpdated >= (localBook.favoriteUpdatedAt || 0) ? cleanRemoteBook.isFavorite : localBook.isFavorite)
+                : (isRemoteMetaNewer ? cleanRemoteBook.isFavorite : localBook.isFavorite)
 
             const mergedLists = (rListsUpdated || localBook.listsUpdatedAt)
-                ? (rListsUpdated >= (localBook.listsUpdatedAt || 0) ? (remoteBook.customListIds || []) : (localBook.customListIds || []))
-                : (isRemoteMetaNewer ? (remoteBook.customListIds || []) : (localBook.customListIds || []))
+                ? (rListsUpdated >= (localBook.listsUpdatedAt || 0) ? (cleanRemoteBook.customListIds || []) : (localBook.customListIds || []))
+                : (isRemoteMetaNewer ? (cleanRemoteBook.customListIds || []) : (localBook.customListIds || []))
 
             // Cloud Backup: select by uploadedAt timestamp rather than blind fallback
-            const rCloud = remoteBook.cloudBackup
+            const rCloud = cleanRemoteBook.cloudBackup
             const lCloud = localBook.cloudBackup
             let mergedCloud = null
             if (rCloud && lCloud) {
@@ -261,13 +290,14 @@ export const mergeSyncData = (localPayload, remotePayload) => {
                 mergedCloud = rCloud || lCloud || null
             }
 
-            if (remoteReadTime > localReadTime || remoteBook.totalReadingSeconds !== localBook.totalReadingSeconds) {
+            if (remoteReadTime > localReadTime || cleanRemoteBook.totalReadingSeconds !== localBook.totalReadingSeconds) {
                 stats.booksUpdated++
             }
 
             bookMap.set(localBook.id, {
                 ...localBook,
-                stableKey: localBook.stableKey || remoteBook.stableKey,
+                format: sanitizeSyncFormat(localBook.format || cleanRemoteBook.format),
+                stableKey: localBook.stableKey || cleanRemoteBook.stableKey,
                 cloudBackup: mergedCloud,
                 progress: newestProgress,
                 lastReadAt: newestLastReadAt,
@@ -584,6 +614,7 @@ export const applyMergedPayload = async mergedPayload => {
                 const isAutoEligible = isAutoDownloadEligible(meta)
                 const cloudBookRecord = {
                     ...meta,
+                    format: sanitizeSyncFormat(meta.format),
                     isCloudOnly: true,
                     hasLocalFile: false,
                     cloudBackup: meta.cloudBackup,

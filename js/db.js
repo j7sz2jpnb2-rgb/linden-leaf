@@ -698,7 +698,6 @@ export const recordBookOpened = async (id, openedAt = Date.now()) => {
             const book = getReq.result
             if (!book) return resolve(null)
             book.lastOpenedAt = Math.max(book.lastOpenedAt || 0, openedAt)
-            book.updatedAt = Date.now()
             store.put(book)
         }
         tx.oncomplete = () => resolve(true)
@@ -1556,40 +1555,32 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
             })
             .filter(b => b.periodReadingSeconds > 0)
             .sort((a, b) => b.periodReadingSeconds - a.periodReadingSeconds)
+
+        // Reconcile total view with periodBooks sum
+        const periodBooksSum = periodBooks.reduce((sum, b) => sum + (b.periodReadingSeconds || 0), 0)
+        if (periodBooksSum > viewTotalSeconds) {
+            const diff = periodBooksSum - viewTotalSeconds
+            const curItem = chartData.find(c => c.isCurrent) || chartData[chartData.length - 1]
+            if (curItem) {
+                curItem.seconds += diff
+                curItem.minutes = Math.round(curItem.seconds / 60)
+            }
+            viewTotalSeconds = periodBooksSum
+        }
     } else if (periodBookDurationMap.size > 0) {
+        // For specific periods (week, month, year), period duration comes strictly from period sessions
         periodBooks = enrichedBooks
             .filter(b => periodBookDurationMap.has(b.id))
             .map(b => {
                 const sessDur = periodBookDurationMap.get(b.id) || 0
                 const bookDur = b.totalReadingSeconds || 0
-                const dur = isCurrentPeriod ? Math.max(sessDur, bookDur) : sessDur
                 return {
                     ...b,
-                    periodReadingSeconds: dur,
-                    totalReadingSeconds: Math.max(bookDur, dur)
+                    periodReadingSeconds: sessDur,
+                    totalReadingSeconds: Math.max(bookDur, sessDur)
                 }
             })
             .sort((a, b) => b.periodReadingSeconds - a.periodReadingSeconds)
-    } else if (isCurrentPeriod) {
-        periodBooks = enrichedBooks
-            .filter(b => (b.totalReadingSeconds || 0) > 0)
-            .map(b => ({
-                ...b,
-                periodReadingSeconds: b.totalReadingSeconds || 0
-            }))
-            .sort((a, b) => b.periodReadingSeconds - a.periodReadingSeconds)
-    }
-
-    // Reconcile viewTotalSeconds with periodBooks sum to ensure mathematical consistency
-    const periodBooksSum = periodBooks.reduce((sum, b) => sum + (b.periodReadingSeconds || 0), 0)
-    if (periodBooksSum > viewTotalSeconds) {
-        const diff = periodBooksSum - viewTotalSeconds
-        const curItem = chartData.find(c => c.isCurrent) || chartData[chartData.length - 1]
-        if (curItem) {
-            curItem.seconds += diff
-            curItem.minutes = Math.round(curItem.seconds / 60)
-        }
-        viewTotalSeconds = periodBooksSum
     }
 
     const periodFinishedBooks = periodBooks.filter(b => (b.progress?.fraction || 0) >= 0.99 || b.isFinished)
