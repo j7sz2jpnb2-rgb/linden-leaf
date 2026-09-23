@@ -565,14 +565,16 @@ async function main() {
         throw new Error('Typography controls missing or unexpectedly disabled in EPUB reader!');
     }
 
-    // Measure initial font size in Foliate iframe
+    // Measure initial font size in Foliate iframe (body and paragraph)
     const initialFs = await evaluate(`(() => {
         const contents = window.app.foliateView?.renderer?.getContents?.() || [];
         const doc = contents[0]?.doc;
+        const bodyFs = doc?.body ? window.getComputedStyle(doc.body).fontSize : null;
         const p = doc?.body?.querySelector('p') || doc?.body;
-        return p ? window.getComputedStyle(p).fontSize : null;
+        const pFs = p ? window.getComputedStyle(p).fontSize : null;
+        return { bodyFs, pFs };
     })()`);
-    console.log(`  Initial Foliate iframe computed font size: ${initialFs}`);
+    console.log(`  Initial Foliate iframe computed font sizes: body=${initialFs.bodyFs}, p=${initialFs.pFs}`);
 
     // Simulate user adjusting font size slider to 24px
     console.log('  Simulating user slider drag from 18 to 24px...');
@@ -586,12 +588,19 @@ async function main() {
     const updatedFs = await evaluate(`(() => {
         const contents = window.app.foliateView?.renderer?.getContents?.() || [];
         const doc = contents[0]?.doc;
+        const bodyFs = doc?.body ? window.getComputedStyle(doc.body).fontSize : null;
         const p = doc?.body?.querySelector('p') || doc?.body;
-        return p ? window.getComputedStyle(p).fontSize : null;
+        const pFs = p ? window.getComputedStyle(p).fontSize : null;
+        return { bodyFs, pFs };
     })()`);
-    console.log(`  Updated Foliate iframe computed font size: ${updatedFs}`);
-    if (updatedFs !== '24px') {
-        throw new Error(`Font size adjustment failed: expected 24px, got ${updatedFs}`);
+    console.log(`  Updated Foliate iframe computed font sizes: body=${updatedFs.bodyFs}, p=${updatedFs.pFs}`);
+    if (updatedFs.bodyFs !== '24px') {
+        throw new Error(`Font size adjustment failed: expected body 24px, got ${updatedFs.bodyFs}`);
+    }
+    const scaleRatio = parseFloat(updatedFs.pFs) / parseFloat(initialFs.pFs);
+    console.log(`  Paragraph font scaling ratio: ${scaleRatio.toFixed(3)} (expected ~1.333)`);
+    if (Math.abs(scaleRatio - 24 / 18) > 0.05) {
+        throw new Error(`Paragraph font scale ratio mismatch: expected ~1.333, got ${scaleRatio}`);
     }
     await captureScreenshot('04_typography_font24');
 
@@ -604,15 +613,18 @@ async function main() {
         const slider = document.querySelector('#setting-font-size');
         const contents = window.app.foliateView?.renderer?.getContents?.() || [];
         const doc = contents[0]?.doc;
+        const bodyFs = doc?.body ? window.getComputedStyle(doc.body).fontSize : null;
         const p = doc?.body?.querySelector('p') || doc?.body;
+        const pFs = p ? window.getComputedStyle(p).fontSize : null;
         return {
             sliderVal: slider ? slider.value : null,
-            fontSize: p ? window.getComputedStyle(p).fontSize : null
+            bodyFs,
+            pFs
         };
     })()`);
-    console.log(`  Reset results: slider=${resetFs.sliderVal}, computed font=${resetFs.fontSize}`);
-    if (resetFs.sliderVal !== '18' || resetFs.fontSize !== initialFs) {
-        throw new Error(`Typography reset failed: expected slider 18 and font ${initialFs}, got slider ${resetFs.sliderVal} and font ${resetFs.fontSize}`);
+    console.log(`  Reset results: slider=${resetFs.sliderVal}, body=${resetFs.bodyFs}, p=${resetFs.pFs}`);
+    if (resetFs.sliderVal !== '18' || resetFs.bodyFs !== initialFs.bodyFs || resetFs.pFs !== initialFs.pFs) {
+        throw new Error(`Typography reset failed: expected slider 18 and body ${initialFs.bodyFs}, got slider ${resetFs.sliderVal} and body ${resetFs.bodyFs}`);
     }
     console.log('  PASS: Typography successfully adjusted to 24px and cleanly reset to default 18px.');
     await captureScreenshot('05_typography_reset18');
