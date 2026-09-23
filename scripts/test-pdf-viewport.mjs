@@ -418,12 +418,243 @@ async function testJumpCleanupAndUnmount() {
     viewport.destroy();
 }
 
+async function testMapOwnershipRace() {
+    console.log('\nSuite 6: In-Flight Map Ownership & Delayed Task Completion Race');
+
+    const container = new MockElement('div');
+    const viewport = new PdfViewport(container, { scale: 1.0, bufferPages: 1 });
+    viewport.pageSizes = [{ width: 600, height: 800 }];
+    viewport._recomputeLayout();
+
+    let resolveOldTask;
+    let resolveNewTask;
+
+    const mockDriver = {
+        kind: 'mock',
+        renderPage(page, scale, signal) {
+            return new Promise((resolve) => {
+                if (scale === 1.0) {
+                    resolveOldTask = () => {
+                        const c = new MockElement('canvas');
+                        c.dataset.name = 'old-1.0';
+                        resolve(c);
+                    };
+                } else if (scale === 2.0) {
+                    resolveNewTask = () => {
+                        const c = new MockElement('canvas');
+                        c.dataset.name = 'new-2.0';
+                        resolve(c);
+                    };
+                }
+            });
+        }
+    };
+    viewport.driver = mockDriver;
+
+    // 1. Initial render at scale 1.0
+    viewport.scrollArea.scrollTop = 0;
+    viewport.currentPage = 0;
+    viewport._renderVisibleSlots();
+
+    // Verify task A is running
+    assert.equal(viewport._activeDriverTasks.size, 1, 'Task A is in-flight on driver');
+    const entryA = viewport._inFlightRenders.get(0);
+    assert.ok(entryA, 'Task A registered in _inFlightRenders');
+
+    // 2. Zoom to 2.0x while task A is still running
+    viewport.scale = 2.0;
+    viewport._recomputeLayout();
+    viewport._syncActiveSlotGeometry();
+    const slot = viewport.activeSlots.get(0);
+    slot._renderToken = 2;
+    slot.renderAbort?.abort();
+    slot.renderAbort = new AbortController();
+
+    // Schedule new 2.0x render
+    viewport._scheduleRender({
+        page: 0,
+        slot,
+        token: 2,
+        tier: 0,
+        distance: 0
+    });
+
+    // 3. Task A finishes late now
+    resolveOldTask();
+    // Allow microtasks to run Task A's finally
+    await new Promise(r => setTimeout(r, 20));
+
+    // After Task A's finally, slot freed for Task B
+    assert.equal(viewport._activeDriverTasks.size, 1, 'Task B now dispatched to driver');
+    const entryB = viewport._inFlightRenders.get(0);
+    assert.ok(entryB, 'Task B must be registered in _inFlightRenders');
+    assert.notEqual(entryB, entryA, 'Task B is a new entry with different request identity');
+    assert.equal(entryB.token, 2, 'Task B token is 2');
+
+    // 4. Now Task B completes
+    resolveNewTask();
+    await new Promise(r => setTimeout(r, 20));
+
+    assert.equal(viewport._inFlightRenders.size, 0, 'In-flight renders empty after Task B completes');
+    const finalCanvas = slot.querySelector('.pdf-img-wrapper').children[0];
+    assert.equal(finalCanvas?.dataset.name, 'new-2.0', 'Final canvas must be new sharp canvas, not overwritten by old task');
+    console.log('  [PASS] 6.1 Late task completion does not delete newer task from _inFlightRenders');
+    console.log('  [PASS] 6.2 Old result does not overwrite newer result in DOM');
+
+    viewport.destroy();
+}
+
+async function testWorkerCapacityStrictness() {
+    console.log('\nSuite 7: Physical Driver Capacity & Delayed Abort Serialization');
+
+    const container = new MockElement('div');
+    const viewport = new PdfViewport(container, { bufferPages: 2 });
+    viewport._renderConcurrency = 1; // Strict single-worker
+    viewport.pageSizes = Array.from({ length: 10 }, () => ({ width: 600, height: 800 }));
+    viewport._recomputeLayout();
+
+    let taskAAborted = false;
+    let taskAResolved = false;
+    let taskBStarted = false;
+    let maxConcurrentDriverTasks = 0;
+    let currentConcurrentDriverTasks = 0;
+
+    const mockDriver = {
+        kind: 'mock',
+        async renderPage(page, scale, signal) {
+            currentConcurrentDriverTasks++;
+            maxConcurrentDriverTasks = Math.max(maxConcurrentDriverTasks, currentConcurrentDriverTasks);
+            try {
+                if (page === 3) {
+                    // Buffer task: simulates cooperative delayed abort (e.g. C loop)
+                    return await new Promise((resolve, reject) => {
+                        signal.addEventListener('abort', () => {
+                            taskAAborted = true;
+                            // Deliberately delay actual termination by 30ms to simulate cooperative C thread
+                            setTimeout(() => {
+                                taskAResolved = true;
+                                reject(new DOMException('Render cancelled', 'AbortError'));
+                            }, 30);
+                        }, { once: true });
+                    });
+                } else if (page === 0) {
+                    taskBStarted = true;
+                    await new Promise(r => setTimeout(r, 10));
+                    return new MockElement('canvas');
+                }
+                return new MockElement('canvas');
+            } finally {
+                currentConcurrentDriverTasks--;
+            }
+        }
+    };
+    viewport.driver = mockDriver;
+
+    // 1. Start buffer task on page 3
+    viewport._mountSlot(3);
+    const slot3 = viewport.activeSlots.get(3);
+    viewport._scheduleRender({
+        page: 3, slot: slot3, token: 1, tier: 1, distance: 3
+    });
+    viewport._pumpRenderQueue();
+
+    assert.equal(viewport._activeDriverTasks.size, 1, 'Buffer task 3 is running');
+    assert.equal(currentConcurrentDriverTasks, 1, 'Driver has 1 task');
+
+    // 2. Visible page 0 arrives while buffer task 3 is running
+    viewport._mountSlot(0);
+    const slot0 = viewport.activeSlots.get(0);
+    viewport.currentPage = 0;
+    viewport._scheduleRender({
+        page: 0, slot: slot0, token: 1, tier: 0, distance: 0
+    });
+
+    // Pump: Visible page triggers preemption of buffer page 3
+    viewport._pumpRenderQueue();
+
+    assert.equal(taskAAborted, true, 'Buffer task 3 received abort signal');
+    // BUT task 3 has NOT finished yet (30ms delay).
+    // Concurrency is 1, so visible page 0 MUST NOT start until task 3 finishes!
+    assert.equal(taskBStarted, false, 'Visible task 0 must NOT start while buffer task 3 is still occupying driver');
+    assert.equal(maxConcurrentDriverTasks, 1, 'Driver concurrency never exceeded 1');
+
+    // 3. Wait for delayed abort to complete
+    await new Promise(r => setTimeout(r, 60));
+
+    assert.equal(taskAResolved, true, 'Buffer task 3 has yielded driver');
+    assert.equal(taskBStarted, true, 'Visible task 0 dispatched immediately once driver was released');
+    assert.equal(maxConcurrentDriverTasks, 1, 'Peak concurrency was strictly 1 throughout preemption lifecycle');
+    console.log('  [PASS] 7.1 Abort signal cooperatively delivered to driver');
+    console.log('  [PASS] 7.2 Driver concurrency limit never violated during preemption delay');
+
+    viewport.destroy();
+}
+
+async function testDocumentSwitchIsolation() {
+    console.log('\nSuite 8: Book Switching Isolation & Ghost Result Discard');
+
+    const container = new MockElement('div');
+    const viewport = new PdfViewport(container, { bufferPages: 1 });
+
+    let resolveDoc1Page;
+    const driver1 = {
+        kind: 'mock1',
+        async open() {
+            return { numPages: 5, pageSizes: Array.from({ length: 5 }, () => ({ width: 500, height: 700 })) };
+        },
+        renderPage() {
+            return new Promise(resolve => {
+                resolveDoc1Page = resolve;
+            });
+        },
+        destroy() {}
+    };
+
+    const driver2 = {
+        kind: 'mock2',
+        async open() {
+            return { numPages: 10, pageSizes: Array.from({ length: 10 }, () => ({ width: 600, height: 800 })) };
+        },
+        async renderPage() {
+            const c = new MockElement('canvas');
+            c.dataset.doc = 'doc2';
+            return c;
+        },
+        destroy() {}
+    };
+
+    // Load Document 1
+    await viewport.load(driver1, { blob: new Uint8Array() });
+    assert.equal(viewport.activeSlots.size, 2, 'Doc 1 mounted initial visible slots');
+
+    // Switch to Document 2 while Doc 1 is in-flight
+    await viewport.load(driver2, { blob: new Uint8Array() });
+    assert.equal(viewport.numPages, 10, 'Doc 2 loaded with 10 pages');
+
+    // Now old Document 1 render completes very late
+    const oldCanvas = new MockElement('canvas');
+    oldCanvas.dataset.doc = 'doc1-ghost';
+    resolveDoc1Page?.(oldCanvas);
+    await new Promise(r => setTimeout(r, 20));
+
+    // Check slot 0: it must belong to Doc 2, never contaminated by Doc 1
+    const slot0 = viewport.activeSlots.get(0);
+    const canvas = slot0?.querySelector('.pdf-img-wrapper')?.children[0];
+    assert.equal(canvas?.dataset.doc, 'doc2', 'Slot canvas belongs to Doc 2, old Doc 1 ghost discarded');
+    console.log('  [PASS] 8.1 Ghost render results from previous document discarded on book switch');
+
+    viewport.destroy();
+}
+
 async function runAll() {
     await testVisiblePagePriority();
     await testBufferPreemption();
     await testZoomContinuityAndPreviewRetention();
     await testGenerationalTokenDiscard();
     await testJumpCleanupAndUnmount();
+    await testMapOwnershipRace();
+    await testWorkerCapacityStrictness();
+    await testDocumentSwitchIsolation();
 
     console.log('\n====================================================');
     console.log('All PDF Viewport Scheduling & Zoom Tests Passed!');

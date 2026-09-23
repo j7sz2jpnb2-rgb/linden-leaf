@@ -50,6 +50,8 @@ export class PdfViewport {
         this._geometryInFlight = null
         this._renderQueue = []
         this._inFlightRenders = new Map()
+        this._activeDriverTasks = new Set()
+        this._renderReqSeq = 0
         this._activeRenders = 0
         this._renderConcurrency = 2
         this._outlineRequested = false
@@ -166,6 +168,10 @@ export class PdfViewport {
         this._geometryQueue.length = 0
         this._geometryQueued.clear()
         this._knownPageGeometry.clear()
+        for (const [page, slot] of [...this.activeSlots]) this._unmountSlot(page, slot)
+        for (const inflight of this._inFlightRenders.values()) inflight.abortController?.abort()
+        this._inFlightRenders.clear()
+        this._renderQueue.length = 0
         if (snapshot) this.currentSnapshot = snapshot
         const info = await this.driver.open(source)
         if (this._destroyed || this._loadGeneration !== currentGen) {
@@ -303,7 +309,7 @@ export class PdfViewport {
         const inQueue = this._renderQueue.some(x => x.page === page && x.token === token)
         if (inQueue) return true
         const inFlight = this._inFlightRenders.get(page)
-        if (inFlight && inFlight.token === token) return true
+        if (inFlight && inFlight.token === token && !inFlight.abortController?.signal?.aborted) return true
         return false
     }
 
@@ -387,9 +393,12 @@ export class PdfViewport {
         if (slot.geometryTimer != null) clearTimeout(slot.geometryTimer)
         slot.remove()
         this.activeSlots.delete(page)
-        this._inFlightRenders.delete(page)
-        this._renderQueue = this._renderQueue.filter(x => x.page !== page)
-        this._activeRenders = this._inFlightRenders.size
+        const inFlight = this._inFlightRenders.get(page)
+        if (inFlight && inFlight.slot === slot) {
+            this._inFlightRenders.delete(page)
+        }
+        this._renderQueue = this._renderQueue.filter(x => x.page !== page || x.slot !== slot)
+        this._activeRenders = Math.max(this._activeDriverTasks.size, this._inFlightRenders.size)
     }
 
     _remountPage(page) {
@@ -456,7 +465,8 @@ export class PdfViewport {
             return true
         })
 
-        if (!this._renderQueue.length && this._inFlightRenders.size === 0) return
+        const totalActive = Math.max(this._activeDriverTasks.size, this._inFlightRenders.size)
+        if (!this._renderQueue.length && totalActive === 0) return
 
         // 2. Re-compute visible boundaries to update tiers and distances dynamically
         const top = this.scrollArea.scrollTop, bottom = top + this.scrollArea.clientHeight
@@ -481,23 +491,29 @@ export class PdfViewport {
         })
 
         // 3. Preemption: If capacity is full and a Tier 0 (visible) task is waiting,
-        // abort an active Tier 1 (buffer) task so the visible page can start immediately.
-        if (this._inFlightRenders.size >= this._renderConcurrency) {
+        // abort an active Tier 1 (buffer) task so the visible page can start immediately
+        // as soon as the driver yields.
+        // NOTE: Cancellation signals request cooperative termination at the driver/C boundary.
+        // The worker is not marked free until the driver task actually finishes or rejects,
+        // preventing buffer overload and maintaining strict concurrency budgeting.
+        if (totalActive >= this._renderConcurrency) {
             const hasWaitingTier0 = this._renderQueue.some(x => x.tier === 0)
             if (hasWaitingTier0) {
                 let bufferToPreempt = null
                 let maxDist = -1
                 for (const inflight of this._inFlightRenders.values()) {
-                    if (inflight.tier === 1 && inflight.distance > maxDist) {
+                    if (inflight.tier === 1 && inflight.distance > maxDist && !inflight.abortController?.signal?.aborted) {
                         maxDist = inflight.distance
                         bufferToPreempt = inflight
                     }
                 }
                 if (bufferToPreempt) {
-                    const { page, slot, token } = bufferToPreempt
-                    slot.renderAbort?.abort()
+                    const { page, slot, token, abortController } = bufferToPreempt
+                    abortController?.abort()
+                    if (this._inFlightRenders.get(page) === bufferToPreempt) {
+                        this._inFlightRenders.delete(page)
+                    }
                     slot.renderAbort = new AbortController()
-                    this._inFlightRenders.delete(page)
                     this._renderQueue.push({
                         page, slot, token,
                         tier: 1,
@@ -509,28 +525,29 @@ export class PdfViewport {
             }
         }
 
-        // 4. Dispatch tasks up to concurrency limit
-        while (this._inFlightRenders.size < this._renderConcurrency && this._renderQueue.length) {
+        // 4. Dispatch tasks up to concurrency limit of ACTUAL driver occupancy
+        while (Math.max(this._activeDriverTasks.size, this._inFlightRenders.size) < this._renderConcurrency && this._renderQueue.length) {
             const item = this._renderQueue.shift()
             if (item.signal.aborted || this.activeSlots.get(item.page) !== item.slot || item.token !== item.slot._renderToken) {
                 continue
             }
 
-            this._inFlightRenders.set(item.page, {
+            const reqId = ++this._renderReqSeq
+            const renderEntry = {
+                id: reqId,
                 page: item.page,
                 slot: item.slot,
                 token: item.token,
                 tier: item.tier,
                 distance: item.distance,
                 abortController: item.slot.renderAbort,
-            })
-            this._activeRenders = this._inFlightRenders.size
+            }
 
-            this._renderPageContent(item.page, item.slot, item.token, item.slot.renderAbort.signal).finally(() => {
-                this._inFlightRenders.delete(item.page)
-                this._activeRenders = this._inFlightRenders.size
-                this._pumpRenderQueue()
-            })
+            this._inFlightRenders.set(item.page, renderEntry)
+            this._activeDriverTasks.add(renderEntry)
+            this._activeRenders = Math.max(this._activeDriverTasks.size, this._inFlightRenders.size)
+
+            this._renderPageContent(item.page, item.slot, item.token, item.slot.renderAbort.signal, renderEntry).catch(() => {})
         }
     }
 
@@ -545,8 +562,11 @@ export class PdfViewport {
         return scale
     }
 
-    async _renderPageContent(page, slot, token, signal) {
+    async _renderPageContent(page, slot, token, signal, renderEntry = null) {
         if (!this.driver || signal.aborted || this._destroyed) return
+        const activeRecord = renderEntry || { page, slot, token, abortController: slot.renderAbort }
+        this._activeDriverTasks.add(activeRecord)
+        this._activeRenders = Math.max(this._activeDriverTasks.size, this._inFlightRenders.size)
         const pixels = slot.querySelector('.pdf-img-wrapper')
         const text = slot.querySelector('.pdf-text-layer')
         const isCurrent = () => (
@@ -630,6 +650,13 @@ export class PdfViewport {
                     }
                 }
             }
+        } finally {
+            this._activeDriverTasks.delete(activeRecord)
+            if (this._inFlightRenders.get(page) === activeRecord) {
+                this._inFlightRenders.delete(page)
+            }
+            this._activeRenders = Math.max(this._activeDriverTasks.size, this._inFlightRenders.size)
+            this._pumpRenderQueue()
         }
     }
 
@@ -1024,7 +1051,10 @@ export class PdfViewport {
         this._geometryQueued.clear()
         if (this._outlineTimer != null) clearTimeout(this._outlineTimer)
         this._renderQueue.length = 0
+        for (const inflight of this._inFlightRenders.values()) inflight.abortController?.abort()
         this._inFlightRenders.clear()
+        this._activeDriverTasks.clear()
+        this._activeRenders = 0
         for (const slot of this.activeSlots.values()) slot.renderAbort?.abort()
         this.activeSlots.clear()
         this.highlightsByPage.clear()
