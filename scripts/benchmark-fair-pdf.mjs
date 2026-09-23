@@ -22,15 +22,19 @@ function getAppMemoryBreakdown(targetPid) {
 }
 
 function computeStats(arr) {
-    if (!arr || arr.length === 0) return { min: 0, median: 0, max: 0, avg: 0 };
+    if (!arr || arr.length === 0) return { min: 0, median: 0, max: 0, avg: 0, raw: [] };
     const sorted = [...arr].sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)];
+    const n = sorted.length;
+    const median = n % 2 === 0
+        ? Math.round(((sorted[n / 2 - 1] + sorted[n / 2]) / 2) * 100) / 100
+        : sorted[Math.floor(n / 2)];
     const sum = sorted.reduce((a, b) => a + b, 0);
     return {
         min: sorted[0],
         median,
         max: sorted[sorted.length - 1],
-        avg: Math.round(sum / sorted.length)
+        avg: Math.round((sum / n) * 100) / 100,
+        raw: arr
     };
 }
 
@@ -258,8 +262,8 @@ async function main() {
 
             const iterations = 4; // 4 iterations alternating order
             const driverData = {
-                pdfjs: { open: [], coldPage0: [], seq3Pages: [], warmPage0: [], zoom2x: [], outDims: null, payloadBytes: null },
-                mupdf: { open: [], coldPage0: [], seq3Pages: [], warmPage0: [], zoom2x: [], outDims: null, payloadBytes: null },
+                pdfjs: { open: [], coldPage0: [], seq3Pages: [], warmPage0: [], zoom2x: [], outDims: null, payloadBytes: null, breakdown: { cold: [], warm: [], zoom: [] } },
+                mupdf: { open: [], coldPage0: [], seq3Pages: [], warmPage0: [], zoom2x: [], outDims: null, payloadBytes: null, breakdown: { cold: [], warm: [], zoom: [] } },
             };
 
             for (let iter = 0; iter < iterations; iter++) {
@@ -268,6 +272,10 @@ async function main() {
                 console.log(`  [Iteration ${iter + 1}/${iterations}] Execution Order: ${order.join(' -> ')}`);
 
                 for (const backend of order) {
+                    if (backend === 'mupdf') {
+                        await evaluate(`window.__TAURI__.core.invoke('mupdf_enable_diagnostics', { enable: true })`);
+                    }
+
                     const runRes = await evaluate(`(async () => {
                         const { PdfJsDriver, MuPdfTauriDriver } = await import('./js/pdf-driver.js');
                         const docMeta = window.__testDocs["${doc.name}"];
@@ -319,6 +327,11 @@ async function main() {
                         const zoomH = page0Zoom.height;
                         const zoomBytes = zoomW * zoomH * 4;
 
+                        let nativeDiag = [];
+                        if ("${backend}" === 'mupdf') {
+                            nativeDiag = await window.__TAURI__.core.invoke('mupdf_get_render_diagnostics');
+                        }
+
                         // Clean destroy
                         await driver.destroy();
 
@@ -332,7 +345,11 @@ async function main() {
                             zoomDims: { w: zoomW, h: zoomH },
                             bytes,
                             zoomBytes,
-                            numPages: opened.numPages
+                            numPages: opened.numPages,
+                            coldTimings: page0Cold?._renderTimings,
+                            warmTimings: page0Warm?._renderTimings,
+                            zoomTimings: page0Zoom?._renderTimings,
+                            nativeDiag
                         };
                     })()`);
 
@@ -345,6 +362,18 @@ async function main() {
                     driverData[backend].zoomDims = runRes.zoomDims;
                     driverData[backend].payloadBytes = runRes.bytes;
                     driverData[backend].zoomBytes = runRes.zoomBytes;
+                    driverData[backend].breakdown.cold.push({
+                        js: runRes.coldTimings,
+                        native: runRes.nativeDiag?.find(d => d.requestId === runRes.coldTimings?.requestId)
+                    });
+                    driverData[backend].breakdown.warm.push({
+                        js: runRes.warmTimings,
+                        native: runRes.nativeDiag?.find(d => d.requestId === runRes.warmTimings?.requestId)
+                    });
+                    driverData[backend].breakdown.zoom.push({
+                        js: runRes.zoomTimings,
+                        native: runRes.nativeDiag?.find(d => d.requestId === runRes.zoomTimings?.requestId)
+                    });
                 }
             }
 
@@ -361,6 +390,7 @@ async function main() {
                     outDims: driverData.pdfjs.outDims,
                     zoomDims: driverData.pdfjs.zoomDims,
                     payloadBytes: driverData.pdfjs.payloadBytes,
+                    breakdown: driverData.pdfjs.breakdown,
                     rawSamples: driverData.pdfjs
                 },
                 mupdf: {
@@ -372,6 +402,7 @@ async function main() {
                     outDims: driverData.mupdf.outDims,
                     zoomDims: driverData.mupdf.zoomDims,
                     payloadBytes: driverData.mupdf.payloadBytes,
+                    breakdown: driverData.mupdf.breakdown,
                     rawSamples: driverData.mupdf
                 }
             };
@@ -379,9 +410,23 @@ async function main() {
             benchmarkResults.driverLevel[doc.name] = docSummary;
 
             console.log(`\n  Results for ${doc.name}:`);
-            console.log(`    MuPDF:  Open=${docSummary.mupdf.open.median}ms, Cold P0=${docSummary.mupdf.coldPage0.median}ms, Seq Avg=${docSummary.mupdf.seq3Pages.median}ms, Warm P0=${docSummary.mupdf.warmPage0.median}ms, Zoom 2.0x=${docSummary.mupdf.zoom2x.median}ms`);
-            console.log(`    PDF.js: Open=${docSummary.pdfjs.open.median}ms, Cold P0=${docSummary.pdfjs.coldPage0.median}ms, Seq Avg=${docSummary.pdfjs.seq3Pages.median}ms, Warm P0=${docSummary.pdfjs.warmPage0.median}ms, Zoom 2.0x=${docSummary.pdfjs.zoom2x.median}ms`);
+            console.log(`    MuPDF:  Open=${docSummary.mupdf.open.median}ms (raw: [${docSummary.mupdf.open.raw.join(', ')}]), Cold P0=${docSummary.mupdf.coldPage0.median}ms (raw: [${docSummary.mupdf.coldPage0.raw.join(', ')}]), Seq Avg=${docSummary.mupdf.seq3Pages.median}ms, Warm P0=${docSummary.mupdf.warmPage0.median}ms (raw: [${docSummary.mupdf.warmPage0.raw.join(', ')}]), Zoom 2.0x=${docSummary.mupdf.zoom2x.median}ms (raw: [${docSummary.mupdf.zoom2x.raw.join(', ')}])`);
+            console.log(`    PDF.js: Open=${docSummary.pdfjs.open.median}ms (raw: [${docSummary.pdfjs.open.raw.join(', ')}]), Cold P0=${docSummary.pdfjs.coldPage0.median}ms (raw: [${docSummary.pdfjs.coldPage0.raw.join(', ')}]), Seq Avg=${docSummary.pdfjs.seq3Pages.median}ms, Warm P0=${docSummary.pdfjs.warmPage0.median}ms (raw: [${docSummary.pdfjs.warmPage0.raw.join(', ')}]), Zoom 2.0x=${docSummary.pdfjs.zoom2x.median}ms (raw: [${docSummary.pdfjs.zoom2x.raw.join(', ')}])`);
             console.log(`    Output Dims: 1.25x=[${docSummary.mupdf.outDims.w}x${docSummary.mupdf.outDims.h}], 2.0x=[${docSummary.mupdf.zoomDims.w}x${docSummary.mupdf.zoomDims.h}]`);
+
+            // Log detailed breakdown for the latest sample
+            const lastMuPdfCold = driverData.mupdf.breakdown.cold[driverData.mupdf.breakdown.cold.length - 1];
+            if (lastMuPdfCold?.native) {
+                const n = lastMuPdfCold.native;
+                const j = lastMuPdfCold.js;
+                console.log(`    [MuPDF Cold Breakdown] QueueWait=${(n.queueWaitUs / 1000).toFixed(2)}ms, C_List=${(n.cListUs / 1000).toFixed(2)}ms (hit=${n.cListHit}), C_Raster=${(n.cRasterUs / 1000).toFixed(2)}ms, C_Pixmap=${(n.cPixmapUs / 1000).toFixed(2)}ms, C_Total=${(n.cTotalUs / 1000).toFixed(2)}ms, RustPacket=${(n.packetUs / 1000).toFixed(2)}ms, IPC_Wait=${(j.ipcMs - n.cTotalUs / 1000).toFixed(2)}ms, CanvasPutImageData=${j.canvasDrawMs}ms, JS_Total=${j.totalJsMs}ms`);
+            }
+            const lastMuPdfZoom = driverData.mupdf.breakdown.zoom[driverData.mupdf.breakdown.zoom.length - 1];
+            if (lastMuPdfZoom?.native) {
+                const n = lastMuPdfZoom.native;
+                const j = lastMuPdfZoom.js;
+                console.log(`    [MuPDF Zoom Breakdown] QueueWait=${(n.queueWaitUs / 1000).toFixed(2)}ms, C_List=${(n.cListUs / 1000).toFixed(2)}ms (hit=${n.cListHit}), C_Raster=${(n.cRasterUs / 1000).toFixed(2)}ms, C_Pixmap=${(n.cPixmapUs / 1000).toFixed(2)}ms, C_Total=${(n.cTotalUs / 1000).toFixed(2)}ms, RustPacket=${(n.packetUs / 1000).toFixed(2)}ms, IPC_Wait=${(j.ipcMs - n.cTotalUs / 1000).toFixed(2)}ms, CanvasPutImageData=${j.canvasDrawMs}ms, JS_Total=${j.totalJsMs}ms`);
+            }
         }
 
         // ====================================================================
@@ -401,7 +446,9 @@ async function main() {
             const bytes = new Uint8Array(bin.length);
             for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
             const file = new File([bytes.buffer], "Fire_magazine.pdf", { type: "application/pdf" });
-            const bookRes = await window.app.processAndSaveBook(file);
+            const nativePath = "${testPdfDoc.path.replace(/\\/g, '\\\\')}";
+            const snapshotPath = window.__testDocs["Fire.pdf"].nativePath;
+            const bookRes = await window.app.processAndSaveBook(file, undefined, nativePath, snapshotPath);
             return typeof bookRes === 'object' && bookRes !== null ? bookRes.id : bookRes;
         })()`);
         console.log(`  Imported ${testPdfDoc.name} into library as ID: ${importedPdfId}`);

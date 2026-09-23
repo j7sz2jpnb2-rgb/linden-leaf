@@ -46,6 +46,28 @@ pub struct SelectionResponse {
     pub b: [f32; 2],
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RenderDiagnostics {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    #[serde(rename = "queueWaitUs")]
+    pub queue_wait_us: u64,
+    #[serde(rename = "cListUs")]
+    pub c_list_us: u64,
+    #[serde(rename = "cRasterUs")]
+    pub c_raster_us: u64,
+    #[serde(rename = "cPixmapUs")]
+    pub c_pixmap_us: u64,
+    #[serde(rename = "cListHit")]
+    pub c_list_hit: bool,
+    #[serde(rename = "cTotalUs")]
+    pub c_total_us: u64,
+    #[serde(rename = "packetUs")]
+    pub packet_us: u64,
+    #[serde(rename = "packetBytes")]
+    pub packet_bytes: usize,
+}
+
 #[cfg(ll_mupdf)]
 mod imp {
     use super::*;
@@ -102,6 +124,14 @@ mod imp {
     struct LlOutlineItem { title: *mut c_char, page: c_int, level: c_int }
     #[repr(C)]
     struct LlOutline { items: *mut LlOutlineItem, count: c_int }
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct LlRenderTimings {
+        list_time_us: u64,
+        raster_time_us: u64,
+        pixmap_time_us: u64,
+        list_hit: c_int,
+    }
 
     extern "C" {
         fn ll_open(path: *const c_char, password: *const c_char, error: *mut c_char, error_size: usize) -> *mut LlDoc;
@@ -126,6 +156,7 @@ mod imp {
                           bx: c_float, by: c_float, mode: c_int,
                           out: *mut LlSelection) -> c_int;
         fn ll_free_selection(out: *mut LlSelection);
+        fn ll_get_last_render_timings(doc: *mut LlDoc) -> LlRenderTimings;
     }
 
     fn native_error(doc: *mut LlDoc) -> String {
@@ -196,6 +227,9 @@ mod imp {
             clip: Option<[f32; 4]>,
             cancel: Arc<CancelHandle>,
             request_id: String,
+            priority: u8,
+            generation: u32,
+            enqueued_at: std::time::Instant,
             reply: oneshot::Sender<Result<Vec<u8>, String>>,
         },
         Close,
@@ -204,6 +238,12 @@ mod imp {
     fn store() -> &'static Mutex<HashMap<String, DocumentSession>> {
         static STORE: OnceLock<Mutex<HashMap<String, DocumentSession>>> = OnceLock::new();
         STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    static DIAGNOSTICS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    fn diagnostics_store() -> &'static Mutex<Vec<RenderDiagnostics>> {
+        static STORE: OnceLock<Mutex<Vec<RenderDiagnostics>>> = OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(Vec::new()))
     }
 
     fn session(doc_id: &str) -> Result<DocumentSession, String> {
@@ -250,7 +290,76 @@ mod imp {
             return;
         }
 
-        while let Ok(cmd) = rx.recv() {
+        let mut pending: Vec<DocCommand> = Vec::new();
+
+        loop {
+            if pending.is_empty() {
+                match rx.recv() {
+                    Ok(cmd) => pending.push(cmd),
+                    Err(_) => break,
+                }
+            }
+
+            while pending.len() < 16 {
+                match rx.try_recv() {
+                    Ok(cmd) => pending.push(cmd),
+                    Err(_) => break,
+                }
+            }
+
+            if pending.iter().any(|c| matches!(c, DocCommand::Close)) {
+                break;
+            }
+
+            let mut i = 0;
+            while i < pending.len() {
+                let should_cancel = if let DocCommand::Render { page, generation, .. } = &pending[i] {
+                    pending.iter().skip(i + 1).any(|later| {
+                        if let DocCommand::Render { page: later_page, generation: later_gen, .. } = later {
+                            *later_page == *page && *later_gen > *generation
+                        } else {
+                            false
+                        }
+                    })
+                } else {
+                    false
+                };
+
+                if should_cancel {
+                    let cmd = pending.remove(i);
+                    if let DocCommand::Render { cancel, request_id, reply, .. } = cmd {
+                        cancel.abort();
+                        if let Ok(mut map) = cancels.lock() { map.remove(&request_id); }
+                        let _ = reply.send(Err("render cancelled".into()));
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+
+            if pending.is_empty() {
+                continue;
+            }
+
+            let best_idx = {
+                let mut best_idx = 0;
+                let mut best_score = 999;
+                for (j, c) in pending.iter().enumerate() {
+                    let score = match c {
+                        DocCommand::Close => 0,
+                        DocCommand::Text { .. } | DocCommand::Select { .. } => 1,
+                        DocCommand::Bounds { .. } | DocCommand::Outline { .. } => 2,
+                        DocCommand::Render { priority, .. } => 10 + (*priority as i32),
+                    };
+                    if score < best_score {
+                        best_score = score;
+                        best_idx = j;
+                    }
+                }
+                best_idx
+            };
+
+            let cmd = pending.remove(best_idx);
             match cmd {
                 DocCommand::Bounds { start, count, reply } => {
                     let mut values = vec![0f32; count.saturating_mul(4)];
@@ -321,15 +430,21 @@ mod imp {
                     unsafe { ll_free_outline(&mut raw) };
                     let _ = reply.send(result);
                 }
-                DocCommand::Render { page, scale, rotation, clip, cancel, request_id, reply } => {
+                DocCommand::Render { page, scale, rotation, clip, cancel, request_id, priority: _, generation: _, enqueued_at, reply } => {
+                    let queue_wait_us = enqueued_at.elapsed().as_micros() as u64;
                     let mut raw = LlImage {
                         samples: std::ptr::null_mut(), length: 0, width: 0, height: 0,
                         stride: 0, x: 0, y: 0, matrix: [0.0; 6], pixmap_owner: std::ptr::null_mut(),
                     };
                     let clip_ptr = clip.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
+                    let t0_c = std::time::Instant::now();
                     let status = unsafe {
                         ll_render(doc, page as i32, scale, rotation, clip_ptr, cancel.ptr(), &mut raw)
                     };
+                    let c_total_us = t0_c.elapsed().as_micros() as u64;
+                    let c_timings = unsafe { ll_get_last_render_timings(doc) };
+
+                    let t0_packet = std::time::Instant::now();
                     let result = if status == LL_CANCELLED {
                         Err("render cancelled".into())
                     } else if status != LL_OK {
@@ -337,6 +452,26 @@ mod imp {
                     } else {
                         render_packet(&raw)
                     };
+                    let packet_us = t0_packet.elapsed().as_micros() as u64;
+                    let packet_bytes = result.as_ref().map(|v| v.len()).unwrap_or(0);
+
+                    if DIAGNOSTICS_ENABLED.load(Ordering::Relaxed) {
+                        if let Ok(mut diag) = diagnostics_store().lock() {
+                            if diag.len() >= 200 { diag.remove(0); }
+                            diag.push(RenderDiagnostics {
+                                request_id: request_id.clone(),
+                                queue_wait_us,
+                                c_list_us: c_timings.list_time_us,
+                                c_raster_us: c_timings.raster_time_us,
+                                c_pixmap_us: c_timings.pixmap_time_us,
+                                c_list_hit: c_timings.list_hit != 0,
+                                c_total_us,
+                                packet_us,
+                                packet_bytes,
+                            });
+                        }
+                    }
+
                     unsafe { ll_free_image(doc, &mut raw) };
                     if let Ok(mut map) = cancels.lock() { map.remove(&request_id); }
                     let _ = reply.send(result);
@@ -517,20 +652,41 @@ mod imp {
     #[tauri::command]
     pub async fn mupdf_render_page(doc_id: String, page_index: usize, scale: f32,
                                    rotation: Option<f32>, clip: Option<[f32; 4]>,
-                                   request_id: String) -> Result<Response, String> {
+                                   request_id: String,
+                                   priority: Option<u8>,
+                                   generation: Option<u32>) -> Result<Response, String> {
         let s = session(&doc_id)?;
         let cancel = Arc::new(CancelHandle::new()?);
         s.cancels.lock().map_err(|e| e.to_string())?.insert(request_id.clone(), cancel.clone());
         let (tx, rx) = oneshot::channel();
         if s.tx.send(DocCommand::Render {
             page: page_index, scale, rotation: rotation.unwrap_or(0.0), clip,
-            cancel, request_id: request_id.clone(), reply: tx,
+            cancel, request_id: request_id.clone(),
+            priority: priority.unwrap_or(0),
+            generation: generation.unwrap_or(0),
+            enqueued_at: std::time::Instant::now(),
+            reply: tx,
         }).is_err() {
             if let Ok(mut m) = s.cancels.lock() { m.remove(&request_id); }
             return Err("MuPDF worker is closed".into());
         }
         let packet = rx.await.map_err(|_| "MuPDF worker dropped render request".to_string())??;
         Ok(Response::new(packet))
+    }
+
+    #[tauri::command]
+    pub fn mupdf_enable_diagnostics(enable: bool) {
+        DIAGNOSTICS_ENABLED.store(enable, Ordering::Relaxed);
+        if !enable {
+            if let Ok(mut s) = diagnostics_store().lock() {
+                s.clear();
+            }
+        }
+    }
+
+    #[tauri::command]
+    pub fn mupdf_get_render_diagnostics() -> Vec<RenderDiagnostics> {
+        diagnostics_store().lock().map(|s| s.clone()).unwrap_or_default()
     }
 
     #[tauri::command]
@@ -625,7 +781,9 @@ mod imp {
     #[tauri::command] pub async fn mupdf_get_page_sizes(_doc_id: String) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_text_layer(_doc_id: String, _page_index: usize) -> Result<TextLayerResponse, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_select(_doc_id: String, _page_index: usize, _a: [f32; 2], _b: [f32; 2], _mode: Option<String>) -> Result<SelectionResponse, String> { unavailable() }
-    #[tauri::command] pub async fn mupdf_render_page(_doc_id: String, _page_index: usize, _scale: f32, _rotation: Option<f32>, _clip: Option<[f32; 4]>, _request_id: String) -> Result<Response, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_render_page(_doc_id: String, _page_index: usize, _scale: f32, _rotation: Option<f32>, _clip: Option<[f32; 4]>, _request_id: String, _priority: Option<u8>, _generation: Option<u32>) -> Result<Response, String> { unavailable() }
+    #[tauri::command] pub fn mupdf_enable_diagnostics(_enable: bool) {}
+    #[tauri::command] pub fn mupdf_get_render_diagnostics() -> Vec<RenderDiagnostics> { Vec::new() }
     #[tauri::command] pub fn mupdf_cancel_render(_doc_id: String, _request_id: String) -> bool { false }
     #[tauri::command] pub async fn mupdf_get_outline_flat(_doc_id: String) -> Result<Vec<FlatOutlineItem>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_links(_doc_id: String, _page_index: usize) -> Result<Vec<serde_json::Value>, String> { unavailable() }

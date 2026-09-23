@@ -170,6 +170,8 @@ pub fn run() {
             mupdf_get_links,
             mupdf_render_page,
             mupdf_cancel_render,
+            mupdf_enable_diagnostics,
+            mupdf_get_render_diagnostics,
             mupdf_close_document,
             mupdf_reclaim_snapshot,
         ])

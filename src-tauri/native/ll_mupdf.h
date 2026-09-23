@@ -40,6 +40,12 @@ typedef struct {
     void *pixmap_owner; /* non-NULL when samples borrow the MuPDF pixmap */
 } ll_image;
 typedef struct { uint64_t list_builds, list_hits, text_builds; } ll_stats;
+typedef struct {
+    uint64_t list_time_us;   /* microseconds building or fetching display list */
+    uint64_t raster_time_us; /* microseconds running display list */
+    uint64_t pixmap_time_us; /* microseconds allocating/copying pixmap samples */
+    int list_hit;            /* 1 if display list was cached hit, 0 if built */
+} ll_render_timings;
 typedef struct { char *title; int page, level; } ll_outline_item;
 typedef struct { ll_outline_item *items; int count; } ll_outline;
 
@@ -88,6 +94,7 @@ LL_API int ll_select_mode(ll_doc *doc, int page, float ax, float ay, float bx, f
                           int mode, ll_selection *out);
 LL_API void ll_free_selection(ll_selection *out);
 LL_API ll_stats ll_get_stats(ll_doc *doc);
+LL_API ll_render_timings ll_get_last_render_timings(ll_doc *doc);
 
 #ifdef __cplusplus
 }

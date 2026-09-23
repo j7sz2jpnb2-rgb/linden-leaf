@@ -161,7 +161,9 @@ export class PdfJsDriver {
 
     async renderPage(pageIndex, scale, signal) {
         if (!this.pdfDoc) throw new Error('Document not loaded')
+        const t0_page = performance.now()
         const page = await this.pdfDoc.getPage(pageIndex + 1)
+        const t1_page = performance.now()
         if (signal?.aborted) { page.cleanup(); throw abortError() }
         const viewport = page.getViewport({ scale })
         const canvas = document.createElement('canvas')
@@ -171,9 +173,16 @@ export class PdfJsDriver {
         const task = page.render({ canvasContext: ctx, viewport })
         const cancel = () => task.cancel()
         signal?.addEventListener('abort', cancel, { once: true })
+        const t0_render = performance.now()
         try {
             await task.promise
+            const t1_render = performance.now()
             if (signal?.aborted) throw abortError()
+            canvas._renderTimings = {
+                getPageMs: Math.round((t1_page - t0_page) * 100) / 100,
+                renderMs: Math.round((t1_render - t0_render) * 100) / 100,
+                totalMs: Math.round((t1_render - t0_page) * 100) / 100,
+            }
             return canvas
         } finally {
             signal?.removeEventListener('abort', cancel)
@@ -323,7 +332,7 @@ export class MuPdfTauriDriver {
         return out
     }
 
-    async renderPage(pageIndex, scale, signal, clip = null) {
+    async renderPage(pageIndex, scale, signal, clip = null, priority = 0, generation = 0) {
         if (!this.docId) throw new Error('Document not loaded')
         if (signal?.aborted) throw abortError()
         const docId = this.docId
@@ -332,6 +341,7 @@ export class MuPdfTauriDriver {
             platformBridge._invokeTauri('mupdf_cancel_render', { docId, requestId }).catch(() => {})
         }
         signal?.addEventListener('abort', cancel, { once: true })
+        const t0_ipc = performance.now()
         try {
             const response = await platformBridge._invokeTauri('mupdf_render_page', {
                 docId,
@@ -340,10 +350,25 @@ export class MuPdfTauriDriver {
                 rotation: 0,
                 clip,
                 requestId,
+                priority,
+                generation,
             })
+            const t1_ipc = performance.now()
             if (signal?.aborted) throw abortError()
+            const t0_norm = performance.now()
             const buffer = await normalizeBinaryResponse(response)
-            return this._packetToCanvas(buffer)
+            const t1_norm = performance.now()
+            const t0_draw = performance.now()
+            const canvas = this._packetToCanvas(buffer)
+            const t1_draw = performance.now()
+            canvas._renderTimings = {
+                requestId,
+                ipcMs: Math.round((t1_ipc - t0_ipc) * 100) / 100,
+                normalizeMs: Math.round((t1_norm - t0_norm) * 100) / 100,
+                canvasDrawMs: Math.round((t1_draw - t0_draw) * 100) / 100,
+                totalJsMs: Math.round((t1_draw - t0_ipc) * 100) / 100,
+            }
+            return canvas
         } catch (err) {
             if (signal?.aborted || /render cancelled/i.test(String(err))) throw abortError()
             throw err

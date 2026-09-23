@@ -13,6 +13,35 @@
 #define ll_isfinite(value) isfinite(value)
 #endif
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+static uint64_t ll_now_us(void) {
+    static LARGE_INTEGER freq;
+    static int initialized = 0;
+    if (!initialized) {
+        QueryPerformanceFrequency(&freq);
+        initialized = 1;
+    }
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return (uint64_t)((counter.QuadPart * 1000000ULL) / freq.QuadPart);
+}
+#else
+#include <time.h>
+static uint64_t ll_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+#endif
+
 /* Small decoded working set. The application owns the larger byte-budgeted
  * bitmap/text caches; this cache only avoids repeatedly interpreting nearby
  * pages while zooming and turning pages. */
@@ -36,6 +65,7 @@ struct ll_doc {
     ll_page pages[CACHE_PAGES];
     uint64_t clock;
     ll_stats stats;
+    ll_render_timings last_render_timings;
 };
 
 struct ll_cancel {
@@ -59,7 +89,8 @@ static void drop_page(ll_doc *d, ll_page *p) {
     p->page = -1;
 }
 
-static ll_page *get_page(ll_doc *d, int number) {
+static ll_page *get_page_internal(ll_doc *d, int number, int *hit) {
+    if (hit) *hit = 0;
     if (number < 0 || number >= d->count)
         fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Page index out of range");
 
@@ -69,6 +100,7 @@ static ll_page *get_page(ll_doc *d, int number) {
         if (p->page == number && p->list) {
             p->used = ++d->clock;
             ++d->stats.list_hits;
+            if (hit) *hit = 1;
             return p;
         }
         if (p->used < entry->used) entry = p;
@@ -94,6 +126,10 @@ static ll_page *get_page(ll_doc *d, int number) {
         fz_rethrow(d->ctx);
     }
     return entry;
+}
+
+static ll_page *get_page(ll_doc *d, int number) {
+    return get_page_internal(d, number, NULL);
 }
 
 static fz_stext_page *get_text(ll_doc *d, int number) {
@@ -352,7 +388,11 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
         if (cancel && cancel->cookie.abort) {
             was_cancelled = 1;
         } else {
-            ll_page *page = get_page(d, number);
+            uint64_t t_list_start = ll_now_us();
+            int list_hit = 0;
+            ll_page *page = get_page_internal(d, number, &list_hit);
+            uint64_t list_time_us = ll_now_us() - t_list_start;
+
             fz_matrix m = fz_concat(fz_rotate(rotation), fz_scale(scale, scale));
             fz_rect box = fz_transform_rect(page->bounds, m);
             m = fz_concat(m, fz_translate(-box.x0, -box.y0));
@@ -388,14 +428,18 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
 
             pix = fz_new_pixmap_with_bbox(d->ctx, fz_device_rgb(d->ctx), bbox, NULL, 1);
             fz_clear_pixmap_with_value(d->ctx, pix, 255);
+
+            uint64_t t_raster_start = ll_now_us();
             dev = fz_new_draw_device(d->ctx, fz_identity, pix);
             fz_run_display_list(d->ctx, page->list, dev, m, box,
                                 cancel ? &cancel->cookie : NULL);
             fz_close_device(d->ctx, dev);
+            uint64_t raster_time_us = ll_now_us() - t_raster_start;
 
             if (cancel && cancel->cookie.abort) {
                 was_cancelled = 1;
             } else {
+                uint64_t t_pixmap_start = ll_now_us();
                 out->width = fz_pixmap_width(d->ctx, pix);
                 out->height = fz_pixmap_height(d->ctx, pix);
                 out->stride = out->width * 4;
@@ -423,6 +467,12 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
                 }
                 float matrix[6] = {m.a, m.b, m.c, m.d, m.e, m.f};
                 memcpy(out->matrix, matrix, sizeof(matrix));
+                uint64_t pixmap_time_us = ll_now_us() - t_pixmap_start;
+
+                d->last_render_timings.list_time_us = list_time_us;
+                d->last_render_timings.raster_time_us = raster_time_us;
+                d->last_render_timings.pixmap_time_us = pixmap_time_us;
+                d->last_render_timings.list_hit = list_hit;
             }
         }
     }
@@ -563,4 +613,12 @@ void ll_free_selection(ll_selection *out) {
     free(out->text);
     free(out->quads);
     memset(out, 0, sizeof(*out));
+}
+
+ll_render_timings ll_get_last_render_timings(ll_doc *d) {
+    if (!d) {
+        ll_render_timings zero = {0, 0, 0, 0};
+        return zero;
+    }
+    return d->last_render_timings;
 }

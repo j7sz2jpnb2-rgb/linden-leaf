@@ -579,7 +579,9 @@ export class PdfViewport {
 
         try {
             const scale = this._renderScale(page)
-            const canvas = await this.driver.renderPage(page, scale, signal)
+            const priority = renderEntry?.tier ?? 0
+            const generation = token
+            const canvas = await this.driver.renderPage(page, scale, signal, null, priority, generation)
             if (!isCurrent()) return
 
             canvas.classList.add('pdf-page-canvas')
