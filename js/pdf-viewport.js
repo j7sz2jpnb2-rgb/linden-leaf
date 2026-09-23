@@ -49,6 +49,7 @@ export class PdfViewport {
         this._geometryQueued = new Set()
         this._geometryInFlight = null
         this._renderQueue = []
+        this._inFlightRenders = new Map()
         this._activeRenders = 0
         this._renderConcurrency = 2
         this._outlineRequested = false
@@ -298,6 +299,14 @@ export class PdfViewport {
         return lo
     }
 
+    _isPageQueuedOrRendering(page, token) {
+        const inQueue = this._renderQueue.some(x => x.page === page && x.token === token)
+        if (inQueue) return true
+        const inFlight = this._inFlightRenders.get(page)
+        if (inFlight && inFlight.token === token) return true
+        return false
+    }
+
     _renderVisibleSlots(force = false) {
         if (!this.pageOffsets.length) return
         const top = this.scrollArea.scrollTop, bottom = top + this.scrollArea.clientHeight
@@ -312,9 +321,64 @@ export class PdfViewport {
         for (let i = start; i <= end; i++) needed.add(i)
 
         for (const [page, slot] of [...this.activeSlots]) {
-            if (force || !needed.has(page)) this._unmountSlot(page, slot)
+            if (!needed.has(page)) this._unmountSlot(page, slot)
         }
         for (let i = start; i <= end; i++) if (!this.activeSlots.has(i)) this._mountSlot(i)
+
+        if (force) {
+            for (let i = start; i <= end; i++) {
+                const slot = this.activeSlots.get(i)
+                if (!slot) continue
+                slot._renderToken = (slot._renderToken || 0) + 1
+                slot.renderAbort?.abort()
+                slot.renderAbort = new AbortController()
+                const text = slot.querySelector('.pdf-text-layer')
+                if (text) {
+                    text.style.opacity = '0'
+                    text.style.pointerEvents = 'none'
+                }
+            }
+        }
+
+        const toSchedule = []
+        for (let i = first; i <= last; i++) {
+            const slot = this.activeSlots.get(i)
+            if (!slot) continue
+            if (force || slot._renderedScale !== this.scale || !slot._renderedToken) {
+                if (!this._isPageQueuedOrRendering(i, slot._renderToken)) {
+                    toSchedule.push({
+                        page: i,
+                        slot,
+                        token: slot._renderToken,
+                        tier: 0,
+                        distance: Math.abs(i - this.currentPage),
+                    })
+                }
+            }
+        }
+
+        for (let i = start; i <= end; i++) {
+            if (i >= first && i <= last) continue
+            const slot = this.activeSlots.get(i)
+            if (!slot) continue
+            if (force || slot._renderedScale !== this.scale || !slot._renderedToken) {
+                if (!this._isPageQueuedOrRendering(i, slot._renderToken)) {
+                    toSchedule.push({
+                        page: i,
+                        slot,
+                        token: slot._renderToken,
+                        tier: 1,
+                        distance: i < first ? (first - i) : (i - last),
+                    })
+                }
+            }
+        }
+
+        for (const item of toSchedule) {
+            this._scheduleRender(item)
+        }
+
+        this._pumpRenderQueue()
     }
 
     _unmountSlot(page, slot) {
@@ -323,6 +387,9 @@ export class PdfViewport {
         if (slot.geometryTimer != null) clearTimeout(slot.geometryTimer)
         slot.remove()
         this.activeSlots.delete(page)
+        this._inFlightRenders.delete(page)
+        this._renderQueue = this._renderQueue.filter(x => x.page !== page)
+        this._activeRenders = this._inFlightRenders.size
     }
 
     _remountPage(page) {
@@ -330,6 +397,7 @@ export class PdfViewport {
         if (!slot) return
         this._unmountSlot(page, slot)
         this._mountSlot(page)
+        this._renderVisibleSlots()
     }
 
     _mountSlot(page) {
@@ -338,6 +406,7 @@ export class PdfViewport {
         const slot = document.createElement('div')
         slot.className = 'pdf-page-slot'
         slot.dataset.page = String(page)
+        slot._renderToken = 1
         slot.renderAbort = new AbortController()
         Object.assign(slot.style, { top: `${layout.top}px`, width: `${layout.width}px`, height: `${layout.height}px` })
 
@@ -361,29 +430,105 @@ export class PdfViewport {
             queueMicrotask(() => this.pulseHighlight(p.pageIdx, p.highlightId, p.fallbackRects))
         }
 
-        this._scheduleRender(page, slot)
+
     }
 
-    _scheduleRender(page, slot) {
-        const item = {
-            page, slot,
-            signal: slot.renderAbort.signal,
-            priority: () => Math.abs(page - this.currentPage),
-        }
-        this._renderQueue.push(item)
-        this._pumpRenderQueue()
+    _scheduleRender(item) {
+        this._renderQueue.push({
+            page: item.page,
+            slot: item.slot,
+            token: item.token,
+            tier: item.tier,
+            distance: item.distance,
+            signal: item.slot.renderAbort.signal,
+        })
     }
 
     _pumpRenderQueue() {
         if (this._destroyed) return
-        this._renderQueue = this._renderQueue.filter(x => !x.signal.aborted && this.activeSlots.get(x.page) === x.slot)
-        this._renderQueue.sort((a, b) => a.priority() - b.priority())
-        while (this._activeRenders < this._renderConcurrency && this._renderQueue.length) {
+
+        // 1. Filter out obsolete entries
+        this._renderQueue = this._renderQueue.filter(x => {
+            if (x.signal.aborted) return false
+            const active = this.activeSlots.get(x.page)
+            if (active !== x.slot) return false
+            if (x.token !== x.slot._renderToken) return false
+            return true
+        })
+
+        if (!this._renderQueue.length && this._inFlightRenders.size === 0) return
+
+        // 2. Re-compute visible boundaries to update tiers and distances dynamically
+        const top = this.scrollArea.scrollTop, bottom = top + this.scrollArea.clientHeight
+        const first = this._firstPageAt(top)
+        let last = first
+        for (let i = first; i < this.pageOffsets.length && this.pageOffsets[i].top <= bottom; i++) last = i
+
+        for (const item of this._renderQueue) {
+            if (item.page >= first && item.page <= last) {
+                item.tier = 0
+                item.distance = Math.abs(item.page - this.currentPage)
+            } else {
+                item.tier = 1
+                item.distance = item.page < first ? (first - item.page) : (item.page - last)
+            }
+        }
+
+        // Sort: Tier 0 before Tier 1; then by distance ascending
+        this._renderQueue.sort((a, b) => {
+            if (a.tier !== b.tier) return a.tier - b.tier
+            return a.distance - b.distance
+        })
+
+        // 3. Preemption: If capacity is full and a Tier 0 (visible) task is waiting,
+        // abort an active Tier 1 (buffer) task so the visible page can start immediately.
+        if (this._inFlightRenders.size >= this._renderConcurrency) {
+            const hasWaitingTier0 = this._renderQueue.some(x => x.tier === 0)
+            if (hasWaitingTier0) {
+                let bufferToPreempt = null
+                let maxDist = -1
+                for (const inflight of this._inFlightRenders.values()) {
+                    if (inflight.tier === 1 && inflight.distance > maxDist) {
+                        maxDist = inflight.distance
+                        bufferToPreempt = inflight
+                    }
+                }
+                if (bufferToPreempt) {
+                    const { page, slot, token } = bufferToPreempt
+                    slot.renderAbort?.abort()
+                    slot.renderAbort = new AbortController()
+                    this._inFlightRenders.delete(page)
+                    this._renderQueue.push({
+                        page, slot, token,
+                        tier: 1,
+                        distance: page < first ? (first - page) : (page - last),
+                        signal: slot.renderAbort.signal,
+                    })
+                    this._renderQueue.sort((a, b) => (a.tier - b.tier) || (a.distance - b.distance))
+                }
+            }
+        }
+
+        // 4. Dispatch tasks up to concurrency limit
+        while (this._inFlightRenders.size < this._renderConcurrency && this._renderQueue.length) {
             const item = this._renderQueue.shift()
-            if (item.signal.aborted) continue
-            this._activeRenders++
-            this._renderPageContent(item.page, item.slot).finally(() => {
-                this._activeRenders--
+            if (item.signal.aborted || this.activeSlots.get(item.page) !== item.slot || item.token !== item.slot._renderToken) {
+                continue
+            }
+
+            this._inFlightRenders.set(item.page, {
+                page: item.page,
+                slot: item.slot,
+                token: item.token,
+                tier: item.tier,
+                distance: item.distance,
+                abortController: item.slot.renderAbort,
+            })
+            this._activeRenders = this._inFlightRenders.size
+
+            this._renderPageContent(item.page, item.slot, item.token, item.slot.renderAbort.signal).finally(() => {
+                this._inFlightRenders.delete(item.page)
+                this._activeRenders = this._inFlightRenders.size
                 this._pumpRenderQueue()
             })
         }
@@ -400,16 +545,36 @@ export class PdfViewport {
         return scale
     }
 
-    async _renderPageContent(page, slot) {
-        if (!this.driver || slot.renderAbort.signal.aborted) return
+    async _renderPageContent(page, slot, token, signal) {
+        if (!this.driver || signal.aborted || this._destroyed) return
         const pixels = slot.querySelector('.pdf-img-wrapper')
         const text = slot.querySelector('.pdf-text-layer')
-        const isCurrent = () => this.activeSlots.get(page) === slot && !slot.renderAbort.signal.aborted
+        const isCurrent = () => (
+            !this._destroyed &&
+            this.activeSlots.get(page) === slot &&
+            !signal.aborted &&
+            slot._renderToken === token &&
+            Boolean(pixels)
+        )
+
         try {
-            const canvas = await this.driver.renderPage(page, this._renderScale(page), slot.renderAbort.signal)
+            const scale = this._renderScale(page)
+            const canvas = await this.driver.renderPage(page, scale, signal)
             if (!isCurrent()) return
+
             canvas.classList.add('pdf-page-canvas')
             pixels.replaceChildren(canvas)
+            slot._renderedScale = this.scale
+            slot._renderedToken = token
+
+            // Remove retry badge if previously shown
+            slot.querySelector('.pdf-render-retry-badge')?.remove()
+
+            // Restore text layer visibility & pointer events
+            if (text) {
+                text.style.opacity = '1'
+                text.style.pointerEvents = 'auto'
+            }
 
             // Raster gets the document worker first. Selection still requests
             // geometry immediately on pointerdown; this merely warms it later.
@@ -423,7 +588,7 @@ export class PdfViewport {
             }
 
             if (this.driver.kind === 'pdfjs' && this.driver.renderTextLayer) {
-                await this.driver.renderTextLayer(page, text, this.scale, slot.renderAbort.signal)
+                await this.driver.renderTextLayer(page, text, this.scale, signal)
             }
             if (isCurrent() && page === this.currentPage && !this._outlineRequested && this.driver.getOutline) {
                 this._outlineRequested = true
@@ -437,13 +602,33 @@ export class PdfViewport {
                 }, 0)
             }
         } catch (err) {
-            if (slot.renderAbort.signal.aborted || err?.name === 'AbortError') return
+            if (signal.aborted || err?.name === 'AbortError') return
             console.warn(`[PdfViewport] render failed page=${page} backend=${this.driver?.kind}:`, err)
             if (isCurrent()) {
-                const box = document.createElement('div')
-                box.className = 'pdf-render-error'
-                box.textContent = `第 ${page + 1} 页渲染失败。滚动离开后返回将自动重试。`
-                pixels.replaceChildren(box)
+                const hasExistingCanvas = pixels.querySelector('canvas')
+                if (!hasExistingCanvas) {
+                    const box = document.createElement('div')
+                    box.className = 'pdf-render-error'
+                    box.textContent = `第 ${page + 1} 页渲染失败。滚动离开后返回将自动重试。`
+                    pixels.replaceChildren(box)
+                } else {
+                    let retryBadge = slot.querySelector('.pdf-render-retry-badge')
+                    if (!retryBadge) {
+                        retryBadge = document.createElement('div')
+                        retryBadge.className = 'pdf-render-retry-badge'
+                        retryBadge.style.cssText = 'position:absolute;bottom:8px;right:8px;background:rgba(220,38,38,0.85);color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;z-index:6;cursor:pointer;'
+                        retryBadge.textContent = '重试高清渲染'
+                        retryBadge.onclick = () => {
+                            retryBadge.remove()
+                            slot._renderToken = (slot._renderToken || 0) + 1
+                            this._scheduleRender({
+                                page, slot, token: slot._renderToken, tier: 0, distance: 0
+                            })
+                            this._pumpRenderQueue()
+                        }
+                        slot.append(retryBadge)
+                    }
+                }
             }
         }
     }
@@ -761,6 +946,7 @@ export class PdfViewport {
         this._recomputeLayout()
         const now = this.pageOffsets[this.currentPage]
         if (now) this.scrollArea.scrollTop = Math.max(0, now.top + clamp(ratio,0,1)*now.height)
+        this._syncActiveSlotGeometry()
         this._renderVisibleSlots(true)
         this._redrawNativePreview()
     }
@@ -838,6 +1024,7 @@ export class PdfViewport {
         this._geometryQueued.clear()
         if (this._outlineTimer != null) clearTimeout(this._outlineTimer)
         this._renderQueue.length = 0
+        this._inFlightRenders.clear()
         for (const slot of this.activeSlots.values()) slot.renderAbort?.abort()
         this.activeSlots.clear()
         this.highlightsByPage.clear()
