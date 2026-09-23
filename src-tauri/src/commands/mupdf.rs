@@ -323,7 +323,7 @@ mod imp {
                 DocCommand::Render { page, scale, rotation, clip, cancel, request_id, reply } => {
                     let mut raw = LlImage {
                         samples: std::ptr::null_mut(), length: 0, width: 0, height: 0,
-                        stride: 0, x: 0, y: 0, matrix: [0.0; 6],
+                        stride: 0, x: 0, y: 0, matrix: [0.0; 6], pixmap_owner: std::ptr::null_mut(),
                     };
                     let clip_ptr = clip.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
                     let status = unsafe {

@@ -12,6 +12,19 @@ $toolPaths = @(
     "C:\Users\YONGHU\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback"
 )
 
+# Discover MSVC if installed in D:\LindenLeaf-Toolchains\MSVC
+$msvcRoot = "D:\LindenLeaf-Toolchains\MSVC"
+if (Test-Path $msvcRoot) {
+    $msvcBins = Get-ChildItem -Path "$msvcRoot\VC\Tools\MSVC\*\bin\Hostx64\x64" -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+    if ($msvcBins) {
+        $toolPaths += $msvcBins[0]
+    }
+    $msbuildBin = "$msvcRoot\MSBuild\Current\Bin"
+    if (Test-Path $msbuildBin) {
+        $toolPaths += $msbuildBin
+    }
+}
+
 foreach ($tp in $toolPaths) {
     if ((Test-Path $tp) -and ($env:PATH -notlike "*$tp*")) {
         $env:PATH = "$tp;" + $env:PATH
@@ -25,6 +38,17 @@ $env:CARGO_HOME = "D:\LindenLeaf-Toolchains\cargo"
 $env:CARGO_TARGET_DIR = "D:\LindenLeaf-Build\target"
 $env:LINDEN_NATIVE_CACHE_DIR = "D:\LindenLeaf-Data\development\pdf-native"
 
+# MuPDF native bridge configuration (MuPDF 1.25.4)
+$mupdfInclude = "D:\LindenLeaf-Dev\mupdf-1.25.4-source\include"
+$mupdfLibDir = "D:\LindenLeaf-Dev\mupdf-1.25.4-source\platform\win32\x64\Release"
+if (Test-Path $mupdfInclude) {
+    $env:LL_MUPDF_INCLUDE = $mupdfInclude
+}
+if (Test-Path $mupdfLibDir) {
+    $env:LL_MUPDF_LIB_DIR = $mupdfLibDir
+}
+$env:LL_MUPDF_LIBS = "libmupdf;libthirdparty;libresources"
+
 Write-Host "[env.ps1] Project session environment configured." -ForegroundColor Green
 Write-Host "  Project root: $projectRoot"
 Write-Host "  Git: $(Get-Command git -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)"
@@ -32,3 +56,8 @@ Write-Host "  Node: $(Get-Command node -ErrorAction SilentlyContinue | Select-Ob
 Write-Host "  PNPM: $(Get-Command pnpm -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)"
 Write-Host "  Rustc: $(Get-Command rustc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)"
 Write-Host "  Cargo: $(Get-Command cargo -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)"
+Write-Host "  Linker: $(Get-Command link -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)"
+Write-Host "  MSBuild: $(Get-Command msbuild -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)"
+Write-Host "  MuPDF Include: $env:LL_MUPDF_INCLUDE"
+Write-Host "  MuPDF Lib Dir: $env:LL_MUPDF_LIB_DIR"
+Write-Host "  MuPDF Libs: $env:LL_MUPDF_LIBS"
