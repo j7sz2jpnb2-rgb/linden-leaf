@@ -634,7 +634,7 @@ export const updateBookProgress = async (id, progressData) => {
             }
             tx.oncomplete = () => {
                 try {
-                    clearPendingProgressBackup(id, progressData?.updatedAt)
+                    clearPendingProgressBackup(id, progressData?.updatedAt, progressData?._backupId)
                 } catch (e) {}
                 resolve(true)
             }
@@ -653,11 +653,25 @@ export const updateBookProgress = async (id, progressData) => {
 export const backupPendingProgress = (bookId, progress) => {
     if (!bookId || !progress || typeof localStorage === 'undefined') return false
     try {
+        const backupId = `pbk_${bookId}_${progress.updatedAt || Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+        progress._backupId = backupId
         const payload = {
+            backupId,
             bookId,
             progress,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            version: progress.updatedAt || Date.now()
         }
+
+        let allBackups = {}
+        try {
+            const rawMap = localStorage.getItem('linden_pending_progress_backups')
+            if (rawMap) allBackups = JSON.parse(rawMap) || {}
+        } catch (e) {}
+        allBackups[bookId] = payload
+        localStorage.setItem('linden_pending_progress_backups', JSON.stringify(allBackups))
+
+        // Legacy single key mirror
         localStorage.setItem('linden_pending_progress_backup', JSON.stringify(payload))
         return true
     } catch (e) {
@@ -665,38 +679,167 @@ export const backupPendingProgress = (bookId, progress) => {
     }
 }
 
-export const clearPendingProgressBackup = (bookId, updatedAt = null) => {
-    if (typeof localStorage === 'undefined') return
+export const clearPendingProgressBackup = (bookId, updatedAt = null, backupId = null) => {
+    if (!bookId || typeof localStorage === 'undefined') return
     try {
+        let shouldClearLegacy = false
+        const rawMap = localStorage.getItem('linden_pending_progress_backups')
+        if (rawMap) {
+            const allBackups = JSON.parse(rawMap) || {}
+            const existing = allBackups[bookId]
+            if (existing) {
+                // Strict matching: if backupId provided, must match OR existing must be strictly older
+                const idMatches = backupId != null && existing.backupId === backupId
+                const isStrictlyOlder = updatedAt != null && existing.version < updatedAt && (existing.progress?.updatedAt || 0) < updatedAt
+                const isExactTimeMatchWithoutId = backupId == null && updatedAt != null && existing.progress?.updatedAt === updatedAt
+
+                if (idMatches || isStrictlyOlder || isExactTimeMatchWithoutId || (backupId == null && updatedAt == null)) {
+                    delete allBackups[bookId]
+                    localStorage.setItem('linden_pending_progress_backups', JSON.stringify(allBackups))
+                    shouldClearLegacy = true
+                }
+            } else {
+                shouldClearLegacy = true
+            }
+        }
+
         const raw = localStorage.getItem('linden_pending_progress_backup')
-        if (!raw) return
-        const parsed = JSON.parse(raw)
-        if (parsed?.bookId === bookId) {
-            if (updatedAt == null || parsed?.progress?.updatedAt === updatedAt) {
-                localStorage.removeItem('linden_pending_progress_backup')
+        if (raw) {
+            const parsed = JSON.parse(raw)
+            if (parsed?.bookId === bookId) {
+                const idMatches = backupId != null && parsed.backupId === backupId
+                const isStrictlyOlder = updatedAt != null && parsed.version < updatedAt && (parsed.progress?.updatedAt || 0) < updatedAt
+                const isExactTimeMatchWithoutId = backupId == null && updatedAt != null && parsed.progress?.updatedAt === updatedAt
+                if (idMatches || isStrictlyOlder || isExactTimeMatchWithoutId || (backupId == null && updatedAt == null) || shouldClearLegacy) {
+                    localStorage.removeItem('linden_pending_progress_backup')
+                }
             }
         }
     } catch (e) {}
 }
 
-export const recoverPendingProgressBackup = async () => {
-    if (typeof localStorage === 'undefined') return null
-    try {
-        const raw = localStorage.getItem('linden_pending_progress_backup')
-        if (!raw) return null
-        const parsed = JSON.parse(raw)
-        if (parsed && parsed.bookId && parsed.progress) {
-            await updateBookProgress(parsed.bookId, parsed.progress)
-            localStorage.removeItem('linden_pending_progress_backup')
-            console.log(`[DB] Successfully recovered progress backup for book: ${parsed.bookId}`)
-            return parsed
-        } else {
-            localStorage.removeItem('linden_pending_progress_backup')
+let _progressRecoveryPromise = null
+
+export const recoverPendingProgressBackup = () => {
+    if (_progressRecoveryPromise) return _progressRecoveryPromise
+    _progressRecoveryPromise = (async () => {
+        const result = {
+            recovered: [],
+            filtered: [],
+            failed: [],
+            deferred: []
         }
-    } catch (e) {
-        console.warn('[DB] Failed to recover pending progress backup:', e)
-    }
-    return null
+        if (typeof localStorage === 'undefined') return result
+        try {
+            let backupsToRecover = []
+            let rawMapExists = false
+            try {
+                const rawMap = localStorage.getItem('linden_pending_progress_backups')
+                if (rawMap) {
+                    rawMapExists = true
+                    const parsedMap = JSON.parse(rawMap)
+                    if (parsedMap && typeof parsedMap === 'object') {
+                        backupsToRecover = Object.values(parsedMap)
+                    }
+                }
+            } catch (e) {}
+
+            try {
+                const rawLegacy = localStorage.getItem('linden_pending_progress_backup')
+                if (rawLegacy) {
+                    const parsedLegacy = JSON.parse(rawLegacy)
+                    // Strict pairing: If rawMap exists, legacy key must correspond to an entry in rawMap
+                    if (parsedLegacy?.bookId) {
+                        const inMap = backupsToRecover.some(b => b.bookId === parsedLegacy.bookId)
+                        if (!inMap && !rawMapExists) {
+                            backupsToRecover.push(parsedLegacy)
+                        } else if (!inMap && rawMapExists) {
+                            // Stale legacy mirror: clean it up to prevent resurrection
+                            localStorage.removeItem('linden_pending_progress_backup')
+                        }
+                    }
+                }
+            } catch (e) {}
+
+            for (const data of backupsToRecover) {
+                if (!data || !data.bookId || !data.progress) {
+                    if (data?.bookId) clearPendingProgressBackup(data.bookId)
+                    result.filtered.push({ bookId: data?.bookId, reason: 'malformed_data' })
+                    continue
+                }
+
+                const { bookId, progress, backupId } = data
+                try {
+                    // 1. Check if book still exists
+                    const book = await getBook(bookId)
+                    if (!book) {
+                        console.log(`[DB] Skipping progress backup for deleted book: ${bookId}`)
+                        clearPendingProgressBackup(bookId, null, backupId)
+                        result.filtered.push({ bookId, backupId, reason: 'book_deleted' })
+                        continue
+                    }
+
+                    // 2. Check content identity
+                    const snapshot = await getBookFileSnapshot(bookId)
+                    if (snapshot) {
+                        if (progress.blobRevision) {
+                            const matchRes = isContentIdentityMatching(progress, snapshot)
+                            if (!matchRes.matches) {
+                                console.log(`[DB] Discarding progress backup due to content mismatch for book: ${bookId}`)
+                                clearPendingProgressBackup(bookId, null, backupId)
+                                result.filtered.push({ bookId, backupId, reason: 'content_mismatch' })
+                                continue
+                            }
+                        } else {
+                            // Legacy backup without blobRevision
+                            if (progress.documentHash && snapshot.documentHash) {
+                                if (progress.documentHash !== snapshot.documentHash) {
+                                    console.log(`[DB] Discarding legacy progress backup due to documentHash conflict for book: ${bookId}`)
+                                    clearPendingProgressBackup(bookId, null, backupId)
+                                    result.filtered.push({ bookId, backupId, reason: 'hash_conflict' })
+                                    continue
+                                }
+                            } else if (book.progress?.blobRevision && book.progress.blobRevision !== snapshot.blobRevision) {
+                                console.log(`[DB] Discarding legacy progress backup lacking revision for replaced book: ${bookId}`)
+                                clearPendingProgressBackup(bookId, null, backupId)
+                                result.filtered.push({ bookId, backupId, reason: 'unconfirmed_legacy_revision' })
+                                continue
+                            }
+                        }
+                    }
+
+                    // 3. Check timestamps (do not overwrite newer progress with older progress)
+                    if (book.progress?.updatedAt && progress.updatedAt && book.progress.updatedAt > progress.updatedAt) {
+                        console.log(`[DB] Discarding obsolete progress backup (newer progress exists) for book: ${bookId}`)
+                        clearPendingProgressBackup(bookId, null, backupId)
+                        result.filtered.push({ bookId, backupId, reason: 'obsolete_progress' })
+                        continue
+                    }
+
+                    // 4. Update progress
+                    const updated = await updateBookProgress(bookId, progress)
+                    if (updated !== false && updated !== null) {
+                        // 5. Clean up ONLY this backup item
+                        clearPendingProgressBackup(bookId, progress.updatedAt, backupId)
+                        console.log(`[DB] Successfully recovered progress backup for book: ${bookId}`)
+                        result.recovered.push({ bookId, backupId, progress })
+                    } else {
+                        result.filtered.push({ bookId, backupId, reason: 'update_skipped' })
+                    }
+                } catch (itemErr) {
+                    console.warn(`[DB] Failed to recover progress backup for book ${bookId}:`, itemErr)
+                    // Retain backup on failure
+                    result.failed.push({ bookId, backupId, error: itemErr, data })
+                }
+            }
+        } catch (e) {
+            console.warn('[DB] Failed to recover pending progress backup:', e)
+        }
+        return result
+    })().finally(() => {
+        _progressRecoveryPromise = null
+    })
+    return _progressRecoveryPromise
 }
 
 export const updateBookReadingTime = async (id, addedSeconds) => {
@@ -1017,6 +1160,7 @@ export const recordReadingSession = async (session, updateBookTotal = true) => {
 
         tx.oncomplete = () => resolve(session.id)
         tx.onerror = () => reject(tx.error || new Error('Failed to record session'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted'))
     })
 }
 
@@ -1063,11 +1207,15 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         const y = d.slice(0, 4)
         yearlyMap[y] = (yearlyMap[y] || 0) + dur
 
-        if (dur >= 60) {
-            activeDates.add(d)
-        }
         if (sess.startTime && sess.startTime < earliestTime) {
             earliestTime = sess.startTime
+        }
+    }
+
+    // Active reading days: any natural day with total reading time in dailyMap >= 60 seconds
+    for (const [d, daySecs] of Object.entries(dailyMap)) {
+        if (daySecs >= 60) {
+            activeDates.add(d)
         }
     }
 
@@ -1082,9 +1230,13 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
                 monthlyMap[ym] = (monthlyMap[ym] || 0) + b.totalReadingSeconds
                 const y = d.slice(0, 4)
                 yearlyMap[y] = (yearlyMap[y] || 0) + b.totalReadingSeconds
-                if (b.totalReadingSeconds >= 30) activeDates.add(d)
                 if (bTime < earliestTime) earliestTime = bTime
                 totalSeconds += b.totalReadingSeconds
+            }
+        }
+        for (const [d, daySecs] of Object.entries(dailyMap)) {
+            if (daySecs >= 60) {
+                activeDates.add(d)
             }
         }
     }

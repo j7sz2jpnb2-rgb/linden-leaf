@@ -683,10 +683,44 @@ class UniversalReaderApp {
         this.checkFirstTimeUser()
         this.loadSettings().then(async () => {
             this.applyTheme(this.settings.theme)
+            await this.ensureRecoveryBarrier()
             await this.renderCustomListsSidebar()
             await this.refreshBookshelf()
             await this.initSyncService()
         })
+    }
+
+    async ensureRecoveryBarrier() {
+        if (!this._recoveryBarrierPromise) {
+            this._recoveryBarrierPromise = (async () => {
+                let progressResult = null
+                let trackerResult = null
+                try {
+                    progressResult = await db.recoverPendingProgressBackup()
+                } catch (e) {
+                    console.warn('[App] Error recovering progress backup:', e)
+                    progressResult = { recovered: [], filtered: [], failed: [{ error: e }], deferred: [] }
+                }
+                try {
+                    trackerResult = await tracker.recoverPendingBackup()
+                } catch (e) {
+                    console.warn('[App] Error recovering tracker backup:', e)
+                    trackerResult = { recovered: [], filtered: [], failed: [{ error: e }], deferred: [] }
+                }
+                const failedProgressBooks = new Set((progressResult?.failed || []).map(f => f.bookId || f.data?.bookId).filter(Boolean))
+                return {
+                    progress: progressResult,
+                    tracker: trackerResult,
+                    hasFailed: (progressResult?.failed?.length > 0) || (trackerResult?.failed?.length > 0),
+                    failedProgressBooks,
+                    canProceedSafely: (bookId) => {
+                        if (!bookId) return true
+                        return !failedProgressBooks.has(bookId)
+                    }
+                }
+            })()
+        }
+        return this._recoveryBarrierPromise
     }
 
     initDOM() {
@@ -5670,84 +5704,94 @@ class UniversalReaderApp {
             this.dom.welcomeModalBackdrop.style.display = 'none'
         }
 
-        // 4. Fetch snapshot with content identity
-        const snapshot = await db.getBookFileSnapshot(bookId)
-        if (!readerSession.isCurrent()) return
-        if (!snapshot || !snapshot.blob) {
-            this.showToast('无法读取书籍文件数据', '⚠️')
-            return this.closeReader()
-        }
-
-        const bookData = (typeof bookOrId === 'object' && bookOrId !== null && bookOrId.title)
-            ? { ...snapshot, ...bookOrId }
-            : (await db.getBook(bookId)) || snapshot
-        if (!readerSession.isCurrent()) return
-
-        if (bookData.isCloudOnly) {
-            return this.handleCloudBookClick(bookData)
-        }
-
-        const targetBlob = snapshot.blob
-        if (!targetBlob) {
-            this.showToast('无法读取书籍文件数据', '⚠️')
-            return this.closeReader()
-        }
-
-        // Accurately resolve book format - fallback to 'epub', NEVER default to 'pdf'
-        let safeFormat = (bookData.format || snapshot.format || '').trim().toLowerCase()
-        if (!safeFormat) {
-            const candidateName = (bookData.filename || snapshot.filename || bookData.title || (targetBlob instanceof File ? targetBlob.name : '') || '').toLowerCase()
-            const extMatch = candidateName.match(/\.([a-z0-9]+)$/i)
-            if (extMatch) {
-                safeFormat = extMatch[1].toLowerCase()
-            } else if (targetBlob?.type === 'application/pdf') {
-                safeFormat = 'pdf'
-            } else if (targetBlob?.type === 'application/epub+zip') {
-                safeFormat = 'epub'
-            } else {
-                safeFormat = 'epub'
-            }
-        }
-
-        const baseTitle = (bookData.title || snapshot.title || 'document').replace(/\.[^/.]+$/, '').trim() || 'document'
-        const safeFileName = bookData.filename || snapshot.filename || `${baseTitle}.${safeFormat}`
-        const isPdf = safeFormat === 'pdf' || safeFileName.toLowerCase().endsWith('.pdf')
-        const safeFileType = isPdf ? 'application/pdf' : (safeFormat === 'epub' ? 'application/epub+zip' : (targetBlob.type || ''))
-
-        const fileObj = (targetBlob instanceof File && targetBlob.name && !targetBlob.name.toLowerCase().endsWith('.pdf') && !isPdf)
-            ? targetBlob
-            : new File([targetBlob], safeFileName, { type: safeFileType })
-
-        readerSession.bookData = bookData
-        readerSession.snapshot = snapshot
-        this.currentBookId = bookId
-        this.currentBookData = bookData
-        this._currentSnapshot = snapshot
-        this.currentLocation = null
-        this.currentPdfPageIndex = 0
-
-        // Switch View
-        this.dom.readerView?.classList.remove('closing')
-        this.dom.bookshelfView.style.display = 'none'
-        this.dom.readerView.style.display = 'block'
-        this.dom.readerView.classList.add('active')
-        this.dom.readerBookTitle.innerText = bookData.title || snapshot.title || '阅读'
-
-        // Clean up previous views if any
-        if (this.pdfViewport && this.pdfViewport !== readerSession.viewport) {
-            this.pdfViewport.destroy()
-            this.pdfViewport = null
-        }
-        if (this.dom.pdfZoomBar) {
-            this.dom.pdfZoomBar.style.display = 'none'
-        }
-        if (this.foliateView && this.foliateView !== readerSession.view) {
-            this.foliateView.close?.()
-            this.foliateView.remove?.()
-            this.foliateView = null
-        }
-
         try {
+            // Ensure recovery barrier has settled before reading book data
+            const barrierResult = await this.ensureRecoveryBarrier()
+            if (!readerSession.isCurrent()) return
+
+            if (barrierResult?.canProceedSafely && !barrierResult.canProceedSafely(bookId)) {
+                this.showToast('上次阅读进度恢复未完成，保留备份待重试', '⚠️')
+            }
+
+            // 4. Fetch snapshot with content identity
+            const snapshot = await db.getBookFileSnapshot(bookId)
+            if (!readerSession.isCurrent()) return
+
+            const bookData = (typeof bookOrId === 'object' && bookOrId !== null && bookOrId.title)
+                ? { ...snapshot, ...bookOrId }
+                : (await db.getBook(bookId)) || snapshot
+            if (!readerSession.isCurrent()) return
+
+            // Handle cloud-only books before requiring local Blob
+            if (bookData?.isCloudOnly) {
+                return this.handleCloudBookClick(bookData)
+            }
+
+            if (!snapshot || !snapshot.blob) {
+                this.showToast('无法读取书籍文件数据', '⚠️')
+                return this.closeReader()
+            }
+
+            const targetBlob = snapshot.blob
+            if (!targetBlob) {
+                this.showToast('无法读取书籍文件数据', '⚠️')
+                return this.closeReader()
+            }
+
+            // Accurately resolve book format - fallback to 'epub', NEVER default to 'pdf'
+            let safeFormat = (bookData.format || snapshot.format || '').trim().toLowerCase()
+            if (!safeFormat) {
+                const candidateName = (bookData.filename || snapshot.filename || bookData.title || (targetBlob instanceof File ? targetBlob.name : '') || '').toLowerCase()
+                const extMatch = candidateName.match(/\.([a-z0-9]+)$/i)
+                if (extMatch) {
+                    safeFormat = extMatch[1].toLowerCase()
+                } else if (targetBlob?.type === 'application/pdf') {
+                    safeFormat = 'pdf'
+                } else if (targetBlob?.type === 'application/epub+zip') {
+                    safeFormat = 'epub'
+                } else {
+                    safeFormat = 'epub'
+                }
+            }
+
+            const baseTitle = (bookData.title || snapshot.title || 'document').replace(/\.[^/.]+$/, '').trim() || 'document'
+            const safeFileName = bookData.filename || snapshot.filename || `${baseTitle}.${safeFormat}`
+            const isPdf = safeFormat === 'pdf' || safeFileName.toLowerCase().endsWith('.pdf')
+            const safeFileType = isPdf ? 'application/pdf' : (safeFormat === 'epub' ? 'application/epub+zip' : (targetBlob.type || ''))
+
+            const fileObj = (targetBlob instanceof File && targetBlob.name && !targetBlob.name.toLowerCase().endsWith('.pdf') && !isPdf)
+                ? targetBlob
+                : new File([targetBlob], safeFileName, { type: safeFileType })
+
+            readerSession.bookData = bookData
+            readerSession.snapshot = snapshot
+            this.currentBookId = bookId
+            this.currentBookData = bookData
+            this._currentSnapshot = snapshot
+            this.currentLocation = null
+            this.currentPdfPageIndex = 0
+
+            // Switch View
+            this.dom.readerView?.classList.remove('closing')
+            this.dom.bookshelfView.style.display = 'none'
+            this.dom.readerView.style.display = 'block'
+            this.dom.readerView.classList.add('active')
+            this.dom.readerBookTitle.innerText = bookData.title || snapshot.title || '阅读'
+
+            // Clean up previous views if any
+            if (this.pdfViewport && this.pdfViewport !== readerSession.viewport) {
+                this.pdfViewport.destroy()
+                this.pdfViewport = null
+            }
+            if (this.dom.pdfZoomBar) {
+                this.dom.pdfZoomBar.style.display = 'none'
+            }
+            if (this.foliateView && this.foliateView !== readerSession.view) {
+                this.foliateView.close?.()
+                this.foliateView.remove?.()
+                this.foliateView = null
+            }
+
             if (isPdf) {
                 // Independent PDF Viewport (no iframe sandbox)
                 const nativePath = snapshot.nativePath || await db.getBookNativePath(bookId)
@@ -6246,10 +6290,11 @@ class UniversalReaderApp {
             // Start Reading Session & Timer
             const startFrac = (isProgressIdentityMatching && bookData.progress?.fraction) || 0
             tracker.startSession(bookId, bookData.title, startFrac)
-            tracker.onTickCallback = ({ seconds, isIdle }) => {
+            tracker.onTickCallback = ({ seconds, sessionSeconds, todaySeconds, isIdle }) => {
                 if (this.dom.readerLiveTimer && readerSession.isCurrent()) {
-                    const timeText = seconds < 60 ? '< 1分钟' : `${Math.floor(seconds / 60)}分钟`
-                    this.dom.readerLiveTimer.innerText = isIdle ? `⏱️ 暂停中 (${timeText})` : `⏱️ ${timeText}`
+                    const activeSecs = sessionSeconds != null ? sessionSeconds : seconds
+                    const timeText = activeSecs < 60 ? '< 1分钟' : `${Math.floor(activeSecs / 60)}分钟`
+                    this.dom.readerLiveTimer.innerText = isIdle ? `⏱️ 暂停中 (本次 ${timeText})` : `⏱️ 本次 ${timeText}`
                 }
             }
 
@@ -6287,16 +6332,19 @@ class UniversalReaderApp {
     async flushReaderStateOnExit(requestId = null) {
         if (typeof requestId === 'string' && requestId.length > 0) {
             this._activeFlushRequests = this._activeFlushRequests || new Map()
+            this._completedFlushRequests = this._completedFlushRequests || new Map()
+
             if (this._activeFlushRequests.has(requestId)) {
                 return this._activeFlushRequests.get(requestId)
+            }
+            if (this._completedFlushRequests.has(requestId)) {
+                return this._completedFlushRequests.get(requestId)
             }
         }
 
         const doFlush = async () => {
             let progressBackupSaved = false
             let trackerBackupSaved = false
-            let progressSaved = false
-            let trackerSaved = false
 
             // 1. Synchronous capture and pre-await backup
             try {
@@ -6331,34 +6379,90 @@ class UniversalReaderApp {
                 console.warn('flushReaderStateOnExit: tracker backup failed:', tErr)
             }
 
-            // 2. Decoupled asynchronous flushes
-            try {
-                if (activeBookId && progressSnapshot) {
-                    await db.updateBookProgress(activeBookId, progressSnapshot)
-                    progressSaved = true
-                    try {
-                        db.clearPendingProgressBackup(activeBookId, progressSnapshot.updatedAt)
-                    } catch (cErr) {}
+            // 2. Decoupled and truly independent asynchronous flushes with bounded timeout (<= 1200ms)
+            // Rust closes process after 1500ms; flushes must complete or report backup within 1200ms
+            const TIMEOUT_MS = 1200
+            let progressTimedOut = false
+
+            const rawProgressPromise = (async () => {
+                if (!activeBookId || !progressSnapshot) {
+                    return { status: 'not_applicable', saved: false }
                 }
-            } catch (pErr) {
-                console.warn('flushReaderStateOnExit: db.updateBookProgress failed:', pErr)
-            }
+                try {
+                    const res = await db.updateBookProgress(activeBookId, progressSnapshot)
+                    if (res !== false && res !== null) {
+                        if (!progressTimedOut) {
+                            try {
+                                db.clearPendingProgressBackup(activeBookId, progressSnapshot.updatedAt, progressSnapshot._backupId)
+                            } catch (cErr) {}
+                        }
+                        return { status: 'committed', saved: true }
+                    } else {
+                        return { status: progressBackupSaved ? 'backed_up' : 'failed', saved: false }
+                    }
+                } catch (pErr) {
+                    console.warn('flushReaderStateOnExit: db.updateBookProgress failed:', pErr)
+                    return { status: progressBackupSaved ? 'backed_up' : 'failed', saved: false }
+                }
+            })()
 
-            try {
-                await tracker.endSession(endFrac)
-                trackerSaved = true
-            } catch (eErr) {
-                console.warn('flushReaderStateOnExit: tracker.endSession failed:', eErr)
-            }
+            const boundedProgressPromise = Promise.race([
+                rawProgressPromise,
+                new Promise(resolve => setTimeout(() => {
+                    progressTimedOut = true
+                    resolve({ status: progressBackupSaved ? 'backed_up' : 'failed', saved: false, timedOut: true })
+                }, TIMEOUT_MS))
+            ])
 
-            // 3. Status determination
+            const rawTrackerPromise = (async () => {
+                if (!tracker.isTracking && !tracker._sessionQueueTail) {
+                    return { status: 'not_applicable', saved: false }
+                }
+                try {
+                    const res = await tracker.endSession(endFrac, activeBookId)
+                    if (res?.status === 'filtered_short_session') {
+                        return { status: 'filtered_short_session', saved: false }
+                    }
+                    if (res?.status === 'not_applicable') {
+                        return { status: 'not_applicable', saved: false }
+                    }
+                    return { status: 'committed', saved: true }
+                } catch (eErr) {
+                    console.warn('flushReaderStateOnExit: tracker.endSession failed:', eErr)
+                    return { status: trackerBackupSaved ? 'backed_up' : 'failed', saved: false }
+                }
+            })()
+
+            const boundedTrackerPromise = Promise.race([
+                rawTrackerPromise,
+                new Promise(resolve => setTimeout(() => {
+                    resolve({ status: trackerBackupSaved ? 'backed_up' : 'failed', saved: false, timedOut: true })
+                }, TIMEOUT_MS))
+            ])
+
+            const [pRes, tRes] = await Promise.all([boundedProgressPromise, boundedTrackerPromise])
+
+            // 3. Status determination & synthesis
             let status = 'database_success'
-            if (progressSnapshot && !progressSaved) {
-                status = progressBackupSaved ? 'recovery_backup_success' : 'failed'
-            } else if (!trackerSaved && trackerBackupSaved) {
-                status = 'recovery_backup_success'
-            } else if (!progressSaved && !trackerSaved && !progressBackupSaved && !trackerBackupSaved) {
+            const hasFailure = pRes.status === 'failed' || tRes.status === 'failed'
+            const hasBackup = pRes.status === 'backed_up' || tRes.status === 'backed_up'
+
+            if (hasFailure) {
                 status = 'failed'
+            } else if (hasBackup) {
+                status = 'recovery_backup_success'
+            } else {
+                status = 'database_success'
+            }
+
+            const result = {
+                status,
+                progressStatus: pRes.status,
+                trackerStatus: tRes.status,
+                progressSaved: pRes.saved,
+                trackerSaved: tRes.saved,
+                progressBackupSaved,
+                trackerBackupSaved
             }
 
             // 4. Close handshake completion: Only call if requestId is a non-empty string
@@ -6368,15 +6472,16 @@ class UniversalReaderApp {
                 } catch (fErr) {
                     console.warn('flushReaderStateOnExit: flushComplete failed:', fErr)
                 }
+
+                this._completedFlushRequests = this._completedFlushRequests || new Map()
+                this._completedFlushRequests.set(requestId, result)
+                if (this._completedFlushRequests.size > 100) {
+                    const oldest = this._completedFlushRequests.keys().next().value
+                    this._completedFlushRequests.delete(oldest)
+                }
             }
 
-            return {
-                status,
-                progressSaved,
-                trackerSaved,
-                progressBackupSaved,
-                trackerBackupSaved
-            }
+            return result
         }
 
         if (typeof requestId === 'string' && requestId.length > 0) {
