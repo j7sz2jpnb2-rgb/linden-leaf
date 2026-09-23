@@ -242,6 +242,17 @@ class PlatformBridge {
         }
     }
 
+    /** Reclaim an orphaned or obsolete snapshot from native cache. */
+    async reclaimSnapshot(snapshotPath) {
+        if (!this.isTauri || !snapshotPath) return false;
+        try {
+            return await this._invokeTauri('mupdf_reclaim_snapshot', { snapshotPath });
+        } catch (err) {
+            console.warn('[PlatformBridge] Snapshot reclaim failed:', snapshotPath, err);
+            return false;
+        }
+    }
+
     // ==========================================
     // 2. Window Controls & States
     // ==========================================

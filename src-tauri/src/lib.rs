@@ -171,6 +171,7 @@ pub fn run() {
             mupdf_render_page,
             mupdf_cancel_render,
             mupdf_close_document,
+            mupdf_reclaim_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Linden Leaf Tauri application");

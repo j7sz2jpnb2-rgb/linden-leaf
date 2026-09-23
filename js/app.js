@@ -1448,13 +1448,17 @@ class UniversalReaderApp {
                         let successCount = 0
                         for (let i = 0; i < total; i++) {
                             const f = fileItems[i]
+                            let nativeSnapshotPath = null
                             try {
                                 if (total > 1) {
                                     this.showToast(`正在导入 (${i + 1}/${total}): ${f.filename}...`, '⏳')
                                 }
-                                let nativeSnapshotPath = await platformBridge.stagePdfSource(f.filePath)
+                                nativeSnapshotPath = await platformBridge.stagePdfSource(f.filePath)
                                 let buffer = nativeSnapshotPath ? await platformBridge.readFileBuffer(nativeSnapshotPath) : null
                                 if (!buffer || buffer.byteLength === 0 || buffer.length === 0) {
+                                    if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
+                                        platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
+                                    }
                                     nativeSnapshotPath = null
                                     buffer = f.buffer || (window.electronAPI.readFileBuffer ? await window.electronAPI.readFileBuffer(f.filePath) : null)
                                 }
@@ -1470,10 +1474,16 @@ class UniversalReaderApp {
                                     await this.processAndSaveBook(fileObj, undefined, f.filePath, nativeSnapshotPath)
                                     successCount++
                                 } else {
+                                    if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
+                                        platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
+                                    }
                                     console.warn('[Import] Failed to read buffer for file:', f.filePath)
                                     this.showToast(`无法读取文件: ${f.filename}`, '⚠️')
                                 }
                             } catch (itemErr) {
+                                if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
+                                    platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
+                                }
                                 console.error(`[Import] Failed to import ${f.filename}:`, itemErr)
                                 this.showToast(`导入 ${f.filename} 失败: ${itemErr.message || itemErr}`, '⚠️')
                             }
@@ -1506,10 +1516,16 @@ class UniversalReaderApp {
         const handleOpenFile = (fileInfo) => {
             this._fileOpenQueue = this._fileOpenQueue.then(async () => {
                 if (!fileInfo) return
+                let nativeSnapshotPath = null
                 try {
-                    let nativeSnapshotPath = await platformBridge.stagePdfSource(fileInfo.filePath)
+                    nativeSnapshotPath = await platformBridge.stagePdfSource(fileInfo.filePath)
                     let buf = nativeSnapshotPath ? await platformBridge.readFileBuffer(nativeSnapshotPath) : fileInfo.buffer
-                    if (!buf || buf.byteLength === 0 || buf.length === 0) nativeSnapshotPath = null
+                    if (!buf || buf.byteLength === 0 || buf.length === 0) {
+                        if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
+                            platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
+                        }
+                        nativeSnapshotPath = null
+                    }
                     if ((!buf || buf.byteLength === 0 || buf.length === 0) && fileInfo.filePath && platformBridge.readFileBuffer) {
                         buf = await platformBridge.readFileBuffer(fileInfo.filePath)
                     }
@@ -1556,6 +1572,9 @@ class UniversalReaderApp {
                         await this.openBook(bookId)
                     }
                 } catch (err) {
+                    if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
+                        platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
+                    }
                     console.error('Failed to open file from OS event:', err)
                 }
             }).catch(err => {

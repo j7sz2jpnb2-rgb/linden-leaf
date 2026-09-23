@@ -284,12 +284,14 @@ export const saveBook = async bookData => {
                 }
             }
 
+            let previousSnapshotPath = null
             if ((blob || nativePath) && meta.id) {
                 const fileStore = tx.objectStore('book_files')
                 const fileReq = fileStore.get(meta.id)
                 fileReq.onsuccess = () => {
                     const local = fileReq.result || { id: meta.id }
                     if (blob) {
+                        previousSnapshotPath = local.nativeSnapshotPath || null
                         local.blob = blob
                         local.blobRevision = generateRevision()
                         local.revisionOrigin = origin
@@ -307,7 +309,26 @@ export const saveBook = async bookData => {
             if (storeNames.includes('deleted_records') && meta.id) {
                 tx.objectStore('deleted_records').delete(meta.id)
             }
-            tx.oncomplete = () => resolve(meta.id)
+            tx.oncomplete = () => {
+                if (previousSnapshotPath && previousSnapshotPath !== nativeSnapshotPath &&
+                    typeof platformBridge !== 'undefined' && platformBridge.reclaimSnapshot) {
+                    openDB().then(db2 => {
+                        if (!db2.objectStoreNames.contains('book_files')) return
+                        const checkTx = db2.transaction(['book_files'], 'readonly')
+                        const req = checkTx.objectStore('book_files').getAll()
+                        req.onsuccess = () => {
+                            const files = req.result || []
+                            const isStillReferenced = files.some(f => f.id !== meta.id && f.nativeSnapshotPath === previousSnapshotPath)
+                            if (!isStillReferenced) {
+                                platformBridge.reclaimSnapshot(previousSnapshotPath).catch(err => {
+                                    console.warn('[db.saveBook] Replaced snapshot reclaim notice:', err)
+                                })
+                            }
+                        }
+                    }).catch(() => {})
+                }
+                resolve(meta.id)
+            }
             tx.onerror = () => reject(tx.error || new Error('Failed to save book'))
             tx.onabort = () => reject(tx.error || new Error('Transaction aborted'))
         } catch (err) {
@@ -946,8 +967,14 @@ export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Dat
                     }
                 }
             }
+            let oldSnapshotPath = null
             if (storeNames.includes('book_files')) {
-                tx.objectStore('book_files').delete(id)
+                const fileStore = tx.objectStore('book_files')
+                const fileReq = fileStore.get(id)
+                fileReq.onsuccess = () => {
+                    oldSnapshotPath = fileReq.result?.nativeSnapshotPath || null
+                    fileStore.delete(id)
+                }
             }
             
             // Safely clean up associated bookmarks, highlights, and pdf_drawings
@@ -978,7 +1005,25 @@ export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Dat
             cleanStoreByIndex('highlights', 'bookId')
             cleanStoreByIndex('pdf_drawings', 'bookId')
 
-            tx.oncomplete = () => resolve(true)
+            tx.oncomplete = () => {
+                if (oldSnapshotPath && typeof platformBridge !== 'undefined' && platformBridge.reclaimSnapshot) {
+                    openDB().then(db2 => {
+                        if (!db2.objectStoreNames.contains('book_files')) return
+                        const checkTx = db2.transaction(['book_files'], 'readonly')
+                        const req = checkTx.objectStore('book_files').getAll()
+                        req.onsuccess = () => {
+                            const files = req.result || []
+                            const isStillReferenced = files.some(f => f.id !== id && f.nativeSnapshotPath === oldSnapshotPath)
+                            if (!isStillReferenced) {
+                                platformBridge.reclaimSnapshot(oldSnapshotPath).catch(err => {
+                                    console.warn('[db.deleteBook] Safe snapshot reclaim notice:', err)
+                                })
+                            }
+                        }
+                    }).catch(() => {})
+                }
+                resolve(true)
+            }
             tx.onerror = () => reject(tx.error || new Error(`Failed to delete book ${id}`))
             tx.onabort = () => reject(tx.error || new Error(`Delete transaction aborted for book ${id}`))
         } catch (err) {

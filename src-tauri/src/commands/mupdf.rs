@@ -166,6 +166,7 @@ mod imp {
         tx: mpsc::Sender<DocCommand>,
         cancels: Arc<Mutex<HashMap<String, Arc<CancelHandle>>>>,
         num_pages: usize,
+        file_path: PathBuf,
     }
 
     enum DocCommand {
@@ -427,35 +428,50 @@ mod imp {
 
     #[tauri::command]
     pub async fn mupdf_open_document(app: tauri::AppHandle, file_path: String, password: Option<String>, expected_size: Option<u64>) -> Result<DocumentMetadata, String> {
-        if file_path.is_empty() || !Path::new(&file_path).is_file() {
-            return Err("MuPDF requires a readable local file path".into());
+        let size = expected_size.ok_or_else(|| "Native PDF open requires expectedSize to verify snapshot boundary".to_string())?;
+        if size == 0 {
+            return Err("Native PDF snapshot size cannot be zero".into());
         }
-        if let Some(size) = expected_size {
-            let root = std::fs::canonicalize(native_snapshot_dir(&app)?)
-                .map_err(|e| format!("Native PDF cache unavailable: {e}"))?;
-            let actual_path = std::fs::canonicalize(&file_path)
-                .map_err(|e| format!("Native PDF snapshot unavailable: {e}"))?;
-            if actual_path.parent() != Some(root.as_path()) {
-                return Err("Native PDF snapshot is outside the app cache".into());
-            }
-            let actual = std::fs::metadata(&file_path).map_err(|e| e.to_string())?.len();
-            if actual != size { return Err("Native PDF snapshot size differs from the indexed Blob".into()); }
+        if file_path.trim().is_empty() {
+            return Err("MuPDF requires a local file path".into());
+        }
+        let raw_path = Path::new(&file_path);
+        if !raw_path.exists() || !raw_path.is_file() {
+            return Err("MuPDF requires an existing readable local file".into());
+        }
+        let root = std::fs::canonicalize(native_snapshot_dir(&app)?)
+            .map_err(|e| format!("Native PDF cache unavailable: {e}"))?;
+        let actual_path = std::fs::canonicalize(raw_path)
+            .map_err(|e| format!("Native PDF snapshot unavailable: {e}"))?;
+        if actual_path.parent() != Some(root.as_path()) {
+            return Err("Native PDF snapshot is outside the app cache".into());
+        }
+        let file_name = actual_path.file_name().and_then(|s| s.to_str()).ok_or("Invalid snapshot filename")?;
+        if !file_name.starts_with("snapshot-") || !file_name.ends_with(".pdf") {
+            return Err("Invalid native PDF snapshot file format".into());
+        }
+        let actual_size = std::fs::metadata(&actual_path).map_err(|e| e.to_string())?.len();
+        if actual_size != size {
+            return Err("Native PDF snapshot size differs from the indexed Blob".into());
         }
         let doc_id = make_doc_id();
         let (tx, rx) = mpsc::channel();
         let cancels = Arc::new(Mutex::new(HashMap::new()));
         let (ready_tx, ready_rx) = oneshot::channel();
         let worker_cancels = cancels.clone();
-        let worker_path = file_path.clone();
+        let worker_path = actual_path.to_string_lossy().into_owned();
         thread::Builder::new().name(format!("ll-mupdf-{doc_id}")).spawn(move || {
             worker(worker_path, password.unwrap_or_default(), rx, worker_cancels, ready_tx)
         }).map_err(|e| format!("Failed to start MuPDF worker: {e}"))?;
 
         let (num_pages, bounds, native_title, native_author) = ready_rx.await.map_err(|_| "MuPDF worker exited during open".to_string())??;
-        store().lock().map_err(|e| e.to_string())?.insert(doc_id.clone(), DocumentSession { tx, cancels, num_pages });
+        store().lock().map_err(|e| e.to_string())?.insert(
+            doc_id.clone(),
+            DocumentSession { tx, cancels, num_pages, file_path: actual_path.clone() },
+        );
         let width = (bounds[2] - bounds[0]).abs().max(1.0);
         let height = (bounds[3] - bounds[1]).abs().max(1.0);
-        let title = native_title.or_else(|| Path::new(&file_path).file_stem().map(|x| x.to_string_lossy().into_owned()));
+        let title = native_title.or_else(|| actual_path.file_stem().map(|x| x.to_string_lossy().into_owned()));
         Ok(DocumentMetadata {
             doc_id, num_pages, default_width: width, default_height: height,
             title, author: native_author, format: "PDF".into(), native_backend: true,
@@ -544,6 +560,57 @@ mod imp {
             true
         } else { false }
     }
+
+    #[tauri::command]
+    pub async fn mupdf_reclaim_snapshot(app: tauri::AppHandle, snapshot_path: String) -> Result<bool, String> {
+        tauri::async_runtime::spawn_blocking(move || {
+            let path_str = snapshot_path.trim();
+            if path_str.is_empty() {
+                return Err("Snapshot path cannot be empty".into());
+            }
+            if path_str.contains('*') || path_str.contains('?') {
+                return Err("Wildcards are not permitted in snapshot reclaim".into());
+            }
+            let raw_path = Path::new(path_str);
+            if !raw_path.exists() {
+                return Ok(false);
+            }
+            let root = std::fs::canonicalize(native_snapshot_dir(&app)?)
+                .map_err(|e| format!("Native PDF cache unavailable: {e}"))?;
+            let actual_path = std::fs::canonicalize(raw_path)
+                .map_err(|e| format!("Cannot resolve snapshot path: {e}"))?;
+
+            if actual_path.parent() != Some(root.as_path()) {
+                return Err("Refusing to reclaim file outside native PDF cache".into());
+            }
+            if !actual_path.is_file() {
+                return Err("Target snapshot is not a regular file".into());
+            }
+            let file_name = actual_path.file_name().and_then(|s| s.to_str())
+                .ok_or_else(|| "Invalid snapshot filename".to_string())?;
+            if !file_name.starts_with("snapshot-") || (!file_name.ends_with(".pdf") && !file_name.ends_with(".part")) {
+                return Err("Refusing to reclaim non-snapshot file".into());
+            }
+            if let Ok(store) = store().lock() {
+                if store.values().any(|s| s.file_path == actual_path) {
+                    return Err("Cannot reclaim snapshot: actively in use by open document session".into());
+                }
+            }
+            let mut last_err = None;
+            for attempt in 0..5 {
+                match std::fs::remove_file(&actual_path) {
+                    Ok(()) => return Ok(true),
+                    Err(e) => {
+                        last_err = Some(e);
+                        if attempt < 4 {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                    }
+                }
+            }
+            Err(format!("Failed to remove snapshot file: {}", last_err.unwrap()))
+        }).await.map_err(|e| format!("Snapshot reclaim worker failed: {e}"))?
+    }
 }
 
 #[cfg(not(ll_mupdf))]
@@ -563,6 +630,7 @@ mod imp {
     #[tauri::command] pub async fn mupdf_get_outline_flat(_doc_id: String) -> Result<Vec<FlatOutlineItem>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_links(_doc_id: String, _page_index: usize) -> Result<Vec<serde_json::Value>, String> { unavailable() }
     #[tauri::command] pub fn mupdf_close_document(_doc_id: String) -> bool { false }
+    #[tauri::command] pub async fn mupdf_reclaim_snapshot(_app: tauri::AppHandle, _snapshot_path: String) -> Result<bool, String> { unavailable() }
 }
 
 pub use imp::*;

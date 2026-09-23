@@ -27,7 +27,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LL_MUPDF_INCLUDE");
     println!("cargo:rerun-if-env-changed=LL_MUPDF_LIB_DIR");
     println!("cargo:rerun-if-env-changed=LL_MUPDF_LIBS");
+    println!("cargo:rerun-if-env-changed=LL_REQUIRE_NATIVE_MUPDF");
+    println!("cargo:rerun-if-env-changed=LL_MUPDF_REQUIRED");
     println!("cargo:rerun-if-env-changed=LINDEN_NATIVE_CACHE_DIR");
+
+    let require_native = env::var("LL_REQUIRE_NATIVE_MUPDF").is_ok()
+        || env::var("LL_MUPDF_REQUIRED").is_ok();
 
     let include = env::var_os("LL_MUPDF_INCLUDE").map(PathBuf::from)
         .or_else(|| {
@@ -51,13 +56,27 @@ fn main() {
             .compile("ll_mupdf_bridge");
 
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
-        let libs = env::var("LL_MUPDF_LIBS").unwrap_or_else(|_| "mupdf".into());
+        let default_libs = if cfg!(windows) {
+            "libmupdf;libthirdparty;libresources"
+        } else {
+            "mupdf"
+        };
+        let libs = env::var("LL_MUPDF_LIBS").unwrap_or_else(|_| default_libs.into());
         for lib in libs.split(|c| c == ';' || c == ',').map(str::trim).filter(|x| !x.is_empty()) {
+            if require_native && cfg!(windows) {
+                let candidate = lib_dir.join(format!("{lib}.lib"));
+                if !candidate.exists() {
+                    panic!("FATAL: Native MuPDF library file does not exist: {}", candidate.display());
+                }
+            }
             println!("cargo:rustc-link-lib={lib}");
         }
         println!("cargo:rustc-cfg=ll_mupdf");
         println!("cargo:warning=MuPDF native backend enabled");
     } else {
+        if require_native {
+            panic!("FATAL: Native MuPDF backend is strictly required (LL_REQUIRE_NATIVE_MUPDF=1), but LL_MUPDF_INCLUDE or LL_MUPDF_LIB_DIR is missing or invalid!");
+        }
         println!("cargo:warning=MuPDF native backend disabled; set LL_MUPDF_INCLUDE and LL_MUPDF_LIB_DIR to enable it");
     }
 
