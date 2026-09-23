@@ -261,6 +261,7 @@ export const saveBook = async bookData => {
                 if (meta.totalReadingSeconds == null) meta.totalReadingSeconds = 0
                 if (!meta.addedAt) meta.addedAt = Date.now()
                 if (meta.lastReadAt === undefined || meta.lastReadAt === null) meta.lastReadAt = 0
+                if (meta.lastOpenedAt === undefined || meta.lastOpenedAt === null) meta.lastOpenedAt = 0
                 if (!meta._preserveUpdatedAt || !meta.updatedAt) {
                     meta.updatedAt = Date.now()
                 }
@@ -684,6 +685,26 @@ export const updateBookProgress = async (id, progressData) => {
 
     _progressQueues.set(id, nextQueue.catch(() => {}))
     return nextQueue
+}
+
+export const recordBookOpened = async (id, openedAt = Date.now()) => {
+    if (!id) return null
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('books', 'readwrite')
+        const store = tx.objectStore('books')
+        const getReq = store.get(id)
+        getReq.onsuccess = () => {
+            const book = getReq.result
+            if (!book) return resolve(null)
+            book.lastOpenedAt = Math.max(book.lastOpenedAt || 0, openedAt)
+            book.updatedAt = Date.now()
+            store.put(book)
+        }
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error || new Error('Failed to record book opened'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted recording book opened'))
+    })
 }
 
 // Progress crash recovery backup

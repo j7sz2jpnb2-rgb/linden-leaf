@@ -4124,7 +4124,13 @@ class UniversalReaderApp {
         if (this.dom.shelfHeaderActions) this.dom.shelfHeaderActions.style.display = 'flex'
         if (this.dom.bookCountFooter) this.dom.bookCountFooter.style.display = 'block'
 
+        this._bookshelfRefreshEpoch = (this._bookshelfRefreshEpoch || 0) + 1
+        const currentRefreshEpoch = this._bookshelfRefreshEpoch
+
         let books = await db.getAllBooks()
+        if (this._bookshelfRefreshEpoch !== currentRefreshEpoch) {
+            return
+        }
         
         // 1. Filter by category
         if (this.shelfCategory === 'favorite') {
@@ -4723,17 +4729,37 @@ class UniversalReaderApp {
             this.dom.heroGreetingSubtitle.innerText = greetingData.subtitle
         }
 
-        // 2. Find Current Read Hero Book (Latest lastReadAt, or first reading book)
-        const readingBooks = (books || []).filter(b => b.progress?.fraction > 0 && b.progress.fraction < 1)
-        readingBooks.sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0))
-        const heroBook = readingBooks[0] || (books && books.length > 0 ? books[0] : null)
+        // 2. Find Current Read Hero Book (Latest lastOpenedAt or lastReadAt, including 0% and 100%)
+        const candidateBooks = (books || []).map(b => ({
+            book: b,
+            effectiveSortTime: Math.max(b.lastOpenedAt || 0, b.lastReadAt || 0)
+        })).filter(item => item.effectiveSortTime > 0)
+        candidateBooks.sort((a, b) => b.effectiveSortTime - a.effectiveSortTime)
+        const heroBook = candidateBooks.length > 0 ? candidateBooks[0].book : (books && books.length > 0 ? books[0] : null)
 
         if (this.dom.heroBookShowcase) {
             if (heroBook) {
-                const fraction = heroBook.progress?.fraction || 0
-                const rawPct = fraction * 100
-                const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
-                const fillPct = Math.min(100, Math.max(0, parseFloat(progressPct) || 0))
+                const rawFraction = Number(heroBook.progress?.fraction)
+                const isFiniteNum = typeof rawFraction === 'number' && Number.isFinite(rawFraction)
+                const clampedFraction = isFiniteNum ? Math.min(1, Math.max(0, rawFraction)) : 0
+                const fillPct = clampedFraction * 100
+                const fillWidth = `${fillPct}%`
+
+                let progressPct
+                if (clampedFraction === 0) {
+                    progressPct = '0'
+                } else if (clampedFraction >= 1) {
+                    progressPct = '100'
+                } else {
+                    const rawPct = clampedFraction * 100
+                    if (rawPct < 1) {
+                        progressPct = rawPct.toFixed(1)
+                    } else {
+                        const rounded = Math.round(rawPct)
+                        progressPct = rounded >= 100 ? '99' : String(rounded)
+                    }
+                }
+
                 const totalSec = heroBook.totalReadingSeconds || 0
                 const readDurationStr = tracker && tracker.formatDuration ? tracker.formatDuration(totalSec) : `${Math.round(totalSec / 60)}分钟`
                 let coverUrl = ''
@@ -4753,7 +4779,7 @@ class UniversalReaderApp {
                             <span class="hero-book-badge"><span class="hero-badge-dot"></span>最近在读</span>
                             <div class="hero-book-title" title="${escapeHTML(heroBook.title)}">${escapeHTML(heroBook.title)}</div>
                             <div class="hero-progress-bar-wrap" style="width: 100%; height: 6px; background: rgba(0, 0, 0, 0.12); border-radius: 3px; overflow: hidden; margin-bottom: 0.55rem; position: relative;">
-                                <div class="hero-progress-bar-fill" style="max-width: ${fillPct}%; width: ${fillPct}% !important; height: 100%;${fillPct > 0 ? ' min-width: 6px;' : ''} background: var(--accent-purple, #da7756) !important; display: block; border-radius: 3px;"></div>
+                                <div class="hero-progress-bar-fill" style="width: ${fillWidth}; max-width: 100%; height: 100%; background: var(--accent-purple, #da7756) !important; display: block; border-radius: 3px;"></div>
                             </div>
                             <div class="hero-book-meta">
                                 已读 ${progressPct}% · 累计阅读 ${readDurationStr}
@@ -6032,6 +6058,9 @@ class UniversalReaderApp {
 
                 // 启动阅读计时
                 tracker.startSession(bookId, bookData.title, initialFrac)
+                db.recordBookOpened(bookId).catch(err => {
+                    console.warn('Failed to record book opened for PDF:', err)
+                })
 
                 setTimeout(() => {
                     if (readerSession.isCurrent() && this.currentBookId === bookId) {
@@ -6282,6 +6311,9 @@ class UniversalReaderApp {
             // Start Reading Session & Timer
             const startFrac = (isProgressIdentityMatching && bookData.progress?.fraction) || 0
             tracker.startSession(bookId, bookData.title, startFrac)
+            db.recordBookOpened(bookId).catch(err => {
+                console.warn('Failed to record book opened for EPUB:', err)
+            })
             tracker.onTickCallback = ({ seconds, sessionSeconds, todaySeconds, isIdle }) => {
                 if (this.dom.readerLiveTimer && readerSession.isCurrent()) {
                     const activeSecs = sessionSeconds != null ? sessionSeconds : seconds
@@ -6578,23 +6610,42 @@ class UniversalReaderApp {
             this.sidebarUserCollapsed = true
             document.getElementById('bookshelf-view')?.classList.add('sidebar-collapsed')
             this.updateSettingsUI()
-            this.refreshBookshelf()
             if (this.dom.booksWorkspace) {
                 this.dom.booksWorkspace.scrollTop = 0
             }
         }
 
         // 9. Asynchronously flush progress and end tracker using captured parameters
-        if (closingBookId && closingProgress) {
-            db.updateBookProgress(closingBookId, closingProgress).catch(err => {
-                console.warn('Failed to flush final book progress:', err)
+        const closingEpoch = this._currentBookEpoch
+
+        // End tracker independently (do not block progress update)
+        if (closingLocation?.fraction != null) {
+            tracker.endSession(closingLocation.fraction).catch(err => {
+                console.warn('Failed to end tracker session:', err)
+            })
+        } else {
+            tracker.endSession().catch(err => {
+                console.warn('Failed to end tracker session:', err)
             })
         }
-        if (closingLocation?.fraction != null) {
-            await tracker.endSession(closingLocation.fraction)
-        } else {
-            await tracker.endSession()
-        }
+
+        // Flush final progress to DB, then refresh bookshelf guarded by session epoch
+        const progressPromise = (closingBookId && closingProgress)
+            ? db.updateBookProgress(closingBookId, closingProgress)
+            : Promise.resolve()
+
+        progressPromise.then(() => {
+            if (this._currentBookEpoch === closingEpoch && !this._activeSession) {
+                this.refreshBookshelf().catch(err => {
+                    console.warn('Failed to refresh bookshelf after book close:', err)
+                })
+            }
+        }).catch(err => {
+            console.warn('Failed to flush final book progress:', err)
+            if (this._currentBookEpoch === closingEpoch && !this._activeSession) {
+                this.refreshBookshelf().catch(() => {})
+            }
+        })
 
         if (this.syncConfig?.enabled && this.syncConfig?.autoSyncOnBookClose) {
             this.triggerSilentBackgroundSync()
