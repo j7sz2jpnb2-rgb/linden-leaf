@@ -57,7 +57,7 @@ export function analyzePortConnections(connections, targetPorts, appPids, queryF
 
 async function queryListeningConnections(ports) {
     const portList = ports.join(',');
-    const cmd = `powershell -NoProfile -Command "try { $conns = Get-NetTCPConnection -LocalPort ${portList} -ErrorAction Stop | Select-Object LocalPort, OwningProcess, State; if ($conns) { ConvertTo-Json -InputObject $conns -Compress } else { '[]' } } catch [System.Management.Automation.ItemNotFoundException] { '[]' } catch { if ($_.Exception.Message -match 'No matching') { '[]' } else { Write-Error $_; exit 2 } }"`;
+    const cmd = `powershell -NoProfile -Command "try { $conns = Get-NetTCPConnection -LocalPort ${portList} -ErrorAction Stop | Select-Object LocalPort, OwningProcess, State; if ($conns) { ConvertTo-Json -InputObject $conns -Compress } else { '[]' } } catch [System.Management.Automation.ItemNotFoundException] { '[]' } catch { if ($_.Exception.Message -match 'No matching|找不到|ItemNotFound') { '[]' } else { Write-Error $_; exit 2 } }"`;
     try {
         const output = execSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
         if (!output || output === '[]') return [];

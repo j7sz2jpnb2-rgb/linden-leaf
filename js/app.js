@@ -9507,6 +9507,8 @@ class UniversalReaderApp {
                 if (this.dom.btnCheckUpdatesText) this.dom.btnCheckUpdatesText.innerText = '检查更新'
             }
         }
+    }
+
     async getBuildInfo() {
         if (this._buildInfo) return this._buildInfo
         try {
