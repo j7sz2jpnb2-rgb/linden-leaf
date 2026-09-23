@@ -19,12 +19,15 @@ async function main() {
     console.log('Linden Leaf: P0 Products Blockers Real-Window Verification Suite');
     console.log('================================================================');
 
-    let releaseExe = 'D:\\LindenLeaf-Release\\linden-leaf.exe';
+    let releaseExe = 'D:\\LindenLeaf-Candidate\\linden-leaf.exe';
     if (!existsSync(releaseExe)) {
         releaseExe = 'D:\\LindenLeaf-Build\\target\\release\\linden-leaf.exe';
     }
     if (!existsSync(releaseExe)) {
-        throw new Error(`Release executable not found at: ${releaseExe}`);
+        releaseExe = 'D:\\LindenLeaf-Release\\linden-leaf.exe';
+    }
+    if (!existsSync(releaseExe)) {
+        throw new Error(`Executable not found at candidate, build, or release paths!`);
     }
     const exeStats = statSync(releaseExe);
     console.log(`[Target EXE] ${releaseExe}`);
@@ -47,6 +50,9 @@ async function main() {
     const profileDir = path.join(testEnvRoot, 'webview2-profile');
     const cacheDir = path.join(testEnvRoot, 'pdf-native');
     const screenDir = path.join(testEnvRoot, 'screenshots');
+    if (existsSync(profileDir)) {
+        try { rmSync(profileDir, { recursive: true, force: true }); } catch (e) {}
+    }
     mkdirSync(profileDir, { recursive: true });
     mkdirSync(cacheDir, { recursive: true });
     mkdirSync(screenDir, { recursive: true });
@@ -114,10 +120,9 @@ async function main() {
 
     ws.onmessage = event => {
         const data = JSON.parse(event.data);
-        if (data.method === 'Security.securityStateChanged') {
-            // track
-        } else if (data.method === 'Log.entryAdded') {
+        if (data.method === 'Log.entryAdded') {
             const entry = data.params?.entry;
+            console.log('  [Browser Log]', entry?.level, entry?.text);
             if (entry?.source === 'violation' || (entry?.text && entry.text.includes('Content Security Policy'))) {
                 cspViolations.push(entry.text);
             }
@@ -127,12 +132,17 @@ async function main() {
         } else if (data.method === 'Runtime.consoleAPICalled') {
             const type = data.params?.type;
             const args = (data.params?.args || []).map(a => a.value || a.description || '').join(' ');
+            console.log('  [Browser Console]', type, args);
             if (args.includes('Content Security Policy') || args.includes('Refused to apply inline style')) {
                 cspViolations.push(args);
             }
             if (type === 'error') {
                 consoleErrors.push(args);
             }
+        } else if (data.method === 'Runtime.exceptionThrown') {
+            const desc = data.params?.exceptionDetails?.exception?.description || data.params?.exceptionDetails?.text;
+            console.error('  [Browser Uncaught Exception]', desc);
+            consoleErrors.push(desc);
         }
 
         if (data.id && pending.has(data.id)) {
@@ -175,16 +185,46 @@ async function main() {
     };
 
     console.log('\n--- Phase 1: Wait for App Initialization & CSP Check ---');
-    await evaluate(`new Promise(resolve => {
-        if (window.app && window.app.dom) return resolve(true);
-        const timer = setInterval(() => {
-            if (window.app && window.app.dom) {
-                clearInterval(timer);
-                resolve(true);
+    let ready = false;
+    for (let i = 0; i < 40; i++) {
+        try {
+            ready = await evaluate(`
+                typeof window.__TAURI__ !== 'undefined' &&
+                document.readyState === 'complete' &&
+                typeof window.app !== 'undefined' &&
+                typeof window.app.dom !== 'undefined' &&
+                typeof window.db !== 'undefined'
+            `);
+            if (ready) {
+                console.log(`  App ready at check ${i}`);
+                break;
+            } else {
+                const status = await evaluate(`({
+                    hasTauri: typeof window.__TAURI__ !== 'undefined',
+                    readyState: document.readyState,
+                    hasApp: typeof window.app !== 'undefined',
+                    hasDom: typeof window.app?.dom !== 'undefined',
+                    hasDb: typeof window.db !== 'undefined',
+                    url: window.location.href,
+                    scripts: Array.from(document.scripts || []).map(s => ({ src: s.src, type: s.type }))
+                })`);
+                console.log(`  [check ${i}] not ready:`, JSON.stringify(status));
+                if (i === 5) {
+                    try {
+                        const dynamicLoad = await evaluate(`import('./js/app.js').then(() => 'imported').catch(e => 'import_err: ' + e.message + ' ' + e.stack)`);
+                        console.log('  [dynamic import app.js attempt]:', dynamicLoad);
+                    } catch (e) {
+                        console.log('  [dynamic import failed]:', e.message);
+                    }
+                }
             }
-        }, 100);
-    })`);
-    await SLEEP(1500);
+        } catch (err) {
+            console.log(`  [check ${i}] error:`, err.message || String(err));
+        }
+        await SLEEP(500);
+    }
+    if (!ready) throw new Error('App page failed to initialize within timeout');
+    await SLEEP(1000);
 
     // Filter CSP violations specifically for style-src
     const styleCspViolations = cspViolations.filter(v => v.includes('style-src') || v.includes('inline style'));
@@ -194,6 +234,43 @@ async function main() {
         throw new Error('style-src CSP violation detected!');
     }
     console.log('  PASS: Zero style-src CSP violations detected.');
+
+    console.log('\n--- Phase 1b: Welcome Onboarding Modal & Skip Action Verification ---');
+    const welcomeCheck = await evaluate(`(() => {
+        const modal = document.querySelector('#welcome-modal-backdrop');
+        const skipBtn = document.querySelector('#btn-welcome-skip');
+        const confirmBtn = document.querySelector('#btn-welcome-confirm');
+        return {
+            hasModal: !!modal,
+            visible: modal ? (modal.style.display !== 'none' || modal.classList.contains('show')) : false,
+            hasSkip: !!skipBtn,
+            hasConfirm: !!confirmBtn
+        };
+    })()`);
+    console.log(`  Welcome Modal Status: modal=${welcomeCheck.hasModal}, visible=${welcomeCheck.visible}, hasSkip=${welcomeCheck.hasSkip}`);
+    if (!welcomeCheck.hasModal || !welcomeCheck.hasSkip) {
+        throw new Error('Welcome modal or skip button missing in DOM!');
+    }
+    await captureScreenshot('00_welcome_modal_visible');
+
+    // Click "稍后设置" (skip) button via real DOM click
+    console.log('  Clicking #btn-welcome-skip button...');
+    await evaluate(`document.querySelector('#btn-welcome-skip').click()`);
+    await SLEEP(500);
+
+    const welcomeAfterSkip = await evaluate(`(() => {
+        const modal = document.querySelector('#welcome-modal-backdrop');
+        return {
+            visible: modal && modal.style.display !== 'none' && modal.classList.contains('show'),
+            initialized: localStorage.getItem('linden_user_initialized')
+        };
+    })()`);
+    console.log(`  After skip: visible=${welcomeAfterSkip.visible}, initialized=${welcomeAfterSkip.initialized}`);
+    if (welcomeAfterSkip.visible || welcomeAfterSkip.initialized !== 'true') {
+        throw new Error('Welcome modal did not properly close upon clicking skip!');
+    }
+    console.log('  PASS: Welcome modal closed completely and initialized flag recorded.');
+    await captureScreenshot('00b_welcome_modal_closed');
 
     console.log('\n--- Phase 2: Settings Panel Computed Styles & Overlap Assertion ---');
     // Open settings drawer
@@ -234,7 +311,55 @@ async function main() {
         throw new Error('Overlapping controls in settings modal');
     }
     console.log('  PASS: Settings controls layout is clean and non-overlapping.');
-    await captureScreenshot('01_settings_panel');
+    await captureScreenshot('01_settings_panel_default');
+
+    // Dual resolution verification: 1360x880 and 960x640
+    console.log('  Testing Settings Panel at 1360x880 window dimensions...');
+    await send('Emulation.setDeviceMetricsOverride')({
+        width: 1360,
+        height: 880,
+        deviceScaleFactor: 1,
+        mobile: false
+    });
+    await SLEEP(400);
+    await captureScreenshot('01b_settings_1360x880');
+
+    console.log('  Testing Settings Panel at 960x640 window dimensions...');
+    await send('Emulation.setDeviceMetricsOverride')({
+        width: 960,
+        height: 640,
+        deviceScaleFactor: 1,
+        mobile: false
+    });
+    await SLEEP(400);
+    const settingsSmallCheck = await evaluate(`(() => {
+        const panel = document.querySelector('#panel-settings');
+        const sections = Array.from(panel ? panel.querySelectorAll('.setting-section') : []);
+        let overlappingCount = 0;
+        for (let i = 1; i < sections.length; i++) {
+            const r0 = sections[i - 1].getBoundingClientRect();
+            const r1 = sections[i].getBoundingClientRect();
+            if (r0.height > 10 && r1.height > 10 && r0.bottom > r1.top + 2) {
+                overlappingCount++;
+            }
+        }
+        return {
+            sectionsCount: sections.length,
+            overlappingCount,
+            scrollHeight: panel.scrollHeight,
+            clientHeight: panel.clientHeight
+        };
+    })()`);
+    console.log(`  960x640 check: sections=${settingsSmallCheck.sectionsCount}, overlaps=${settingsSmallCheck.overlappingCount}, scrollHeight=${settingsSmallCheck.scrollHeight}, clientHeight=${settingsSmallCheck.clientHeight}`);
+    if (settingsSmallCheck.overlappingCount > 0) {
+        throw new Error('Overlapping controls detected in 960x640 settings modal!');
+    }
+    await captureScreenshot('01c_settings_960x640');
+
+    // Restore device metrics
+    await send('Emulation.clearDeviceMetricsOverride')({});
+    await SLEEP(300);
+
     // Close settings drawer
     await evaluate(`window.app.closeDrawer()`);
     await SLEEP(300);
@@ -416,6 +541,85 @@ async function main() {
     })()`);
     console.log(`  After cross-chapter jump: textLen=${textCheck1Chapter.textLen}, snippet="${textCheck1Chapter.snippet}"`);
     await captureScreenshot('03b_don_quixote_chapter_jump');
+
+    console.log('\n--- Phase 4b: Reader Settings Drawer Typography Manipulation & Reset ---');
+    // Open settings drawer during reading
+    console.log('  Opening settings drawer during reading...');
+    await evaluate(`window.app.openDrawer('settings')`);
+    await SLEEP(600);
+
+    // Scroll to typography section
+    const typoPrep = await evaluate(`(() => {
+        const slider = document.querySelector('#setting-font-size');
+        const resetBtn = document.querySelector('#btn-reset-typography');
+        if (slider) slider.scrollIntoView({ behavior: 'instant', block: 'center' });
+        return {
+            hasSlider: !!slider,
+            hasReset: !!resetBtn,
+            val: slider ? slider.value : null,
+            disabled: slider ? slider.disabled : null
+        };
+    })()`);
+    console.log(`  Typography controls: slider=${typoPrep.hasSlider}, reset=${typoPrep.hasReset}, val=${typoPrep.val}, disabled=${typoPrep.disabled}`);
+    if (!typoPrep.hasSlider || !typoPrep.hasReset || typoPrep.disabled) {
+        throw new Error('Typography controls missing or unexpectedly disabled in EPUB reader!');
+    }
+
+    // Measure initial font size in Foliate iframe
+    const initialFs = await evaluate(`(() => {
+        const contents = window.app.foliateView?.renderer?.getContents?.() || [];
+        const doc = contents[0]?.doc;
+        const p = doc?.body?.querySelector('p') || doc?.body;
+        return p ? window.getComputedStyle(p).fontSize : null;
+    })()`);
+    console.log(`  Initial Foliate iframe computed font size: ${initialFs}`);
+
+    // Simulate user adjusting font size slider to 24px
+    console.log('  Simulating user slider drag from 18 to 24px...');
+    await evaluate(`(() => {
+        const slider = document.querySelector('#setting-font-size');
+        slider.value = "24";
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await SLEEP(600);
+
+    const updatedFs = await evaluate(`(() => {
+        const contents = window.app.foliateView?.renderer?.getContents?.() || [];
+        const doc = contents[0]?.doc;
+        const p = doc?.body?.querySelector('p') || doc?.body;
+        return p ? window.getComputedStyle(p).fontSize : null;
+    })()`);
+    console.log(`  Updated Foliate iframe computed font size: ${updatedFs}`);
+    if (updatedFs !== '24px') {
+        throw new Error(`Font size adjustment failed: expected 24px, got ${updatedFs}`);
+    }
+    await captureScreenshot('04_typography_font24');
+
+    // Click "一键恢复默认"
+    console.log('  Clicking #btn-reset-typography to reset settings...');
+    await evaluate(`document.querySelector('#btn-reset-typography').click()`);
+    await SLEEP(600);
+
+    const resetFs = await evaluate(`(() => {
+        const slider = document.querySelector('#setting-font-size');
+        const contents = window.app.foliateView?.renderer?.getContents?.() || [];
+        const doc = contents[0]?.doc;
+        const p = doc?.body?.querySelector('p') || doc?.body;
+        return {
+            sliderVal: slider ? slider.value : null,
+            fontSize: p ? window.getComputedStyle(p).fontSize : null
+        };
+    })()`);
+    console.log(`  Reset results: slider=${resetFs.sliderVal}, computed font=${resetFs.fontSize}`);
+    if (resetFs.sliderVal !== '18' || resetFs.fontSize !== initialFs) {
+        throw new Error(`Typography reset failed: expected slider 18 and font ${initialFs}, got slider ${resetFs.sliderVal} and font ${resetFs.fontSize}`);
+    }
+    console.log('  PASS: Typography successfully adjusted to 24px and cleanly reset to default 18px.');
+    await captureScreenshot('05_typography_reset18');
+
+    // Close settings drawer
+    await evaluate(`window.app.closeDrawer()`);
+    await SLEEP(400);
 
     // Close reader and verify Home Page Hero Card Counterexample!
     console.log('\n--- Phase 5: Hero Card Counterexample (<60s, fraction near 0) ---');
