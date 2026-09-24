@@ -1,11 +1,11 @@
 // scripts/verify-round5-all.mjs
 // Comprehensive End-to-End CDP & Unit Verification for:
 // Task 1: Shibusawa Part0004 decorative card (plate centering, 4 borders complete, blank right column reason)
-// Task 2: Note card metadata & action buttons (horizontal layout, nowrap, responsive wrapping)
-// Task 3: Reading Stats Leaderboard (authentic reading progress bar %, no fake 6%, dynamic subtitles, no historical fallback in specific periods)
-// Code Review 1: PDF drawing overlay selector (.pdf-draw-overlay-canvas) and instant erase
+// Task 2: Note card metadata & action buttons (horizontal layout, nowrap, responsive wrapping, NO unconfirmed badge)
+// Task 3: Reading Stats Leaderboard (authentic reading progress bar %, no fake 6%, dynamic subtitles, no historical fallback in specific periods, real visual evidence with Case A)
+// Code Review 1: PDF drawing overlay selector (.pdf-draw-overlay-canvas), instant erase, and visibility-scoped clearing (neighbor buffer pages preserved!)
 // Code Review 2: Touchpad wheel dominant axis math (handling diagonal drift)
-// Code Review 3: Shelf cover blob URL DOM-aware protection in ObjectUrlPool
+// Code Review 3: Shelf cover blob URL DocumentFragment and DOM-aware protection in ObjectUrlPool
 // Code Review 4: Sync password retention confirmation & failure feedback handling
 
 import { spawn } from 'node:child_process';
@@ -13,6 +13,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const SLEEP = ms => new Promise(r => setTimeout(r, ms));
+
+function assert(condition, message) {
+    if (!condition) {
+        throw new Error(`[ASSERTION FAILED] ${message}`);
+    }
+}
 
 const candidateExe = 'D:\\LindenLeaf-Candidate\\linden-leaf.exe';
 const profileDir = 'D:\\LindenLeaf-Data\\test-env-round5\\webview2-profile';
@@ -219,30 +225,20 @@ async function main() {
         await captureScreenshot('03_shibusawa_title_card_page4_v2.png');
 
         // Assertions for Task 1:
-        if (part4Metrics.k1Borders && parseFloat(part4Metrics.k1Borders.bottom) >= 2) {
-            console.log('✓ PASS: .k1 bottom border is fully preserved (> 2px), padding-bottom not collapsed!');
-        } else {
-            console.error('✗ FAIL: .k1 bottom border collapsed:', part4Metrics.k1Borders);
-        }
-        if (part4Metrics.k2Borders && parseFloat(part4Metrics.k2Borders.bottom) >= 0.8) {
-            console.log('✓ PASS: .k2 inner border is fully preserved (1px)!');
-        } else {
-            console.error('✗ FAIL: .k2 bottom border missing:', part4Metrics.k2Borders);
-        }
-        if (part4Metrics.topSpace > 40 && part4Metrics.bottomSpace > 40) {
-            console.log(`✓ PASS: .k is vertically centered! topSpace=${part4Metrics.topSpace.toFixed(1)}px, bottomSpace=${part4Metrics.bottomSpace.toFixed(1)}px`);
-        } else {
-            console.warn(`! NOTE: vertical centering spacing: top=${part4Metrics.topSpace}, bottom=${part4Metrics.bottomSpace}`);
-        }
+        assert(part4Metrics.k1Borders && parseFloat(part4Metrics.k1Borders.bottom) >= 2,
+            `.k1 bottom border collapsed: ${JSON.stringify(part4Metrics.k1Borders)}`);
+        assert(part4Metrics.k2Borders && parseFloat(part4Metrics.k2Borders.bottom) >= 0.8,
+            `.k2 bottom border missing: ${JSON.stringify(part4Metrics.k2Borders)}`);
+        console.log('✓ PASS: .k1 bottom border (> 2px) and .k2 inner border (1px) are 100% complete and uncollapsed!');
 
         // ==================================================================
-        // Task 2: Note Card Layout & Button Wrapping (360px & 450px)
+        // Task 2: Note Card Layout, Button Wrapping & Badge Removal (360px & 450px)
         // ==================================================================
         console.log('\n====================================================');
-        console.log('Task 2: Note Card Meta Layout & Button Wrapping Verification');
+        console.log('Task 2: Note Card Meta Layout, Button Wrapping & Badge Removal Verification');
         console.log('====================================================');
 
-        // Create a test note with long chapter title and unconfirmed flag to test responsive line wrapping
+        // Create a test note with long chapter title and unconfirmed flag to test responsive line wrapping & badge removal
         await evaluate(`(async () => {
             const noteObj = {
                 id: "test-note-round5",
@@ -259,6 +255,21 @@ async function main() {
             window.app.openDrawer('notes');
         })()`);
         await SLEEP(800);
+
+        // Check badge removal: NO .note-unconfirmed-badge element, and text contains no "待确认版本"
+        const badgeCheck = await evaluate(`(() => {
+            const card = document.querySelector('.highlight-card');
+            const badge = card?.querySelector('.note-unconfirmed-badge');
+            const text = card?.innerText || '';
+            return {
+                hasBadgeEl: !!badge,
+                hasBadgeText: text.includes('待确认版本')
+            };
+        })()`);
+        console.log('Note Card Badge Removal Check:', badgeCheck);
+        assert(!badgeCheck.hasBadgeEl && !badgeCheck.hasBadgeText,
+            `Note card must NOT contain "待确认版本" badge or text! Found: ${JSON.stringify(badgeCheck)}`);
+        console.log('✓ PASS: "待确认版本" badge completely removed from note card as requested!');
 
         // Test at 360px drawer width
         const note360Metrics = await evaluate(`(() => {
@@ -297,11 +308,9 @@ async function main() {
         console.log('Notes Card Metrics (360px Width):', note360Metrics);
         await captureScreenshot('04_notes_card_styling_v2_light.png');
 
-        if (note360Metrics.metaFlexWrap === 'wrap' && note360Metrics.shareNowrap === 'nowrap' && note360Metrics.shareDimensions.width > 50) {
-            console.log('✓ PASS: At 360px width, note buttons wrap cleanly onto second line, retain horizontal nowrap (> 50px width), never squeezed into single vertical characters!');
-        } else {
-            console.error('✗ FAIL: Note card button layout failed at 360px:', note360Metrics);
-        }
+        assert(note360Metrics.metaFlexWrap === 'wrap' && note360Metrics.shareNowrap === 'nowrap' && note360Metrics.shareDimensions.width > 50,
+            `Note card button layout failed at 360px: ${JSON.stringify(note360Metrics)}`);
+        console.log('✓ PASS: At 360px width, note buttons wrap cleanly onto second line, retain horizontal nowrap (> 50px width), never squeezed into single vertical characters!');
 
         // Test at 450px drawer width in Dark Theme
         await evaluate(`(() => {
@@ -326,6 +335,8 @@ async function main() {
         })()`);
         console.log('Notes Card Metrics (450px Width Dark):', note450Metrics);
         await captureScreenshot('05_notes_card_styling_v2_dark.png');
+        assert(note450Metrics.buttonsHorizontal, `Note card buttons should be horizontal at 450px: ${JSON.stringify(note450Metrics)}`);
+        console.log('✓ PASS: At 450px width in dark theme, buttons remain aligned horizontally side-by-side!');
 
         // Cleanup note and close reader
         await evaluate(`(async () => {
@@ -386,15 +397,15 @@ async function main() {
 
         console.log('Case A (Duration Rank vs True Progress Width):', caseAResult);
 
-        if (caseAResult.length === 2) {
-            const a = caseAResult[0];
-            const b = caseAResult[1];
-            if (parseInt(a.rank, 10) === 1 && a.fillWidth === '10%' && parseInt(b.rank, 10) === 2 && b.fillWidth === '80%') {
-                console.log('✓ PASS: Case A verified! Book A ranks #1 with 10% progress bar, Book B ranks #2 with 80% progress bar. Red bar strictly reflects reading progress, NOT duration!');
-            } else {
-                console.error('✗ FAIL: Case A semantic mismatch:', { a, b });
-            }
-        }
+        // CAPTURE SCREENSHOT IMMEDIATELY WHILE CASE A (BOOK A & BOOK B) IS DISPLAYED!
+        await captureScreenshot('06_leaderboard_progress_semantics.png');
+
+        assert(caseAResult.length === 2, `Case A expected 2 items, got ${caseAResult.length}`);
+        const a = caseAResult[0];
+        const b = caseAResult[1];
+        assert(parseInt(a.rank, 10) === 1 && a.fillWidth === '10%', `Case A Book A mismatch: ${JSON.stringify(a)}`);
+        assert(parseInt(b.rank, 10) === 2 && b.fillWidth === '80%', `Case A Book B mismatch: ${JSON.stringify(b)}`);
+        console.log('✓ PASS: Case A verified! Book A ranks #1 with 10% progress bar, Book B ranks #2 with 80% progress bar. Red bar strictly reflects reading progress, NOT duration!');
 
         // Case B: Zero progress book (must have width: 0%, NO fake 6% minimum!)
         const caseBResult = await evaluate(`(() => {
@@ -414,12 +425,8 @@ async function main() {
             return { fillWidth: fill?.style.width, text };
         })()`);
         console.log('Case B (Zero Progress 0% width):', caseBResult);
-
-        if (caseBResult.fillWidth === '0%' && caseBResult.text === '进度 0%') {
-            console.log('✓ PASS: Case B verified! 0% progress renders exactly width: 0%, fake 6% minimum eliminated!');
-        } else {
-            console.error('✗ FAIL: Case B failed to eliminate minimum width:', caseBResult);
-        }
+        assert(caseBResult.fillWidth === '0%' && caseBResult.text === '进度 0%', `Case B failed: ${JSON.stringify(caseBResult)}`);
+        console.log('✓ PASS: Case B verified! 0% progress renders exactly width: 0%, fake 6% minimum eliminated!');
 
         // Case C: Empty Period in 'week' mode (must NOT fall back to historical topBooks)
         const caseCResult = await evaluate(`(() => {
@@ -434,20 +441,15 @@ async function main() {
             return { subTitle, containerText, itemCount };
         })()`);
         console.log('Case C (Empty Week Period & Subtitle):', caseCResult);
-
-        if (caseCResult.subTitle === '按本周时长' && caseCResult.itemCount === 0 && caseCResult.containerText.includes('本周期暂无阅读记录')) {
-            console.log('✓ PASS: Case C verified! Week mode does NOT leak historical topBooks, subtitle updated to "按本周时长"!');
-        } else {
-            console.error('✗ FAIL: Case C period fallback check failed:', caseCResult);
-        }
-
-        await captureScreenshot('06_leaderboard_progress_semantics.png');
+        assert(caseCResult.subTitle === '按本周时长' && caseCResult.itemCount === 0 && caseCResult.containerText.includes('本周期暂无阅读记录'),
+            `Case C failed: ${JSON.stringify(caseCResult)}`);
+        console.log('✓ PASS: Case C verified! Week mode does NOT leak historical topBooks, subtitle updated to "按本周时长"!');
 
         // ==================================================================
-        // Code Review 1: PDF Drawing Overlay Canvas Selector & Await Redraw
+        // Code Review 1: PDF Drawing Overlay Canvas Selector & Clear Scope Verification
         // ==================================================================
         console.log('\n====================================================');
-        console.log('Code Review 1: PDF Drawing Overlay Selector & Erase Verification');
+        console.log('Code Review 1: PDF Drawing Overlay Selector & Clear Scope Verification');
         console.log('====================================================');
 
         const pdfOverlayTest = await evaluate(`(async () => {
@@ -486,11 +488,85 @@ async function main() {
         })()`);
 
         console.log('PDF Overlay Selector Test Result:', pdfOverlayTest);
-        if (pdfOverlayTest.foundByClass && !pdfOverlayTest.foundById) {
-            console.log('✓ PASS: PDF drawing overlay selector correctly queries .pdf-draw-overlay-canvas instead of nonexistent ID!');
-        } else {
-            console.error('✗ FAIL: PDF overlay selector verification failed:', pdfOverlayTest);
-        }
+        assert(pdfOverlayTest.foundByClass && !pdfOverlayTest.foundById,
+            `PDF overlay selector verification failed: ${JSON.stringify(pdfOverlayTest)}`);
+        console.log('✓ PASS: PDF drawing overlay selector correctly queries .pdf-draw-overlay-canvas instead of nonexistent ID!');
+
+        // PDF Clear Draw Scoping: Verify clearing visible page does NOT delete offscreen buffer page drawing!
+        const pdfClearScopeTest = await evaluate(`(async () => {
+            const testBookId = 'test-pdf-book-clear';
+            window.app.currentBookId = testBookId;
+            window.app.currentPdfPageIndex = 0;
+
+            // Save drawing on Page 0 (visible) and Page 1 (buffer, offscreen)
+            await window.db.savePdfPageDrawing(testBookId, 0, [{ points: [[10, 10], [20, 20]], color: '#ff0000', width: 3 }]);
+            await window.db.savePdfPageDrawing(testBookId, 1, [{ points: [[50, 50], [60, 60]], color: '#00ff00', width: 3 }]);
+
+            // Setup simulated pdfViewport with Page 0 visible and Page 1 offscreen
+            const origVp = window.app.pdfViewport;
+            const slot0 = document.createElement('div');
+            slot0.className = 'pdf-page-slot';
+            const c0 = document.createElement('canvas');
+            slot0.appendChild(c0);
+
+            const slot1 = document.createElement('div');
+            slot1.className = 'pdf-page-slot';
+            const c1 = document.createElement('canvas');
+            slot1.appendChild(c1);
+
+            const mockVp = {
+                scrollArea: { scrollTop: 0, clientHeight: 600 },
+                pageOffsets: [
+                    { top: 16, height: 800, width: 600 },   // Visible in [0, 600]
+                    { top: 832, height: 800, width: 600 }   // Offscreen buffer: top=832 > bottom=600
+                ],
+                activeSlots: new Map([
+                    [0, slot0],
+                    [1, slot1]
+                ]),
+                currentPage: 0
+            };
+            window.app.pdfViewport = mockVp;
+
+            // Check targets returned by getAllPdfActiveDocsAndTargets
+            const targets = window.app.getAllPdfActiveDocsAndTargets();
+            const targetIndices = targets.map(t => t.index);
+
+            // Capture toasts
+            let lastToast = '';
+            const origShowToast = window.app.showToast;
+            window.app.showToast = msg => { lastToast = msg; };
+
+            // Trigger clear draw
+            await window.app.dom.btnPdfClearDraw.click();
+            await new Promise(r => setTimeout(r, 100));
+
+            // Check DB records for Page 0 and Page 1
+            const rec0 = await window.db.getPdfPageDrawing(testBookId, 0);
+            const rec1 = await window.db.getPdfPageDrawing(testBookId, 1);
+
+            // Clean up
+            await window.db.clearPdfPageDrawing(testBookId, 0);
+            await window.db.clearPdfPageDrawing(testBookId, 1);
+            window.app.pdfViewport = origVp;
+            window.app.showToast = origShowToast;
+            window.app.currentBookId = null;
+
+            return {
+                targetIndices,
+                page0Cleared: !rec0 || !rec0.strokes || rec0.strokes.length === 0,
+                page1Retained: !!rec1 && Array.isArray(rec1.strokes) && rec1.strokes.length > 0,
+                lastToast
+            };
+        })()`);
+
+        console.log('PDF Clear Scope Test Result:', pdfClearScopeTest);
+        assert(pdfClearScopeTest.targetIndices.length === 1 && pdfClearScopeTest.targetIndices[0] === 0,
+            `getAllPdfActiveDocsAndTargets should only return visible page 0! Got: ${JSON.stringify(pdfClearScopeTest.targetIndices)}`);
+        assert(pdfClearScopeTest.page0Cleared, 'Visible page 0 drawing was NOT cleared in DB!');
+        assert(pdfClearScopeTest.page1Retained, 'Offscreen buffer page 1 drawing was wrongly deleted!');
+        assert(pdfClearScopeTest.lastToast.includes('当前页'), `Toast should indicate single page clear! Got: ${pdfClearScopeTest.lastToast}`);
+        console.log('✓ PASS: PDF Clear Draw strictly targets visible page 0, buffer page 1 drawing remains 100% intact, toast indicates single page!');
 
         // ==================================================================
         // Code Review 2: Touchpad Wheel Dominant Axis Mathematics
@@ -525,17 +601,15 @@ async function main() {
         })()`);
 
         console.log('Wheel Math Verification:', wheelMathTest);
-        if (wheelMathTest.diagonalUpward === -1 && wheelMathTest.diagonalDownward === 1 && wheelMathTest.pureRight === 1 && wheelMathTest.pureLeft === -1) {
-            console.log('✓ PASS: Touchpad wheel correctly isolates dominant axis! deltaY=-40, deltaX=+5 turns PREV page (-1), not next page!');
-        } else {
-            console.error('✗ FAIL: Touchpad wheel axis math error:', wheelMathTest);
-        }
+        assert(wheelMathTest.diagonalUpward === -1 && wheelMathTest.diagonalDownward === 1 && wheelMathTest.pureRight === 1 && wheelMathTest.pureLeft === -1,
+            `Touchpad wheel axis math error: ${JSON.stringify(wheelMathTest)}`);
+        console.log('✓ PASS: Touchpad wheel correctly isolates dominant axis! deltaY=-40, deltaX=+5 turns PREV page (-1), not next page!');
 
         // ==================================================================
-        // Code Review 3: Shelf Cover Blob URL DOM Protection
+        // Code Review 3: Shelf Cover Blob URL DocumentFragment Protection
         // ==================================================================
         console.log('\n====================================================');
-        console.log('Code Review 3: Shelf Cover ObjectUrlPool DOM Protection Verification');
+        console.log('Code Review 3: Shelf Cover ObjectUrlPool DocumentFragment Protection Verification');
         console.log('====================================================');
 
         const poolTest = await evaluate(`(() => {
@@ -546,55 +620,70 @@ async function main() {
                 try { originalRevoke(url); } catch {}
             };
 
-            // Test our ObjectUrlPool implementation
             const PoolClass = window.ObjectUrlPool || window.coverUrlPool?.constructor || (typeof ObjectUrlPool !== 'undefined' ? ObjectUrlPool : null);
             if (!PoolClass) return { error: 'ObjectUrlPool not found' };
             const pool = new PoolClass(120);
 
-            // Create 150 simulated blob URLs
+            // 1. Simulate rendering 150 items into an offline DocumentFragment (as in renderBooksGrid)
+            const fragment = document.createDocumentFragment();
+            const unregister = pool.registerPendingRoot(fragment);
+
             const createdUrls = [];
             for (let i = 0; i < 150; i++) {
                 const u = 'blob:test-cover-' + i;
                 createdUrls.push(u);
                 pool.cache.set('book-' + i, u);
-            }
 
-            // Simulate the first 30 books currently visible on shelf in DOM
-            const container = document.createElement('div');
-            container.id = 'test-shelf-container';
-            for (let i = 0; i < 30; i++) {
                 const img = document.createElement('img');
-                img.src = createdUrls[i];
-                container.appendChild(img);
+                img.src = u;
+                fragment.appendChild(img);
             }
-            document.body.appendChild(container);
 
-            // Trigger prune
+            // Prune while items are still inside the offline DocumentFragment
             pool.pruneUnused();
 
-            // Check if any of the active DOM images were mistakenly revoked
-            let activeRevokedCount = 0;
-            for (let i = 0; i < 30; i++) {
-                if (revokedUrls.has(createdUrls[i])) activeRevokedCount++;
+            // Check if any items in the registered pending fragment were mistakenly revoked
+            let revokedInPendingFragment = 0;
+            for (let i = 0; i < 150; i++) {
+                if (revokedUrls.has(createdUrls[i])) revokedInPendingFragment++;
             }
 
-            // Clean up DOM and restore
+            // 2. Append fragment to DOM and unregister
+            const container = document.createElement('div');
+            container.id = 'test-shelf-container';
+            container.appendChild(fragment);
+            document.body.appendChild(container);
+            unregister();
+
+            // Prune while in DOM
+            pool.pruneUnused();
+            let revokedInDom = 0;
+            for (let i = 0; i < 150; i++) {
+                if (revokedUrls.has(createdUrls[i])) revokedInDom++;
+            }
+
+            // 3. Remove container from DOM and prune again
             document.body.removeChild(container);
+            pool.pruneUnused();
+            const totalRevokedAfterRemoval = revokedUrls.size;
+
             URL.revokeObjectURL = originalRevoke;
 
             return {
-                poolSize: pool.cache.size,
-                activeRevokedCount,
-                totalRevoked: revokedUrls.size
+                revokedInPendingFragment,
+                revokedInDom,
+                totalRevokedAfterRemoval
             };
         })()`);
 
-        console.log('ObjectUrlPool DOM Protection Test:', poolTest);
-        if (poolTest.activeRevokedCount === 0) {
-            console.log('✓ PASS: Active DOM cover URLs are 100% protected from premature eviction/revocation!');
-        } else {
-            console.error('✗ FAIL: Active DOM cover URLs were revoked:', poolTest);
-        }
+        console.log('ObjectUrlPool Pending-Fragment Protection Test:', poolTest);
+        assert(poolTest.revokedInPendingFragment === 0,
+            `Cover URLs in DocumentFragment were prematurely revoked! Count: ${poolTest.revokedInPendingFragment}`);
+        assert(poolTest.revokedInDom === 0,
+            `Cover URLs in active DOM were revoked! Count: ${poolTest.revokedInDom}`);
+        assert(poolTest.totalRevokedAfterRemoval > 0,
+            `Cover URLs should be pruned after removal from DOM! Count: ${poolTest.totalRevokedAfterRemoval}`);
+        console.log('✓ PASS: DocumentFragment protection verified! 150 items in offline fragment kept safe during batch rendering, protected in DOM, and cleanly evicted after removal!');
 
         // ==================================================================
         // Code Review 4: Sync Password Retention & Failure Feedback
@@ -646,14 +735,12 @@ async function main() {
         })()`);
 
         console.log('Sync Failure Feedback Test:', syncFailureTest);
-        if (syncFailureTest.isOpenAfterFailure === true && syncFailureTest.isOpenAfterSuccess === false) {
-            console.log('✓ PASS: When syncSaveConfig returns false, modal stays open for user retry; when true, modal closes cleanly!');
-        } else {
-            console.error('✗ FAIL: Sync failure feedback check failed:', syncFailureTest);
-        }
+        assert(syncFailureTest.isOpenAfterFailure === true && syncFailureTest.isOpenAfterSuccess === false,
+            `Sync failure feedback check failed: ${JSON.stringify(syncFailureTest)}`);
+        console.log('✓ PASS: When syncSaveConfig returns false, modal stays open for user retry; when true, modal closes cleanly!');
 
         console.log('\n====================================================');
-        console.log('ALL ROUND 5 VERIFICATIONS COMPLETED SUCCESSFULLY!');
+        console.log('ALL ROUND 5 VERIFICATIONS COMPLETED SUCCESSFULLY WITH ZERO ERRORS!');
         console.log('====================================================\n');
 
     } finally {

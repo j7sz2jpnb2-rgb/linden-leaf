@@ -90,11 +90,19 @@ export function decodePdfProgress(savedProgress, totalPages) {
     return { page: 1, fraction: 0 }
 }
 
-// Object URL Lifecycle Pool with DOM-Aware Protection to prevent premature revocation and memory bloat
+// Object URL Lifecycle Pool with DOM-Aware and Pending-Fragment Protection to prevent premature revocation and memory bloat
 class ObjectUrlPool {
     constructor(maxCapacity = 120) {
         this.cache = new Map()
         this.maxCapacity = maxCapacity
+        this.pendingRoots = new Set()
+    }
+    registerPendingRoot(root) {
+        if (!root) return () => {}
+        this.pendingRoots.add(root)
+        return () => {
+            this.pendingRoots.delete(root)
+        }
     }
     get(key, blob) {
         if (!blob) return ''
@@ -119,11 +127,20 @@ class ObjectUrlPool {
         }
     }
     pruneUnused() {
-        // Find keys whose URL is NOT currently referenced by an <img> or element in the active DOM
+        // Find keys whose URL is NOT currently referenced by an <img> or element in the active DOM or any registered pending root
         for (const [key, url] of this.cache.entries()) {
             if (this.cache.size <= Math.floor(this.maxCapacity * 0.8)) break
             try {
-                const inDom = document.querySelector(`img[src="${CSS.escape(url)}"], [data-cover-url="${CSS.escape(url)}"]`)
+                const selector = `img[src="${CSS.escape(url)}"], [data-cover-url="${CSS.escape(url)}"]`
+                let inDom = !!document.querySelector(selector)
+                if (!inDom && this.pendingRoots.size > 0) {
+                    for (const root of this.pendingRoots) {
+                        if (root.querySelector?.(selector)) {
+                            inDom = true
+                            break
+                        }
+                    }
+                }
                 if (!inDom) {
                     this.revoke(key)
                 }
@@ -147,6 +164,7 @@ class ObjectUrlPool {
             } catch (e) {}
         }
         this.cache.clear()
+        this.pendingRoots.clear()
     }
 }
 const coverUrlPool = new ObjectUrlPool(120)
@@ -2827,20 +2845,16 @@ class UniversalReaderApp {
             const activeSession = this._activeSession
             const snapshot = this._currentSnapshot || {}
             const allTargets = this.getAllPdfActiveDocsAndTargets()
-            if (allTargets.length > 1) {
-                for (const target of allTargets) {
-                    const pIdx = target.index != null ? target.index : this.currentPdfPageIndex
-                    if (pIdx != null) await db.clearPdfPageDrawing(this.currentBookId, pIdx, true, Date.now(), snapshot)
-                }
-                if (activeSession && !activeSession.isCurrent()) return
-                await this.redrawPdfPageOverlay()
-                this.showToast('🗑️ 已清空当前双页手绘批注')
-            } else if (this.currentPdfPageIndex != null) {
-                await db.clearPdfPageDrawing(this.currentBookId, this.currentPdfPageIndex, true, Date.now(), snapshot)
-                if (activeSession && !activeSession.isCurrent()) return
-                await this.redrawPdfPageOverlay()
-                this.showToast('🗑️ 已清空当前页手绘批注')
+            const isTwoPage = allTargets.length >= 2
+            const targetPageIndices = allTargets.length > 0
+                ? [...new Set(allTargets.map(t => t.index != null ? t.index : this.currentPdfPageIndex).filter(idx => idx != null))]
+                : (this.currentPdfPageIndex != null ? [this.currentPdfPageIndex] : [])
+            for (const pIdx of targetPageIndices) {
+                await db.clearPdfPageDrawing(this.currentBookId, pIdx, true, Date.now(), snapshot)
             }
+            if (activeSession && !activeSession.isCurrent()) return
+            await this.redrawPdfPageOverlay()
+            this.showToast(isTwoPage ? '🗑️ 已清空当前双页手绘批注' : '🗑️ 已清空当前页手绘批注')
         })
 
         // PDF OCR Extract Button
@@ -3052,7 +3066,30 @@ class UniversalReaderApp {
     getAllPdfActiveDocsAndTargets() {
         const results = []
         if (this.pdfViewport?.activeSlots) {
-            for (const [pageIdx, slot] of this.pdfViewport.activeSlots.entries()) {
+            const vp = this.pdfViewport
+            const scrollArea = vp.scrollArea
+            const top = scrollArea ? scrollArea.scrollTop : 0
+            const bottom = scrollArea ? top + scrollArea.clientHeight : 0
+            const visiblePages = []
+            if (scrollArea && vp.pageOffsets && vp.pageOffsets.length > 0) {
+                for (const [pageIdx, slot] of vp.activeSlots.entries()) {
+                    const p = vp.pageOffsets[pageIdx]
+                    if (!p) continue
+                    // Page is truly visible if it has substantial visible height (> 20px) in scrollArea
+                    const visibleH = Math.max(0, Math.min(bottom, p.top + p.height) - Math.max(top, p.top))
+                    if (visibleH > 20) {
+                        visiblePages.push({ pageIdx, slot })
+                    }
+                }
+            }
+            if (visiblePages.length === 0) {
+                const curPage = vp.currentPage != null ? vp.currentPage : this.currentPdfPageIndex
+                if (curPage != null && vp.activeSlots.has(curPage)) {
+                    visiblePages.push({ pageIdx: curPage, slot: vp.activeSlots.get(curPage) })
+                }
+            }
+            visiblePages.sort((a, b) => a.pageIdx - b.pageIdx)
+            for (const { pageIdx, slot } of visiblePages) {
                 const canvas = slot.querySelector('canvas:not(.pdf-draw-overlay-canvas)')
                 const img = slot.querySelector('img')
                 const svg = slot.querySelector('svg')
@@ -5139,11 +5176,16 @@ class UniversalReaderApp {
         this.dom.booksGrid.style.alignItems = ''
 
         const gridFragment = document.createDocumentFragment()
-        books.forEach((book, idx) => {
-            const card = this.createBookCard(book, idx)
-            gridFragment.appendChild(card)
-        })
-        this.dom.booksGrid.appendChild(gridFragment)
+        const unregisterGrid = coverUrlPool.registerPendingRoot(gridFragment)
+        try {
+            books.forEach((book, idx) => {
+                const card = this.createBookCard(book, idx)
+                gridFragment.appendChild(card)
+            })
+            this.dom.booksGrid.appendChild(gridFragment)
+        } finally {
+            unregisterGrid()
+        }
     }
 
     renderBooksTable(books) {
@@ -5159,41 +5201,46 @@ class UniversalReaderApp {
         }
 
         const tableFragment = document.createDocumentFragment()
-        books.forEach(book => {
-            const row = document.createElement('tr')
-            row.className = 'jane-table-row'
-            row.dataset.id = book.id
+        const unregisterTable = coverUrlPool.registerPendingRoot(tableFragment)
+        try {
+            books.forEach(book => {
+                const row = document.createElement('tr')
+                row.className = 'jane-table-row'
+                row.dataset.id = book.id
 
-            const fraction = book.progress?.fraction || 0
-            const rawPct = fraction * 100
-            const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
-            const sizeStr = formatFileSize(book.size)
-            const dateStr = book.addedAt ? new Date(book.addedAt).toLocaleDateString('zh-CN') : '-'
+                const fraction = book.progress?.fraction || 0
+                const rawPct = fraction * 100
+                const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
+                const sizeStr = formatFileSize(book.size)
+                const dateStr = book.addedAt ? new Date(book.addedAt).toLocaleDateString('zh-CN') : '-'
 
-            const isCloud = !!book.isCloudOnly
-            const hasBackup = !!(book.cloudBackup?.hasBackup)
-            const cloudBadge = isCloud ? `<span style="font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #2563eb; margin-right: 6px; font-weight: 500; display: inline-flex; align-items: center; gap: 3px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>待拉取</span>` : (hasBackup ? `<span style="font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.12); color: #059669; margin-right: 6px; font-weight: 500; display: inline-flex; align-items: center; gap: 3px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>已备份</span>` : '')
-            const cloudBtnText = isCloud ? '拉取' : (hasBackup ? '已备份' : '备份')
-            const cloudBtnStyle = hasBackup ? 'color: #059669; border: 1px solid rgba(16,185,129,0.25); background: rgba(16,185,129,0.06);' : 'color: #2563eb; border: 1px solid rgba(59,130,246,0.25); background: rgba(59,130,246,0.06);'
+                const isCloud = !!book.isCloudOnly
+                const hasBackup = !!(book.cloudBackup?.hasBackup)
+                const cloudBadge = isCloud ? `<span style="font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #2563eb; margin-right: 6px; font-weight: 500; display: inline-flex; align-items: center; gap: 3px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>待拉取</span>` : (hasBackup ? `<span style="font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.12); color: #059669; margin-right: 6px; font-weight: 500; display: inline-flex; align-items: center; gap: 3px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>已备份</span>` : '')
+                const cloudBtnText = isCloud ? '拉取' : (hasBackup ? '已备份' : '备份')
+                const cloudBtnStyle = hasBackup ? 'color: #059669; border: 1px solid rgba(16,185,129,0.25); background: rgba(16,185,129,0.06);' : 'color: #2563eb; border: 1px solid rgba(59,130,246,0.25); background: rgba(59,130,246,0.06);'
 
-            row.innerHTML = `
-                <td class="jane-table-cell" style="width: 40px; text-align: center;">
-                    <button class="table-fav-btn ${book.isFavorite ? 'active' : ''}" title="${book.isFavorite ? '取消收藏' : '加入收藏'}" style="background: none; border: none; font-size: 1.1rem; cursor: pointer; color: ${book.isFavorite ? '#f59e0b' : 'var(--text-tertiary)'};">★</button>
-                </td>
-                <td class="jane-table-cell font-medium" style="font-weight: 600;">${cloudBadge}${escapeHTML(book.title)}</td>
-                <td class="jane-table-cell text-muted">${escapeHTML(book.author || '未知作者')}</td>
-                <td class="jane-table-cell text-muted">${escapeHTML((book.format || 'epub').toUpperCase())} · ${sizeStr}</td>
-                <td class="jane-table-cell text-muted">${progressPct}%</td>
-                <td class="jane-table-cell text-muted">${dateStr}</td>
-                <td class="jane-table-cell" style="text-align: center; white-space: nowrap;">
-                    <button class="table-cloud-btn" title="坚果云备份/拉取" style="${cloudBtnStyle} padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>${cloudBtnText}</button>
-                    <button class="table-list-btn" title="加入与管理书单" style="color: var(--claude-terracotta, #da7756); border: 1px solid rgba(218, 119, 86, 0.25); background: rgba(218, 119, 86, 0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>书单</button>
-                    <button class="table-delete-btn" title="从书架删除" style="color: #ef4444; border: 1px solid rgba(239,68,68,0.25); background: rgba(239,68,68,0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; transition: all 0.2s;">删除</button>
-                </td>
-            `
-            tableFragment.appendChild(row)
-        })
-        this.dom.booksTableBody.appendChild(tableFragment)
+                row.innerHTML = `
+                    <td class="jane-table-cell" style="width: 40px; text-align: center;">
+                        <button class="table-fav-btn ${book.isFavorite ? 'active' : ''}" title="${book.isFavorite ? '取消收藏' : '加入收藏'}" style="background: none; border: none; font-size: 1.1rem; cursor: pointer; color: ${book.isFavorite ? '#f59e0b' : 'var(--text-tertiary)'};">★</button>
+                    </td>
+                    <td class="jane-table-cell font-medium" style="font-weight: 600;">${cloudBadge}${escapeHTML(book.title)}</td>
+                    <td class="jane-table-cell text-muted">${escapeHTML(book.author || '未知作者')}</td>
+                    <td class="jane-table-cell text-muted">${escapeHTML((book.format || 'epub').toUpperCase())} · ${sizeStr}</td>
+                    <td class="jane-table-cell text-muted">${progressPct}%</td>
+                    <td class="jane-table-cell text-muted">${dateStr}</td>
+                    <td class="jane-table-cell" style="text-align: center; white-space: nowrap;">
+                        <button class="table-cloud-btn" title="坚果云备份/拉取" style="${cloudBtnStyle} padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>${cloudBtnText}</button>
+                        <button class="table-list-btn" title="加入与管理书单" style="color: var(--claude-terracotta, #da7756); border: 1px solid rgba(218, 119, 86, 0.25); background: rgba(218, 119, 86, 0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>书单</button>
+                        <button class="table-delete-btn" title="从书架删除" style="color: #ef4444; border: 1px solid rgba(239,68,68,0.25); background: rgba(239,68,68,0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; transition: all 0.2s;">删除</button>
+                    </td>
+                `
+                tableFragment.appendChild(row)
+            })
+            this.dom.booksTableBody.appendChild(tableFragment)
+        } finally {
+            unregisterTable()
+        }
     }
 
     async handleDeleteBook(book) {
@@ -8238,19 +8285,12 @@ class UniversalReaderApp {
             const card = document.createElement('div')
             card.className = 'highlight-card'
             card.style.borderLeftColor = note.color || '#facc15'
-            if (isUnconfirmed) {
-                card.style.opacity = '0.75'
-            }
-
-            const unconfirmedBadge = isUnconfirmed 
-                ? `<span class="note-unconfirmed-badge" style="margin-left: 6px; font-size: 0.7rem; color: #d97706; background: rgba(245, 158, 11, 0.12); padding: 1px 5px; border-radius: 4px; font-weight: 500;">⚠️ 待确认版本</span>` 
-                : ''
 
             card.innerHTML = `
                 <div class="highlight-text">“${escapeHTML(note.text)}”</div>
                 ${note.note ? `<div class="highlight-note">${escapeHTML(note.note)}</div>` : ''}
                 <div class="highlight-meta">
-                    <span class="highlight-meta-info">${escapeHTML(note.chapterTitle || '正文')} • ${new Date(note.createdAt).toLocaleDateString()}${unconfirmedBadge}</span>
+                    <span class="highlight-meta-info">${escapeHTML(note.chapterTitle || '正文')} • ${new Date(note.createdAt).toLocaleDateString()}</span>
                     <div class="highlight-meta-actions">
                         <button class="btn-note-share" title="分享卡片">📷 分享卡片</button>
                         <button class="btn-note-del" title="删除笔记">删除</button>
