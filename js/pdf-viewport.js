@@ -676,9 +676,9 @@ export class PdfViewport {
                 const visHeight = visBottom - visTop
                 const visRatio = visHeight / Math.max(1, pageOffset.height)
 
-                // Only clip if page is partially visible (< 85% visible in scroll area)
-                if (visRatio < 0.85 && visHeight > 0) {
-                    const bleed = Math.round(this.scrollArea.clientHeight * 0.20)
+                // Only clip if page is partially visible (< 80% visible in scroll area)
+                if (visRatio < 0.80 && visHeight > 0) {
+                    const bleed = Math.round(this.scrollArea.clientHeight * 0.35)
                     let cssY0 = Math.max(0, visTop - bleed)
                     let cssY1 = Math.min(pageOffset.height, visBottom + bleed)
 
@@ -696,6 +696,34 @@ export class PdfViewport {
                     }
                 }
             }
+
+            // CRITICAL CONTINUITY FIX:
+            // If slot has NO full-page preview canvas and this is a clipped render,
+            // immediately fetch and mount a fast full-page base preview (scale 0.5 ~ 1.0)
+            // so that scrolling or partial visibility NEVER exposes blank white slot background!
+            if (clip && !pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')) {
+                const baseScale = Math.min(1.0, Math.max(0.5, this.scale * 0.5))
+                try {
+                    const baseCanvas = await this.driver.renderPage(page, baseScale, signal, null, 1, generation)
+                    if (isCurrent() && !pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')) {
+                        baseCanvas.classList.add('pdf-page-preview')
+                        baseCanvas.style.position = 'absolute'
+                        baseCanvas.style.inset = '0'
+                        baseCanvas.style.width = '100%'
+                        baseCanvas.style.height = '100%'
+                        baseCanvas.style.zIndex = '1'
+                        baseCanvas.style.filter = 'var(--reader-img-filter,none)'
+                        baseCanvas.style.pointerEvents = 'none'
+                        if (typeof pixels.prepend === 'function') pixels.prepend(baseCanvas)
+                        else if (pixels.children?.unshift) { pixels.children.unshift(baseCanvas); baseCanvas.parentElement = pixels }
+                        else pixels.append(baseCanvas)
+                    }
+                } catch (_) {
+                    // Base preview is non-fatal enhancement
+                }
+            }
+
+            if (!isCurrent()) return
 
             let canvas = null
             const cacheKey = this._cacheKey(page, scale, clip)
@@ -761,15 +789,32 @@ export class PdfViewport {
                 canvas.style.zIndex = '2'
 
                 const existingPageCanvas = pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')
-                pixels.querySelectorAll('.pdf-clip-canvas').forEach(c => c.remove())
-
                 if (existingPageCanvas) {
                     existingPageCanvas.className = 'pdf-page-preview'
                     existingPageCanvas.style.zIndex = '1'
-                    pixels.prepend(canvas)
-                } else {
-                    pixels.replaceChildren(canvas)
                 }
+
+                // Remove any old clip that is completely contained within the new clip range
+                const existingClips = [...pixels.querySelectorAll('.pdf-clip-canvas')]
+                for (const old of existingClips) {
+                    const oldTop = parseFloat(old.style.top) || 0
+                    const oldHeight = parseFloat(old.style.height) || 0
+                    const oldBottom = oldTop + oldHeight
+                    const newBottom = cssTop + cssHeight
+                    if (oldTop >= cssTop && oldBottom <= newBottom) {
+                        old.remove()
+                    }
+                }
+
+                // Keep at most 2 active clip canvases to prevent DOM buildup while maintaining scroll continuity
+                const remainingClips = [...pixels.querySelectorAll('.pdf-clip-canvas')]
+                while (remainingClips.length >= 2) {
+                    remainingClips.shift()?.remove()
+                }
+
+                if (typeof pixels.prepend === 'function') pixels.prepend(canvas)
+                else if (pixels.children?.unshift) { pixels.children.unshift(canvas); canvas.parentElement = pixels }
+                else pixels.append(canvas)
 
                 slot._renderedClip = {
                     top: requestedClip ? requestedClip.top : cssTop,

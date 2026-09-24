@@ -52,7 +52,6 @@ static uint64_t ll_now_us(void) {
 typedef struct {
     int page;
     uint64_t used;
-    int is_visible;
     fz_rect bounds;
     fz_display_list *list;
     fz_stext_page *text;
@@ -100,29 +99,21 @@ static ll_page *get_page_internal(ll_doc *d, int number, int *hit, int priority)
         ll_page *p = &d->pages[i];
         if (p->page == number && p->list) {
             p->used = ++d->clock;
-            if (priority == 0) p->is_visible = 1;
             ++d->stats.list_hits;
             if (hit) *hit = 1;
             return p;
         }
     }
 
-    /* Cache miss: pick best eviction victim.
-     * Rule: Prefer unused (-1) -> then lowest 'used' among buffer pages (!is_visible) ->
-     *       then lowest 'used' among visible pages. */
+    /* Cache miss: pick best eviction victim using clean standard LRU.
+     * Select unallocated slot (-1) first; otherwise evict entry with minimum 'used' clock. */
     for (int i = 0; i < CACHE_PAGES; ++i) {
         ll_page *p = &d->pages[i];
         if (p->page == -1) {
             entry = p;
             break;
         }
-        if (!entry) {
-            entry = p;
-            continue;
-        }
-        if (entry->is_visible && !p->is_visible) {
-            entry = p;
-        } else if (entry->is_visible == p->is_visible && p->used < entry->used) {
+        if (!entry || p->used < entry->used) {
             entry = p;
         }
     }
@@ -137,7 +128,6 @@ static ll_page *get_page_internal(ll_doc *d, int number, int *hit, int priority)
         entry->list = fz_new_display_list_from_page(d->ctx, page);
         entry->page = number;
         entry->used = ++d->clock;
-        entry->is_visible = (priority == 0) ? 1 : 0;
         ++d->stats.list_builds;
     }
     fz_always(d->ctx) {

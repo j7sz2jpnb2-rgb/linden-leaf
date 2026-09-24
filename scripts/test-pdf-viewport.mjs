@@ -41,6 +41,15 @@ class MockElement {
             }
         }
     }
+    prepend(...children) {
+        for (let i = children.length - 1; i >= 0; i--) {
+            const c = children[i];
+            if (c) {
+                c.parentElement = this;
+                this.children.unshift(c);
+            }
+        }
+    }
     replaceChildren(...children) {
         this.children = [];
         this.append(...children);
@@ -73,9 +82,10 @@ class MockElement {
         const results = [];
         const walk = (el) => {
             if (selector.startsWith('.') && el._classes.has(selector.slice(1))) results.push(el);
+            else if (el.tagName && el.tagName.toLowerCase() === selector.toLowerCase()) results.push(el);
             for (const child of el.children) walk(child);
         };
-        walk(this);
+        for (const child of this.children) walk(child);
         return results;
     }
     closest(selector) { return this; }
@@ -87,7 +97,26 @@ class MockElement {
         };
     }
     getBoundingClientRect() {
-        return { top: 0, left: 0, width: parseFloat(this.style.width) || 600, height: parseFloat(this.style.height) || 800 };
+        let top = 0;
+        if (this.style.top && this.style.top.endsWith('px')) {
+            top = parseFloat(this.style.top) || 0;
+            if (this.parentElement) top += this.parentElement.getBoundingClientRect().top;
+        } else if (this.parentElement) {
+            top = this.parentElement.getBoundingClientRect().top;
+        }
+        let height = 800;
+        if (this.style.height && this.style.height.endsWith('px')) {
+            height = parseFloat(this.style.height) || 800;
+        } else if (this.parentElement) {
+            height = this.parentElement.getBoundingClientRect().height;
+        }
+        let width = 600;
+        if (this.style.width && this.style.width.endsWith('px')) {
+            width = parseFloat(this.style.width) || 600;
+        } else if (this.parentElement) {
+            width = this.parentElement.getBoundingClientRect().width;
+        }
+        return { top, bottom: top + height, left: 0, right: width, width, height };
     }
     addEventListener() {}
     removeEventListener() {}
@@ -837,6 +866,103 @@ async function testDirectionalPrefetchAndBitmapCache() {
     viewport.destroy();
 }
 
+async function testScrollCoverageUncoveredHeightZero() {
+    console.log('\nSuite 11: Rapid Scroll Canvas Coverage (Uncovered Height = 0 Guarantee)');
+
+    const container = new MockElement('div');
+    const viewport = new PdfViewport(container, {
+        scale: 2.0,
+        enableClip: true,
+        clipPixelThreshold: 500_000,
+    });
+    // Page with 600x1000 at 2.0x -> 1200x2000 pixels
+    viewport.pageSizes = [{ width: 600, height: 1000 }];
+    viewport._recomputeLayout();
+
+    const mockDriver = {
+        kind: 'mupdf',
+        supportsClip: true,
+        async renderPage(page, scale, signal, clip, priority, generation) {
+            const canvas = new MockElement('canvas');
+            canvas.dataset.page = String(page);
+            canvas.dataset.scale = String(scale);
+            if (clip) {
+                canvas.width = clip[2] - clip[0];
+                canvas.height = clip[3] - clip[1];
+                canvas.offsetX = clip[0];
+                canvas.offsetY = clip[1];
+            } else {
+                canvas.width = Math.round(600 * scale);
+                canvas.height = Math.round(1000 * scale);
+                canvas.offsetX = 0;
+                canvas.offsetY = 0;
+            }
+            return canvas;
+        },
+        destroy() {}
+    };
+
+    viewport.driver = mockDriver;
+    viewport.scrollArea.scrollTop = 0;
+    viewport.scrollArea.clientHeight = 800;
+    viewport.currentPage = 0;
+
+    // 1. Initial cold render at 2.0x
+    viewport._renderVisibleSlots();
+    while (viewport._activeRenders > 0 || viewport._renderQueue.length > 0) {
+        await new Promise(r => setTimeout(r, 10));
+    }
+
+    const slot = viewport.activeSlots.get(0);
+    assert.ok(slot, 'Slot 0 must be active');
+    const wrapper = slot.querySelector('.pdf-img-wrapper');
+    assert.ok(wrapper, 'Wrapper must exist');
+
+    // Slot must contain BOTH .pdf-page-preview (full page) and .pdf-clip-canvas (visible clip)
+    const preview = wrapper.querySelector('.pdf-page-preview');
+    assert.ok(preview, 'Slot must have .pdf-page-preview covering full page');
+    const clipCanvas = wrapper.querySelector('.pdf-clip-canvas');
+    assert.ok(clipCanvas, 'Slot must have .pdf-clip-canvas for visible clip');
+    console.log('  [PASS] 11.1 Slot initialized with full-page base preview and visible clip');
+
+    // 2. Measure uncoveredHeight immediately after 480px scroll
+    viewport.scrollArea.scrollTop = 480;
+    slot.style.top = `${-480}px`; // simulate viewport scroll on slot
+    viewport._renderVisibleSlots();
+
+    const measureUncovered = () => {
+        const visibleTop = 0;
+        const visibleBottom = 800;
+        const canvases = [...slot.querySelectorAll('canvas')].map(c => {
+            const r = c.getBoundingClientRect();
+            return { className: c.className, top: r.top, bottom: r.bottom };
+        });
+        const yCuts = [visibleTop, visibleBottom, ...canvases.flatMap(c => [Math.max(visibleTop, c.top), Math.min(visibleBottom, c.bottom)])].filter(Number.isFinite).sort((a,b)=>a-b);
+        let uncovered = 0;
+        for (let i = 0; i + 1 < yCuts.length; i++) {
+            const a = yCuts[i], b = yCuts[i+1];
+            if (b <= a) continue;
+            const mid = (a + b) / 2;
+            if (!canvases.some(c => c.top <= mid && c.bottom >= mid)) uncovered += b - a;
+        }
+        return uncovered;
+    };
+
+    const immediateUncovered = measureUncovered();
+    assert.equal(immediateUncovered, 0, 'Uncovered height immediately after scroll must be 0');
+    console.log('  [PASS] 11.2 Immediate post-scroll uncovered height is 0 (preview covers entire viewport)');
+
+    // 3. Let new clip complete and settle
+    while (viewport._activeRenders > 0 || viewport._renderQueue.length > 0) {
+        await new Promise(r => setTimeout(r, 10));
+    }
+    const settledUncovered = measureUncovered();
+    assert.equal(settledUncovered, 0, 'Uncovered height after settle must be 0');
+    console.log('  [PASS] 11.3 Settled uncovered height is 0 (new clip cleanly sharpens view)');
+
+    viewport.destroy();
+}
+
 async function runAll() {
     await testVisiblePagePriority();
     await testBufferPreemption();
@@ -848,6 +974,7 @@ async function runAll() {
     await testDocumentSwitchIsolation();
     await testViewportBoundedClipAndHandover();
     await testDirectionalPrefetchAndBitmapCache();
+    await testScrollCoverageUncoveredHeightZero();
 
     console.log('\n====================================================');
     console.log('All PDF Viewport Scheduling & Zoom Tests Passed!');
