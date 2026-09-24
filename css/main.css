@@ -2824,11 +2824,64 @@ foliate-view {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 .highlight-meta {
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   color: var(--text-muted);
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 0.4rem 0.6rem;
+  margin-top: 0.45rem;
+  padding-top: 0.2rem;
+}
+
+.highlight-meta-info {
+  flex: 1 1 180px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.4rem;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+.highlight-meta-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.highlight-meta-actions button {
+  white-space: nowrap !important;
+  font-size: 0.75rem;
+  padding: 3px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1.3;
+}
+
+.highlight-meta-actions .btn-note-share {
+  color: var(--accent-purple, #8b5cf6);
+  font-weight: 600;
+}
+
+.highlight-meta-actions .btn-note-share:hover {
+  background: rgba(139, 92, 246, 0.12);
+}
+
+.highlight-meta-actions .btn-note-del {
+  color: #ef4444;
+}
+
+.highlight-meta-actions .btn-note-del:hover {
+  background: rgba(239, 68, 68, 0.12);
 }
 
 .search-input-group { display: flex; gap: 0.5rem; margin-bottom: 1rem; }

@@ -90,7 +90,7 @@ export function decodePdfProgress(savedProgress, totalPages) {
     return { page: 1, fraction: 0 }
 }
 
-// Object URL Lifecycle Pool with LRU Eviction to prevent Blob memory bloat
+// Object URL Lifecycle Pool with DOM-Aware Protection to prevent premature revocation and memory bloat
 class ObjectUrlPool {
     constructor(maxCapacity = 120) {
         this.cache = new Map()
@@ -105,12 +105,9 @@ class ObjectUrlPool {
             this.cache.set(key, existing)
             return existing
         }
-        // Evict oldest entry when capacity is reached to prevent memory growth
+        // Evict oldest unused entry when capacity is reached
         if (this.cache.size >= this.maxCapacity) {
-            const oldestKey = this.cache.keys().next().value
-            if (oldestKey !== undefined) {
-                this.revoke(oldestKey)
-            }
+            this.pruneUnused()
         }
         try {
             const url = URL.createObjectURL(blob)
@@ -119,6 +116,20 @@ class ObjectUrlPool {
         } catch (e) {
             console.warn('[ObjectUrlPool] Failed creating object URL:', e)
             return ''
+        }
+    }
+    pruneUnused() {
+        // Find keys whose URL is NOT currently referenced by an <img> or element in the active DOM
+        for (const [key, url] of this.cache.entries()) {
+            if (this.cache.size <= Math.floor(this.maxCapacity * 0.8)) break
+            try {
+                const inDom = document.querySelector(`img[src="${CSS.escape(url)}"], [data-cover-url="${CSS.escape(url)}"]`)
+                if (!inDom) {
+                    this.revoke(key)
+                }
+            } catch (e) {
+                // If query fails, fall back to safe retention
+            }
         }
     }
     revoke(key) {
@@ -139,6 +150,8 @@ class ObjectUrlPool {
     }
 }
 const coverUrlPool = new ObjectUrlPool(120)
+window.ObjectUrlPool = ObjectUrlPool
+window.coverUrlPool = coverUrlPool
 
 const formatFontWeight = w => {
     const num = parseInt(w, 10) || 400
@@ -255,24 +268,63 @@ const buildContentCSS = (settings) => {
             padding: 1em 0 !important;
             background: transparent !important;
         }
-        /* Decorative chapter title boxes (e.g. Shibusawa .k, .k1, .k2, .k3, .k4, .k5) */
-        .k, .k1, .k2, .k3, .k4, .k5 {
+        /* Decorative chapter title card: .k > .k1 > .k2 (e.g. Shibusawa part0004.html) */
+        html:has(body > .k:only-child) body,
+        body:has(> .k:only-child) {
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: center !important;
+            min-height: 100% !important;
+            height: 100% !important;
+            box-sizing: border-box !important;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+        }
+        .k:has(> .k1 > .k2),
+        body > .k:only-child {
+            display: block !important;
             page-break-inside: avoid !important;
             break-inside: avoid !important;
             -webkit-column-break-inside: avoid !important;
+            background-color: #231815 !important;
+            padding: 0.5em !important;
+            margin: auto auto !important;
+            box-sizing: border-box !important;
+            width: 100% !important;
+            max-width: 540px !important;
+        }
+        .k:has(> .k1 > .k2) > .k1,
+        body > .k:only-child > .k1 {
+            background-color: #231815 !important;
+            color: #fff !important;
+            border: 3px solid #fff !important;
+            padding: 0.5em !important;
+            margin: 0 !important;
             box-sizing: border-box !important;
         }
-        .k2, .k4, .k5 {
-            padding-top: clamp(1em, 6vh, 2.5em) !important;
-            padding-bottom: clamp(1em, 6vh, 2.5em) !important;
+        .k:has(> .k1 > .k2) > .k1 > .k2,
+        body > .k:only-child > .k1 > .k2 {
+            background-color: #231815 !important;
+            color: #fff !important;
+            border: 1px solid #fff !important;
+            padding: clamp(2.2em, 5vh, 4.2em) 1.5em !important;
+            margin: 0 !important;
+            box-sizing: border-box !important;
         }
-        .k .center {
+        .k:has(> .k1 > .k2) .center {
             margin-top: 0.8em !important;
             margin-bottom: 0.8em !important;
+            line-height: 1.3 !important;
         }
-        .k .center1 {
-            margin-top: 0.5em !important;
-            margin-bottom: 0.5em !important;
+        .k:has(> .k1 > .k2) .center1 {
+            margin-top: 0.6em !important;
+            margin-bottom: 0.6em !important;
+        }
+        .k:has(> .k1 > .k2) img {
+            display: inline-block !important;
+            max-width: 70% !important;
+            height: auto !important;
+            max-height: 3.2em !important;
         }
     `
 
@@ -430,7 +482,6 @@ const buildContentCSS = (settings) => {
         body > div:last-child > :last-child,
         body > section:last-child > :last-child {
             margin-bottom: 0 !important;
-            padding-bottom: 0 !important;
         }
 
         /* 4. Target Calibre / Pandoc / Kindle dummy page-break markers directly in CSS */
@@ -2782,12 +2833,12 @@ class UniversalReaderApp {
                     if (pIdx != null) await db.clearPdfPageDrawing(this.currentBookId, pIdx, true, Date.now(), snapshot)
                 }
                 if (activeSession && !activeSession.isCurrent()) return
-                this.redrawPdfPageOverlay()
+                await this.redrawPdfPageOverlay()
                 this.showToast('🗑️ 已清空当前双页手绘批注')
             } else if (this.currentPdfPageIndex != null) {
                 await db.clearPdfPageDrawing(this.currentBookId, this.currentPdfPageIndex, true, Date.now(), snapshot)
                 if (activeSession && !activeSession.isCurrent()) return
-                this.redrawPdfPageOverlay()
+                await this.redrawPdfPageOverlay()
                 this.showToast('🗑️ 已清空当前页手绘批注')
             }
         })
@@ -2910,10 +2961,13 @@ class UniversalReaderApp {
             if (this.dom.readerView?.classList.contains('active') && this.settings.layout !== 'scrolled' && !this.foliateView?.isFixedLayout && this.currentBookData?.format !== 'pdf') {
                 e.preventDefault()
                 if (outerWheelCooldown) return
-                if (Math.abs(e.deltaY) > 20 || Math.abs(e.deltaX) > 20) {
+                const absY = Math.abs(e.deltaY)
+                const absX = Math.abs(e.deltaX)
+                if (absY > 20 || absX > 20) {
                     outerWheelCooldown = true
-                    if (e.deltaY > 0 || e.deltaX > 0) this.turnPageNext()
-                    else this.turnPagePrev()
+                    const dominantDelta = absY >= absX ? e.deltaY : e.deltaX
+                    if (dominantDelta > 0) this.turnPageNext()
+                    else if (dominantDelta < 0) this.turnPagePrev()
                     setTimeout(() => { outerWheelCooldown = false }, 220)
                 }
             }
@@ -3182,7 +3236,8 @@ class UniversalReaderApp {
 
         for (const activeObj of allTargets) {
             if (!activeObj?.doc) continue
-            const overlayCanvas = activeObj.doc.getElementById('pdf-page-draw-overlay')
+            const overlayCanvas = activeObj.container?.querySelector?.('.pdf-draw-overlay-canvas') || 
+                                  activeObj.doc.querySelector?.('.pdf-draw-overlay-canvas')
             if (!overlayCanvas) continue
 
             const targetPageIndex = overlayCanvas.dataset.pageIndex != null 
@@ -7587,11 +7642,14 @@ class UniversalReaderApp {
             // In paginated mode, ALWAYS prevent browser native scrolling to protect column alignment!
             e.preventDefault()
             if (wheelCooldown) return
-            if (Math.abs(e.deltaY) > 20 || Math.abs(e.deltaX) > 20) {
+            const absY = Math.abs(e.deltaY)
+            const absX = Math.abs(e.deltaX)
+            if (absY > 20 || absX > 20) {
                 wheelCooldown = true
-                if (e.deltaY > 0 || e.deltaX > 0) {
+                const dominantDelta = absY >= absX ? e.deltaY : e.deltaX
+                if (dominantDelta > 0) {
                     this.turnPageNext()
-                } else {
+                } else if (dominantDelta < 0) {
                     this.turnPagePrev()
                 }
                 setTimeout(() => {
@@ -8192,10 +8250,10 @@ class UniversalReaderApp {
                 <div class="highlight-text">“${escapeHTML(note.text)}”</div>
                 ${note.note ? `<div class="highlight-note">${escapeHTML(note.note)}</div>` : ''}
                 <div class="highlight-meta">
-                    <span>${escapeHTML(note.chapterTitle || '正文')} • ${new Date(note.createdAt).toLocaleDateString()}${unconfirmedBadge}</span>
-                    <div style="display: flex; gap: 8px;">
-                        <button class="btn-note-share" style="color: var(--accent-purple); font-size: 0.75rem; font-weight: 600; background: none; border: none; cursor: pointer;">📷 分享卡片</button>
-                        <button class="btn-note-del" style="color: #ef4444; font-size: 0.75rem; background: none; border: none; cursor: pointer;">删除</button>
+                    <span class="highlight-meta-info">${escapeHTML(note.chapterTitle || '正文')} • ${new Date(note.createdAt).toLocaleDateString()}${unconfirmedBadge}</span>
+                    <div class="highlight-meta-actions">
+                        <button class="btn-note-share" title="分享卡片">📷 分享卡片</button>
+                        <button class="btn-note-del" title="删除笔记">删除</button>
                     </div>
                 </div>
             `
@@ -8730,9 +8788,27 @@ class UniversalReaderApp {
             // 5. Render Distribution Bar Chart
             this.renderDistributionChart(stats)
 
-            // 6. Books Leaderboard
-            const leaderboardBooks = (stats.periodBooks && stats.periodBooks.length > 0) ? stats.periodBooks : stats.topBooks
-            this.renderLeaderboard(leaderboardBooks)
+            // 6. Books Leaderboard: in specific periods (week, month, year), do NOT fall back to historical topBooks!
+            const isTotalMode = stats.viewMode === 'total'
+            const leaderboardBooks = isTotalMode
+                ? (stats.periodBooks && stats.periodBooks.length > 0 ? stats.periodBooks : (stats.topBooks || []))
+                : (stats.periodBooks || [])
+
+            // Update leaderboard subtitle to match current period
+            const subTitleEl = document.querySelector('.stats-leaderboard-box .stats-section-subtitle')
+            if (subTitleEl) {
+                if (stats.viewMode === 'week') {
+                    subTitleEl.innerText = stats.weekOffset === 0 ? '按本周时长' : '按所选周时长'
+                } else if (stats.viewMode === 'month') {
+                    subTitleEl.innerText = `按${stats.targetMonth}月时长`
+                } else if (stats.viewMode === 'year') {
+                    subTitleEl.innerText = `按${stats.targetYear}年时长`
+                } else {
+                    subTitleEl.innerText = '按累计时长'
+                }
+            }
+
+            this.renderLeaderboard(leaderboardBooks, stats.viewMode)
 
             // 7. Recent Sessions Timeline
             this.renderRecentSessions(stats.recentSessions)
@@ -8805,7 +8881,7 @@ class UniversalReaderApp {
         }
     }
 
-    renderLeaderboard(books) {
+    renderLeaderboard(books, viewMode = 'total') {
         const container = this.dom.statsLeaderboardList
         if (!container) return
         container.innerHTML = ''
@@ -8817,15 +8893,16 @@ class UniversalReaderApp {
         })
 
         if (validBooks.length === 0) {
+            const emptyNotice = viewMode === 'total'
+                ? '暂无阅读记录，挑选一本书开始阅读吧'
+                : '本周期暂无阅读记录，挑选一本书开始阅读吧'
             container.innerHTML = `
                 <div style="text-align: center; color: var(--text-muted); font-size: 0.82rem; padding: 2.5rem 1rem;">
-                    暂无阅读记录，挑选一本书开始阅读吧
+                    ${emptyNotice}
                 </div>
             `
             return
         }
-
-        const maxDurationSecs = Math.max(1, ...validBooks.map(b => (b.periodReadingSeconds != null ? b.periodReadingSeconds : b.totalReadingSeconds) || 0))
 
         validBooks.forEach((book, idx) => {
             const item = document.createElement('div')
@@ -8845,15 +8922,16 @@ class UniversalReaderApp {
             }
 
             const bookSecs = (book.periodReadingSeconds != null ? book.periodReadingSeconds : book.totalReadingSeconds) || 0
-            const fraction = book.progress?.fraction || 0
-            const rawPct = fraction * 100
-            const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
             const timeStr = tracker.formatDuration(bookSecs)
 
-            // Duration bar: relative to the top book's duration, with min 6% width so it is always visible if > 0
-            const durationBarWidth = maxDurationSecs > 0 && bookSecs > 0
-                ? Math.min(100, Math.max(6, Math.round((bookSecs / maxDurationSecs) * 100)))
-                : 0
+            // Reading progress bar: strictly reflects genuine reading progress (fraction * 100), clamped [0, 100]
+            const rawFraction = (typeof book.progress?.fraction === 'number' && Number.isFinite(book.progress.fraction))
+                ? book.progress.fraction
+                : (book.isFinished ? 1 : 0)
+            const fraction = Math.max(0, Math.min(1, rawFraction))
+            const rawPct = fraction * 100
+            const progressPct = fraction === 0 ? '0' : (rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0)))
+            const progressBarWidth = Math.max(0, Math.min(100, Math.round(fraction * 1000) / 10))
 
             item.innerHTML = `
                 <div class="rank-badge ${rankClass}">${rankText}</div>
@@ -8868,7 +8946,7 @@ class UniversalReaderApp {
                         <span>进度 ${progressPct}%</span>
                     </div>
                     <div class="item-progress-track">
-                        <div class="item-progress-fill" style="width: ${durationBarWidth}%;"></div>
+                        <div class="item-progress-fill" style="width: ${progressBarWidth}%;"></div>
                     </div>
                 </div>
             `
@@ -9206,10 +9284,11 @@ class UniversalReaderApp {
         // Save & Enable Button
         const btnSaveEnable = this.dom.btnSyncSaveEnable || document.getElementById('btn-sync-save-enable')
         btnSaveEnable?.addEventListener('click', async () => {
-            const cfg = this.getSyncConfigFromUI()
-            cfg.enabled = true
-            this.syncConfig = cfg
-            await this.saveSyncConfig()
+            const saved = await this.saveSyncConfig({ enabled: true })
+            if (!saved) {
+                this.showToast('保存云同步设置失败，请检查配置或日志重试', 'error')
+                return
+            }
             this.renderSyncUI()
             this.closeWebdavSyncModal()
             this.showToast('云端同步已开启，多端数据将自动实时对齐', '✓')
@@ -9219,10 +9298,11 @@ class UniversalReaderApp {
         // Disable Sync Button
         const btnDisable = this.dom.btnSyncDisable || document.getElementById('btn-sync-disable')
         btnDisable?.addEventListener('click', async () => {
-            const cfg = this.getSyncConfigFromUI()
-            cfg.enabled = false
-            this.syncConfig = cfg
-            await this.saveSyncConfig()
+            const saved = await this.saveSyncConfig({ enabled: false })
+            if (!saved) {
+                this.showToast('保存设置失败，请重试', 'error')
+                return
+            }
             this.renderSyncUI()
             this.closeWebdavSyncModal()
             this.showToast('已关闭云端同步', '✓')
@@ -9334,22 +9414,31 @@ class UniversalReaderApp {
         const baseCfg = this.getSyncConfigFromUI()
         const cfg = { ...baseCfg, ...(overrideConfig || {}) }
         if (window.electronAPI?.syncSaveConfig) {
-            await window.electronAPI.syncSaveConfig(cfg)
-            if (window.electronAPI.syncGetConfig) {
-                const refreshed = await window.electronAPI.syncGetConfig()
-                if (refreshed) {
-                    this.syncConfig = {
-                        ...this.syncConfig,
-                        ...refreshed,
-                        ...(cfg.lastSyncTime ? {
-                            lastSyncTime: cfg.lastSyncTime,
-                            lastSyncStatus: cfg.lastSyncStatus,
-                            lastSyncSummary: cfg.lastSyncSummary
-                        } : {})
-                    }
+            try {
+                const ok = await window.electronAPI.syncSaveConfig(cfg)
+                if (ok === false) {
+                    console.error('[CloudSync] syncSaveConfig returned false')
+                    return false
                 }
-            } else {
-                this.syncConfig = { ...this.syncConfig, ...cfg }
+                if (window.electronAPI.syncGetConfig) {
+                    const refreshed = await window.electronAPI.syncGetConfig()
+                    if (refreshed) {
+                        this.syncConfig = {
+                            ...this.syncConfig,
+                            ...refreshed,
+                            ...(cfg.lastSyncTime ? {
+                                lastSyncTime: cfg.lastSyncTime,
+                                lastSyncStatus: cfg.lastSyncStatus,
+                                lastSyncSummary: cfg.lastSyncSummary
+                            } : {})
+                        }
+                    }
+                } else {
+                    this.syncConfig = { ...this.syncConfig, ...cfg }
+                }
+            } catch (err) {
+                console.error('[CloudSync] syncSaveConfig threw error:', err)
+                return false
             }
         } else {
             this.syncConfig = { ...this.syncConfig, ...cfg }
@@ -9360,10 +9449,15 @@ class UniversalReaderApp {
             this.dom.heroGreetingTitle.innerText = greetingData.title
             this.dom.heroGreetingSubtitle.innerText = greetingData.subtitle
         }
+        return true
     }
 
     async testSyncConnection() {
-        await this.saveSyncConfig()
+        const saved = await this.saveSyncConfig()
+        if (!saved) {
+            this.showToast('保存配置失败，无法进行连接测试', 'error')
+            return
+        }
         const config = this.syncConfig
         if (!config.username || (!config.password && !config.hasPassword)) {
             this.showToast('请先输入坚果云账号（邮箱）和应用授权密码', 'warning')
@@ -9418,7 +9512,11 @@ class UniversalReaderApp {
     }
 
     async triggerManualSync() {
-        await this.saveSyncConfig()
+        const saved = await this.saveSyncConfig()
+        if (!saved) {
+            this.showToast('保存配置失败，无法启动同步', 'error')
+            return
+        }
         const config = this.syncConfig
         if (!config.username || (!config.password && !config.hasPassword)) {
             this.showToast('请先输入坚果云账号与应用授权密码', 'warning')
