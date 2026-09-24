@@ -1046,14 +1046,14 @@
 
     <!-- Quote Card Modal (WeChat Read style share card generator) -->
     <div id="quote-card-backdrop" class="global-modal-backdrop" style="display: none; z-index: 99999;">
-      <div id="quote-card-dialog" class="global-modal-card" style="max-width: 900px; width: 92vw; display: flex; flex-direction: row; padding: 0; position: relative; max-height: 90vh;">
-        <button id="btn-quote-close" class="footnote-popup-close" style="position: absolute; right: 15px; top: 15px; z-index: 10;" title="关闭">×</button>
+      <div id="quote-card-dialog" class="quote-modal-dialog">
+        <button id="btn-quote-close" class="footnote-popup-close quote-modal-close" style="position: absolute; right: 15px; top: 15px; z-index: 10;" title="关闭">×</button>
         
         <!-- Left: Canvas Preview Wrapper -->
-        <div id="quote-card-canvas-wrap" style="flex: 1; padding: 24px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 12px 0 0 12px;"></div>
+        <div id="quote-card-canvas-wrap" class="quote-card-preview-viewport"></div>
 
         <!-- Right: Controls & Options -->
-        <div class="quote-controls-column" style="width: 340px; padding: 20px; overflow-y: auto; max-height: 85vh;">
+        <div class="quote-controls-column">
           <!-- 1. Theme Color Selector -->
           <div class="control-group">
             <label class="control-label">纸张质感与配色</label>
@@ -1090,22 +1090,28 @@
               <svg class="icon icon-sm chevron-icon" id="quote-details-chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
             </button>
             <div id="quote-details-panel" class="quote-details-panel" style="display: none;">
+              <!-- 5a. Card Source Text (Affects this card only) -->
               <div class="expand-input-item">
-                <label class="expand-label">书籍名称</label>
-                <input type="text" id="quote-book-title-input" class="quote-text-input" placeholder="修改书名" />
+                <label class="expand-label">章节 / 出处（仅此卡片）</label>
+                <input type="text" id="quote-chapter-title-input" class="quote-text-input" placeholder="可修改或清空出处文字" />
+                <span class="expand-hint">修改或清空仅影响本次卡片，不修改书籍目录</span>
               </div>
-              <div class="expand-input-item">
-                <label class="expand-label">作者 / 来源</label>
-                <input type="text" id="quote-book-author-input" class="quote-text-input" placeholder="修改作者或来源" />
+
+              <!-- 5b. Book Metadata (Sync to Shelf) -->
+              <div class="quote-shelf-meta-box">
+                <div class="expand-input-item">
+                  <label class="expand-label">书籍名称</label>
+                  <input type="text" id="quote-book-title-input" class="quote-text-input" placeholder="修改书名" />
+                </div>
+                <div class="expand-input-item">
+                  <label class="expand-label">作者</label>
+                  <input type="text" id="quote-book-author-input" class="quote-text-input" placeholder="修改作者" />
+                </div>
+                <button id="btn-quote-save-to-shelf" type="button" class="btn-save-to-shelf" title="将修改后的书名和作者保存到书库">
+                  <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                  <span>将书名和作者保存到书库</span>
+                </button>
               </div>
-              <div class="expand-input-item">
-                <label class="expand-label">章节名称</label>
-                <input type="text" id="quote-chapter-title-input" class="quote-text-input" placeholder="修改章节名称" />
-              </div>
-              <button id="btn-quote-save-to-shelf" type="button" class="btn-save-to-shelf" title="将修改后的书名和作者永久保存到书库数据库">
-                <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                <span>同步保存到书库</span>
-              </button>
             </div>
           </div>
 

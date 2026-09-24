@@ -1268,21 +1268,27 @@ class UniversalReaderApp {
             'list': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-purple, #da7756)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>'
         }
 
-        // Automatic mapping from legacy emojis
+        // Automatic mapping from legacy icons
         let mappedKey = 'info'
-        if (icon === '⚠️') mappedKey = 'warning'
+        if (icon === '⚠️' || icon === 'warning') mappedKey = 'warning'
         else if (icon === '🔴' || icon === 'error') mappedKey = 'error'
-        else if (icon === '🟢' || icon === '🎉' || icon === '✓' || icon === '🌱' || icon === 'success') mappedKey = 'success'
+        else if (icon === '🟢' || icon === '🎉' || icon === '✓' || icon === '🌱' || icon === '✅' || icon === '⭐' || icon === '💾' || icon === 'success') mappedKey = 'success'
         else if (icon === '🗑️' || icon === 'delete') mappedKey = 'delete'
-        else if (icon === '☁️' || icon === 'cloud') mappedKey = 'cloud'
+        else if (icon === '☁️' || icon === 'cloud' || icon === '⏳') mappedKey = 'cloud'
         else if (icon === '📖' || icon === 'book') mappedKey = 'book'
         else if (icon === '📑' || icon === 'list') mappedKey = 'list'
+        else if (icon === '📋' || icon === 'copy') mappedKey = 'success'
+        else if (icon === '📝') mappedKey = 'info'
         else if (toastSvgMap[icon]) mappedKey = icon
 
         if (this.dom.globalToastIcon) {
             this.dom.globalToastIcon.innerHTML = toastSvgMap[mappedKey] || toastSvgMap['info']
         }
-        if (this.dom.globalToastMsg) this.dom.globalToastMsg.innerText = msg
+        // Strip leading decorative emojis from message body so messages are clean and unified with the SVG icon
+        const cleanMsg = typeof msg === 'string'
+            ? msg.replace(/^[\s\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1FA00}-\u{1FAFF}\u{FE00}-\u{FE0F}✓✨🎉🗑️📋✅⭐⚠️🔴🟢🌱💾📖📄📑📝⏳]+\s*/u, '')
+            : msg
+        if (this.dom.globalToastMsg) this.dom.globalToastMsg.innerText = cleanMsg
         this.dom.globalToast.style.display = 'flex'
         requestAnimationFrame(() => {
             this.dom.globalToast?.classList.add('show')
@@ -1752,7 +1758,7 @@ class UniversalReaderApp {
                 this.dom.heroGreetingTitle.innerText = greetingData.title
                 this.dom.heroGreetingSubtitle.innerText = greetingData.subtitle
             }
-            this.showToast(displayName !== '读者' ? `✨ 欢迎您，${displayName}！祝您阅读愉快` : '✨ 欢迎使用 Linden Leaf！祝您阅读愉快', '🌱')
+            this.showToast(displayName !== '读者' ? `欢迎您，${displayName}！祝您阅读愉快` : '欢迎使用 Linden Leaf！祝您阅读愉快', 'info')
         }
         this.dom.btnWelcomeConfirm?.addEventListener('click', handleWelcomeSave)
         this.dom.welcomeUsernameInput?.addEventListener('keydown', e => {
@@ -2404,7 +2410,7 @@ class UniversalReaderApp {
             this.settings.columnCount = '2'
             this.updateSettingsUI()
             this.saveSettingsDebounced()
-            this.showToast('✨ 已将排版与间距恢复为默认设置')
+            this.showToast('已将排版与间距恢复为默认设置', 'info')
         })
 
         this.dom.columnCountSelect?.addEventListener('change', e => {
@@ -2461,7 +2467,7 @@ class UniversalReaderApp {
             if (this.dom.imgGrayscaleSwitch) this.dom.imgGrayscaleSwitch.checked = false
             if (this.dom.imgInvertSwitch) this.dom.imgInvertSwitch.checked = false
             applyImgFilter()
-            this.showToast('✨ 已重置扫描画质增强滤镜')
+            this.showToast('已重置扫描画质增强滤镜', 'info')
         })
 
         // Search
@@ -2598,14 +2604,27 @@ class UniversalReaderApp {
 
         // Selection Share Button
         this.dom.btnPopupShare?.addEventListener('click', () => {
+            const chapter = this.currentLocation?.tocItem?.label || ''
+            let locationInfo = ''
+            if (this.pdfViewport || this.currentBookData?.format === 'pdf') {
+                const page = this.currentLocation?.page ?? this.pdfViewport?.currentPage
+                if (page != null) locationInfo = `第 ${Number(page) + 1} 页`
+            } else if (this.foliateView) {
+                const cur = this.currentLocation?.location?.current
+                const total = this.currentLocation?.location?.total
+                if (cur != null && total > 0) {
+                    locationInfo = `${Math.round(cur / total * 100)}%`
+                } else if (this.currentLocation?.page) {
+                    locationInfo = `第 ${this.currentLocation.page} 页`
+                }
+            }
+
             if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
                 const joinedQuote = this.multiSelectedRanges.map(r => r.text).join('\n\n……\n\n')
-                const chapter = this.currentLocation?.tocItem?.label || ''
-                this.openQuoteCardModal(joinedQuote, chapter)
+                this.openQuoteCardModal(joinedQuote, chapter, locationInfo)
                 this.hideSelectionPopup()
             } else if (this.selectedTextInfo?.text) {
-                const chapter = this.currentLocation?.tocItem?.label || ''
-                this.openQuoteCardModal(this.selectedTextInfo.text, chapter)
+                this.openQuoteCardModal(this.selectedTextInfo.text, chapter, locationInfo)
                 this.hideSelectionPopup()
             }
         })
@@ -2615,7 +2634,14 @@ class UniversalReaderApp {
             if (this.clickedHighlightInfo) {
                 const hl = await this.findHighlightByCFI(this.clickedHighlightInfo.value)
                 if (hl?.text) {
-                    this.openQuoteCardModal(hl.text, hl.chapterTitle || '')
+                    let locationInfo = ''
+                    if (hl.formatType === 'pdf' || hl.pdfTarget) {
+                        const target = hl.pdfTarget || {}
+                        const firstSegment = Array.isArray(target.segments) ? target.segments[0] : null
+                        const page = firstSegment?.page ?? target.page
+                        if (page != null) locationInfo = `第 ${Number(page) + 1} 页`
+                    }
+                    this.openQuoteCardModal(hl.text, hl.chapterTitle || '', locationInfo)
                 }
             }
         })
@@ -2667,6 +2693,7 @@ class UniversalReaderApp {
 
         this.dom.quoteChapterTitleInput?.addEventListener('input', e => {
             quoteCard.chapterTitle = e.target.value.trim()
+            quoteCard.locationInfo = ''
             this.updateQuoteCardPreview(false)
         })
 
@@ -2684,17 +2711,17 @@ class UniversalReaderApp {
                 if (this.dom.readerBookTitle) {
                     this.dom.readerBookTitle.innerText = newTitle
                 }
-                this.showToast('🎉 书籍信息已成功永久保存到书库！', '💾')
+                this.showToast('书名与作者已成功保存到书库', 'success')
             } catch (err) {
                 console.error('Failed to update book metadata:', err)
-                this.showToast(`保存失败: ${err.message}`, '⚠️')
+                this.showToast(`保存失败: ${err.message}`, 'warning')
             }
         })
 
         this.dom.btnQuoteCopyClipboard?.addEventListener('click', async () => {
             const res = await quoteCard.copyImageToClipboard()
             if (res.success) {
-                this.showToast('图片已复制到剪贴板，可直接粘贴发送', '✓')
+                this.showToast('图片已复制到剪贴板，可直接粘贴发送', 'success')
                 if (this.dom.quoteCopyToast) {
                     this.dom.quoteCopyToast.style.display = 'block'
                     setTimeout(() => {
@@ -2826,7 +2853,7 @@ class UniversalReaderApp {
             setTimeout(() => {
                 this.renderPdfDrawingOverlayForCurrentPage?.()
             }, 180)
-            this.showToast(nextMode === '2' ? '📖 已切换为双页展开' : '📄 已切换为单页展示')
+            this.showToast(nextMode === '2' ? '已切换为双页展开' : '已切换为单页展示', 'book')
         })
 
         // PDF Freehand Drawing Tool Listeners
@@ -2846,7 +2873,7 @@ class UniversalReaderApp {
                     pdfToolBtns.forEach(b => b?.classList.remove('active'))
                     this.setPdfOverlayDrawingActive(false)
                     this.pdfViewport?.setInteractionMode('select')
-                    this.showToast('已退出手动画笔模式')
+                    this.showToast('已退出手动画笔模式', 'info')
                 } else {
                     // Activate tool
                     this.pdfDrawTool = tool
@@ -2859,8 +2886,8 @@ class UniversalReaderApp {
                     this.pdfViewport?.setInteractionMode('draw')
                     this.renderPdfDrawingOverlayForCurrentPage()
                     this.setPdfOverlayDrawingActive(true)
-                    const toolName = tool === 'marker' ? '🖍️ 荧光马克笔 (半透明)' : (tool === 'pen' ? '✏️ 批注笔' : '🧹 橡皮擦')
-                    this.showToast(`已开启 ${toolName}，可在页面上自由绘制`)
+                    const toolName = tool === 'marker' ? '荧光马克笔 (半透明)' : (tool === 'pen' ? '批注笔' : '橡皮擦')
+                    this.showToast(`已开启 ${toolName}，可在页面上自由绘制`, 'info')
                 }
             })
         })
@@ -2888,7 +2915,7 @@ class UniversalReaderApp {
                 })
             }
             if (activeSession && !activeSession.isCurrent()) return
-            this.showToast(isTwoPage ? '🗑️ 已清空当前双页手绘批注' : '🗑️ 已清空当前页手绘批注')
+            this.showToast(isTwoPage ? '已清空当前双页手绘批注' : '已清空当前页手绘批注', 'delete')
         })
 
         // PDF OCR Extract Button
@@ -2901,13 +2928,13 @@ class UniversalReaderApp {
         this.dom.btnCopyPdfOcr?.addEventListener('click', () => {
             const text = this.dom.pdfOcrResultText?.value || ''
             if (!text.trim()) {
-                this.showToast('没有可复制的识别文字', '⚠️')
+                this.showToast('没有可复制的识别文字', 'warning')
                 return
             }
             navigator.clipboard.writeText(text).then(() => {
-                this.showToast('📋 识别文字已复制到剪贴板', '✅')
+                this.showToast('识别文字已复制到剪贴板', 'success')
             }).catch(() => {
-                this.showToast('复制失败，请手动选取复制', '⚠️')
+                this.showToast('复制失败，请手动选取复制', 'warning')
             })
         })
 
@@ -4101,7 +4128,7 @@ class UniversalReaderApp {
             if (!mergedText) return false
             try {
                 await navigator.clipboard.writeText(mergedText)
-                this.showToast(`📋 已合并复制 ${this.multiSelectedRanges.length} 处选区内容`, '📋')
+                this.showToast(`已合并复制 ${this.multiSelectedRanges.length} 处选区内容`, 'success')
                 this.clearVirtualMultiSelections()
                 this.multiSelectedRanges = []
                 const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
@@ -4110,18 +4137,18 @@ class UniversalReaderApp {
                 return true
             } catch (err) {
                 console.error('[Copy] Clipboard writeText failed:', err)
-                this.showToast('复制失败，请重试', '⚠️')
+                this.showToast('复制失败，请重试', 'warning')
                 return false
             }
         } else if (this.selectedTextInfo?.text) {
             try {
                 await navigator.clipboard.writeText(this.selectedTextInfo.text)
-                this.showToast('📋 已复制选中文字到剪贴板', '📋')
+                this.showToast('已复制选中文字到剪贴板', 'success')
                 this.hideSelectionPopup()
                 return true
             } catch (err) {
                 console.error('[Copy] Clipboard writeText failed:', err)
-                this.showToast('复制失败，请重试', '⚠️')
+                this.showToast('复制失败，请重试', 'warning')
                 return false
             }
         }
@@ -4376,7 +4403,7 @@ class UniversalReaderApp {
             .trim()
     }
 
-    async openQuoteCardModal(text, chapterTitle = '') {
+    async openQuoteCardModal(text, chapterTitle = '', locationInfo = null) {
         this.hideSelectionPopup()
         this.hideHighlightActionPopup()
 
@@ -4385,17 +4412,33 @@ class UniversalReaderApp {
 
         const bookTitle = this.currentBookData?.title || '未命名书籍'
         const author = this.currentBookData?.author || '未知作者'
-        const isFixed = this.foliateView?.isFixedLayout || this.currentBookData?.format === 'pdf'
-        const pageIndex = isFixed
-            ? (this.currentLocation?.page || '')
-            : (this.currentLocation?.location?.current != null ? this.currentLocation.location.current + 1 : (this.currentLocation?.page || ''))
+
+        if (locationInfo === null) {
+            if (this.pdfViewport || this.currentBookData?.format === 'pdf') {
+                const page = this.currentLocation?.page ?? this.pdfViewport?.currentPage
+                if (page != null) locationInfo = `第 ${Number(page) + 1} 页`
+            } else if (this.foliateView) {
+                const cur = this.currentLocation?.location?.current
+                const total = this.currentLocation?.location?.total
+                if (cur != null && total > 0) {
+                    locationInfo = `${Math.round(cur / total * 100)}%`
+                } else if (this.currentLocation?.page) {
+                    locationInfo = `第 ${this.currentLocation.page} 页`
+                }
+            }
+        }
+
+        const sourceParts = []
+        if (cleanedChapter) sourceParts.push(cleanedChapter)
+        if (locationInfo) sourceParts.push(locationInfo)
+        const initialSource = sourceParts.join(' · ')
 
         quoteCard.setData({
             bookTitle,
             author,
             quoteText: cleanedText,
-            chapterTitle: cleanedChapter,
-            pageIndex,
+            chapterTitle: initialSource,
+            locationInfo: '',
             userName: this.dom.quoteUserNameInput?.value || 'Linden 读者'
         })
 
@@ -4409,7 +4452,7 @@ class UniversalReaderApp {
             this.dom.quoteBookAuthorInput.value = author
         }
         if (this.dom.quoteChapterTitleInput) {
-            this.dom.quoteChapterTitleInput.value = cleanedChapter
+            this.dom.quoteChapterTitleInput.value = initialSource
         }
 
         // Render Theme Pickers
@@ -4445,7 +4488,7 @@ class UniversalReaderApp {
         THEMES.forEach(t => {
             const btn = document.createElement('button')
             btn.className = `quote-theme-pill ${t.id === quoteCard.currentThemeId ? 'active' : ''}`
-            btn.dataset.theme = t.id
+            btn.dataset.quoteTheme = t.id
             btn.innerHTML = `
                 <span class="quote-theme-color-dot" style="background: ${t.bg};"></span>
                 <span>${t.name}</span>
@@ -4901,7 +4944,7 @@ class UniversalReaderApp {
                 }
 
                 const bookTitle = book?.title || '图书'
-                this.showToast(isFav ? `⭐ 已将《${bookTitle}》加入收藏` : `已取消《${bookTitle}》收藏`, '⭐')
+                this.showToast(isFav ? `已将《${bookTitle}》加入收藏` : `已取消《${bookTitle}》收藏`, 'success')
                 if (this.shelfCategory === 'favorite') {
                     this.refreshBookshelf()
                 }
@@ -5728,7 +5771,7 @@ class UniversalReaderApp {
                 }
             }
 
-            this.showToast(`已从书架删除《${book.title}》`, '🗑️')
+            this.showToast(`已从书架删除《${book.title}》`, 'delete')
             await this.renderCustomListsSidebar()
             await this.refreshBookshelf()
 
@@ -5831,7 +5874,7 @@ class UniversalReaderApp {
         )
         if (!confirmed) return
         await db.deleteCustomList(list.id)
-        this.showToast(`已删除书单「${list.name}」`, '🗑️')
+        this.showToast(`已删除书单「${list.name}」`, 'delete')
         if (this.shelfCategory === list.id) {
             this.shelfCategory = 'all'
             document.getElementById('nav-cat-all')?.classList.add('active')
@@ -5983,7 +6026,7 @@ class UniversalReaderApp {
         await db.setBookLists(this.managingBookId, checked)
         const book = await db.getBook(this.managingBookId)
         this.closeManageBookListsModal()
-        this.showToast(`已更新《${book?.title || '图书'}》所属书单`, '✅')
+        this.showToast(`已更新《${book?.title || '图书'}》所属书单`, 'success')
         await this.renderCustomListsSidebar()
         await this.refreshBookshelf()
     }
@@ -6059,7 +6102,7 @@ class UniversalReaderApp {
         }
 
         this.closeBatchAddToListModal()
-        this.showToast('书单图书列表已更新！', '📑')
+        this.showToast('书单图书列表已更新', 'list')
         await this.renderCustomListsSidebar()
         await this.refreshBookshelf()
     }
@@ -6123,14 +6166,14 @@ class UniversalReaderApp {
 
             // Only auto-open if the user isn't already actively reading another book
             if (!this.currentBookId) {
-                this.showToast(`《${book.title}》已就绪！正在翻开...`, '📖')
+                this.showToast(`《${book.title}》已就绪，正在翻开...`, 'book')
                 await this.openBook(book.id)
             } else {
-                this.showToast(`《${book.title}》已下载就绪！`, '📖')
+                this.showToast(`《${book.title}》已下载就绪`, 'success')
             }
         } catch (err) {
             console.error('Download cloud book error:', err)
-            this.showToast(`拉取失败: ${err.message}`, '🔴')
+            this.showToast(`拉取失败: ${err.message}`, 'error')
         } finally {
             this._activeTransfers?.delete(book.id)
         }
@@ -6200,14 +6243,14 @@ class UniversalReaderApp {
             book.cloudBackupState = 'synced'
             await db.saveBook(book)
 
-            this.showToast(`《${book.title}》已成功备份至坚果云！`, '✅')
+            this.showToast(`《${book.title}》已成功备份至坚果云`, 'cloud')
             await this.refreshBookshelf()
 
             // Trigger silent metadata sync so cloud index is immediately updated
             this.triggerSilentBackgroundSync()
         } catch (err) {
             console.error('Upload book error:', err)
-            this.showToast(`备份失败: ${err.message}`, '🔴')
+            this.showToast(`备份失败: ${err.message}`, 'error')
         } finally {
             this._activeTransfers?.delete(book.id)
         }
@@ -8315,7 +8358,7 @@ class UniversalReaderApp {
                 }
             }
             if (activeSession && !activeSession.isCurrent()) return
-            this.showToast(`✨ 已为 ${rangesToProcess.length} 处选区添加标注`)
+            this.showToast(`已为 ${rangesToProcess.length} 处选区添加标注`, 'success')
             this.multiSelectedRanges = []
             const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
             iframe?.contentDocument?.getSelection()?.removeAllRanges()
@@ -8766,7 +8809,14 @@ class UniversalReaderApp {
 
             card.querySelector('.btn-note-share')?.addEventListener('click', e => {
                 e.stopPropagation()
-                this.openQuoteCardModal(note.text, note.chapterTitle || '')
+                let locationInfo = ''
+                if (note.formatType === 'pdf' || note.pdfTarget) {
+                    const target = note.pdfTarget || {}
+                    const firstSegment = Array.isArray(target.segments) ? target.segments[0] : null
+                    const page = firstSegment?.page ?? target.page
+                    if (page != null) locationInfo = `第 ${Number(page) + 1} 页`
+                }
+                this.openQuoteCardModal(note.text, note.chapterTitle || '', locationInfo)
             })
 
             card.querySelector('.btn-note-del')?.addEventListener('click', async e => {
@@ -8791,7 +8841,7 @@ class UniversalReaderApp {
     async exportNotesToMarkdown() {
         if (!this.currentBookId || !this.currentBookData) return
         const notes = await db.getHighlightsByBook(this.currentBookId)
-        if (notes.length === 0) return this.showToast('当前书籍暂无笔记可导出', '📝')
+        if (notes.length === 0) return this.showToast('当前书籍暂无笔记可导出', 'info')
 
         let md = `# 《${this.currentBookData.title}》阅读笔记\n\n`
         md += `* 作者：${this.currentBookData.author || '未知作者'}\n`
@@ -9969,7 +10019,7 @@ class UniversalReaderApp {
                     title.style.color = '#059669'
                 }
                 if (desc) desc.innerText = res.message || 'WebDAV 服务器认证通过，远程目录已就绪'
-                this.showToast('✅ 坚果云连接测试成功！', 'cloud')
+                this.showToast('坚果云连接测试成功', 'cloud')
             } else {
                 if (dot) dot.innerHTML = '<span class="sync-indicator-dot offline"></span>'
                 if (title) {
@@ -10209,7 +10259,7 @@ class UniversalReaderApp {
                 if (res.hasUpdate) {
                     this.openUpdateModal(res)
                 } else if (!silent) {
-                    this.showToast(`🎉 当前已是最新版本 (v${res.currentVersion})`, '✓')
+                    this.showToast(`当前已是最新版本 (v${res.currentVersion})`, 'success')
                 }
             } else if (!silent) {
                 this.showToast(res.error || '检查更新失败', '⚠️')

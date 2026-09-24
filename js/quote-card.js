@@ -83,13 +83,14 @@ function mapVerticalPunctuation(text) {
 
 /**
  * Intelligent Vertical Title Column Splitter (WeChat Read Proportions)
- * - <= 4 chars: single column
- * - 5 chars: single column (or split if punctuation)
- * - 6-12 chars: split into double columns (by punctuation or mid-point)
+ * - Preserves brackets and punctuation pairs (no orphan brackets)
+ * - Natural semantic splits (colon, dash, bracket boundaries)
+ * - Balanced column lengths with orphan punctuation protection
  * - Latin / English titles: automatic horizontal fallback
  */
-function splitVerticalTitle(title) {
+export function splitVerticalTitle(title) {
     const raw = (title || '未命名书籍').trim()
+    const chars = Array.from(raw)
     const cjkCount = (raw.match(/[\u4e00-\u9fa5]/g) || []).length
     const latinCount = (raw.match(/[a-zA-Z]/g) || []).length
     const isMainlyLatin = latinCount > 0 && cjkCount === 0
@@ -98,38 +99,54 @@ function splitVerticalTitle(title) {
         return { isLatin: true, columns: [raw] }
     }
 
-    const cleanTitle = raw.replace(/^《+|》+$/g, '').trim()
-
-    if (cleanTitle.length <= 4) {
-        return { isLatin: false, columns: [cleanTitle] }
+    // Up to 6 characters can comfortably remain a single stately column (e.g. 《百年孤独》, 活着, 围城)
+    if (chars.length <= 6 && !/[:：\s\-—_]/.test(raw)) {
+        return { isLatin: false, columns: [raw] }
     }
 
-    if (cleanTitle.length === 5) {
-        if (/[:：\s\-—_]/.test(cleanTitle)) {
-            const parts = cleanTitle.split(/[:：\s\-—_]+/).filter(Boolean)
-            if (parts.length >= 2) return { isLatin: false, columns: parts.slice(0, 2) }
-        }
-        return { isLatin: false, columns: [cleanTitle] }
-    }
-
-    if (/[:：\s\-—_]/.test(cleanTitle)) {
-        const parts = cleanTitle.split(/[:：\s\-—_]+/).filter(Boolean)
-        if (parts.length >= 2) {
-            let col1 = parts[0]
-            let col2 = parts.slice(1).join(' ')
-            if (col1.length > 7) col1 = col1.slice(0, 6) + '…'
-            if (col2.length > 7) col2 = col2.slice(0, 6) + '…'
+    // 1. Check natural semantic delimiter: colon, space, dash
+    const delimMatch = raw.match(/[:：\s\-—_]+/)
+    if (delimMatch && delimMatch.index > 0 && delimMatch.index < raw.length - 1) {
+        const p1 = raw.slice(0, delimMatch.index).trim()
+        const p2 = raw.slice(delimMatch.index + delimMatch[0].length).trim()
+        if (p1 && p2) {
+            let col1 = p1
+            let col2 = p2
+            if (Array.from(col1).length > 9) col1 = Array.from(col1).slice(0, 8).join('') + '…'
+            if (Array.from(col2).length > 9) col2 = Array.from(col2).slice(0, 8).join('') + '…'
             return { isLatin: false, columns: [col1, col2] }
         }
     }
 
-    const len = Math.min(cleanTitle.length, 12)
-    const mid = Math.ceil(len / 2)
-    const col1 = cleanTitle.slice(0, mid)
-    let col2 = cleanTitle.slice(mid, 12)
-    if (cleanTitle.length > 12) col2 += '…'
+    // 2. Check closing bracket boundary (e.g. 《堂吉诃德》讲稿 -> 《堂吉诃德》 + 讲稿)
+    const bracketCloseMatch = raw.match(/[》）】」』〉〕]/)
+    if (bracketCloseMatch && bracketCloseMatch.index >= 2 && bracketCloseMatch.index < raw.length - 1) {
+        const splitIdx = bracketCloseMatch.index + 1
+        const p1 = raw.slice(0, splitIdx).trim()
+        const p2 = raw.slice(splitIdx).trim()
+        if (p1 && p2 && Array.from(p1).length <= 9 && Array.from(p2).length <= 9) {
+            return { isLatin: false, columns: [p1, p2] }
+        }
+    }
 
-    return { isLatin: false, columns: [col1, col2] }
+    // 3. Fallback midpoint split with orphan punctuation protection
+    const maxChars = 18
+    const truncated = chars.length > maxChars ? chars.slice(0, maxChars - 1).concat(['…']) : chars
+    let mid = Math.ceil(truncated.length / 2)
+
+    // Ensure Column 2 does not start with closing punctuation
+    const NO_START_PUNCT = '，。、；：？！…—）》〉】｝〕’”·,.!?:;)]}︾︶︒︑︔︓︕︖』」﹀︼︺'
+    const NO_END_PUNCT = '（《〈【〔“‘([{︽︵︻︹『「'
+    if (mid < truncated.length && NO_START_PUNCT.includes(truncated[mid])) {
+        mid = Math.min(truncated.length, mid + 1)
+    } else if (mid > 0 && NO_END_PUNCT.includes(truncated[mid - 1])) {
+        mid = Math.max(1, mid - 1)
+    }
+
+    const col1 = truncated.slice(0, mid).join('')
+    const col2 = truncated.slice(mid).join('')
+
+    return { isLatin: false, columns: col2 ? [col1, col2] : [col1] }
 }
 
 export class QuoteCardGenerator {
@@ -141,17 +158,28 @@ export class QuoteCardGenerator {
         this.author = ''
         this.quoteText = ''
         this.chapterTitle = ''
+        this.locationInfo = ''
         this.pageIndex = ''
     }
 
-    setData({ bookTitle, author, quoteText, chapterTitle, pageIndex, userName }) {
+    setData({ bookTitle, author, quoteText, chapterTitle, locationInfo, pageIndex, userName }) {
         this.bookTitle = bookTitle || '未命名书籍'
         this.author = author || '未知作者'
         this.quoteText = quoteText || ''
         this.chapterTitle = chapterTitle || ''
-        this.pageIndex = pageIndex || ''
+        this.locationInfo = locationInfo || (pageIndex ? (String(pageIndex).startsWith('第') ? pageIndex : `第 ${pageIndex} 页`) : '')
+        this.pageIndex = this.locationInfo
         const savedUserName = (typeof localStorage !== 'undefined' && localStorage.getItem('linden_user_name')) || 'Linden 读者'
         this.userName = userName || savedUserName
+    }
+
+    formatSourceMeta() {
+        const parts = []
+        const cleanChapter = (this.chapterTitle || '').trim()
+        const cleanLocation = (this.locationInfo || '').trim()
+        if (cleanChapter) parts.push(cleanChapter)
+        if (cleanLocation) parts.push(cleanLocation)
+        return parts.join(' · ')
     }
 
     setTheme(themeId) {
@@ -277,24 +305,42 @@ export class QuoteCardGenerator {
         // Font settings - Classical literary serif
         const serifFont = "'Noto Serif SC', 'Source Han Serif SC', '思源宋体', 'Songti SC', 'STSong', 'SimSun', serif"
 
-        // 1. Measure Header Height
+        // 1. Measure Header Height & Analyze Layout
         let headerHeight = 0
-        const rawTitle = this.bookTitle || '未命名'
+        const rawTitle = (this.bookTitle || '未命名书籍').trim()
         const titleInfo = splitVerticalTitle(rawTitle)
         const isVerticalActive = this.titleLayout === 'vertical' && !titleInfo.isLatin
         const titleCharGap = 40
         const authorCharGap = 22
 
+        const authorStr = (this.author || '').trim()
+        const authorChars = Array.from(authorStr)
+        const isAuthorLatin = /[a-zA-Z]/.test(authorStr)
+        const hasAuthorSlash = /[\/／]/.test(authorStr)
+        // Short CJK author can be vertical: <= 8 characters, pure CJK (can have brackets like [法] 司汤达)
+        const canAuthorBeVertical = isVerticalActive && authorStr.length > 0 && authorChars.length <= 8 && !isAuthorLatin && !hasAuthorSlash
+
+        let authorLines = []
+        if (authorStr && (!isVerticalActive || !canAuthorBeVertical)) {
+            mctx.font = `15px ${serifFont}`
+            authorLines = this.wrapText(mctx, authorStr, contentWidth)
+        }
+
         if (isVerticalActive) {
-            const maxColChars = Math.max(...titleInfo.columns.map(c => c.length))
+            const maxColChars = Math.max(...titleInfo.columns.map(c => Array.from(c).length), 1)
             const titleH = maxColChars * titleCharGap
-            const authorLen = Math.min((this.author || '').length, 10)
-            const authorH = authorLen * authorCharGap
-            headerHeight = Math.max(titleH, authorH, 110)
+            if (canAuthorBeVertical) {
+                const authorH = authorChars.length * authorCharGap
+                headerHeight = Math.max(titleH, authorH, 110)
+            } else {
+                const authorH = authorLines.length > 0 ? (authorLines.length * 22 + 16) : 0
+                headerHeight = titleH + authorH
+            }
         } else {
             mctx.font = `bold 28px ${serifFont}`
-            const titleLines = this.wrapText(mctx, this.bookTitle, contentWidth)
-            headerHeight = titleLines.length * 36 + (this.author ? 36 : 14)
+            const titleLines = this.wrapText(mctx, rawTitle, contentWidth)
+            const authorBlockHeight = authorLines.length > 0 ? (authorLines.length * 24 + 12) : 0
+            headerHeight = titleLines.length * 36 + authorBlockHeight
         }
 
         // 2. Measure Quote Body Text
@@ -303,14 +349,20 @@ export class QuoteCardGenerator {
         const quoteLineHeight = 48
         const quoteTextHeight = quoteLines.length * quoteLineHeight
 
-        // 3. Measure SubMeta
-        const subMeta = this.pageIndex ? `/ ${this.pageIndex}` : (this.chapterTitle ? `${this.chapterTitle}` : '')
-        const subMetaHeight = subMeta ? 24 : 0
+        // 3. Measure Source Meta (Chapter / Location)
+        const sourceMeta = this.formatSourceMeta()
+        let sourceMetaLines = []
+        let sourceMetaHeight = 0
+        if (sourceMeta) {
+            mctx.font = `15px ${serifFont}`
+            sourceMetaLines = this.wrapText(mctx, sourceMeta, contentWidth)
+            sourceMetaHeight = sourceMetaLines.length * 24
+        }
 
         // 4. Calculate Compact Total Height (WeChat Read Proportions)
         const topPadding = 56
         const headerToQuoteGap = 42
-        const quoteToMetaGap = subMeta ? 28 : 0
+        const quoteToMetaGap = sourceMetaHeight > 0 ? 26 : 0
         const metaToDividerGap = 28
         const dividerHeight = 1
         const dividerToFooterGap = 22
@@ -320,7 +372,7 @@ export class QuoteCardGenerator {
         const bottomPadding = 36
 
         const calculatedHeight = topPadding + headerHeight + headerToQuoteGap + quoteTextHeight
-            + quoteToMetaGap + subMetaHeight + metaToDividerGap + dividerHeight
+            + quoteToMetaGap + sourceMetaHeight + metaToDividerGap + dividerHeight
             + dividerToFooterGap + footerLine1Height + footerLineGap + footerLine2Height + bottomPadding
 
         const totalHeight = Math.min(Math.max(Math.round(calculatedHeight), 320), 3200)
@@ -337,7 +389,7 @@ export class QuoteCardGenerator {
         ctx.imageSmoothingEnabled = true
         ctx.imageSmoothingQuality = 'high'
 
-        // 1. Draw Background (Clean, full bleed, no ugly borders)
+        // 1. Draw Background
         ctx.fillStyle = theme.bg
         ctx.fillRect(0, 0, logicalWidth, totalHeight)
 
@@ -345,53 +397,68 @@ export class QuoteCardGenerator {
         let currentY = topPadding
 
         if (isVerticalActive) {
-            // Vertical Layout (Double-column aware, classical right-to-left progression)
+            // Classical Vertical Layout (Double-column aware, classical right-to-left progression)
             ctx.font = `bold 32px ${serifFont}`
             ctx.fillStyle = theme.titleColor
             ctx.textAlign = 'center'
             ctx.textBaseline = 'middle'
 
-            const colWidth = 42
+            const colPitch = 44
             const numCols = titleInfo.columns.length
-            const titleBlockWidth = (numCols - 1) * colWidth
-            const authorGap = this.author ? 26 : 0
-            const rightmostColX = padding + 20 + titleBlockWidth + authorGap
+            const titleBlockWidth = (numCols - 1) * colPitch
+            const authorExtraSpace = canAuthorBeVertical ? 50 : 0
+            const rightmostColX = padding + 24 + titleBlockWidth + authorExtraSpace
 
             titleInfo.columns.forEach((colText, colIdx) => {
-                const colX = rightmostColX - colIdx * colWidth
-                const vChars = mapVerticalPunctuation(colText).split('')
+                const colX = rightmostColX - colIdx * colPitch
+                const vChars = Array.from(mapVerticalPunctuation(colText))
                 for (let i = 0; i < vChars.length; i++) {
-                    ctx.fillText(vChars[i], colX, currentY + i * titleCharGap + 18)
+                    ctx.fillText(vChars[i], colX, currentY + i * titleCharGap + 20)
                 }
             })
 
-            // Author Vertically adjacent on the left side of the title
-            if (this.author) {
+            // If author is short CJK, draw it vertically to the left of the title block with generous net spacing
+            if (canAuthorBeVertical) {
                 ctx.font = `15px ${serifFont}`
                 ctx.fillStyle = theme.authorColor
-                const authorX = rightmostColX - numCols * colWidth + 14
-                const vAuthorChars = mapVerticalPunctuation((this.author || '').slice(0, 10)).split('')
+                const leftmostTitleColX = rightmostColX - (numCols - 1) * colPitch
+                const authorX = leftmostTitleColX - 44
+                const vAuthorChars = Array.from(mapVerticalPunctuation(authorStr))
                 for (let i = 0; i < vAuthorChars.length; i++) {
-                    ctx.fillText(vAuthorChars[i], authorX, currentY + i * authorCharGap + 12)
+                    ctx.fillText(vAuthorChars[i], authorX, currentY + i * authorCharGap + 14)
+                }
+            } else if (authorLines.length > 0) {
+                // If author is long / foreign / multi-author, draw it horizontally below the vertical title block
+                ctx.font = `15px ${serifFont}`
+                ctx.fillStyle = theme.authorColor
+                ctx.textAlign = 'left'
+                ctx.textBaseline = 'alphabetic'
+                const maxColChars = Math.max(...titleInfo.columns.map(c => Array.from(c).length), 1)
+                const authorStartY = currentY + maxColChars * titleCharGap + 20
+                for (let i = 0; i < authorLines.length; i++) {
+                    ctx.fillText(authorLines[i], padding, authorStartY + i * 22)
                 }
             }
 
             currentY += headerHeight + headerToQuoteGap
         } else {
-            // Horizontal Layout with auto-wrapping for long titles / Latin books
+            // Horizontal Layout with auto-wrapping for long titles and authors
             ctx.font = `bold 28px ${serifFont}`
             ctx.fillStyle = theme.titleColor
             ctx.textAlign = 'left'
             ctx.textBaseline = 'alphabetic'
-            const titleLines = this.wrapText(ctx, this.bookTitle, contentWidth)
+            const titleLines = this.wrapText(ctx, rawTitle, contentWidth)
             titleLines.forEach((tLine, tIdx) => {
                 ctx.fillText(tLine, padding, currentY + 28 + tIdx * 36)
             })
 
-            if (this.author) {
-                ctx.font = `16px ${serifFont}`
+            if (authorLines.length > 0) {
+                ctx.font = `15px ${serifFont}`
                 ctx.fillStyle = theme.authorColor
-                ctx.fillText(this.author, padding, currentY + 26 + titleLines.length * 36)
+                const authorStartY = currentY + 28 + titleLines.length * 36 + 6
+                authorLines.forEach((aLine, aIdx) => {
+                    ctx.fillText(aLine, padding, authorStartY + aIdx * 24)
+                })
             }
 
             currentY += headerHeight + headerToQuoteGap
@@ -409,13 +476,16 @@ export class QuoteCardGenerator {
 
         currentY += quoteTextHeight + quoteToMetaGap
 
-        // 4. Draw Index / Chapter tag (e.g. "/ 2" or Chapter title)
-        if (subMeta) {
-            ctx.font = `16px ${serifFont}`
+        // 4. Draw Source Meta (Chapter / Location)
+        if (sourceMetaLines.length > 0) {
+            ctx.font = `15px ${serifFont}`
             ctx.fillStyle = theme.metaColor
             ctx.textAlign = 'left'
-            ctx.fillText(subMeta, padding, currentY + 16)
-            currentY += subMetaHeight
+            ctx.textBaseline = 'alphabetic'
+            for (let i = 0; i < sourceMetaLines.length; i++) {
+                ctx.fillText(sourceMetaLines[i], padding, currentY + 16 + i * 22)
+            }
+            currentY += sourceMetaHeight
         }
 
         currentY += metaToDividerGap
@@ -438,10 +508,11 @@ export class QuoteCardGenerator {
         ctx.font = `14px ${serifFont}`
         ctx.fillStyle = theme.metaColor
         ctx.textAlign = 'left'
-        const currentUserName = this.userName || (typeof localStorage !== 'undefined' && localStorage.getItem('linden_user_name')) || 'Linden 读者'
+        ctx.textBaseline = 'alphabetic'
+        const currentUserName = this.userName || 'Linden 读者'
         ctx.fillText(`${currentUserName} · 摘录于 ${dateStr}`, padding, currentY + 14)
 
-        // Line 2: Brand (with plenty of breathing room)
+        // Line 2: Brand
         ctx.font = `13px ${serifFont}`
         ctx.fillStyle = theme.metaColor
         ctx.fillText('Linden Leaf 阅读器', padding, currentY + 14 + footerLine1Height + footerLineGap)
@@ -504,4 +575,5 @@ export class QuoteCardGenerator {
 }
 
 export const quoteCard = new QuoteCardGenerator()
+quoteCard.splitVerticalTitle = splitVerticalTitle
 if (typeof window !== 'undefined') window.quoteCard = quoteCard
