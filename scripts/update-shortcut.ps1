@@ -3,12 +3,17 @@ param(
 )
 
 $workingDir = Split-Path -Parent $TargetPath
+$iconPath = Join-Path $workingDir 'icon.ico'
+if (-not (Test-Path $iconPath)) {
+    $iconPath = 'D:\LindenLeaf-Dev\astra-mupdf-core\build\icon.ico'
+}
+
 $sh = New-Object -ComObject WScript.Shell
 $sc = $sh.CreateShortcut('C:\Users\YONGHU\Desktop\Linden Leaf Tauri.lnk')
 $sc.TargetPath = $TargetPath
 $sc.WorkingDirectory = $workingDir
 $sc.Arguments = ''
-$sc.IconLocation = 'D:\LindenLeaf-Dev\astra-mupdf-core\build\icon.ico,0'
+$sc.IconLocation = "$iconPath,0"
 $sc.Save()
 
 Write-Output "Shortcut updated successfully!"
