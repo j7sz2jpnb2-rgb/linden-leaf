@@ -694,6 +694,24 @@ const buildContentCSS = (settings) => {
     `
 }
 
+class PdfDrawingMutationQueue {
+    constructor() {
+        this._queues = new Map()
+    }
+    enqueue(bookId, pageIndex, task) {
+        const key = `${bookId}:${pageIndex}`
+        const prev = this._queues.get(key) || Promise.resolve()
+        const next = prev.then(task, task)
+        this._queues.set(key, next)
+        next.finally(() => {
+            if (this._queues.get(key) === next) {
+                this._queues.delete(key)
+            }
+        })
+        return next
+    }
+}
+
 class UniversalReaderApp {
     constructor() {
         this.currentBookId = null
@@ -784,6 +802,10 @@ class UniversalReaderApp {
         this.pdfDrawWidth = 18
         this.currentPdfPageIndex = 0
         this.pdfOverlayCanvas = null
+        this._pdfMutationQueue = new PdfDrawingMutationQueue()
+        this._pdfPageStrokesCache = new Map()
+        this._pdfOcrTaskId = 0
+        this._pdfOcrAbortController = null
 
         this.initDOM()
         this.bindEvents()
@@ -2823,6 +2845,7 @@ class UniversalReaderApp {
                     this.pdfDrawTool = null
                     pdfToolBtns.forEach(b => b?.classList.remove('active'))
                     this.setPdfOverlayDrawingActive(false)
+                    this.pdfViewport?.setInteractionMode('select')
                     this.showToast('已退出手动画笔模式')
                 } else {
                     // Activate tool
@@ -2831,6 +2854,9 @@ class UniversalReaderApp {
                     this.pdfDrawWidth = tool === 'marker' ? 18 : (tool === 'pen' ? 3 : 26)
                     pdfToolBtns.forEach(b => b?.classList.remove('active'))
                     btn.classList.add('active')
+                    this.hideSelectionPopup()
+                    this.hideHighlightActionPopup()
+                    this.pdfViewport?.setInteractionMode('draw')
                     this.renderPdfDrawingOverlayForCurrentPage()
                     this.setPdfOverlayDrawingActive(true)
                     const toolName = tool === 'marker' ? '🖍️ 荧光马克笔 (半透明)' : (tool === 'pen' ? '✏️ 批注笔' : '🧹 橡皮擦')
@@ -2849,11 +2875,19 @@ class UniversalReaderApp {
             const targetPageIndices = allTargets.length > 0
                 ? [...new Set(allTargets.map(t => t.index != null ? t.index : this.currentPdfPageIndex).filter(idx => idx != null))]
                 : (this.currentPdfPageIndex != null ? [this.currentPdfPageIndex] : [])
+            const bookId = this.currentBookId
+            const now = Date.now()
             for (const pIdx of targetPageIndices) {
-                await db.clearPdfPageDrawing(this.currentBookId, pIdx, true, Date.now(), snapshot)
+                this._clearPdfPageStrokesCache(bookId, pIdx)
+                this._clearPageOverlayCanvases(pIdx)
+                this._enqueuePdfDrawingMutation(bookId, pIdx, snapshot, async () => {
+                    await db.clearPdfPageDrawing(bookId, pIdx, true, now, snapshot)
+                    if (this.currentBookId === bookId && this.currentPdfPageIndex === pIdx) {
+                        this._currentPdfPageStrokes = []
+                    }
+                })
             }
             if (activeSession && !activeSession.isCurrent()) return
-            await this.redrawPdfPageOverlay()
             this.showToast(isTwoPage ? '🗑️ 已清空当前双页手绘批注' : '🗑️ 已清空当前页手绘批注')
         })
 
@@ -3002,6 +3036,10 @@ class UniversalReaderApp {
             if (this.dom.pdfZoomPercentInput) this.dom.pdfZoomPercentInput.value = displayStr
             this.dom.btnPdfFitWidth?.classList.toggle('active', zoomVal === 'fit-width')
             this.dom.btnPdfFitPage?.classList.toggle('active', zoomVal === 'fit-page')
+            clearTimeout(this._pdfZoomOverlayTimer)
+            this._pdfZoomOverlayTimer = setTimeout(() => {
+                this.syncAllPdfOverlays?.()
+            }, 80)
             return
         }
         if (!this.foliateView?.renderer) return
@@ -3171,11 +3209,72 @@ class UniversalReaderApp {
         return list[0] || null
     }
 
+    _getOrInitPageStrokes(bookId, pageIdx) {
+        if (!bookId || pageIdx == null) return []
+        const key = `${bookId}:${pageIdx}`
+        if (!this._pdfPageStrokesCache.has(key)) {
+            this._pdfPageStrokesCache.set(key, [])
+        }
+        return this._pdfPageStrokesCache.get(key)
+    }
+
+    _clearPdfPageStrokesCache(bookId, pageIdx) {
+        if (!bookId || pageIdx == null) return
+        this._pdfPageStrokesCache.delete(`${bookId}:${pageIdx}`)
+    }
+
+    _enqueuePdfDrawingMutation(bookId, pageIdx, snapshot, task) {
+        if (!this._pdfMutationQueue) this._pdfMutationQueue = new PdfDrawingMutationQueue()
+        return this._pdfMutationQueue.enqueue(bookId, pageIdx, task)
+    }
+
+    _clearPageOverlayCanvases(pageIdx) {
+        if (this.pdfViewport) {
+            const slot = this.pdfViewport.activeSlots?.get(pageIdx)
+            if (slot) {
+                const baseCanvas = slot.querySelector('.pdf-draw-base-canvas, .pdf-draw-overlay-canvas')
+                const activeCanvas = slot.querySelector('.pdf-draw-active-canvas')
+                if (baseCanvas) {
+                    const ctx = baseCanvas.getContext('2d')
+                    ctx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
+                }
+                if (activeCanvas) {
+                    const ctx = activeCanvas.getContext('2d')
+                    ctx.clearRect(0, 0, activeCanvas.width, activeCanvas.height)
+                }
+            }
+        }
+        const activeObj = this.getPdfActiveDocAndTarget()
+        if (activeObj?.container) {
+            const canvases = activeObj.container.querySelectorAll('.pdf-draw-overlay-canvas, .pdf-draw-base-canvas, .pdf-draw-active-canvas')
+            canvases.forEach(c => {
+                const ctx = c.getContext('2d')
+                ctx.clearRect(0, 0, c.width, c.height)
+            })
+        }
+    }
+
     setPdfOverlayDrawingActive(isActive) {
+        if (this.pdfViewport) {
+            for (const [_, slot] of this.pdfViewport.activeSlots) {
+                const activeCanvas = slot.querySelector('.pdf-draw-active-canvas')
+                if (activeCanvas) {
+                    if (isActive) {
+                        activeCanvas.classList.add('is-drawing-active')
+                        activeCanvas.style.pointerEvents = 'auto'
+                        activeCanvas.style.cursor = 'crosshair'
+                    } else {
+                        activeCanvas.classList.remove('is-drawing-active')
+                        activeCanvas.style.pointerEvents = 'none'
+                        activeCanvas.style.cursor = 'default'
+                    }
+                }
+            }
+        }
         const allTargets = this.getAllPdfActiveDocsAndTargets()
         allTargets.forEach(activeObj => {
             if (!activeObj?.doc) return
-            const overlayCanvases = activeObj.doc.querySelectorAll('.pdf-draw-overlay-canvas')
+            const overlayCanvases = activeObj.doc.querySelectorAll('.pdf-draw-overlay-canvas, .pdf-draw-active-canvas')
             overlayCanvases.forEach(cvs => {
                 if (isActive) {
                     cvs.classList.add('is-drawing-active')
@@ -3190,7 +3289,161 @@ class UniversalReaderApp {
         })
     }
 
+    async renderStrokesForPage(pageIdx, baseCanvas, readerSession) {
+        if (!baseCanvas || !this.currentBookId) return
+        const bookId = this.currentBookId
+        const snapshot = this._currentSnapshot || {}
+        const session = readerSession || this._activeSession
+        const key = `${bookId}:${pageIdx}`
+
+        let strokes
+        if (this._pdfPageStrokesCache.has(key)) {
+            strokes = this._pdfPageStrokesCache.get(key)
+        } else {
+            const drawingRecord = await db.getPdfPageDrawing(bookId, pageIdx, snapshot)
+            if (session && !session.isCurrent()) return
+            if (this.currentBookId !== bookId) return
+            strokes = drawingRecord?.strokes || []
+            this._pdfPageStrokesCache.set(key, strokes)
+        }
+
+        if (this.currentBookId !== bookId) return
+        if (pageIdx === this.currentPdfPageIndex) {
+            this._currentPdfPageStrokes = strokes
+        }
+
+        const ctx = baseCanvas.getContext('2d')
+        ctx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
+        strokes.forEach(stroke => {
+            this.drawSingleStrokeOnCanvas(ctx, stroke, baseCanvas.width, baseCanvas.height)
+        })
+    }
+
+    mountPdfOverlayForSlot(pageIdx, slot, readerSession) {
+        if (!slot || pageIdx == null) return
+
+        let overlayWrapper = slot.querySelector('.pdf-draw-overlay-wrapper')
+        if (!overlayWrapper) {
+            overlayWrapper = document.createElement('div')
+            overlayWrapper.className = 'pdf-draw-overlay-wrapper'
+            overlayWrapper.dataset.pageIndex = String(pageIdx)
+            Object.assign(overlayWrapper.style, {
+                position: 'absolute',
+                top: '0px',
+                left: '0px',
+                width: '100%',
+                height: '100%',
+                zIndex: '50',
+                pointerEvents: 'none'
+            })
+            slot.append(overlayWrapper)
+        }
+
+        let baseCanvas = overlayWrapper.querySelector('.pdf-draw-base-canvas')
+        if (!baseCanvas) {
+            baseCanvas = document.createElement('canvas')
+            baseCanvas.className = 'pdf-draw-base-canvas pdf-draw-overlay-canvas'
+            baseCanvas.dataset.pageIndex = String(pageIdx)
+            Object.assign(baseCanvas.style, {
+                position: 'absolute',
+                top: '0px',
+                left: '0px',
+                width: '100%',
+                height: '100%',
+                zIndex: '1',
+                pointerEvents: 'none'
+            })
+            overlayWrapper.append(baseCanvas)
+        }
+
+        let activeCanvas = overlayWrapper.querySelector('.pdf-draw-active-canvas')
+        if (!activeCanvas) {
+            activeCanvas = document.createElement('canvas')
+            activeCanvas.className = 'pdf-draw-active-canvas'
+            activeCanvas.dataset.pageIndex = String(pageIdx)
+            Object.assign(activeCanvas.style, {
+                position: 'absolute',
+                top: '0px',
+                left: '0px',
+                width: '100%',
+                height: '100%',
+                zIndex: '2',
+                touchAction: 'none'
+            })
+            overlayWrapper.append(activeCanvas)
+            this.attachPdfDrawingPointerEvents(activeCanvas, baseCanvas, pageIdx, slot, readerSession)
+        }
+
+        if (this.pdfDrawTool) {
+            activeCanvas.classList.add('is-drawing-active')
+            activeCanvas.style.pointerEvents = 'auto'
+            activeCanvas.style.cursor = 'crosshair'
+        } else {
+            activeCanvas.classList.remove('is-drawing-active')
+            activeCanvas.style.pointerEvents = 'none'
+            activeCanvas.style.cursor = 'default'
+        }
+
+        this.syncPdfOverlayGeometryForSlot(pageIdx, slot)
+        this.renderStrokesForPage(pageIdx, baseCanvas, readerSession)
+    }
+
+    unmountPdfOverlayForSlot(pageIdx, slot) {
+        if (!slot) return
+        if (typeof slot._pdfOverlayCleanup === 'function') {
+            slot._pdfOverlayCleanup()
+            delete slot._pdfOverlayCleanup
+        }
+    }
+
+    syncPdfOverlayGeometryForSlot(pageIdx, slot) {
+        if (!slot) return
+        const overlayWrapper = slot.querySelector('.pdf-draw-overlay-wrapper')
+        if (!overlayWrapper) return
+
+        const baseCanvas = overlayWrapper.querySelector('.pdf-draw-base-canvas')
+        const activeCanvas = overlayWrapper.querySelector('.pdf-draw-active-canvas')
+        if (!baseCanvas || !activeCanvas) return
+
+        const p = this.pdfViewport?.pageOffsets?.[pageIdx]
+        const cssW = p?.width || slot.offsetWidth || 800
+        const cssH = p?.height || slot.offsetHeight || 1100
+        const dpr = Math.min(window.devicePixelRatio || 1, 2)
+        const backingW = Math.min(4096, Math.max(1, Math.round(cssW * dpr)))
+        const backingH = Math.min(4096, Math.max(1, Math.round(cssH * dpr)))
+
+        let resized = false
+        if (baseCanvas.width !== backingW || baseCanvas.height !== backingH) {
+            baseCanvas.width = backingW
+            baseCanvas.height = backingH
+            resized = true
+        }
+        if (activeCanvas.width !== backingW || activeCanvas.height !== backingH) {
+            activeCanvas.width = backingW
+            activeCanvas.height = backingH
+        }
+
+        if (resized) {
+            this.renderStrokesForPage(pageIdx, baseCanvas, this._activeSession)
+        }
+    }
+
+    syncAllPdfOverlays() {
+        if (this.pdfViewport) {
+            for (const [pageIdx, slot] of this.pdfViewport.activeSlots.entries()) {
+                this.syncPdfOverlayGeometryForSlot(pageIdx, slot)
+            }
+        }
+    }
+
     async renderPdfDrawingOverlayForCurrentPage() {
+        if (this.pdfViewport) {
+            for (const [pageIdx, slot] of this.pdfViewport.activeSlots.entries()) {
+                this.mountPdfOverlayForSlot(pageIdx, slot, this._activeSession)
+            }
+            return
+        }
+
         const allTargets = this.getAllPdfActiveDocsAndTargets()
         if (allTargets.length === 0 || !this.currentBookId) return
 
@@ -3202,12 +3455,15 @@ class UniversalReaderApp {
             const targetPageIndex = (index != null) ? index : this.currentPdfPageIndex
             if (targetPageIndex == null) continue
 
-            container.style.position = 'relative'
+            if (!container.classList?.contains('pdf-page-slot')) {
+                container.style.position = 'relative'
+            }
 
             let overlayCanvas = container.querySelector('.pdf-draw-overlay-canvas')
             if (!overlayCanvas) {
                 overlayCanvas = doc.createElement('canvas')
                 overlayCanvas.className = 'pdf-draw-overlay-canvas'
+                overlayCanvas.dataset.pageIndex = String(targetPageIndex)
                 if (this.pdfDrawTool) {
                     overlayCanvas.classList.add('is-drawing-active')
                     overlayCanvas.style.pointerEvents = 'auto'
@@ -3218,7 +3474,7 @@ class UniversalReaderApp {
                 }
                 overlayCanvas.style.touchAction = 'none'
                 container.appendChild(overlayCanvas)
-                this.attachPdfDrawingPointerEvents(overlayCanvas, doc)
+                this.attachPdfDrawingPointerEvents(overlayCanvas, overlayCanvas, targetPageIndex, container, this._activeSession)
             } else {
                 if (this.pdfDrawTool) {
                     overlayCanvas.classList.add('is-drawing-active')
@@ -3232,7 +3488,6 @@ class UniversalReaderApp {
 
             overlayCanvas.dataset.pageIndex = targetPageIndex
 
-            // Match dimensions to target
             const rect = targetElement.getBoundingClientRect()
             const targetWidth = canvas?.width || targetElement.naturalWidth || Math.round(rect.width) || 800
             const targetHeight = canvas?.height || targetElement.naturalHeight || Math.round(rect.height) || 1100
@@ -3247,27 +3502,21 @@ class UniversalReaderApp {
             overlayCanvas.style.zIndex = '50'
 
             this.pdfOverlayCanvas = overlayCanvas
-
-            // Load and draw saved strokes for this page
-            const ctx = overlayCanvas.getContext('2d')
-            ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
-            const session = this._activeSession
-            const currentBookId = this.currentBookId
-            const currentSnapshot = this._currentSnapshot || {}
-            const drawingRecord = await db.getPdfPageDrawing(currentBookId, targetPageIndex, currentSnapshot)
-            if (session && !session.isCurrent()) return
-            if (this.currentBookId !== currentBookId) return
-            const strokes = drawingRecord?.strokes || []
-            if (targetPageIndex === this.currentPdfPageIndex) {
-                this._currentPdfPageStrokes = strokes
-            }
-            strokes.forEach(stroke => {
-                this.drawSingleStrokeOnCanvas(ctx, stroke, overlayCanvas.width, overlayCanvas.height)
-            })
+            this.renderStrokesForPage(targetPageIndex, overlayCanvas, this._activeSession)
         }
     }
 
     async redrawPdfPageOverlay() {
+        if (this.pdfViewport) {
+            for (const [pageIdx, slot] of this.pdfViewport.activeSlots.entries()) {
+                const baseCanvas = slot.querySelector('.pdf-draw-base-canvas, .pdf-draw-overlay-canvas')
+                if (baseCanvas) {
+                    this.renderStrokesForPage(pageIdx, baseCanvas, this._activeSession)
+                }
+            }
+            return
+        }
+
         const allTargets = this.getAllPdfActiveDocsAndTargets()
         if (allTargets.length === 0 || !this.currentBookId) return
 
@@ -3282,23 +3531,7 @@ class UniversalReaderApp {
                 : (activeObj.index != null ? activeObj.index : this.currentPdfPageIndex)
             if (targetPageIndex == null) continue
 
-            const ctx = overlayCanvas.getContext('2d')
-            ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height)
-
-            const session = this._activeSession
-            const currentBookId = this.currentBookId
-            const currentSnapshot = this._currentSnapshot || {}
-            const drawingRecord = await db.getPdfPageDrawing(currentBookId, targetPageIndex, currentSnapshot)
-            if (session && !session.isCurrent()) return
-            if (this.currentBookId !== currentBookId) return
-            const strokes = drawingRecord?.strokes || []
-            if (targetPageIndex === this.currentPdfPageIndex) {
-                this._currentPdfPageStrokes = strokes
-            }
-
-            strokes.forEach(stroke => {
-                this.drawSingleStrokeOnCanvas(ctx, stroke, overlayCanvas.width, overlayCanvas.height)
-            })
+            this.renderStrokesForPage(targetPageIndex, overlayCanvas, this._activeSession)
         }
     }
 
@@ -3362,41 +3595,102 @@ class UniversalReaderApp {
         ctx.restore()
     }
 
-    attachPdfDrawingPointerEvents(canvasElement, doc) {
+    attachPdfDrawingPointerEvents(activeCanvas, baseCanvas, pageIdx, slot, readerSession) {
+        let activePointerId = null
         let isDrawing = false
         let currentStroke = null
-        let gestureBookId = null
-        let gesturePageIndex = null
+        let rafId = null
 
         const getCoords = e => {
-            const rect = canvasElement.getBoundingClientRect()
-            const w = rect.width || canvasElement.width || 1
-            const h = rect.height || canvasElement.height || 1
+            const rect = activeCanvas.getBoundingClientRect()
+            const w = rect.width || activeCanvas.width || 1
+            const h = rect.height || activeCanvas.height || 1
             return [
                 Math.max(0, Math.min(1, (e.clientX - rect.left) / w)),
                 Math.max(0, Math.min(1, (e.clientY - rect.top) / h))
             ]
         }
 
-        const handlePointerDown = e => {
-            if (!this.pdfDrawTool || !this.currentBookId) return
-            // Only primary button (left click / single touch / pen tip)
-            if (e.button != null && e.button !== 0) return
+        const cancelPendingRaf = () => {
+            if (rafId != null) {
+                cancelAnimationFrame(rafId)
+                rafId = null
+            }
+        }
 
-            const targetPageIndex = canvasElement.dataset.pageIndex != null 
-                ? parseInt(canvasElement.dataset.pageIndex, 10) 
-                : this.currentPdfPageIndex
-            if (targetPageIndex == null) return
+        const finishGesture = (commit = true) => {
+            if (!isDrawing) return
+            isDrawing = false
+            cancelPendingRaf()
+
+            if (activePointerId != null) {
+                try {
+                    activeCanvas.releasePointerCapture?.(activePointerId)
+                } catch (_) {}
+                activePointerId = null
+            }
+
+            const strokeToSave = currentStroke
+            currentStroke = null
+            const session = readerSession || this._activeSession
+            const bookId = this.currentBookId
+            const snapshot = this._currentSnapshot || {}
+
+            if (commit && strokeToSave && strokeToSave.points.length > 0 && bookId) {
+                const strokes = this._getOrInitPageStrokes(bookId, pageIdx)
+                strokes.push(strokeToSave)
+
+                const baseCtx = baseCanvas.getContext('2d')
+                baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
+                strokes.forEach(s => {
+                    this.drawSingleStrokeOnCanvas(baseCtx, s, baseCanvas.width, baseCanvas.height)
+                })
+
+                if (activeCanvas !== baseCanvas) {
+                    const activeCtx = activeCanvas.getContext('2d')
+                    activeCtx.clearRect(0, 0, activeCanvas.width, activeCanvas.height)
+                }
+
+                this._enqueuePdfDrawingMutation(bookId, pageIdx, snapshot, async () => {
+                    if (session && !session.isCurrent()) return
+                    const drawingRecord = await db.getPdfPageDrawing(bookId, pageIdx, snapshot)
+                    if (session && !session.isCurrent()) return
+                    const existingStrokes = drawingRecord?.strokes || []
+                    existingStrokes.push(strokeToSave)
+                    await db.savePdfPageDrawing(bookId, pageIdx, existingStrokes, snapshot)
+                    if (session && !session.isCurrent()) return
+                    if (this.currentBookId === bookId && this.currentPdfPageIndex === pageIdx) {
+                        this._currentPdfPageStrokes = existingStrokes
+                    }
+                })
+            } else {
+                if (activeCanvas !== baseCanvas) {
+                    const activeCtx = activeCanvas.getContext('2d')
+                    activeCtx.clearRect(0, 0, activeCanvas.width, activeCanvas.height)
+                }
+                const strokes = this._getOrInitPageStrokes(bookId, pageIdx)
+                const baseCtx = baseCanvas.getContext('2d')
+                baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
+                strokes.forEach(s => {
+                    this.drawSingleStrokeOnCanvas(baseCtx, s, baseCanvas.width, baseCanvas.height)
+                })
+            }
+        }
+
+        const onPointerDown = e => {
+            if (!this.pdfDrawTool || !this.currentBookId) return
+            if (e.pointerType === 'mouse' && e.button !== 0) return
+            if (activePointerId != null) return
 
             e.preventDefault()
             e.stopPropagation()
 
-            const session = this._activeSession
-            const snapshot = this._currentSnapshot || {}
-            gestureBookId = this.currentBookId
-            gesturePageIndex = targetPageIndex
-            isDrawing = true
+            activePointerId = e.pointerId
+            try {
+                activeCanvas.setPointerCapture?.(e.pointerId)
+            } catch (_) {}
 
+            isDrawing = true
             const [nx, ny] = getCoords(e)
             currentStroke = {
                 tool: this.pdfDrawTool,
@@ -3405,67 +3699,151 @@ class UniversalReaderApp {
                 points: [[nx, ny]]
             }
 
-            const ctx = canvasElement.getContext('2d')
-            this.drawSingleStrokeOnCanvas(ctx, currentStroke, canvasElement.width, canvasElement.height)
-
-            const onDocPointerMove = evt => {
-                if (!isDrawing || !currentStroke) return
-                evt.preventDefault()
-                evt.stopPropagation()
-
-                const [curX, curY] = getCoords(evt)
-                const prevPt = currentStroke.points[currentStroke.points.length - 1]
-                currentStroke.points.push([curX, curY])
-
-                const moveCtx = canvasElement.getContext('2d')
-                this.drawStrokeSegment(moveCtx, currentStroke, prevPt, [curX, curY], canvasElement.width, canvasElement.height)
-            }
-
-            const onDocPointerUp = async evt => {
-                doc.removeEventListener('pointermove', onDocPointerMove, true)
-                doc.removeEventListener('pointerup', onDocPointerUp, true)
-                doc.removeEventListener('pointercancel', onDocPointerUp, true)
-                window.removeEventListener('pointerup', onDocPointerUp, true)
-
-                if (!isDrawing || !currentStroke) return
-                isDrawing = false
-
-                const strokeToSave = currentStroke
-                const saveBookId = gestureBookId
-                const savePageIndex = gesturePageIndex
-                currentStroke = null
-                gestureBookId = null
-                gesturePageIndex = null
-
-                if (session && !session.isCurrent()) return
-
-                if (strokeToSave.points.length > 0 && saveBookId && savePageIndex != null) {
-                    const drawingRecord = await db.getPdfPageDrawing(saveBookId, savePageIndex, snapshot)
-                    if (session && !session.isCurrent()) return
-                    const existingStrokes = drawingRecord?.strokes || []
-                    existingStrokes.push(strokeToSave)
-                    await db.savePdfPageDrawing(saveBookId, savePageIndex, existingStrokes, snapshot)
-                    if (session && !session.isCurrent()) return
-                    if (savePageIndex === this.currentPdfPageIndex) {
-                        this._currentPdfPageStrokes = existingStrokes
-                    }
+            if (currentStroke.tool === 'eraser') {
+                const baseCtx = baseCanvas.getContext('2d')
+                this.drawSingleStrokeOnCanvas(baseCtx, currentStroke, baseCanvas.width, baseCanvas.height)
+            } else {
+                const targetCanvas = (activeCanvas !== baseCanvas) ? activeCanvas : baseCanvas
+                const ctx = targetCanvas.getContext('2d')
+                if (activeCanvas !== baseCanvas) {
+                    ctx.clearRect(0, 0, targetCanvas.width, targetCanvas.height)
                 }
-                if (session && !session.isCurrent()) return
-                await this.redrawPdfPageOverlay()
+                this.drawSingleStrokeOnCanvas(ctx, currentStroke, targetCanvas.width, targetCanvas.height)
             }
-
-            doc.addEventListener('pointermove', onDocPointerMove, true)
-            doc.addEventListener('pointerup', onDocPointerUp, true)
-            doc.addEventListener('pointercancel', onDocPointerUp, true)
-            window.addEventListener('pointerup', onDocPointerUp, { once: true, capture: true })
         }
 
-        canvasElement.addEventListener('pointerdown', handlePointerDown)
+        const onPointerMove = e => {
+            if (!isDrawing || e.pointerId !== activePointerId) return
+            if (e.pointerType === 'mouse' && (e.buttons & 1) === 0) {
+                finishGesture(true)
+                return
+            }
+
+            e.preventDefault()
+            e.stopPropagation()
+
+            const [nx, ny] = getCoords(e)
+            const pts = currentStroke.points
+            const last = pts[pts.length - 1]
+            if (!last || Math.abs(nx - last[0]) > 0.0003 || Math.abs(ny - last[1]) > 0.0003) {
+                pts.push([nx, ny])
+            }
+
+            if (rafId == null) {
+                rafId = requestAnimationFrame(() => {
+                    rafId = null
+                    if (!isDrawing || !currentStroke) return
+                    if (currentStroke.tool === 'eraser') {
+                        const baseCtx = baseCanvas.getContext('2d')
+                        baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
+                        const strokes = this._getOrInitPageStrokes(this.currentBookId, pageIdx)
+                        strokes.forEach(s => {
+                            this.drawSingleStrokeOnCanvas(baseCtx, s, baseCanvas.width, baseCanvas.height)
+                        })
+                        this.drawSingleStrokeOnCanvas(baseCtx, currentStroke, baseCanvas.width, baseCanvas.height)
+                    } else if (activeCanvas !== baseCanvas) {
+                        const activeCtx = activeCanvas.getContext('2d')
+                        activeCtx.clearRect(0, 0, activeCanvas.width, activeCanvas.height)
+                        this.drawSingleStrokeOnCanvas(activeCtx, currentStroke, activeCanvas.width, activeCanvas.height)
+                    } else {
+                        const prevPt = currentStroke.points[currentStroke.points.length - 2]
+                        if (prevPt) {
+                            const ctx = baseCanvas.getContext('2d')
+                            this.drawStrokeSegment(ctx, currentStroke, prevPt, [nx, ny], baseCanvas.width, baseCanvas.height)
+                        }
+                    }
+                })
+            }
+        }
+
+        const onPointerUp = e => {
+            if (e.pointerId !== activePointerId) return
+            finishGesture(true)
+        }
+
+        const onPointerCancel = e => {
+            if (e.pointerId !== activePointerId) return
+            finishGesture(false)
+        }
+
+        const onLostPointerCapture = e => {
+            if (e.pointerId !== activePointerId) return
+            finishGesture(true)
+        }
+
+        const onWindowBlur = () => {
+            if (isDrawing) finishGesture(true)
+        }
+
+        activeCanvas.addEventListener('pointerdown', onPointerDown)
+        activeCanvas.addEventListener('pointermove', onPointerMove)
+        activeCanvas.addEventListener('pointerup', onPointerUp)
+        activeCanvas.addEventListener('pointercancel', onPointerCancel)
+        activeCanvas.addEventListener('lostpointercapture', onLostPointerCapture)
+        window.addEventListener('blur', onWindowBlur)
+
+        slot._pdfOverlayCleanup = () => {
+            finishGesture(false)
+            activeCanvas.removeEventListener('pointerdown', onPointerDown)
+            activeCanvas.removeEventListener('pointermove', onPointerMove)
+            activeCanvas.removeEventListener('pointerup', onPointerUp)
+            activeCanvas.removeEventListener('pointercancel', onPointerCancel)
+            activeCanvas.removeEventListener('lostpointercapture', onLostPointerCapture)
+            window.removeEventListener('blur', onWindowBlur)
+        }
     }
 
     // ==========================================================
     // Lightweight On-Demand PDF OCR Text Extraction
     // ==========================================================
+    _formatSpansToText(spans) {
+        if (!spans || !spans.length) return ''
+        if (spans[0]?.line != null) {
+            const linesMap = new Map()
+            for (const s of spans) {
+                if (!s.text) continue
+                const l = s.line
+                if (!linesMap.has(l)) linesMap.set(l, [])
+                linesMap.get(l).push(s)
+            }
+            const sortedLines = [...linesMap.entries()].sort((a, b) => a[0] - b[0])
+            return sortedLines.map(([_, chars]) => {
+                chars.sort((a, b) => a.x - b.x)
+                let lineText = ''
+                for (let i = 0; i < chars.length; i++) {
+                    const cur = chars[i]
+                    if (i > 0) {
+                        const prev = chars[i - 1]
+                        const isAsciiWord = /[a-zA-Z0-9]/.test(prev.text) && /[a-zA-Z0-9]/.test(cur.text)
+                        const gap = cur.x - (prev.x + prev.w)
+                        if (isAsciiWord && gap > (cur.size || 10) * 0.25) {
+                            lineText += ' '
+                        }
+                    }
+                    lineText += cur.text
+                }
+                return lineText.trim()
+            }).filter(Boolean).join('\n')
+        }
+
+        const sorted = [...spans].sort((a, b) => (Math.abs(a.y - b.y) <= 4 ? a.x - b.x : a.y - b.y))
+        const lines = []
+        let curLine = []
+        let curY = null
+        for (const s of sorted) {
+            if (!s.text) continue
+            if (curY == null || Math.abs(s.y - curY) > 5) {
+                if (curLine.length) lines.push(curLine)
+                curLine = [s]
+                curY = s.y
+            } else {
+                curLine.push(s)
+            }
+        }
+        if (curLine.length) lines.push(curLine)
+        return lines.map(line => line.map(s => s.text).join(' ').trim()).filter(Boolean).join('\n')
+    }
+
     async handlePdfOcrExtract() {
         if (!this.dom.modalPdfOcr) return
 
@@ -3474,48 +3852,89 @@ class UniversalReaderApp {
             this.dom.modalPdfOcr?.classList.add('show')
         })
         if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⏳'
-        if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '正在提取当前页面图像并进行文字识别...'
+        if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '正在提取当前页面文本或图像...'
         if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = ''
         if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = '共 0 字'
 
-        try {
-            const activeObj = this.getPdfActiveDocAndTarget()
+        const taskId = ++this._pdfOcrTaskId
+        this._pdfOcrAbortController?.abort()
+        this._pdfOcrAbortController = new AbortController()
+        const signal = this._pdfOcrAbortController.signal
 
-            // 1. Instant extraction: Check if page already has an embedded/OCR text layer
-            const textLayerEl = activeObj?.container?.querySelector('.pdf-text-layer, .textLayer') || activeObj?.doc?.querySelector('.pdf-text-layer, .textLayer')
-            const existingText = (textLayerEl ? (textLayerEl.innerText || textLayerEl.textContent || '') : '').trim()
-            if (existingText.length > 5) {
-                if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = existingText
-                if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = `共 ${existingText.length} 字`
+        const activeSession = this._activeSession
+        const currentBookId = this.currentBookId
+        const targetPageIndex = this.pdfViewport ? (this.pdfViewport.currentPage ?? 0) : (this.currentPdfPageIndex ?? 0)
+
+        try {
+            const driver = this.pdfDriver || activeSession?.driver
+
+            // 1. Try driver text layer (embedded text) first
+            let nativeText = ''
+            if (driver?.getTextLayer) {
+                try {
+                    const layer = await driver.getTextLayer(targetPageIndex)
+                    if (layer?.spans?.length) {
+                        nativeText = this._formatSpansToText(layer.spans)
+                    }
+                } catch (e) {
+                    console.warn('[PDF OCR] getTextLayer check failed:', e)
+                }
+            }
+
+            // Fallback check DOM text layer
+            if (!nativeText || nativeText.length <= 5) {
+                const activeObj = this.getPdfActiveDocAndTarget()
+                const textLayerEl = activeObj?.container?.querySelector('.pdf-text-layer, .textLayer') || activeObj?.doc?.querySelector('.pdf-text-layer, .textLayer')
+                const domText = (textLayerEl ? (textLayerEl.innerText || textLayerEl.textContent || '') : '').trim()
+                if (domText.length > 5) nativeText = domText
+            }
+
+            if (signal.aborted || taskId !== this._pdfOcrTaskId || this.currentBookId !== currentBookId) return
+
+            if (nativeText && nativeText.trim().length > 5) {
+                const trimmed = nativeText.trim()
+                if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = trimmed
+                if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = `共 ${trimmed.length} 字`
                 if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '✅'
                 if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '已提取页面内嵌文本！可在上方选择或点击下方快速复制'
                 return
             }
 
-            // 2. Pure scanned bitmap OCR
+            // 2. Pure scanned bitmap OCR: request dedicated unclipped full-page canvas from driver
+            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '正在获取整页高保真图像用于文字识别...'
+
             let imageSource = null
-            if (activeObj?.img) {
+            if (driver?.renderPage) {
                 try {
-                    const offCanvas = document.createElement('canvas')
-                    offCanvas.width = activeObj.img.naturalWidth || activeObj.img.width || 1200
-                    offCanvas.height = activeObj.img.naturalHeight || activeObj.img.height || 1600
-                    const offCtx = offCanvas.getContext('2d')
-                    offCtx.drawImage(activeObj.img, 0, 0)
-                    imageSource = offCanvas.toDataURL('image/png')
-                } catch (imgErr) {
-                    imageSource = activeObj.img.src
+                    imageSource = await driver.renderPage(targetPageIndex, 1.5, signal, null)
+                } catch (renderErr) {
+                    if (signal.aborted) return
+                    console.warn('[PDF OCR] driver full-page renderPage failed, falling back:', renderErr)
                 }
-            } else if (activeObj?.canvas) {
-                imageSource = activeObj.canvas
-            } else if (activeObj?.doc) {
-                const anyCanvas = activeObj.doc.querySelector('canvas')
-                if (anyCanvas) imageSource = anyCanvas
             }
 
             if (!imageSource) {
-                const readerCanvas = document.querySelector('#reader-content-area canvas')
-                if (readerCanvas) imageSource = readerCanvas
+                const activeObj = this.getPdfActiveDocAndTarget()
+                if (activeObj?.img) {
+                    try {
+                        const offCanvas = document.createElement('canvas')
+                        offCanvas.width = activeObj.img.naturalWidth || activeObj.img.width || 1200
+                        offCanvas.height = activeObj.img.naturalHeight || activeObj.img.height || 1600
+                        const offCtx = offCanvas.getContext('2d')
+                        offCtx.drawImage(activeObj.img, 0, 0)
+                        imageSource = offCanvas.toDataURL('image/png')
+                    } catch (imgErr) {
+                        imageSource = activeObj.img.src
+                    }
+                } else if (activeObj?.canvas) {
+                    imageSource = activeObj.canvas
+                } else {
+                    const anyCanvas = document.querySelector('#reader-content-area canvas:not(.pdf-draw-overlay-canvas)')
+                    if (anyCanvas) imageSource = anyCanvas
+                }
             }
+
+            if (signal.aborted || taskId !== this._pdfOcrTaskId || this.currentBookId !== currentBookId) return
 
             if (!imageSource) {
                 if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
@@ -3530,17 +3949,19 @@ class UniversalReaderApp {
             }
 
             if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = 'OCR 引擎分析识别中 (中文/英文)...'
-            
+
             const result = await Tesseract.recognize(imageSource, 'chi_sim+eng', {
                 workerPath: './vendor/tesseract/worker.min.js',
                 corePath: 'https://npmmirror.com/mirrors/tesseract.js-core/v4.0.4/tesseract-core.wasm.js',
                 langPath: 'https://npmmirror.com/mirrors/tessdata/4.0.0'
             })
 
+            if (signal.aborted || taskId !== this._pdfOcrTaskId || this.currentBookId !== currentBookId) return
+
             const recognizedText = (result?.data?.text || '').trim()
             if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = recognizedText
             if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = `共 ${recognizedText.length} 字`
-            
+
             if (recognizedText.length > 0) {
                 if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '✅'
                 if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '识别完成！可在上方选词或点击下方按钮快速复制'
@@ -3549,6 +3970,7 @@ class UniversalReaderApp {
                 if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '识别结束，当前页未检测到明显文字或图像较模糊。'
             }
         } catch (err) {
+            if (signal.aborted) return
             console.error('PDF OCR error:', err)
             if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
             if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = `识别提示: ${err.message || '网络连接超时或语言包加载受限'}`
@@ -3556,6 +3978,8 @@ class UniversalReaderApp {
     }
 
     closePdfOcrModal() {
+        this._pdfOcrTaskId++
+        this._pdfOcrAbortController?.abort()
         if (this.dom.modalPdfOcr) {
             this.dom.modalPdfOcr.classList.remove('show')
             setTimeout(() => {
@@ -6075,6 +6499,21 @@ class UniversalReaderApp {
                 const sessionViewport = new PdfViewport(this.dom.readerContentArea, {
                     scale: 1.25,
                     snapshot,
+                    onSlotMount: (pageIdx, slot) => {
+                        if (!readerSession.isCurrent()) return
+                        this.mountPdfOverlayForSlot(pageIdx, slot, readerSession)
+                    },
+                    onSlotUnmount: (pageIdx, slot) => {
+                        this.unmountPdfOverlayForSlot(pageIdx, slot)
+                    },
+                    onSlotGeometrySync: (pageIdx, slot) => {
+                        if (!readerSession.isCurrent()) return
+                        this.syncPdfOverlayGeometryForSlot(pageIdx, slot)
+                    },
+                    onZoomChange: (scale) => {
+                        if (!readerSession.isCurrent()) return
+                        this.syncAllPdfOverlays()
+                    },
                     onOutline: toc => {
                         if (!readerSession.isCurrent()) return
                         this.currentPdfTOC = toc
@@ -6139,7 +6578,7 @@ class UniversalReaderApp {
                         }, 500)
                     },
                     onSelection: (selInfo) => {
-                        if (!readerSession.isCurrent()) return
+                        if (!readerSession.isCurrent() || this.pdfDrawTool) return
                         this.selectedTextInfo = {
                             text: selInfo.text,
                             formatType: 'pdf',
@@ -6186,7 +6625,7 @@ class UniversalReaderApp {
                         this.showToast('已添加高亮笔记', '✓')
                     },
                     onHighlightClick: (hl, event, customRect) => {
-                        if (!readerSession.isCurrent()) return
+                        if (!readerSession.isCurrent() || this.pdfDrawTool) return
                         let targetRect = customRect
                         if (!targetRect && event?.target?.classList?.contains('pdf-highlight-rect')) {
                             targetRect = event.target.getBoundingClientRect()
@@ -6834,6 +7273,11 @@ class UniversalReaderApp {
             this.pdfDrawTool = null
             this.pdfOverlayCanvas = null
             this.currentPdfPageIndex = 0
+            this._pdfPageStrokesCache?.clear?.()
+            this.dom.btnPdfMarkerYellow?.classList?.remove('active')
+            this.dom.btnPdfMarkerGreen?.classList?.remove('active')
+            this.dom.btnPdfPenRed?.classList?.remove('active')
+            this.dom.btnPdfEraser?.classList?.remove('active')
             this.shelfViewMode = 'grid'
             this.shelfCategory = 'all'
             this.sidebarUserCollapsed = true

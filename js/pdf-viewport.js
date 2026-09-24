@@ -31,6 +31,11 @@ export class PdfViewport {
             onSelection: null,
             onHighlightCreate: null,
             onHighlightClick: null,
+            onSlotMount: null,
+            onSlotUnmount: null,
+            onSlotGeometrySync: null,
+            onInteractionModeChange: null,
+            onZoomChange: null,
         }, options)
 
         this.scale = this.options.scale
@@ -44,6 +49,8 @@ export class PdfViewport {
         this.currentPage = 0
         this.highlights = []
         this.highlightsByPage = new Map()
+        this.interactionMode = 'select' // 'select' | 'draw'
+        this._nativeGestureEpoch = 0
 
         this._destroyed = false
         this._geometryAbort = null
@@ -130,6 +137,7 @@ export class PdfViewport {
         })
 
         this.scrollArea.addEventListener('mouseup', e => {
+            if (this.interactionMode === 'draw') return
             if (this.driver?.kind !== 'mupdf') this._handleDomSelection(e)
         })
         this.scrollArea.addEventListener('pointerdown', e => this._nativePointerDown(e))
@@ -139,7 +147,7 @@ export class PdfViewport {
         this.scrollArea.addEventListener('dblclick', e => this._nativeDoubleClick(e))
 
         this.scrollArea.addEventListener('click', e => {
-            if (this._nativeDrag) return
+            if (this.interactionMode === 'draw' || this._nativeDrag) return
             const sel = window.getSelection()
             if (sel && !sel.isCollapsed && sel.toString().trim()) return
             const slot = e.target.closest?.('.pdf-page-slot')
@@ -304,6 +312,7 @@ export class PdfViewport {
             slot.style.top = `${p.top}px`
             slot.style.width = `${p.width}px`
             slot.style.height = `${p.height}px`
+            this.options.onSlotGeometrySync?.(page, slot)
         }
     }
 
@@ -421,6 +430,7 @@ export class PdfViewport {
     }
 
     _unmountSlot(page, slot) {
+        this.options.onSlotUnmount?.(page, slot)
         slot.renderAbort?.abort()
         if (slot.geometryIdleId != null) window.cancelIdleCallback?.(slot.geometryIdleId)
         if (slot.geometryTimer != null) clearTimeout(slot.geometryTimer)
@@ -472,7 +482,7 @@ export class PdfViewport {
             queueMicrotask(() => this.pulseHighlight(p.pageIdx, p.highlightId, p.fallbackRects))
         }
 
-
+        this.options.onSlotMount?.(page, slot)
     }
 
     _scheduleRender(item) {
@@ -953,6 +963,7 @@ export class PdfViewport {
     }
 
     _handleDomSelection() {
+        if (this.interactionMode === 'draw') return
         const sel = window.getSelection()
         if (!sel || sel.isCollapsed || !sel.rangeCount) return
         const range = sel.getRangeAt(0), text = sel.toString().trim()
@@ -1058,58 +1069,77 @@ export class PdfViewport {
     }
 
     async _nativePointerDown(e) {
-        if (this.driver?.kind !== 'mupdf' || e.button !== 0) return
+        if (this.interactionMode === 'draw' || this.driver?.kind !== 'mupdf' || e.button !== 0) return
+        const epoch = ++this._nativeGestureEpoch
         const hit = this._slotForPoint(e.clientX, e.clientY)
         if (!hit) return
         const point = this._clientToPage(hit, e.clientX, e.clientY)
         const ch = await this._hitNativeChar(hit.page, point)
-        if (!ch) return
+        if (!ch || epoch !== this._nativeGestureEpoch || this.interactionMode === 'draw') return
         e.preventDefault()
-        this.scrollArea.setPointerCapture?.(e.pointerId)
-        this._nativeDrag = { pointerId:e.pointerId, anchor:{ page:hit.page,index:ch.index,point }, focus:{ page:hit.page,index:ch.index,point } }
+        try { this.scrollArea.setPointerCapture?.(e.pointerId) } catch (_) {}
+        this._nativeDrag = { pointerId: e.pointerId, epoch, anchor: { page: hit.page, index: ch.index, point }, focus: { page: hit.page, index: ch.index, point } }
         this._updateNativePreview()
     }
 
     async _nativePointerMove(e) {
+        if (this.interactionMode === 'draw') return
         const drag = this._nativeDrag
         if (!drag || e.pointerId !== drag.pointerId) return
+        if (e.pointerType === 'mouse' && (e.buttons & 1) === 0) {
+            this._cancelNativeDrag()
+            return
+        }
         const hit = this._slotForPoint(e.clientX, e.clientY)
         if (!hit) return
         const point = this._clientToPage(hit, e.clientX, e.clientY)
         const ch = await this._hitNativeChar(hit.page, point)
-        if (!ch || this._nativeDrag !== drag) return
-        drag.focus = { page:hit.page,index:ch.index,point }
+        if (!ch || this._nativeDrag !== drag || this.interactionMode === 'draw') return
+        drag.focus = { page: hit.page, index: ch.index, point }
         this._updateNativePreview()
     }
 
     async _nativePointerUp(e) {
+        this._nativeGestureEpoch++
         const drag = this._nativeDrag
         if (!drag || e.pointerId !== drag.pointerId) return
         this._nativeDrag = null
-        this.scrollArea.releasePointerCapture?.(e.pointerId)
+        try { this.scrollArea.releasePointerCapture?.(e.pointerId) } catch (_) {}
+        if (this.interactionMode === 'draw') {
+            this._nativePreview = null
+            this._redrawNativePreview()
+            return
+        }
         const selection = await this._finalizeNativeSelection(drag.anchor, drag.focus, 'char').catch(err => {
             console.warn('[PDF] native selection failed:', err); return null
         })
-        if (selection) this._emitNativeSelection(selection)
+        if (selection && this.interactionMode !== 'draw' && drag.epoch === this._nativeGestureEpoch - 1) {
+            this._emitNativeSelection(selection)
+        }
     }
 
     _cancelNativeDrag() {
+        this._nativeGestureEpoch++
+        if (this._nativeDrag?.pointerId != null) {
+            try { this.scrollArea.releasePointerCapture?.(this._nativeDrag.pointerId) } catch (_) {}
+        }
         this._nativeDrag = null
         this._nativePreview = null
         this._redrawNativePreview()
     }
 
     async _nativeDoubleClick(e) {
-        if (this.driver?.kind !== 'mupdf') return
+        if (this.interactionMode === 'draw' || this.driver?.kind !== 'mupdf') return
+        const epoch = ++this._nativeGestureEpoch
         const hit = this._slotForPoint(e.clientX, e.clientY)
         if (!hit) return
         const point = this._clientToPage(hit, e.clientX, e.clientY)
         const ch = await this._hitNativeChar(hit.page, point)
-        if (!ch) return
+        if (!ch || epoch !== this._nativeGestureEpoch || this.interactionMode === 'draw') return
         e.preventDefault()
         const selection = await this._finalizeNativeSelection(
-            { page:hit.page,index:ch.index,point }, { page:hit.page,index:ch.index,point }, 'word')
-        if (selection) this._emitNativeSelection(selection)
+            { page: hit.page, index: ch.index, point }, { page: hit.page, index: ch.index, point }, 'word')
+        if (selection && this.interactionMode !== 'draw') this._emitNativeSelection(selection)
     }
 
     async _selectionEndpoints(anchor, focus) {
@@ -1220,11 +1250,26 @@ export class PdfViewport {
         const now = this.pageOffsets[this.currentPage]
         if (now) this.scrollArea.scrollTop = Math.max(0, now.top + clamp(ratio,0,1)*now.height)
         this._syncActiveSlotGeometry()
+        this.options.onZoomChange?.(this.scale)
         for (const slot of this.activeSlots.values()) {
             slot._renderedClip = null
         }
         this._renderVisibleSlots(true)
         this._redrawNativePreview()
+    }
+
+    setInteractionMode(mode) {
+        const next = mode === 'draw' ? 'draw' : 'select'
+        if (this.interactionMode === next) return
+        this.interactionMode = next
+        this._nativeGestureEpoch++
+        if (next === 'draw') {
+            this._cancelNativeDrag()
+            try {
+                window.getSelection()?.removeAllRanges?.()
+            } catch (_) {}
+        }
+        this.options.onInteractionModeChange?.(next)
     }
 
     goToPage(page, yRatio = 0) {
