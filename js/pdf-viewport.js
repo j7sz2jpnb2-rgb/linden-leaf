@@ -718,8 +718,14 @@ export class PdfViewport {
                         else if (pixels.children?.unshift) { pixels.children.unshift(baseCanvas); baseCanvas.parentElement = pixels }
                         else pixels.append(baseCanvas)
                     }
-                } catch (_) {
-                    // Base preview is non-fatal enhancement
+                } catch (previewErr) {
+                    // Base preview failed: if slot has no existing canvas backing at all,
+                    // fall back clip to null so we request full page render instead of risking visible gap
+                    if (!pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')) {
+                        console.warn('[PdfViewport] base preview failed, falling back clip to full page:', previewErr)
+                        clip = null
+                        requestedClip = null
+                    }
                 }
             }
 
@@ -786,7 +792,7 @@ export class PdfViewport {
                 canvas.style.height = `${cssHeight}px`
                 canvas.style.filter = 'var(--reader-img-filter,none)'
                 canvas.style.pointerEvents = 'none'
-                canvas.style.zIndex = '2'
+                canvas.style.zIndex = '3'
 
                 const existingPageCanvas = pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')
                 if (existingPageCanvas) {
@@ -794,9 +800,10 @@ export class PdfViewport {
                     existingPageCanvas.style.zIndex = '1'
                 }
 
-                // Remove any old clip that is completely contained within the new clip range
+                // Any older retained clips get zIndex = 2 so newest clip (zIndex = 3) always renders on top
                 const existingClips = [...pixels.querySelectorAll('.pdf-clip-canvas')]
                 for (const old of existingClips) {
+                    old.style.zIndex = '2'
                     const oldTop = parseFloat(old.style.top) || 0
                     const oldHeight = parseFloat(old.style.height) || 0
                     const oldBottom = oldTop + oldHeight

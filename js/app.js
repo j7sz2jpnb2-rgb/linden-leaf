@@ -204,10 +204,34 @@ const buildContentCSS = (settings) => {
             break-before: avoid !important;
             -webkit-column-break-before: avoid !important;
         }
-        /* SVG & Cover Image Proportion Preservation */
+        /* SVG & Cover Image Proportion Preservation (Prevent bottom truncation on aspect ratio mismatch) */
+        html:has(meta[name="calibre:cover"]) body,
+        html:has(meta[name="calibre:cover"]) body > div,
+        body > div:has(> svg:only-child):only-child {
+            height: 100% !important;
+            max-height: 100% !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+        }
         svg, svg:has(image) {
             max-width: 100% !important;
             max-height: 100% !important;
+            box-sizing: border-box !important;
+        }
+        html:has(meta[name="calibre:cover"]) svg,
+        body > div:has(> svg:only-child):only-child > svg {
+            display: block !important;
+            margin: 0 auto !important;
+            vertical-align: top !important;
+            width: auto !important;
+            height: 100% !important;
+            max-height: 100% !important;
+            max-width: 100% !important;
+            object-fit: contain !important;
         }
         svg image {
             object-fit: contain !important;
@@ -230,6 +254,25 @@ const buildContentCSS = (settings) => {
             margin-bottom: 2em !important;
             padding: 1em 0 !important;
             background: transparent !important;
+        }
+        /* Decorative chapter title boxes (e.g. Shibusawa .k, .k1, .k2, .k3, .k4, .k5) */
+        .k, .k1, .k2, .k3, .k4, .k5 {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+            -webkit-column-break-inside: avoid !important;
+            box-sizing: border-box !important;
+        }
+        .k2, .k4, .k5 {
+            padding-top: clamp(1em, 6vh, 2.5em) !important;
+            padding-bottom: clamp(1em, 6vh, 2.5em) !important;
+        }
+        .k .center {
+            margin-top: 0.8em !important;
+            margin-bottom: 0.8em !important;
+        }
+        .k .center1 {
+            margin-top: 0.5em !important;
+            margin-bottom: 0.5em !important;
         }
     `
 
@@ -2413,20 +2456,7 @@ class UniversalReaderApp {
             }
         })
         this.dom.btnPopupCopy?.addEventListener('click', async () => {
-            if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
-                const mergedText = this.multiSelectedRanges.map(r => r.text).join('\n\n')
-                await navigator.clipboard.writeText(mergedText)
-                this.showToast(`📋 已合并复制 ${this.multiSelectedRanges.length} 处选区内容`, '📋')
-                this.clearVirtualMultiSelections()
-                this.multiSelectedRanges = []
-                const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
-                iframe?.contentDocument?.getSelection()?.removeAllRanges()
-                this.hideSelectionPopup()
-            } else if (this.selectedTextInfo?.text) {
-                await navigator.clipboard.writeText(this.selectedTextInfo.text)
-                this.showToast('📋 已复制选中文字到剪贴板', '📋')
-                this.hideSelectionPopup()
-            }
+            await this.copyMultiSelectionOrSingle()
         })
         this.dom.btnPopupSearch?.addEventListener('click', () => {
             const text = this.selectedTextInfo?.text
@@ -3452,17 +3482,22 @@ class UniversalReaderApp {
 
         // 1. If target element is an empty anchor/span or inline tag with text <= 4, climb up to enclosing block
         let containerEl = targetEl
-        const isInline = ['a', 'span', 'small', 'sup', 'sub', 'b', 'i', 'strong', 'em', 'img'].includes(targetEl.tagName?.toLowerCase())
-        const textLen = (targetEl.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().length
-        if (isInline || textLen <= 4) {
-            const parentBlock = targetEl.closest('li, p, blockquote, dd, aside, div.footnote, div.note, [class*="note" i], [class*="fn" i], div')
-            if (parentBlock && (parentBlock.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().length > 4) {
-                containerEl = parentBlock
-            } else if (targetEl.matches('dt') && targetEl.nextElementSibling?.matches('dd')) {
-                containerEl = targetEl.nextElementSibling
+        if (targetEl.matches?.('dl') && targetEl.querySelector?.('dd')) {
+            containerEl = targetEl.querySelector('dd') || targetEl
+        } else {
+            const dtParent = targetEl.matches?.('dt') ? targetEl : targetEl.closest?.('dt')
+            if (dtParent && dtParent.nextElementSibling?.matches?.('dd')) {
+                containerEl = dtParent.nextElementSibling
+            } else {
+                const isInline = ['a', 'span', 'small', 'sup', 'sub', 'b', 'i', 'strong', 'em', 'img'].includes(targetEl.tagName?.toLowerCase())
+                const textLen = (targetEl.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().length
+                if (isInline || textLen <= 4) {
+                    const parentBlock = targetEl.closest('li, p, blockquote, dd, aside, div.footnote, div.note, [class*="note" i], [class*="fn" i], div')
+                    if (parentBlock && (parentBlock.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().length > 4) {
+                        containerEl = parentBlock
+                    }
+                }
             }
-        } else if (targetEl.matches('dt') && targetEl.nextElementSibling?.matches('dd')) {
-            containerEl = targetEl.nextElementSibling
         }
 
         // 2. Clone to safely manipulate DOM without mutating reader document
@@ -3491,8 +3526,23 @@ class UniversalReaderApp {
         // 5. Clean leading bracketed/circled numbers (e.g. [1], 1., ㉗, 45., [注1])
         raw = raw.replace(/^[\[（(【]?(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)[\]）)】]?\s*[.、:：\-]?\s*/, '').trim()
 
+        const isTrivialMarker = s => !s || /^[\[（(【]?\s*(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)\s*[\]）)】]?\s*[.、:：\-]?$/.test(s)
+        const anchorLabel = anchorEl ? (anchorEl.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^[\[（(]|[\]）)]$/g, '') : ''
+        if (raw === anchorLabel || isTrivialMarker(raw)) {
+            const candidateP = containerEl.querySelector?.('p, dd, div')
+            const candidateText = candidateP ? (candidateP.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim() : ''
+            if (candidateText && candidateText !== anchorLabel && !isTrivialMarker(candidateText)) {
+                raw = candidateText.replace(/^[\[（(【]?(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)[\]）)】]?\s*[.、:：\-]?\s*/, '').trim()
+            } else {
+                return ''
+            }
+        }
+
         const fallback = (containerEl.textContent || containerEl.innerText || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-        return raw || fallback
+        const cleanFallback = fallback.replace(/^[\[（(【]?(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)[\]）)】]?\s*[.、:：\-]?\s*/, '').trim()
+        if (!isTrivialMarker(raw)) return raw
+        if (!isTrivialMarker(cleanFallback) && cleanFallback !== anchorLabel) return cleanFallback
+        return ''
     }
 
     showFootnotePopup({ title, text, rect }) {
@@ -3527,6 +3577,39 @@ class UniversalReaderApp {
         if (this.dom.footnotePopup) {
             this.dom.footnotePopup.style.display = 'none'
         }
+    }
+
+    async copyMultiSelectionOrSingle() {
+        if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
+            const mergedText = this.multiSelectedRanges.map(r => r.text).filter(Boolean).join('\n\n')
+            if (!mergedText) return false
+            try {
+                await navigator.clipboard.writeText(mergedText)
+                this.showToast(`📋 已合并复制 ${this.multiSelectedRanges.length} 处选区内容`, '📋')
+                this.clearVirtualMultiSelections()
+                this.multiSelectedRanges = []
+                const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
+                iframe?.contentDocument?.getSelection()?.removeAllRanges()
+                this.hideSelectionPopup()
+                return true
+            } catch (err) {
+                console.error('[Copy] Clipboard writeText failed:', err)
+                this.showToast('复制失败，请重试', '⚠️')
+                return false
+            }
+        } else if (this.selectedTextInfo?.text) {
+            try {
+                await navigator.clipboard.writeText(this.selectedTextInfo.text)
+                this.showToast('📋 已复制选中文字到剪贴板', '📋')
+                this.hideSelectionPopup()
+                return true
+            } catch (err) {
+                console.error('[Copy] Clipboard writeText failed:', err)
+                this.showToast('复制失败，请重试', '⚠️')
+                return false
+            }
+        }
+        return false
     }
 
     turnPageNext() {
@@ -3636,6 +3719,15 @@ class UniversalReaderApp {
                 return
             }
 
+            // Ctrl+C / Cmd+C: Intercept multi-selection copying when more than 1 selection range is active
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+                if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
+                    e.preventDefault()
+                    this.copyMultiSelectionOrSingle()
+                    return
+                }
+            }
+
             switch (e.key) {
                 case 'ArrowUp': {
                     e.preventDefault()
@@ -3665,28 +3757,40 @@ class UniversalReaderApp {
                     }
                     break
                 }
-                case 'ArrowLeft':
+                case 'ArrowLeft': {
+                    if (e.altKey) return
+                    e.preventDefault()
+                    this.turnPagePrev()
+                    break
+                }
                 case 'PageUp':
                 case 'h':
                 case 'H':
                 case 'k':
-                case 'K':
+                case 'K': {
                     if (e.ctrlKey || e.metaKey || e.altKey) return
                     e.preventDefault()
                     this.turnPagePrev()
                     break
-                case 'ArrowRight':
+                }
+                case 'ArrowRight': {
+                    if (e.altKey) return
+                    e.preventDefault()
+                    this.turnPageNext()
+                    break
+                }
                 case 'PageDown':
                 case ' ':
                 case 'l':
                 case 'L':
                 case 'j':
                 case 'J':
-                case 'Enter':
+                case 'Enter': {
                     if (e.ctrlKey || e.metaKey || e.altKey) return
                     e.preventDefault()
                     this.turnPageNext()
                     break
+                }
                 case 'f':
                 case 'F':
                     e.preventDefault()
@@ -6158,6 +6262,7 @@ class UniversalReaderApp {
                                   (targetId && isNoteIdPattern && (isNumericOrSymbolMark || !cleanText))
 
                 if (isNoteref && targetId) {
+                    e.preventDefault()
                     const doc = a?.ownerDocument
                     let targetEl = doc ? (doc.getElementById(targetId) || doc.querySelector(`[name="${CSS.escape(targetId)}"]`)) : null
                     
@@ -6168,13 +6273,8 @@ class UniversalReaderApp {
                     }
 
                     let footnoteText = (a?.getAttribute('data-wr-footernote') || a?.getAttribute('zy-footnote') || a?.getAttribute('data-note') || '').trim()
-                    if (!footnoteText) {
+                    if (!footnoteText && targetEl) {
                         footnoteText = this.extractFootnoteFromTarget(targetEl, a)
-                    }
-
-                    if (!footnoteText && a) {
-                        const img = a.querySelector('img')
-                        footnoteText = (img?.getAttribute('alt') || a.getAttribute('title') || '').trim()
                     }
 
                     if (!footnoteText && sessionView?.book) {
@@ -6197,6 +6297,19 @@ class UniversalReaderApp {
                             }
                         } catch (err) {
                             console.warn('External footnote lookup error in link event:', err)
+                        }
+                    }
+
+                    if (!footnoteText && a) {
+                        const img = a.querySelector('img')
+                        const imgAlt = (img?.getAttribute('alt') || '').trim()
+                        const title = (a.getAttribute('title') || '').trim()
+                        const anchorClean = (a.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^[\[（(【]|[\]）)】]$/g, '')
+                        const isTrivial = s => !s || /^[\[（(【]?\s*(?:\d{1,4}|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)\s*[\]）)】]?\s*[.、:：\-]?$/.test(s) || s === anchorClean
+                        if (imgAlt && !isTrivial(imgAlt)) {
+                            footnoteText = imgAlt
+                        } else if (title && !isTrivial(title)) {
+                            footnoteText = title
                         }
                     }
 
@@ -6674,6 +6787,9 @@ class UniversalReaderApp {
         if (!this.currentBookId) return
         if (session && this._activeSession !== session) return
         this.hideFootnotePopup()
+        if (this.multiSelectedRanges && this.multiSelectedRanges.length > 0) {
+            this.renderVirtualMultiSelections()
+        }
         const activeBookId = this.currentBookId
         const activeEpoch = this._currentBookEpoch
 
@@ -7043,6 +7159,10 @@ class UniversalReaderApp {
         // Industrial-grade DOM Normalization (Prune ghost pagebreaks, format headings, normalize poetry)
         this.normalizeEpubDocument(doc)
 
+        if (this.multiSelectedRanges && this.multiSelectedRanges.length > 0) {
+            setTimeout(() => this.renderVirtualMultiSelections(), 60)
+        }
+
         // Throttled activity heartbeat on reading doc (mousemove, scroll, selection, keydown)
         let lastActReset = 0
         const triggerActReset = () => {
@@ -7084,7 +7204,12 @@ class UniversalReaderApp {
 
         const iframeKeyHandler = e => {
             if (e.key === 'Control' || e.key === 'Meta') isCtrlActive = true
-            if (!e.ctrlKey && !e.metaKey && !e.altKey && ['ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'h', 'H', 'l', 'L', 'j', 'J', 'k', 'K', ' ', 'Enter'].includes(e.key)) {
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                if (!e.altKey) {
+                    e.preventDefault()
+                    e.stopPropagation()
+                }
+            } else if (!e.ctrlKey && !e.metaKey && !e.altKey && ['PageUp', 'PageDown', 'h', 'H', 'l', 'L', 'j', 'J', 'k', 'K', ' ', 'Enter'].includes(e.key)) {
                 e.preventDefault()
                 e.stopPropagation()
             }
@@ -7308,14 +7433,8 @@ class UniversalReaderApp {
                     }
 
                     let footnoteText = (a.getAttribute('data-wr-footernote') || a.getAttribute('zy-footnote') || a.getAttribute('data-note') || '').trim()
-                    if (!footnoteText) {
+                    if (!footnoteText && targetEl) {
                         footnoteText = this.extractFootnoteFromTarget(targetEl, a)
-                    }
-                    
-                    // Fallback to img alt or title or text
-                    if (!footnoteText && a) {
-                        const img = a.querySelector('img')
-                        footnoteText = (img?.getAttribute('alt') || a.getAttribute('title') || '').trim()
                     }
 
                     // If still empty and link points to another file in book, resolve external section
@@ -7325,7 +7444,7 @@ class UniversalReaderApp {
                             const section = book.sections[index]
                             const fullHref = section?.resolveHref?.(href) ?? href
                             const resolved = book.resolveHref ? (book.resolveHref(fullHref) || book.resolveHref(href)) : null
-                            if (resolved && resolved.index != null && resolved.index !== index) {
+                            if (resolved && resolved.index != null && (resolved.index !== index || !targetEl)) {
                                 const targetSec = book.sections[resolved.index]
                                 const secDoc = await targetSec?.createDocument?.()
                                 if (secDoc) {
@@ -7341,6 +7460,20 @@ class UniversalReaderApp {
                             }
                         } catch (err) {
                             console.warn('External footnote lookup error in doc click:', err)
+                        }
+                    }
+
+                    // Fallback to img alt or title only if not trivial
+                    if (!footnoteText && a) {
+                        const img = a.querySelector('img')
+                        const imgAlt = (img?.getAttribute('alt') || '').trim()
+                        const title = (a.getAttribute('title') || '').trim()
+                        const anchorClean = (a.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^[\[（(【]|[\]）)】]$/g, '')
+                        const isTrivial = s => !s || /^[\[（(【]?\s*(?:\d{1,4}|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)\s*[\]）)】]?\s*[.、:：\-]?$/.test(s) || s === anchorClean
+                        if (imgAlt && !isTrivial(imgAlt)) {
+                            footnoteText = imgAlt
+                        } else if (title && !isTrivial(title)) {
+                            footnoteText = title
                         }
                     }
                     

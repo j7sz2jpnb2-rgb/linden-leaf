@@ -174,93 +174,73 @@ async function main() {
             await evaluate('window.app.pdfViewport.setZoom(2); true');
             await SLEEP(500);
 
+            const totalPages = await evaluate('window.app.pdfViewport.pageOffsets.length');
+            const targetPage = doc.targetPage;
+            const awayPage = (targetPage + 8 < totalPages) ? targetPage + 8 : Math.max(0, targetPage - 8);
+
+            const testMode = async (enableClip, runNum) => {
+                await evaluate(`window.app.pdfViewport.options.enableClip = ${enableClip}; true`);
+                await evaluate('window.app.pdfViewport._bitmapCache.clear(); window.app.pdfViewport._bitmapCacheBytes = 0; true');
+
+                const m = await evaluate(`(async () => {
+                    const vp = window.app.pdfViewport;
+                    const page = ${targetPage};
+                    const away = ${awayPage};
+                    // Step away to guarantee target page slot is completely unmounted
+                    vp.goToPage(away);
+                    await new Promise(r => setTimeout(r, 500));
+                    if (vp.activeSlots.has(page)) {
+                        vp.unmountSlot(page);
+                    }
+
+                    const t0 = performance.now();
+                    vp.goToPage(page);
+
+                    let timeToVisibleMs = null;
+                    let sharpCompletionMs = null;
+                    let payloadBytes = 0;
+
+                    for (let i = 0; i < 150; i++) {
+                        await new Promise(r => setTimeout(r, 16));
+                        const slot = vp.activeSlots.get(page);
+                        if (!slot) continue;
+                        const canvases = [...slot.querySelectorAll('canvas')];
+                        if (!timeToVisibleMs && canvases.length > 0) {
+                            timeToVisibleMs = Math.round(performance.now() - t0);
+                        }
+                        if (slot._renderedScale === 2 && (${enableClip} ? (slot._renderedClip || slot._renderedToken) : !slot._renderedClip)) {
+                            sharpCompletionMs = Math.round(performance.now() - t0);
+                            payloadBytes = canvases.reduce((acc, c) => acc + c.width * c.height * 4, 0);
+                            break;
+                        }
+                    }
+                    const slot = vp.activeSlots.get(page);
+                    const clipInfo = slot?._renderedClip;
+                    return { timeToVisibleMs, sharpCompletionMs, payloadBytes, clipInfo };
+                })()`);
+
+                const mem = getAppMemoryBreakdown(app.pid);
+                const modeName = enableClip ? 'clipOn' : 'clipOff';
+                results[doc.name][modeName].push({ ...m, memoryMB: mem.totalMB, webview2MB: mem.webview2MB });
+                const tag = enableClip ? 'Clip ON ' : 'Clip OFF';
+                console.log(`  [${tag} Run ${runNum}] PageIdx=${targetPage} (p.${targetPage+1}), Visible=${m.timeToVisibleMs}ms, Sharp=${m.sharpCompletionMs}ms, CanvasAllocMem=${(m.payloadBytes / 1024).toFixed(1)} KB, TotalMem=${mem.totalMB}MB`);
+            };
+
             const runs = 3;
             for (let r = 0; r < runs; r++) {
-                // Test Clip ON
-                {
-                    await evaluate('window.app.pdfViewport.options.enableClip = true; true');
-                    await evaluate('window.app.pdfViewport._bitmapCache.clear(); window.app.pdfViewport._bitmapCacheBytes = 0; true');
-
-                    const m = await evaluate(`(async () => {
-                        const vp = window.app.pdfViewport;
-                        const page = ${doc.targetPage};
-                        // Jump away first to ensure clean slot state
-                        vp.goToPage(page > 0 ? 0 : 1);
-                        await new Promise(r => setTimeout(r, 400));
-
-                        const t0 = performance.now();
-                        vp.goToPage(page);
-
-                        let timeToVisibleMs = null;
-                        let sharpCompletionMs = null;
-                        let payloadBytes = 0;
-
-                        for (let i = 0; i < 120; i++) {
-                            await new Promise(r => setTimeout(r, 16));
-                            const slot = vp.activeSlots.get(page);
-                            if (!slot) continue;
-                            const canvases = [...slot.querySelectorAll('canvas')];
-                            if (!timeToVisibleMs && canvases.length > 0) {
-                                timeToVisibleMs = Math.round(performance.now() - t0);
-                            }
-                            if (slot._renderedScale === 2 && (slot._renderedClip || slot._renderedToken)) {
-                                sharpCompletionMs = Math.round(performance.now() - t0);
-                                payloadBytes = canvases.reduce((acc, c) => acc + c.width * c.height * 4, 0);
-                                break;
-                            }
-                        }
-                        const slot = vp.activeSlots.get(page);
-                        const clipInfo = slot?._renderedClip;
-                        return { timeToVisibleMs, sharpCompletionMs, payloadBytes, clipInfo };
-                    })()`);
-
-                    const mem = getAppMemoryBreakdown(app.pid);
-                    results[doc.name].clipOn.push({ ...m, memoryMB: mem.totalMB, webview2MB: mem.webview2MB });
-                    console.log(`  [Clip ON  Run ${r + 1}] Visible=${m.timeToVisibleMs}ms, Sharp=${m.sharpCompletionMs}ms, Payload=${(m.payloadBytes / 1024).toFixed(1)} KB, Clip=[top:${m.clipInfo?.top}, btm:${m.clipInfo?.bottom}], TotalMem=${mem.totalMB}MB`);
+                // Alternate order across runs to eliminate warmup/ordering bias:
+                // Run 1: ON then OFF
+                // Run 2: OFF then ON
+                // Run 3: ON then OFF
+                if (r % 2 === 0) {
+                    await testMode(true, r + 1);
+                    await SLEEP(300);
+                    await testMode(false, r + 1);
+                } else {
+                    await testMode(false, r + 1);
+                    await SLEEP(300);
+                    await testMode(true, r + 1);
                 }
-
-                await SLEEP(300);
-
-                // Test Clip OFF
-                {
-                    await evaluate('window.app.pdfViewport.options.enableClip = false; true');
-                    await evaluate('window.app.pdfViewport._bitmapCache.clear(); window.app.pdfViewport._bitmapCacheBytes = 0; true');
-
-                    const m = await evaluate(`(async () => {
-                        const vp = window.app.pdfViewport;
-                        const page = ${doc.targetPage};
-                        vp.goToPage(page > 0 ? 0 : 1);
-                        await new Promise(r => setTimeout(r, 400));
-
-                        const t0 = performance.now();
-                        vp.goToPage(page);
-
-                        let timeToVisibleMs = null;
-                        let sharpCompletionMs = null;
-                        let payloadBytes = 0;
-
-                        for (let i = 0; i < 120; i++) {
-                            await new Promise(r => setTimeout(r, 16));
-                            const slot = vp.activeSlots.get(page);
-                            if (!slot) continue;
-                            const canvases = [...slot.querySelectorAll('canvas')];
-                            if (!timeToVisibleMs && canvases.length > 0) {
-                                timeToVisibleMs = Math.round(performance.now() - t0);
-                            }
-                            if (slot._renderedScale === 2 && !slot._renderedClip) {
-                                sharpCompletionMs = Math.round(performance.now() - t0);
-                                payloadBytes = canvases.reduce((acc, c) => acc + c.width * c.height * 4, 0);
-                                break;
-                            }
-                        }
-                        return { timeToVisibleMs, sharpCompletionMs, payloadBytes };
-                    })()`);
-
-                    const mem = getAppMemoryBreakdown(app.pid);
-                    results[doc.name].clipOff.push({ ...m, memoryMB: mem.totalMB, webview2MB: mem.webview2MB });
-                    console.log(`  [Clip OFF Run ${r + 1}] Visible=${m.timeToVisibleMs}ms, Sharp=${m.sharpCompletionMs}ms, Payload=${(m.payloadBytes / 1024).toFixed(1)} KB, TotalMem=${mem.totalMB}MB`);
-                }
-
                 await SLEEP(300);
             }
 

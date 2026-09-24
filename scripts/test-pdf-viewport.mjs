@@ -743,8 +743,8 @@ async function testViewportBoundedClipAndHandover() {
     assert.ok(wrapper, 'Wrapper must exist');
     const clipCanvas = wrapper.children[0];
     assert.ok(clipCanvas.classList.contains('pdf-clip-canvas'), 'Clipped canvas must have pdf-clip-canvas class');
-    assert.equal(clipCanvas.style.zIndex, '2', 'Clip canvas must have zIndex 2');
-    console.log('  [PASS] 9.1 Bounded clip calculated and positioned correctly');
+    assert.equal(clipCanvas.style.zIndex, '3', 'Newest clip canvas must have zIndex 3');
+    console.log('  [PASS] 9.1 Bounded clip calculated and positioned correctly with zIndex 3');
 
     // 2. Preview retention test
     const initialClipCanvas = clipCanvas;
@@ -765,7 +765,9 @@ async function testViewportBoundedClipAndHandover() {
     assert.ok(clipCallCount > initialCallCount, 'Scroll beyond bleed margin must trigger new clip render');
     const newClipCanvas = wrapper.children[0];
     assert.ok(newClipCanvas, 'New clip canvas must be mounted');
-    console.log('  [PASS] 9.3 Scrolling beyond bleed margin dynamically requested new visible clip');
+    assert.equal(newClipCanvas.style.zIndex, '3', 'Newest clip canvas must have zIndex 3');
+    assert.equal(initialClipCanvas.style.zIndex, '2', 'Older retained clip canvas must have zIndex 2');
+    console.log('  [PASS] 9.3 Scrolling beyond bleed margin dynamically mounted new visible clip (zIndex 3 on top of zIndex 2)');
 
     // 4. Fallback on driver clip error
     let failClipOnce = true;
