@@ -170,12 +170,16 @@ export function aggregateSessions(sessions = [], options = {}) {
         totalSeconds += secs
 
         if (!dayMap.has(dateStr)) {
-            dayMap.set(dateStr, { seconds: 0, minutes: 0, bookIds: new Set(), sessionCount: 0 })
+            dayMap.set(dateStr, { seconds: 0, minutes: 0, bookIds: new Set(), sessionCount: 0, bookDurationMap: new Map() })
         }
         const item = dayMap.get(dateStr)
+        if (!item.bookDurationMap) item.bookDurationMap = new Map()
         item.seconds += secs
         item.sessionCount++
-        if (session.bookId) item.bookIds.add(session.bookId)
+        if (session.bookId) {
+            item.bookIds.add(session.bookId)
+            item.bookDurationMap.set(session.bookId, (item.bookDurationMap.get(session.bookId) || 0) + secs)
+        }
     }
 
     let maxMinutes = 0
@@ -292,15 +296,42 @@ export async function renderCalendarHeatmap(container, targetYear = new Date().g
                 const tipText = mins > 0 ? `${dateStr}: ${durationStr}${bookNames ? `\n阅读: ${bookNames}` : ''}` : `${dateStr}: 未阅读`
                 cell.title = tipText
 
-                cell.addEventListener('click', () => {
+                const handleCellClick = () => {
                     const allActive = container.querySelectorAll('.heatmap-cell.active')
                     allActive.forEach(c => c.classList.remove('active'))
                     cell.classList.add('active')
                     if (onDayClick) {
-                        onDayClick(dateStr, {
+                        const bookList = []
+                        if (info && info.bookDurationMap) {
+                            for (const [bId, bSecs] of info.bookDurationMap.entries()) {
+                                bookList.push({
+                                    bookId: bId,
+                                    title: bookTitleMap.get(bId) || '未知书籍',
+                                    seconds: bSecs,
+                                    minutes: Math.round(bSecs / 60)
+                                })
+                            }
+                            bookList.sort((a, b) => b.seconds - a.seconds)
+                        }
+                        const payload = {
+                            dateStr,
                             minutes: mins,
-                            bookNames: info ? Array.from(info.bookIds).map(id => bookTitleMap.get(id) || '未知书籍') : []
-                        })
+                            seconds: info?.seconds || 0,
+                            books: bookList,
+                            bookNames: bookList.map(b => b.title)
+                        }
+                        onDayClick(dateStr, payload)
+                    }
+                }
+
+                cell.tabIndex = 0
+                cell.setAttribute('role', 'button')
+                cell.setAttribute('aria-label', tipText)
+                cell.addEventListener('click', handleCellClick)
+                cell.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        handleCellClick()
                     }
                 })
             }

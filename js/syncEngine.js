@@ -129,6 +129,14 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
         }
     }
 
+    // 7. Rating: LWW based on ratingUpdatedAt. Explicit null propagates to cancel/clear rating across devices.
+    let rating = localBook.rating !== undefined ? localBook.rating : null
+    let ratingUpdatedAt = localBook.ratingUpdatedAt || 0
+    if (incomingMeta.ratingUpdatedAt !== undefined && isIncomingNewer(incomingMeta.ratingUpdatedAt, localBook.ratingUpdatedAt)) {
+        rating = incomingMeta.rating !== undefined ? incomingMeta.rating : null
+        ratingUpdatedAt = incomingMeta.ratingUpdatedAt || 0
+    }
+
     return {
         tags,
         tagsUpdatedAt,
@@ -139,6 +147,8 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
         listsUpdatedAt,
         isFavorite,
         favoriteUpdatedAt,
+        rating,
+        ratingUpdatedAt,
         progress,
         lastReadAt,
         totalReadingSeconds,
@@ -173,6 +183,8 @@ export const buildBookSyncMeta = (b) => {
         readingStatus: b.readingStatus || (b.lastReadAt > 0 ? 'reading' : 'unread'),
         statusUpdatedAt: b.statusUpdatedAt || 0,
         completedAt: b.completedAt || null,
+        rating: b.rating !== undefined ? b.rating : null,
+        ratingUpdatedAt: b.ratingUpdatedAt || 0,
         lastReadAt: b.lastReadAt || 0,
         totalReadingSeconds: b.totalReadingSeconds || 0,
         addedAt: b.addedAt || Date.now(),
@@ -319,6 +331,8 @@ export const mergeSyncData = (localPayload, remotePayload) => {
                 listsUpdatedAt: clampTime(b.listsUpdatedAt),
                 tagsUpdatedAt: clampTime(b.tagsUpdatedAt),
                 statusUpdatedAt: clampTime(b.statusUpdatedAt),
+                rating: b.rating !== undefined ? b.rating : null,
+                ratingUpdatedAt: clampTime(b.ratingUpdatedAt),
                 updatedAt: clampTime(b.updatedAt),
                 isLocal: true
             })
@@ -333,6 +347,7 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         const rListsUpdated = clampTime(remoteBook.listsUpdatedAt)
         const rTagsUpdated = clampTime(remoteBook.tagsUpdatedAt)
         const rStatusUpdated = clampTime(remoteBook.statusUpdatedAt)
+        const rRatingUpdated = clampTime(remoteBook.ratingUpdatedAt)
 
         const safeFormat = sanitizeSyncFormat(remoteBook.format)
         let safeCloud = remoteBook.cloudBackup
@@ -359,6 +374,8 @@ export const mergeSyncData = (localPayload, remotePayload) => {
                 readingStatus: cleanRemoteBook.readingStatus || 'unread',
                 statusUpdatedAt: rStatusUpdated,
                 completedAt: cleanRemoteBook.completedAt || null,
+                rating: cleanRemoteBook.rating !== undefined ? cleanRemoteBook.rating : null,
+                ratingUpdatedAt: rRatingUpdated,
                 lastReadAt: rLastRead,
                 updatedAt: rUpdated,
                 favoriteUpdatedAt: rFavUpdated,
@@ -389,6 +406,8 @@ export const mergeSyncData = (localPayload, remotePayload) => {
                 readingStatus: reconciled.readingStatus,
                 statusUpdatedAt: reconciled.statusUpdatedAt,
                 completedAt: reconciled.completedAt,
+                rating: reconciled.rating,
+                ratingUpdatedAt: reconciled.ratingUpdatedAt,
                 isFavorite: reconciled.isFavorite,
                 favoriteUpdatedAt: reconciled.favoriteUpdatedAt,
                 listsUpdatedAt: reconciled.listsUpdatedAt,
@@ -678,6 +697,11 @@ export const applyMergedPayload = async mergedPayload => {
                     localBook.favoriteUpdatedAt = reconciled.favoriteUpdatedAt
                     changed = true
                 }
+                if (localBook.rating !== reconciled.rating) {
+                    localBook.rating = reconciled.rating
+                    localBook.ratingUpdatedAt = reconciled.ratingUpdatedAt
+                    changed = true
+                }
                 if (reconciled.lastReadAt > (localBook.lastReadAt || 0) || (reconciled.progress && !localBook.progress)) {
                     localBook.progress = reconciled.progress
                     localBook.lastReadAt = reconciled.lastReadAt
@@ -714,6 +738,8 @@ export const applyMergedPayload = async mergedPayload => {
                     readingStatus: meta.readingStatus || 'unread',
                     statusUpdatedAt: meta.statusUpdatedAt || 0,
                     completedAt: meta.completedAt || null,
+                    rating: meta.rating !== undefined ? meta.rating : null,
+                    ratingUpdatedAt: meta.ratingUpdatedAt || 0,
                     cloudBackup: meta.cloudBackup,
                     cloudBackupState: isAutoEligible ? 'pending_auto_download' : 'cloud_only',
                     addedAt: meta.addedAt || Date.now(),

@@ -197,7 +197,7 @@ async function runAll() {
     })
 
     await test('4.4 Valid reading statuses enum coverage', () => {
-        assert.deepEqual(VALID_READING_STATUSES, ['unread', 'reading', 'on_hold', 'finished'])
+        assert.deepEqual(VALID_READING_STATUSES, ['unread', 'want_to_read', 'reading', 'on_hold', 'finished'])
     })
 
     // ---------------------------------------------------------------------

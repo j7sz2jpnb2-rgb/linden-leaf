@@ -263,11 +263,17 @@
               <svg class="icon icon-sm" viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
               <span>阅读统计</span>
             </button>
-            <button class="nav-item" data-category="finished" id="nav-cat-finished">
-              <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-              <span>已读完</span>
+            <button class="nav-item" data-category="overview" id="nav-cat-overview">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+              <span>阅读总览</span>
+            </button>
+            <button class="nav-item" data-category="finished" id="nav-cat-finished" style="display: none;"></button>
+            <button class="nav-item" data-category="ai-history" id="nav-cat-ai-history">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+              <span>AI 阅读记录</span>
             </button>
           </div>
+
         </div>
 
         <!-- Sidebar Bottom: Minimal Profile Card with Quick Settings Trigger -->
@@ -354,6 +360,7 @@
               <div class="sort-menu-item" data-sort="totalReadingSeconds"><span>阅读时长</span><span class="sort-check"></span></div>
               <div class="sort-menu-item" data-sort="lastReadAt"><span>上次阅读</span><span class="sort-check"></span></div>
               <div class="sort-menu-item active" data-sort="addedAt"><span>添加日期</span><span class="sort-check">✓</span></div>
+              <div class="sort-menu-item" data-sort="rating"><span>我的评分</span><span class="sort-check"></span></div>
               <div class="sort-menu-divider"></div>
               <div class="sort-menu-item" data-order="asc"><span>升序</span><span class="order-check"></span></div>
               <div class="sort-menu-item active" data-order="desc"><span>降序</span><span class="order-check">✓</span></div>
@@ -410,6 +417,50 @@
 
             <!-- Screen 2: Bookshelf Grid -->
             <div class="modern-shelf-screen" id="modern-shelf-screen">
+              <!-- Reading Overview Control Panel -->
+              <div id="reading-overview-panel" class="reading-overview-panel" style="display: none;">
+                <div class="overview-top-bar">
+                  <div class="overview-status-tabs" id="overview-status-tabs">
+                    <button type="button" class="overview-tab-btn active" data-status="all">全部 <span class="overview-count-badge" id="overview-count-all">0</span></button>
+                    <button type="button" class="overview-tab-btn" data-status="unread">未读 <span class="overview-count-badge" id="overview-count-unread">0</span></button>
+                    <button type="button" class="overview-tab-btn" data-status="want_to_read">想读 <span class="overview-count-badge" id="overview-count-want_to_read">0</span></button>
+                    <button type="button" class="overview-tab-btn" data-status="reading">在读 <span class="overview-count-badge" id="overview-count-reading">0</span></button>
+                    <button type="button" class="overview-tab-btn" data-status="on_hold">搁置 <span class="overview-count-badge" id="overview-count-on_hold">0</span></button>
+                    <button type="button" class="overview-tab-btn" data-status="finished">读完 <span class="overview-count-badge" id="overview-count-finished">0</span></button>
+                  </div>
+                  <div class="overview-action-bar">
+                    <div class="overview-search-wrap">
+                      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                      <input type="text" id="overview-search-input" class="overview-search-input" placeholder="在当前结果中搜索..." />
+                    </div>
+                    <button type="button" id="btn-overview-open-tags" class="btn-overview-action" title="管理与筛选全库标签">
+                      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
+                      <span>标签</span>
+                    </button>
+                    <div class="overview-rating-select-wrap">
+                      <select id="overview-rating-filter" class="overview-select" title="按评分筛选">
+                        <option value="all">评分: 全部</option>
+                        <option value="5.0">★★★★★ 5.0分</option>
+                        <option value="4.5">★ ≥ 4.5分</option>
+                        <option value="4.0">★ ≥ 4.0分</option>
+                        <option value="3.5">★ ≥ 3.5分</option>
+                        <option value="3.0">★ ≥ 3.0分</option>
+                        <option value="unrated">仅未评分</option>
+                      </select>
+                    </div>
+                    <button type="button" id="btn-overview-toggle-grouping" class="btn-overview-action" title="读完书籍按完成年月分组" style="display: none;">
+                      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                      <span id="overview-grouping-text">年月分组</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="overview-active-filters-bar" id="overview-active-filters-bar" style="display: none;">
+                  <span class="active-filters-label">已选筛选：</span>
+                  <div class="active-filters-pills" id="overview-active-filters-pills"></div>
+                  <button type="button" class="btn-clear-overview-filters" id="btn-clear-overview-filters">清除筛选</button>
+                </div>
+              </div>
+
               <!-- Divider Header for the Grid -->
               <div class="modern-shelf-divider" id="modern-shelf-divider">
                 <div class="divider-left">
@@ -602,6 +653,17 @@
                 <div class="stats-section-subtitle" id="stats-heatmap-year-subtitle">2026年</div>
               </div>
               <div id="stats-calendar-heatmap-container" style="min-height: 100px;"></div>
+              <!-- Calendar Heatmap Day Details Panel -->
+              <div id="stats-heatmap-day-details" class="stats-heatmap-day-details" style="display: none;">
+                <div class="heatmap-day-details-header">
+                  <div class="heatmap-day-details-title-wrap">
+                    <span class="heatmap-day-details-date" id="heatmap-detail-date"></span>
+                    <span class="heatmap-day-details-total" id="heatmap-detail-total"></span>
+                  </div>
+                  <button type="button" class="btn-close-heatmap-detail" id="btn-close-heatmap-detail" title="收起详情">×</button>
+                </div>
+                <div class="heatmap-day-details-books" id="heatmap-detail-books-list"></div>
+              </div>
             </div>
 
             <!-- Top Books Leaderboard Card -->
@@ -685,6 +747,9 @@
               <polyline points="10 9 9 9 8 9"/>
             </svg>
           </button>
+          <button id="btn-toggle-ai-sidebar" class="btn-tool" title="AI 阅读助手 (快捷侧栏)">
+            <svg class="icon" viewBox="0 0 24 24"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+          </button>
           <button id="btn-toggle-settings" class="btn-tool" title="排版与主题设置">
             <svg class="icon" viewBox="0 0 24 24">
               <circle cx="12" cy="12" r="3"/>
@@ -709,6 +774,96 @@
           <svg class="icon icon-lg" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
       </div>
+
+      <!-- AI Sidebar Resizer Divider -->
+      <div id="ai-sidebar-resizer" class="ai-sidebar-resizer" style="display: none;" title="拖动调整 AI 侧边栏宽度"></div>
+
+      <!-- AI Assistant Right Sidebar Panel -->
+      <aside id="reader-ai-sidebar" class="reader-ai-sidebar" style="display: none;">
+        <div class="ai-sidebar-header">
+          <div class="ai-sidebar-title-group">
+            <span class="ai-sidebar-badge">AI 助手</span>
+            <span id="ai-sidebar-conv-title" class="ai-sidebar-title" title="当前会话">阅读辅导</span>
+          </div>
+          <div class="ai-sidebar-header-actions">
+            <button type="button" id="btn-ai-new-conv" class="btn-ai-pill-action" title="新建独立对话">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <span>新对话</span>
+            </button>
+            <button type="button" id="btn-ai-view-history" class="btn-ai-pill-action" title="查看所有 AI 阅读记录">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span>历史</span>
+            </button>
+            <button type="button" id="btn-ai-collapse-sidebar" class="btn-ai-close-action" title="收起 AI 侧边栏">✕</button>
+          </div>
+        </div>
+
+        <!-- Chat Conversation Messages Area -->
+        <div id="ai-chat-messages" class="ai-chat-messages">
+          <!-- Populated dynamically -->
+        </div>
+
+        <!-- Bottom Controls -->
+        <div class="ai-sidebar-bottom-panel">
+          <!-- Pending Quote Reference Box (待发送引用) -->
+          <div id="ai-pending-reference-box" class="ai-pending-reference-box" style="display: none;">
+            <div class="ai-ref-header">
+              <div class="ai-ref-label-group">
+                <span class="ai-ref-tag">选文引用</span>
+                <span id="ai-pending-ref-chapter" class="ai-ref-chapter"></span>
+              </div>
+              <div class="ai-ref-actions">
+                <button type="button" id="btn-ai-expand-ref" class="btn-ai-text-action">展开</button>
+                <button type="button" id="btn-ai-remove-ref" class="btn-ai-text-action btn-ai-danger">移除</button>
+              </div>
+            </div>
+            <div id="ai-pending-ref-text" class="ai-pending-ref-text"></div>
+          </div>
+
+          <!-- Context Toggle & Preview (<= 1000 Tokens) -->
+          <div id="ai-context-control-bar" class="ai-context-control-bar">
+            <label class="ai-context-checkbox-label" title="自动提取选文前后邻近段落，每个出站请求合计 ≤1000 token">
+              <input type="checkbox" id="ai-chk-include-context" checked />
+              <span>附带附近上下文</span>
+              <span id="ai-context-token-pill" class="ai-token-pill">≤1000 token</span>
+            </label>
+            <button type="button" id="btn-ai-preview-context" class="btn-ai-text-action" style="font-size: 0.72rem;">预览</button>
+          </div>
+          <div id="ai-context-preview-drawer" class="ai-context-preview-drawer" style="display: none;">
+            <div id="ai-context-preview-content" class="ai-context-preview-content"></div>
+          </div>
+
+          <!-- Quick Action Buttons Strip (Max 4 Enabled, including built-in) -->
+          <div class="ai-quick-presets-strip">
+            <div id="ai-quick-presets-container" class="ai-quick-presets-container">
+              <!-- Rendered dynamically -->
+            </div>
+            <button type="button" id="btn-ai-manage-presets" class="btn-ai-manage-gear" title="管理快捷指令与提示词">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+          </div>
+
+          <!-- Input Box & Actions -->
+          <div class="ai-input-area">
+            <textarea id="ai-chat-input" class="ai-chat-textarea" rows="2" placeholder="提问、追问或补充指令 (Enter 发送，Shift+Enter 换行)..."></textarea>
+            <div class="ai-input-footer">
+              <div class="ai-input-status-group">
+                <span id="ai-cooldown-indicator" class="ai-cooldown-indicator" style="display: none;"></span>
+                <span id="ai-status-summary" class="ai-status-summary"></span>
+              </div>
+              <div class="ai-input-button-group">
+                <!-- Separate STOP button to avoid instant replacement double-click hazards! -->
+                <button type="button" id="btn-ai-stop-generation" class="btn-ai-stop" style="display: none;" title="立即停止当前生成">
+                  <span class="ai-stop-icon">■</span> 停止
+                </button>
+                <button type="button" id="btn-ai-send-message" class="btn-ai-send" title="发送问题">
+                  发送
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
 
       <!-- WPS / Adobe Style PDF Floating Zoom & Freehand Annotation Controller -->
       <div id="pdf-zoom-control-bar" class="pdf-zoom-control-bar" style="display: none;">
@@ -914,10 +1069,8 @@
             <div class="control-row" id="setting-turn-animation-row">
               <span class="control-label">翻页动效</span>
               <select id="setting-turn-animation-mode" class="setting-select">
-                <option value="slide" selected>横向滑动 (推荐)</option>
-                <option value="cover">覆盖翻页 (实验性)</option>
-                <option value="curl">仿真卷页 (实验性)</option>
-                <option value="none">无动画 (瞬切/墨水屏)</option>
+                <option value="none" selected>无动画翻页 (默认)</option>
+                <option value="slide">横向滑动</option>
               </select>
             </div>
             <div class="control-row">
@@ -1031,6 +1184,20 @@
             </div>
           </div>
 
+          <!-- Standalone Offline Dictionary Setting Card -->
+          <div class="setting-section" id="dict-settings-section">
+            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>本地划词查词 (独立词典)</span>
+              <label class="toggle-switch" title="启用单字/短语划词就地查词典">
+                <input type="checkbox" id="setting-dict-enabled" checked />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <p style="font-size: 0.76rem; color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
+              纯本地离线词典快速查词，显示词性与常见中文释义。不读取上下文，不调用 AI，无费用且不受 10 秒间隔限制。
+            </p>
+          </div>
+
           <!-- Cloud Synchronization Setting Card -->
           <div class="setting-section" id="sync-settings-section">
             <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
@@ -1065,6 +1232,90 @@
               </button>
             </div>
           </div>
+
+          <!-- Advanced Settings Trigger Row (3-click unlock) -->
+          <div class="setting-section" id="advanced-settings-trigger-section" style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.8rem;">
+            <div id="row-advanced-settings-trigger" class="advanced-settings-trigger-row" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none;">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="font-size: 0.84rem; font-weight: 600; color: var(--text-secondary);">⚙️ 高级设置</span>
+                <span id="badge-advanced-status" style="font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; background: var(--bg-tertiary); color: var(--text-muted);">未解锁</span>
+              </div>
+              <span id="hint-advanced-trigger" style="font-size: 0.74rem; color: var(--accent-purple);">连续点击3次解锁</span>
+            </div>
+
+            <!-- Advanced Settings Container (Unlocked only) -->
+            <div id="advanced-settings-container" style="display: none; margin-top: 0.8rem; flex-direction: column; gap: 12px;">
+              <!-- Group 1: AI 与翻译 -->
+              <div class="advanced-group" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">AI 与翻译</div>
+                <div class="control-row" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 8px;">
+                  <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
+                    <span class="control-label" style="font-size: 0.76rem;">自动附近正文上限 (0～10000 Token)</span>
+                    <span id="label-ai-context-budget" style="font-size: 0.76rem; font-weight: 600; color: var(--accent-purple);">1000</span>
+                  </div>
+                  <input type="range" id="setting-ai-context-budget" min="0" max="10000" step="100" value="1000" style="width: 100%;" />
+                  <p style="font-size: 0.7rem; color: var(--text-muted); margin: 0; line-height: 1.3;">0 表示不提取额外正文；硬上限 10000。此预算仅限制自动补充正文，不限制显式选文。</p>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                  <span class="control-label" style="font-size: 0.76rem;">整段就地翻译</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-inplace-para-trans" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <p style="font-size: 0.7rem; color: var(--text-muted); margin: 0 0 8px 0; line-height: 1.3;">开启后选文气泡显示“译本段”，就地输出对照译文，不打乱排版或覆盖原书。</p>
+
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.76rem;">模型 Tokenizer 映射</span>
+                  <select id="setting-model-tokenizer" class="jane-modal-input" style="font-size: 0.76rem; padding: 2px 6px; width: 130px;">
+                    <option value="auto">自动识别 (默认)</option>
+                    <option value="cl100k_base">cl100k_base</option>
+                    <option value="gpt2">gpt2</option>
+                    <option value="cjk_heuristic">CJK 启发式分词</option>
+                  </select>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span class="control-label" style="font-size: 0.76rem;">单次最大输出 (Tokens)</span>
+                  <input type="number" id="setting-ai-max-tokens" min="256" max="4096" step="128" value="2048" class="jane-modal-input" style="font-size: 0.76rem; padding: 2px 6px; width: 75px;" />
+                </div>
+              </div>
+
+              <!-- Group 2: 费用与隐私 -->
+              <div class="advanced-group" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">费用与隐私安全</div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.76rem;">最短发送间隔 (硬防误触)</span>
+                  <select id="setting-ai-cooldown" class="jane-modal-input" style="font-size: 0.76rem; padding: 2px 6px; width: 100px;">
+                    <option value="10">10 秒 (推荐)</option>
+                    <option value="20">20 秒</option>
+                    <option value="30">30 秒</option>
+                  </select>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.76rem;">每日请求次数上限 (0=不限)</span>
+                  <input type="number" id="setting-ai-daily-limit" min="0" max="1000" step="5" value="0" class="jane-modal-input" style="font-size: 0.76rem; padding: 2px 6px; width: 75px;" />
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                  <span class="control-label" style="font-size: 0.76rem;">保存本地查词历史</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-dict-save-history" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div style="display: flex; gap: 6px;">
+                  <button type="button" id="btn-open-audit-from-settings" class="btn-secondary-action" style="flex: 1; padding: 4px 6px; font-size: 0.74rem;">查看审计日志</button>
+                  <button type="button" id="btn-clear-ai-cache-settings" class="btn-secondary-action" style="flex: 1; padding: 4px 6px; font-size: 0.74rem;">清理日志与缓存</button>
+                </div>
+              </div>
+
+              <!-- Reset & Re-lock -->
+              <div style="margin-top: 4px; border-top: 1px dashed var(--border-color); padding-top: 6px;">
+                <button type="button" id="btn-reset-advanced-settings" class="btn-secondary-action" style="width: 100%; color: #ef4444; border-color: rgba(239, 68, 68, 0.3); font-size: 0.74rem; padding: 5px;">
+                  恢复高级参数并重新锁定
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </aside>
@@ -1082,16 +1333,58 @@
       <button id="popup-copy" class="btn-tool" style="width: 28px; height: 28px;" title="复制文本 (支持 Ctrl 多选合并复制)">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
       </button>
+      <button id="popup-dict" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-green); font-size: 13px;" title="查词典 (本地英汉释义，无费用无冷却)">📖</button>
       <button id="popup-search" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-blue);" title="网页搜索 / 百科查词">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       </button>
       <button id="popup-ai" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple); font-size: 13px;" title="AI 翻译与智能问答">✨</button>
+      <button id="popup-translate-para" class="btn-tool" style="display: none; width: auto; height: 28px; padding: 0 6px; font-size: 11px; color: var(--accent-purple); font-weight: 600;" title="整段就地翻译 (高级设置)">译本段</button>
       <button id="popup-note" class="btn-tool" style="width: 28px; height: 28px;" title="写想法/笔记">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
       </button>
       <button id="popup-share" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple);" title="生成精美书摘图片 (可一键复制到剪贴板)">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
       </button>
+    </div>
+
+    <!-- Standalone Offline Dictionary Card (Decoupled from AI, no 10s cooldown, instant POS & definition) -->
+    <div id="reader-dictionary-card" class="reader-dictionary-card" style="display: none;">
+      <div class="dict-card-header">
+        <div class="dict-word-info">
+          <span class="dict-word-text" id="dict-card-word">word</span>
+          <span class="dict-phonetic" id="dict-card-phonetic"></span>
+        </div>
+        <button type="button" class="dict-card-close" id="btn-close-dict-card" title="关闭 (Esc)">×</button>
+      </div>
+      <div class="dict-card-body" id="dict-card-body">
+        <!-- Definitions rendered here -->
+      </div>
+      <div class="dict-card-footer">
+        <span class="dict-source-badge" id="dict-card-source">已安装的英汉词典</span>
+        <div class="dict-card-actions">
+          <button type="button" class="btn-dict-action" id="btn-dict-copy" title="复制释义">复制</button>
+          <button type="button" class="btn-dict-action btn-dict-ai" id="btn-dict-ask-ai" title="在 AI 中询问 (附上选词，需主动点击发送)">在 AI 中询问</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- In-place Paragraph Translation Card (When enabled in Advanced Settings) -->
+    <div id="reader-para-translation-card" class="reader-para-translation-card" style="display: none;">
+      <div class="para-trans-header">
+        <span class="para-trans-title">整段就地翻译</span>
+        <div class="para-trans-header-actions">
+          <button type="button" class="para-trans-btn-icon" id="btn-para-trans-copy" title="复制译文">
+            <svg class="icon icon-xs" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+          <button type="button" class="para-trans-btn-icon" id="btn-para-trans-to-ai" title="转入右侧 AI 继续探讨">
+            <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          </button>
+          <button type="button" class="para-trans-close" id="btn-close-para-trans" title="关闭">×</button>
+        </div>
+      </div>
+      <div class="para-trans-content" id="para-trans-content">
+        <!-- Streaming / completed translation rendered here -->
+      </div>
     </div>
 
     <!-- Highlight Click Action Popup -->
@@ -1573,6 +1866,37 @@
     </div>
   </div>
 
+  <!-- Modal: Global Tags Navigation & Management -->
+  <div id="modal-global-tags" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 620px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
+          <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">全库标签</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <button type="button" id="btn-toggle-tag-management" class="btn-secondary-action" style="font-size: 0.78rem; padding: 0.25rem 0.6rem;">管理模式</button>
+          <button id="btn-close-global-tags" class="footnote-popup-close">×</button>
+        </div>
+      </div>
+      <div class="global-modal-body" style="padding: 0.75rem 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <input type="text" id="input-global-tag-search" class="global-modal-input" placeholder="搜索标签..." style="flex: 1; font-size: 0.84rem; padding: 6px 12px;" />
+        </div>
+        <div id="global-tags-list-container" class="global-tags-list-container" style="display: flex; flex-wrap: wrap; gap: 8px; min-height: 80px; align-content: flex-start;">
+          <!-- Populated dynamically -->
+        </div>
+        <div id="global-tags-empty-hint" style="display: none; color: var(--text-muted); font-size: 0.84rem; text-align: center; padding: 2rem 0;">
+          暂无标签
+        </div>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <span id="global-tags-footer-hint" style="font-size: 0.76rem; color: var(--text-muted);">点击标签可直接筛选。多选标签将同时包含全部所选标签。</span>
+        <button type="button" id="btn-confirm-global-tags" class="btn-primary-action" style="padding: 0.35rem 1.1rem; font-size: 0.82rem;">完成</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: Single Book Details Drawer -->
   <div id="modal-book-details" class="global-modal-backdrop" style="display: none; z-index: 99999;">
     <div class="global-modal-card book-details-modal-card">
@@ -1684,6 +2008,152 @@
     <div class="import-panel-footer">
       <span id="import-panel-stats" class="import-panel-stats">就绪</span>
       <button id="btn-import-clear-done" class="btn-import-footer-action">清除已完成</button>
+    </div>
+  </div>
+
+  <!-- Modal: AI Presets & Quick Buttons Manager -->
+  <div id="modal-ai-presets" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 680px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">管理快捷指令与提示词</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span id="ai-presets-quota-badge" style="font-size: 0.8rem; background: var(--bg-tertiary); padding: 2px 8px; border-radius: 12px; color: var(--accent-purple); font-weight: 600;">已启用 2 / 4 个</span>
+          <button id="btn-close-ai-presets" class="footnote-popup-close">×</button>
+        </div>
+      </div>
+      <div class="global-modal-body" style="padding: 1rem 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px;">
+        <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0; line-height: 1.5;">
+          阅读侧栏最多同时启用 4 个快捷操作按钮（包含内置的翻译和解读）。不要求填满。点击编辑自定义名称与提示词。管理和保存预设不调用模型。
+        </p>
+
+        <!-- Presets List Container -->
+        <div id="ai-presets-list" style="display: flex; flex-direction: column; gap: 10px;">
+          <!-- Dynamically populated -->
+        </div>
+
+        <!-- Add Custom Preset Section -->
+        <div style="background: var(--bg-card); border: 1px dashed var(--border-color); border-radius: 8px; padding: 12px; margin-top: 6px;">
+          <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; color: var(--text-main);">＋ 新增自定义快捷指令</div>
+          <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+            <input type="text" id="input-new-preset-name" class="global-modal-input" placeholder="按钮名称 (如：润色译文、总结要点)" style="width: 160px; font-size: 0.82rem;" maxlength="12" />
+            <input type="text" id="input-new-preset-prompt" class="global-modal-input" placeholder="指令提示词 (如：将引用内容精练总结为三条核心论点)" style="flex: 1; font-size: 0.82rem;" />
+            <button type="button" id="btn-add-new-preset" class="btn-primary-action" style="padding: 0.35rem 0.9rem; font-size: 0.82rem; white-space: nowrap;">添加</button>
+          </div>
+        </div>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: flex-end; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <button type="button" id="btn-save-ai-presets-close" class="btn-primary-action" style="padding: 0.4rem 1.25rem; font-size: 0.85rem;">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Replace Preset Conflict Picker (When 5th preset is enabled) -->
+  <div id="modal-ai-replace-preset" class="global-modal-backdrop" style="display: none; z-index: 100000;">
+    <div class="global-modal-card" style="max-width: 440px; width: 90vw;">
+      <div class="global-modal-header">
+        <span class="global-modal-title" style="font-size: 1rem; font-weight: 700;">已达到 4 个快捷按钮上限</span>
+        <button id="btn-close-replace-preset" class="footnote-popup-close">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 1rem 0;">
+        <p style="font-size: 0.84rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 12px;">
+          阅读侧栏最多同时启用 4 个快捷操作。请选择要替换停用的一个已有按钮，或者取消本次操作：
+        </p>
+        <div id="ai-replace-options-list" style="display: flex; flex-direction: column; gap: 8px;">
+          <!-- Rendered dynamically -->
+        </div>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button type="button" id="btn-cancel-replace-preset" class="btn-secondary-action" style="padding: 0.4rem 1rem; font-size: 0.84rem;">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: AI Reading History View -->
+  <div id="modal-ai-history" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 860px; width: 94vw; max-height: 88vh; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+          <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">AI 阅读记录</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <input type="text" id="input-ai-history-search" class="global-modal-input" placeholder="搜索历史问答、书名或选段..." style="width: 220px; font-size: 0.82rem; padding: 4px 10px;" />
+          <button id="btn-close-ai-history" class="footnote-popup-close">×</button>
+        </div>
+      </div>
+      <div class="global-modal-body" style="padding: 0.75rem 0; flex: 1; overflow: hidden; display: flex; gap: 14px;">
+        <!-- Left: Conversations List -->
+        <div style="width: 280px; border-right: 1px solid var(--border-color); overflow-y: auto; padding-right: 10px; display: flex; flex-direction: column; gap: 6px;" id="ai-history-conversations-list">
+          <!-- Populated dynamically -->
+        </div>
+        <!-- Right: Active Conversation Detail -->
+        <div style="flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden;" id="ai-history-detail-panel">
+          <div id="ai-history-detail-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 8px; border-bottom: 1px solid var(--border-color); margin-bottom: 8px;">
+            <div style="min-width: 0; flex: 1;">
+              <div id="ai-history-active-title" style="font-size: 0.95rem; font-weight: 700; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">请选择左侧会话</div>
+              <div id="ai-history-active-meta" style="font-size: 0.76rem; color: var(--text-muted);"></div>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <button type="button" id="btn-history-jump-book" class="btn-secondary-action" style="padding: 0.3rem 0.75rem; font-size: 0.78rem; display: none;">定位原文</button>
+              <button type="button" id="btn-history-export-md" class="btn-secondary-action" style="padding: 0.3rem 0.75rem; font-size: 0.78rem; display: none;">导出 Markdown</button>
+              <button type="button" id="btn-history-delete-conv" class="btn-secondary-action btn-ai-danger" style="padding: 0.3rem 0.75rem; font-size: 0.78rem; display: none;">删除会话</button>
+            </div>
+          </div>
+          <div id="ai-history-messages-view" style="flex: 1; overflow-y: auto; padding-right: 6px; display: flex; flex-direction: column; gap: 10px;">
+            <div style="color: var(--text-muted); font-size: 0.84rem; text-align: center; margin-top: 40px;">选择左侧会话查看历史问答详情</div>
+          </div>
+        </div>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <span style="font-size: 0.76rem; color: var(--text-muted);">所有对话记录仅持久化保存在本机，不上传至任何第三方云端。</span>
+        <button type="button" id="btn-clear-all-ai-history" class="btn-secondary-action btn-ai-danger" style="padding: 0.35rem 0.9rem; font-size: 0.8rem;">清空全部记录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: AI Request & Token Audit Log -->
+  <div id="modal-ai-audit" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 780px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">AI 请求与用量记录</span>
+        </div>
+        <button id="btn-close-ai-audit" class="footnote-popup-close">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 0.75rem 0; flex: 1; overflow-y: auto;">
+        <div id="ai-audit-log-table-container">
+          <!-- Populated dynamically -->
+        </div>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <span style="font-size: 0.76rem; color: var(--text-muted);">仅记录调用时间、模型、状态与用量。不记录 API Key、凭据或书籍正文。</span>
+        <div style="display: flex; gap: 8px;">
+          <button type="button" id="btn-clear-ai-audit" class="btn-secondary-action btn-ai-danger" style="padding: 0.35rem 0.9rem; font-size: 0.8rem;">清空日志</button>
+          <button type="button" id="btn-close-ai-audit-action" class="btn-primary-action" style="padding: 0.35rem 1.1rem; font-size: 0.8rem;">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Advanced Settings Unlock Confirmation -->
+  <div id="modal-advanced-settings-confirm" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 440px; width: 90vw;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem;">
+        <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">开启高级设置</span>
+        <button type="button" class="footnote-popup-close" id="btn-close-advanced-confirm">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 1rem 0; font-size: 0.84rem; line-height: 1.6; color: var(--text-secondary);">
+        <p style="margin: 0 0 10px 0;">高级设置可调整 AI 上下文、整段翻译和性能参数。部分选项会增加 API 用量、内存占用或改变阅读行为。你可以随时恢复默认设置。</p>
+        <p style="margin: 0; font-size: 0.76rem; color: var(--text-muted);">注：本次解锁状态将持久保存在本机，此后点击即可直接展开，无需再次三连击。</p>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <button type="button" class="btn-secondary-action" id="btn-cancel-advanced-unlock" style="padding: 0.35rem 1rem; font-size: 0.82rem;">暂不开启</button>
+        <button type="button" class="btn-primary-action" id="btn-confirm-advanced-unlock" style="padding: 0.35rem 1.1rem; font-size: 0.82rem;">开启高级设置</button>
+      </div>
     </div>
   </div>
 

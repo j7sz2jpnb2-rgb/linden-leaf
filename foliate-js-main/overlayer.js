@@ -226,29 +226,71 @@ static underline(rects, options = {}) {
         return g
     }
     static dashed(rects, options = {}) {
-        const { color = '#64748b', width: strokeWidth = 2, writingMode } = options
+        const { color = '#64748b', width: strokeWidth = 1.2, writingMode } = options
         const g = createSVGElement('g')
         g.setAttribute('fill', 'none')
         g.setAttribute('stroke', color)
         g.setAttribute('stroke-width', strokeWidth)
-        g.setAttribute('stroke-dasharray', '4,3')
-        g.setAttribute('stroke-linecap', 'round')
+        g.setAttribute('stroke-dasharray', '5,4')
+        g.setAttribute('stroke-linecap', 'butt')
         if (writingMode === 'vertical-rl' || writingMode === 'vertical-lr') {
-            for (const { right, top, height } of rects) {
+            const lines = []
+            for (const r of rects) {
+                const right = r.right
+                const top = r.top
+                const bottom = r.bottom || (r.top + r.height)
+                let merged = false
+                for (const line of lines) {
+                    if (Math.abs(line.right - right) < 3) {
+                        if (top <= line.bottom + 4 && bottom >= line.top - 4) {
+                            line.top = Math.min(line.top, top)
+                            line.bottom = Math.max(line.bottom, bottom)
+                            merged = true
+                            break
+                        }
+                    }
+                }
+                if (!merged) {
+                    lines.push({ right, top, bottom })
+                }
+            }
+            for (const line of lines) {
+                const xPos = writingMode === 'vertical-rl' ? line.right - 1.5 : line.right + 1.5
                 const el = createSVGElement('line')
-                el.setAttribute('x1', right - 1)
-                el.setAttribute('y1', top)
-                el.setAttribute('x2', right - 1)
-                el.setAttribute('y2', top + height)
+                el.setAttribute('x1', xPos)
+                el.setAttribute('y1', line.top)
+                el.setAttribute('x2', xPos)
+                el.setAttribute('y2', line.bottom)
                 g.append(el)
             }
         } else {
-            for (const { left, bottom, width } of rects) {
+            const lines = []
+            for (const r of rects) {
+                const left = r.left
+                const right = r.right || (r.left + r.width)
+                const bottom = r.bottom
+                let merged = false
+                for (const line of lines) {
+                    if (Math.abs(line.bottom - bottom) < 4) {
+                        if (left <= line.right + 6 && right >= line.left - 6) {
+                            line.left = Math.min(line.left, left)
+                            line.right = Math.max(line.right, right)
+                            merged = true
+                            break
+                        }
+                    }
+                }
+                if (!merged) {
+                    lines.push({ left, right, bottom })
+                }
+            }
+            for (const line of lines) {
+                const yPos = line.bottom + 1.2
                 const el = createSVGElement('line')
-                el.setAttribute('x1', left)
-                el.setAttribute('y1', bottom - 1)
-                el.setAttribute('x2', left + width)
-                el.setAttribute('y2', bottom - 1)
+                el.setAttribute('x1', line.left)
+                el.setAttribute('y1', yPos)
+                el.setAttribute('x2', line.right)
+                el.setAttribute('y2', yPos)
                 g.append(el)
             }
         }

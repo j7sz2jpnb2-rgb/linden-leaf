@@ -56,6 +56,7 @@ pub fn run() {
                 eprintln!("[TAURI SETUP] Build Info: {}", build_info.trim());
             }
             app.manage(AppState::default());
+            app.manage(AiState::default());
 
             let args: Vec<String> = std::env::args().collect();
             let file_paths = extract_book_paths_from_args(&args);
@@ -166,6 +167,14 @@ pub fn run() {
             secure_load_credential,
             secure_has_credential,
             secure_delete_credential,
+            // Native AI Request Layer & Safeguards
+            ai_request_chat_completion,
+            ai_abort_request,
+            ai_get_status,
+            ai_get_audit_log,
+            ai_clear_audit_log,
+            ai_set_cooldown_and_limit,
+            ai_bind_credential,
             // MuPDF Native Reader
             mupdf_is_available,
             mupdf_stage_pdf,

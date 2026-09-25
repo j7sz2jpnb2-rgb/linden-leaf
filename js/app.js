@@ -21,8 +21,11 @@ import { renderCleanBarChart, renderCalendarHeatmap, formatAxisLabel, formatMinu
 import { bookDetailsModal } from './book-details.js'
 import { fullTextSearchEngine } from './fulltext-search.js'
 import { isAiReady, getAiConfig, saveAiConfig, getAiApiKey, requestAiCompletion, createTranslationPrompt, createExplainPrompt, createQuestionPrompt, renderSafeMarkdown, SYSTEM_PROMPTS } from './reading-ai-assistant.js'
-import { batchAddTag, batchRemoveTag, normalizeTag } from './tags-manager.js'
+import { batchAddTag, batchRemoveTag, normalizeTag, resolveReadingState, getAllTagsWithCounts, renameTagGlobally, deleteTagGlobally, STATUS_LABELS, setReadingStatus } from './tags-manager.js'
 import { PageTurnController, FoliatePageTurnAdapter, PdfPageTurnAdapter } from './page-turn-controller.js'
+import { AiSidebarController } from './ai-sidebar-controller.js'
+import { dictionaryService } from './dictionary-service.js'
+import { advancedSettings } from './advanced-settings.js'
 
 // Format language map helper
 const escapeHTML = str => {
@@ -741,8 +744,15 @@ class UniversalReaderApp {
 
         // Shelf UI state (Startup always defaults to Modern Hero Grid & collapsed sidebar)
         this.shelfViewMode = 'grid' // 'grid' (Modern Two-Screen Grid), 'shelf' (Skeuomorphic), 'list' (Table)
-        this.shelfCategory = 'all' // 'all', 'unread', 'finished'
-        this.sortField = 'addedAt' // 'title', 'author', 'language', 'size', 'lastReadAt', 'addedAt'
+        this.shelfCategory = 'all' // 'all', 'unread', 'finished', 'overview', 'stats', 'favorite'
+        this.overviewStatus = 'all' // 'all', 'unread', 'want_to_read', 'reading', 'on_hold', 'finished'
+        this.overviewSelectedTags = new Set()
+        this.overviewRatingFilter = 'all'
+        this.overviewSearchQuery = ''
+        this.overviewGroupByYearMonth = false
+        this.tagManagementMode = false
+        this._statsRenderEpoch = 0
+        this.sortField = 'addedAt' // 'title', 'author', 'language', 'size', 'lastReadAt', 'addedAt', 'rating'
         this.sortOrder = 'desc' // 'asc', 'desc'
         this.searchQuery = ''
         this.currentBooksList = []
@@ -777,7 +787,7 @@ class UniversalReaderApp {
             readingGoalToday: 45,
             searchEngine: 'baidu',
             searchCustomUrl: '',
-            pageTurnMode: 'slide'
+            pageTurnMode: 'none'
         }
 
         // Import Queue Integration
@@ -843,10 +853,36 @@ class UniversalReaderApp {
 
         this.initDOM()
 
+        this.dictionaryService = dictionaryService
+        this.dictionaryService.app = this
+        this.advancedSettings = advancedSettings
+        this.advancedSettings.app = this
+        this.aiSidebar = new AiSidebarController(this)
+        this.advancedSettings.bindUI({
+            badgeAdvancedStatus: this.dom.badgeAdvancedStatus,
+            hintAdvancedTrigger: this.dom.hintAdvancedTrigger,
+            advancedSettingsContainer: this.dom.advancedSettingsContainer,
+            settingAiContextBudget: this.dom.settingAiContextBudget,
+            labelAiContextBudget: this.dom.labelAiContextBudget,
+            settingInplaceParaTrans: this.dom.settingInplaceParaTrans,
+            settingModelTokenizer: this.dom.settingModelTokenizer,
+            settingAiMaxTokens: this.dom.settingAiMaxTokens,
+            settingAiCooldown: this.dom.settingAiCooldown,
+            settingAiDailyLimit: this.dom.settingAiDailyLimit,
+            settingDictSaveHistory: this.dom.settingDictSaveHistory,
+            btnPopupTranslatePara: this.dom.popupTranslatePara,
+            rowAdvancedSettingsTrigger: this.dom.rowAdvancedSettingsTrigger,
+            modalAdvancedSettingsConfirm: this.dom.modalAdvancedSettingsConfirm,
+            btnCloseAdvancedConfirm: this.dom.btnCloseAdvancedConfirm,
+            btnCancelAdvancedUnlock: this.dom.btnCancelAdvancedUnlock,
+            btnConfirmAdvancedUnlock: this.dom.btnConfirmAdvancedUnlock,
+            btnResetAdvancedSettings: this.dom.btnResetAdvancedSettings
+        })
+
         // Unified Page Turn Controller
         this.pageTurnController = new PageTurnController({
             container: this.dom.readerContentArea,
-            mode: this.settings.pageTurnMode || 'slide',
+            mode: this.settings.pageTurnMode || 'none',
             isBlockedCallback: () => Boolean(
                 this.pdfDrawTool ||
                 (this.pdfViewport && this.pdfViewport.scale > 1.05) ||
@@ -876,6 +912,10 @@ class UniversalReaderApp {
         })
     }
 
+    get currentBook() {
+        return this.currentBookData
+    }
+
     async ensureRecoveryBarrier() {
         if (!this._recoveryBarrierPromise) {
             this._recoveryBarrierPromise = (async () => {
@@ -892,6 +932,11 @@ class UniversalReaderApp {
                 } catch (e) {
                     console.warn('[App] Error recovering tracker backup:', e)
                     trackerResult = { recovered: [], filtered: [], failed: [{ error: e }], deferred: [] }
+                }
+                try {
+                    await db.recoverInterruptedAiMessages()
+                } catch (e) {
+                    console.warn('[App] Error recovering interrupted AI messages:', e)
                 }
                 const failedProgressBooks = new Set((progressResult?.failed || []).map(f => f.bookId || f.data?.bookId).filter(Boolean))
                 return {
@@ -1257,6 +1302,47 @@ class UniversalReaderApp {
             settingAiKey: document.getElementById('setting-ai-key'),
             popupAi: document.getElementById('popup-ai'),
 
+            // Standalone Dictionary Elements
+            popupDict: document.getElementById('popup-dict'),
+            popupTranslatePara: document.getElementById('popup-translate-para'),
+            settingDictEnabled: document.getElementById('setting-dict-enabled'),
+            readerDictionaryCard: document.getElementById('reader-dictionary-card'),
+            dictCardWord: document.getElementById('dict-card-word'),
+            dictCardPhonetic: document.getElementById('dict-card-phonetic'),
+            dictCardBody: document.getElementById('dict-card-body'),
+            dictCardSource: document.getElementById('dict-card-source'),
+            btnCloseDictCard: document.getElementById('btn-close-dict-card'),
+            btnDictCopy: document.getElementById('btn-dict-copy'),
+            btnDictAskAi: document.getElementById('btn-dict-ask-ai'),
+
+            // In-place Paragraph Translation Card Elements
+            readerParaTranslationCard: document.getElementById('reader-para-translation-card'),
+            paraTransContent: document.getElementById('para-trans-content'),
+            btnParaTransCopy: document.getElementById('btn-para-trans-copy'),
+            btnParaTransToAi: document.getElementById('btn-para-trans-to-ai'),
+            btnCloseParaTrans: document.getElementById('btn-close-para-trans'),
+
+            // Advanced Settings Elements
+            rowAdvancedSettingsTrigger: document.getElementById('row-advanced-settings-trigger'),
+            badgeAdvancedStatus: document.getElementById('badge-advanced-status'),
+            hintAdvancedTrigger: document.getElementById('hint-advanced-trigger'),
+            advancedSettingsContainer: document.getElementById('advanced-settings-container'),
+            settingAiContextBudget: document.getElementById('setting-ai-context-budget'),
+            labelAiContextBudget: document.getElementById('label-ai-context-budget'),
+            settingInplaceParaTrans: document.getElementById('setting-inplace-para-trans'),
+            settingModelTokenizer: document.getElementById('setting-model-tokenizer'),
+            settingAiMaxTokens: document.getElementById('setting-ai-max-tokens'),
+            settingAiCooldown: document.getElementById('setting-ai-cooldown'),
+            settingAiDailyLimit: document.getElementById('setting-ai-daily-limit'),
+            settingDictSaveHistory: document.getElementById('setting-dict-save-history'),
+            btnResetAdvancedSettings: document.getElementById('btn-reset-advanced-settings'),
+            btnOpenAuditFromSettings: document.getElementById('btn-open-audit-from-settings'),
+            btnClearAiCacheSettings: document.getElementById('btn-clear-ai-cache-settings'),
+            modalAdvancedSettingsConfirm: document.getElementById('modal-advanced-settings-confirm'),
+            btnCloseAdvancedConfirm: document.getElementById('btn-close-advanced-confirm'),
+            btnCancelAdvancedUnlock: document.getElementById('btn-cancel-advanced-unlock'),
+            btnConfirmAdvancedUnlock: document.getElementById('btn-confirm-advanced-unlock'),
+
             // PDF OCR Page Range & Mode Elements
             pdfOcrPageRange: document.getElementById('pdf-ocr-page-range'),
             pdfOcrMode: document.getElementById('pdf-ocr-mode'),
@@ -1291,6 +1377,31 @@ class UniversalReaderApp {
 
             // Calendar Heatmap Container
             statsCalendarHeatmap: document.getElementById('stats-calendar-heatmap-container'),
+            statsHeatmapDayDetails: document.getElementById('stats-heatmap-day-details'),
+            heatmapDetailDate: document.getElementById('heatmap-detail-date'),
+            heatmapDetailTotal: document.getElementById('heatmap-detail-total'),
+            btnCloseHeatmapDetail: document.getElementById('btn-close-heatmap-detail'),
+            heatmapDetailBooksList: document.getElementById('heatmap-detail-books-list'),
+
+            // Reading Overview & Global Tags
+            navCatOverview: document.getElementById('nav-cat-overview'),
+            readingOverviewPanel: document.getElementById('reading-overview-panel'),
+            overviewStatusTabs: document.getElementById('overview-status-tabs'),
+            overviewSearchInput: document.getElementById('overview-search-input'),
+            btnOverviewOpenTags: document.getElementById('btn-overview-open-tags'),
+            overviewRatingFilterSelect: document.getElementById('overview-rating-filter'),
+            btnOverviewToggleGrouping: document.getElementById('btn-overview-toggle-grouping'),
+            overviewGroupingText: document.getElementById('overview-grouping-text'),
+            overviewActiveFiltersBar: document.getElementById('overview-active-filters-bar'),
+            overviewActiveFiltersPills: document.getElementById('overview-active-filters-pills'),
+            btnClearOverviewFilters: document.getElementById('btn-clear-overview-filters'),
+            modalGlobalTags: document.getElementById('modal-global-tags'),
+            inputGlobalTagSearch: document.getElementById('input-global-tag-search'),
+            globalTagsListContainer: document.getElementById('global-tags-list-container'),
+            globalTagsEmptyHint: document.getElementById('global-tags-empty-hint'),
+            btnToggleTagManagement: document.getElementById('btn-toggle-tag-management'),
+            btnCloseGlobalTags: document.getElementById('btn-close-global-tags'),
+            btnConfirmGlobalTags: document.getElementById('btn-confirm-global-tags'),
 
             // Batch Mode & Batch Operations
             btnBatchMode: document.getElementById('btn-batch-mode'),
@@ -1534,7 +1645,7 @@ class UniversalReaderApp {
             localStorage.setItem('linden_leaf_view_mode', 'grid')
         } catch (e) {}
         const validTurnModes = ['none', 'slide', 'cover', 'curl']
-        this.pageTurnController?.setMode(validTurnModes.includes(this.settings.pageTurnMode) ? this.settings.pageTurnMode : 'slide')
+        this.pageTurnController?.setMode(validTurnModes.includes(this.settings.pageTurnMode) ? this.settings.pageTurnMode : 'none')
         this.updateSettingsUI()
     }
 
@@ -1599,14 +1710,28 @@ class UniversalReaderApp {
             this.dom.gapSlider.value = this.settings.gap || 6
             this.dom.gapValue.innerText = `${this.settings.gap || 6}%`
         }
+        const isVertical = this.settings.writingMode === 'vertical-rl'
         if (this.dom.columnCountSelect) {
-            this.dom.columnCountSelect.value = this.settings.columnCount || '2'
+            const twoColOpt = this.dom.columnCountSelect.querySelector('option[value="2"]')
+            if (isVertical) {
+                if (twoColOpt) {
+                    twoColOpt.disabled = true
+                    twoColOpt.textContent = '双栏 / 双页展开 (竖排仅限单栏)'
+                }
+                this.dom.columnCountSelect.value = '1'
+            } else {
+                if (twoColOpt) {
+                    twoColOpt.disabled = false
+                    twoColOpt.textContent = '双栏 / 双页展开'
+                }
+                this.dom.columnCountSelect.value = this.settings.columnCount || '2'
+            }
         }
         if (this.dom.layoutSelect) {
             this.dom.layoutSelect.value = this.settings.layout || 'paginated'
         }
         const validTurnModes = ['none', 'slide', 'cover', 'curl']
-        const turnMode = validTurnModes.includes(this.settings.pageTurnMode) ? this.settings.pageTurnMode : 'slide'
+        const turnMode = validTurnModes.includes(this.settings.pageTurnMode) ? this.settings.pageTurnMode : 'none'
         if (this.dom.turnAnimationSelect) {
             this.dom.turnAnimationSelect.value = turnMode
         }
@@ -1724,10 +1849,12 @@ class UniversalReaderApp {
         } else {
             // Pass margin, max-inline-size, max-column-count, gap, flow to paginator
             if (r.setAttribute) {
+                const isVertical = this.settings.writingMode === 'vertical-rl'
+                const effectiveColumnCount = isVertical ? '1' : (this.settings.columnCount || '2')
                 r.setAttribute('flow', this.settings.layout || 'paginated')
                 r.setAttribute('margin', `${this.settings.margin || 48}px`)
                 r.setAttribute('max-inline-size', `${this.settings.maxWidth || 760}px`)
-                r.setAttribute('max-column-count', this.settings.columnCount || '2')
+                r.setAttribute('max-column-count', effectiveColumnCount)
                 r.setAttribute('gap', `${this.settings.gap || 6}%`)
             }
         }
@@ -1923,18 +2050,10 @@ class UniversalReaderApp {
         // Quick favorite toggle button in header
         this.dom.btnHeaderFavorite?.addEventListener('click', () => {
             if (this.shelfCategory === 'favorite') {
-                this.shelfCategory = 'all'
+                this.switchShelfCategory('all')
             } else {
-                this.shelfCategory = 'favorite'
+                this.switchShelfCategory('favorite')
             }
-            this.dom.navCategoryItems?.forEach(i => {
-                i.classList.toggle('active', i.dataset.category === this.shelfCategory)
-            })
-            const titles = { all: '全部图书', favorite: '收藏的书', unread: '待读清单', finished: '已读完', stats: '阅读统计' }
-            if (this.dom.currentCategoryTitle) {
-                this.dom.currentCategoryTitle.innerText = titles[this.shelfCategory] || '全部图书'
-            }
-            this.refreshBookshelf()
         })
 
         let searchTimer = null
@@ -2007,76 +2126,7 @@ class UniversalReaderApp {
         // Category switching
         this.dom.navCategoryItems?.forEach(item => {
             item.addEventListener('click', () => {
-                const wasAll = this.shelfCategory === 'all'
-                this.dom.navCategoryItems.forEach(i => i.classList.remove('active'))
-                document.querySelectorAll('.custom-list-nav-item').forEach(i => i.classList.remove('active'))
-                item.classList.add('active')
-                this.shelfCategory = item.dataset.category
-                const titles = { all: '全部图书', favorite: '收藏的书', unread: '待读清单', finished: '已读完', stats: '阅读统计' }
-
-                if (this.shelfCategory === 'all') {
-                    const isAtTop = !this.dom.booksWorkspace || this.dom.booksWorkspace.scrollTop <= 100
-                    if (isAtTop) {
-                        if (this.dom.currentCategoryTitle) {
-                            this.dom.currentCategoryTitle.innerText = ''
-                            this.dom.currentCategoryTitle.style.display = 'none'
-                        }
-                    } else {
-                        if (this.dom.currentCategoryTitle) {
-                            this.dom.currentCategoryTitle.innerText = '全部图书'
-                            this.dom.currentCategoryTitle.style.display = 'block'
-                        }
-                    }
-                    if (wasAll && this.shelfViewMode === 'grid') {
-                        this.glideToHero()
-                    }
-                } else {
-                    if (this.dom.currentCategoryTitle) {
-                        this.dom.currentCategoryTitle.innerText = titles[this.shelfCategory] || '全部图书'
-                        this.dom.currentCategoryTitle.style.display = 'block'
-                    }
-                }
-                
-                if (this.shelfCategory === 'stats') {
-                    if (this.dom.booksWorkspace) {
-                        this.dom.booksWorkspace.scrollTop = 0
-                    }
-                    this.dom.mainArea?.classList.add('stats-view-active')
-                    this.dom.mainArea?.classList.remove('wood-shelf-active')
-                    this.dom.booksWorkspace?.classList.remove('wood-shelf-theme')
-                    if (this.dom.booksShelf) this.dom.booksShelf.style.display = 'none'
-                    if (this.dom.modernGridWrapper) this.dom.modernGridWrapper.style.display = 'none'
-                    if (this.dom.booksGrid) this.dom.booksGrid.style.display = 'none'
-                    if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'none'
-                    if (this.dom.statsDashboardContainer) {
-                        this.dom.statsDashboardContainer.style.display = 'block'
-                        this.dom.statsDashboardContainer.classList.remove('view-spring-transition')
-                        void this.dom.statsDashboardContainer.offsetWidth
-                        this.dom.statsDashboardContainer.classList.add('view-spring-transition')
-                    }
-                    if (this.dom.shelfHeaderActions) this.dom.shelfHeaderActions.style.display = 'none'
-                    if (this.dom.bookCountFooter) this.dom.bookCountFooter.style.display = 'none'
-                    if (this.dom.footerStatus) this.dom.footerStatus.style.display = 'none'
-                    this.renderStatsDashboard()
-                } else {
-                    this.dom.mainArea?.classList.remove('stats-view-active')
-                    const wasStats = this.dom.statsDashboardContainer && this.dom.statsDashboardContainer.style.display !== 'none'
-                    if (this.dom.statsDashboardContainer) this.dom.statsDashboardContainer.style.display = 'none'
-                    if (this.dom.shelfHeaderActions) this.dom.shelfHeaderActions.style.display = 'flex'
-                    if (this.dom.bookCountFooter) this.dom.bookCountFooter.style.display = 'block'
-                    if (wasStats) {
-                        const targetContainer = this.shelfViewMode === 'grid' ? this.dom.modernGridWrapper : this.dom.booksTableContainer
-                        if (targetContainer) {
-                            targetContainer.classList.remove('view-spring-transition')
-                            void targetContainer.offsetWidth
-                            targetContainer.classList.add('view-spring-transition')
-                        }
-                    }
-                    if (this.dom.booksWorkspace) {
-                        this.dom.booksWorkspace.scrollTop = 0
-                    }
-                    this.refreshBookshelf()
-                }
+                this.switchShelfCategory(item.dataset.category)
             })
         })
 
@@ -2536,8 +2586,14 @@ class UniversalReaderApp {
         })
 
         this.dom.columnCountSelect?.addEventListener('change', e => {
+            if (this.settings.writingMode === 'vertical-rl') {
+                this.dom.columnCountSelect.value = '1'
+                this.showToast('古典竖排模式仅支持单栏排版', 'ℹ️')
+                return
+            }
             this.settings.columnCount = e.target.value
             this.saveSettings()
+            this.applySettingsToReader()
         })
 
         this.dom.layoutSelect?.addEventListener('change', e => {
@@ -2642,6 +2698,7 @@ class UniversalReaderApp {
             writingModeSelect.addEventListener('change', async e => {
                 this.settings.writingMode = e.target.value
                 this.saveSettings()
+                this.syncSettingsUI()
                 this.applySettingsToReader()
                 if (this.foliateView && this.currentBookId) {
                     const loc = this.currentLocation?.cfi || this.currentLocation?.fraction || 0
@@ -2745,9 +2802,90 @@ class UniversalReaderApp {
                 this.hideSelectionPopup()
             }
         })
-        this.dom.popupAi?.addEventListener('click', () => {
+        this.dom.popupDict?.addEventListener('click', () => {
+            const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : null
             this.hideSelectionPopup()
-            this.openAiAssistantModal()
+            if (selInfo && selInfo.text) {
+                this.showDictionaryCard(selInfo)
+            }
+        })
+        this.dom.popupTranslatePara?.addEventListener('click', async () => {
+            const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : null
+            this.hideSelectionPopup()
+            if (selInfo && selInfo.text) {
+                await this.handleInPlaceParagraphTranslation(selInfo)
+            }
+        })
+        this.dom.popupAi?.addEventListener('click', () => {
+            // Snapshot selectedTextInfo BEFORE hideSelectionPopup clears it!
+            const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : null
+            this.hideSelectionPopup()
+            if (this.aiSidebar && selInfo) {
+                this.aiSidebar.openWithSelection(selInfo)
+            } else if (this.aiSidebar) {
+                this.aiSidebar.openSidebar()
+            } else {
+                this.openAiAssistantModal(selInfo)
+            }
+        })
+
+        // Standalone Dictionary Card button listeners
+        this.dom.btnCloseDictCard?.addEventListener('click', () => this.hideDictionaryCard())
+        this.dom.btnDictCopy?.addEventListener('click', () => {
+            if (this._currentDictResult) {
+                const text = `${this._currentDictResult.word} ${this._currentDictResult.phonetic || ''}\n` +
+                    this._currentDictResult.entries.map(e => `${e.pos} ${e.def}`).join('\n')
+                navigator.clipboard?.writeText(text).then(() => {
+                    this.showToast('词典释义已复制', 'success')
+                })
+            }
+        })
+        this.dom.btnDictAskAi?.addEventListener('click', () => {
+            const word = this._currentDictResult?.word || this._currentDictResult?.normalizedWord
+            this.hideDictionaryCard()
+            if (word && this.aiSidebar) {
+                this.aiSidebar.openWithSelection({ text: word, chapterOrPage: '词典查词' })
+            }
+        })
+        this.dom.settingDictEnabled?.addEventListener('change', (e) => {
+            this.dictionaryService?.setEnabled(e.target.checked)
+        })
+
+        // In-place Paragraph Translation Card button listeners
+        this.dom.btnCloseParaTrans?.addEventListener('click', () => this.hideParaTranslationCard())
+        this.dom.btnParaTransCopy?.addEventListener('click', () => {
+            if (this._currentParaTranslation) {
+                navigator.clipboard?.writeText(this._currentParaTranslation).then(() => {
+                    this.showToast('段落译文已复制', 'success')
+                })
+            }
+        })
+        this.dom.btnParaTransToAi?.addEventListener('click', () => {
+            const original = this._currentParaOriginal || ''
+            this.hideParaTranslationCard()
+            if (original && this.aiSidebar) {
+                this.aiSidebar.openWithSelection({ text: original, chapterOrPage: '段落翻译' })
+            }
+        })
+
+        // Advanced settings audit buttons
+        this.dom.btnOpenAuditFromSettings?.addEventListener('click', () => {
+            if (this.aiSidebar) {
+                this.aiSidebar.openAuditModal()
+            }
+        })
+        this.dom.btnClearAiCacheSettings?.addEventListener('click', async () => {
+            if (this.aiSidebar) {
+                await this.aiSidebar.handleClearAuditLog()
+            }
+        })
+
+        // Close cards on Escape
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                this.hideDictionaryCard()
+                this.hideParaTranslationCard()
+            }
         })
 
 
@@ -3152,35 +3290,41 @@ class UniversalReaderApp {
             if (e.target === this.dom.modalAiAssistant) this.closeAiAssistantModal()
         })
         this.dom.btnAiTranslate?.addEventListener('click', () => {
-            const text = (this.selectedTextInfo?.text || '').trim()
-            if (text) this.runAiRequest(createTranslationPrompt(text), SYSTEM_PROMPTS.translate)
+            const text = (this._activeAiSnapshot?.text || this.selectedTextInfo?.text || '').trim()
+            if (text) {
+                this.runAiRequest(createTranslationPrompt(text), SYSTEM_PROMPTS.translate)
+            } else {
+                this.showToast('请先选取需要翻译的文本', 'ℹ️')
+            }
         })
         this.dom.btnAiExplain?.addEventListener('click', () => {
-            const text = (this.selectedTextInfo?.text || '').trim()
-            if (text) this.runAiRequest(createExplainPrompt(text), SYSTEM_PROMPTS.explain)
+            const text = (this._activeAiSnapshot?.text || this.selectedTextInfo?.text || '').trim()
+            if (text) {
+                this.runAiRequest(createExplainPrompt(text), SYSTEM_PROMPTS.explain)
+            } else {
+                this.showToast('请先选取需要解析的文本', 'ℹ️')
+            }
         })
         this.dom.btnAiAsk?.addEventListener('click', () => {
             const q = (this.dom.inputAiPrompt?.value || '').trim()
-            const text = (this.selectedTextInfo?.text || '').trim()
+            const text = (this._activeAiSnapshot?.text || this.selectedTextInfo?.text || '').trim()
             if (q) {
                 this.runAiRequest(createQuestionPrompt(text, q), SYSTEM_PROMPTS.qa)
-                if (this.dom.inputAiPrompt) this.dom.inputAiPrompt.value = ''
             }
         })
         this.dom.inputAiPrompt?.addEventListener('keydown', e => {
             if (e.key === 'Enter') {
                 const q = (this.dom.inputAiPrompt?.value || '').trim()
-                const text = (this.selectedTextInfo?.text || '').trim()
+                const text = (this._activeAiSnapshot?.text || this.selectedTextInfo?.text || '').trim()
                 if (q) {
                     this.runAiRequest(createQuestionPrompt(text, q), SYSTEM_PROMPTS.qa)
-                    if (this.dom.inputAiPrompt) this.dom.inputAiPrompt.value = ''
                 }
             }
         })
         this.dom.btnAiCopy?.addEventListener('click', () => {
-            const text = this.dom.aiResponseArea?.innerText || ''
-            if (!text.trim()) {
-                this.showToast('没有可复制的 AI 内容', 'warning')
+            const text = this._lastCompletedAiText || this.dom.aiResponseArea?.innerText || ''
+            if (!text.trim() || text.includes('正在思考') || text.includes('请求出错') || text.includes('点击上方')) {
+                this.showToast('没有可复制的完整 AI 内容', 'warning')
                 return
             }
             navigator.clipboard.writeText(text).then(() => {
@@ -3190,18 +3334,19 @@ class UniversalReaderApp {
             })
         })
         this.dom.btnAiSaveNote?.addEventListener('click', async () => {
-            const aiText = (this.dom.aiResponseArea?.innerText || '').trim()
-            if (!aiText) {
-                this.showToast('暂无可保存的 AI 内容', 'warning')
+            if (!this._lastCompletedAiText) {
+                this.showToast('暂无可保存的完整 AI 内容', 'warning')
                 return
             }
-            if (this.selectedTextInfo?.cfi || this.selectedTextInfo?.pdfTarget) {
-                await this.createHighlight('#3b82f6', 'highlight', `[AI 辅助]: ${aiText}`)
+            const aiText = this._lastCompletedAiText.trim()
+            const ref = this._activeAiSnapshot || this.selectedTextInfo
+            if (ref && (ref.cfi || ref.pdfTarget)) {
+                await this.createHighlight('#3b82f6', 'highlight', `[AI 辅助]: ${aiText}`, ref)
                 this.showToast('已将 AI 解读保存为划线批注', 'success')
                 this.closeAiAssistantModal()
             } else {
                 navigator.clipboard.writeText(aiText).then(() => {
-                    this.showToast('已复制 AI 内容到剪贴板', 'success')
+                    this.showToast('无原文锚点，已复制 AI 回答到剪贴板', 'info')
                 })
             }
         })
@@ -3347,6 +3492,416 @@ class UniversalReaderApp {
 
         // Keyboard Shortcuts
         document.addEventListener('keydown', e => this.handleGlobalKeydown(e))
+
+        // Reading Overview & Heatmap Details Events
+        this.bindOverviewEvents()
+    }
+
+    bindOverviewEvents() {
+        // Status filter tabs
+        this.dom.overviewStatusTabs?.addEventListener('click', (e) => {
+            const btn = e.target.closest('.overview-tab-btn')
+            if (!btn) return
+            const status = btn.dataset.status || 'all'
+            this.overviewStatus = status
+            this.updateOverviewControlsUI()
+            this.updateOverviewActiveFiltersBar()
+            this.refreshBookshelf()
+        })
+
+        // In-place search input
+        let ovSearchTimer = null
+        this.dom.overviewSearchInput?.addEventListener('input', (e) => {
+            this.overviewSearchQuery = e.target.value
+            clearTimeout(ovSearchTimer)
+            ovSearchTimer = setTimeout(() => {
+                this.updateOverviewActiveFiltersBar()
+                this.refreshBookshelf()
+            }, 150)
+        })
+
+        // Rating filter dropdown
+        this.dom.overviewRatingFilterSelect?.addEventListener('change', (e) => {
+            this.overviewRatingFilter = e.target.value
+            this.updateOverviewActiveFiltersBar()
+            this.refreshBookshelf()
+        })
+
+        // Open global tags modal
+        this.dom.btnOverviewOpenTags?.addEventListener('click', () => {
+            this.openGlobalTagsModal()
+        })
+
+        // Toggle Year-Month Grouping for finished books
+        this.dom.btnOverviewToggleGrouping?.addEventListener('click', () => {
+            this.overviewGroupByYearMonth = !this.overviewGroupByYearMonth
+            this.updateOverviewControlsUI()
+            this.refreshBookshelf()
+        })
+
+        // Clear active filters button
+        this.dom.btnClearOverviewFilters?.addEventListener('click', () => {
+            this.clearOverviewFilters()
+        })
+
+        // Global tags modal events
+        this.dom.inputGlobalTagSearch?.addEventListener('input', () => {
+            this.renderGlobalTagsList()
+        })
+
+        this.dom.btnToggleTagManagement?.addEventListener('click', () => {
+            this.tagManagementMode = !this.tagManagementMode
+            if (this.dom.btnToggleTagManagement) {
+                this.dom.btnToggleTagManagement.innerText = this.tagManagementMode ? '退出管理' : '管理模式'
+            }
+            this.renderGlobalTagsList()
+        })
+
+        this.dom.btnCloseGlobalTags?.addEventListener('click', () => {
+            this.closeGlobalTagsModal()
+        })
+
+        this.dom.btnConfirmGlobalTags?.addEventListener('click', () => {
+            this.closeGlobalTagsModal()
+        })
+
+        this.dom.modalGlobalTags?.addEventListener('click', (e) => {
+            if (e.target === this.dom.modalGlobalTags) {
+                this.closeGlobalTagsModal()
+            }
+        })
+
+        // Heatmap day details close button
+        this.dom.btnCloseHeatmapDetail?.addEventListener('click', () => {
+            if (this.dom.statsHeatmapDayDetails) {
+                this.dom.statsHeatmapDayDetails.style.display = 'none'
+            }
+            this.dom.statsCalendarHeatmap?.querySelectorAll('.heatmap-cell.active').forEach(c => c.classList.remove('active'))
+        })
+    }
+
+    async switchShelfCategory(cat, options = {}) {
+        if (cat === 'ai-history') {
+            this.aiSidebar?.openHistoryModal()
+            return
+        }
+
+        // Support 'finished' navigation alias -> map to overview with finished status
+        if (cat === 'finished') {
+            cat = 'overview'
+            options.status = 'finished'
+        }
+
+        this.shelfCategory = cat
+
+        // If entering overview, apply filter options
+        if (cat === 'overview') {
+            if (options.status) {
+                this.overviewStatus = options.status
+            }
+            if (options.tags) {
+                this.overviewSelectedTags = new Set(options.tags)
+            }
+            if (options.rating != null) {
+                this.overviewRatingFilter = options.rating
+            }
+            if (options.search != null) {
+                this.overviewSearchQuery = options.search
+            }
+            if (this.dom.readingOverviewPanel) {
+                this.dom.readingOverviewPanel.style.display = 'block'
+            }
+            this.updateOverviewControlsUI()
+            this.updateOverviewActiveFiltersBar()
+        } else {
+            // When navigating outside overview, hide the overview panel
+            if (this.dom.readingOverviewPanel) {
+                this.dom.readingOverviewPanel.style.display = 'none'
+            }
+        }
+
+        // Update nav items active class
+        this.dom.navCategoryItems?.forEach(item => {
+            const isTarget = item.dataset.category === cat || (cat === 'overview' && item.dataset.category === 'overview')
+            item.classList.toggle('active', isTarget)
+        })
+        document.querySelectorAll('.custom-list-nav-item').forEach(item => {
+            item.classList.toggle('active', item.dataset.id === cat)
+        })
+
+        // Update header category title
+        const titles = {
+            all: '全部图书',
+            favorite: '收藏的书',
+            overview: '阅读总览',
+            stats: '阅读统计'
+        }
+        let title = titles[cat]
+        if (!title && cat.startsWith('list_')) {
+            const custom = this.customLists?.find(l => l.id === cat)
+            title = custom ? custom.name : '书单'
+        }
+        if (this.dom.currentCategoryTitle) {
+            this.dom.currentCategoryTitle.innerText = title || '全部图书'
+            this.dom.currentCategoryTitle.style.display = 'block'
+        }
+
+        await this.refreshBookshelf()
+    }
+
+    updateOverviewControlsUI() {
+        this.dom.overviewStatusTabs?.querySelectorAll('.overview-tab-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.status === this.overviewStatus)
+        })
+        if (this.dom.overviewRatingFilterSelect) {
+            this.dom.overviewRatingFilterSelect.value = this.overviewRatingFilter
+        }
+        if (this.dom.overviewSearchInput && this.dom.overviewSearchInput.value !== this.overviewSearchQuery) {
+            this.dom.overviewSearchInput.value = this.overviewSearchQuery
+        }
+        if (this.dom.btnOverviewToggleGrouping) {
+            const isFinished = this.overviewStatus === 'finished'
+            this.dom.btnOverviewToggleGrouping.style.display = isFinished ? 'inline-flex' : 'none'
+            this.dom.btnOverviewToggleGrouping.classList.toggle('active', this.overviewGroupByYearMonth)
+            if (this.dom.overviewGroupingText) {
+                this.dom.overviewGroupingText.innerText = this.overviewGroupByYearMonth ? '取消分组' : '年月分组'
+            }
+        }
+    }
+
+    updateOverviewActiveFiltersBar() {
+        if (!this.dom.overviewActiveFiltersBar || !this.dom.overviewActiveFiltersPills) return
+
+        const pills = []
+        if (this.overviewSelectedTags && this.overviewSelectedTags.size > 0) {
+            for (const tag of this.overviewSelectedTags) {
+                pills.push({ type: 'tag', value: tag, label: `标签: ${tag}` })
+            }
+        }
+        if (this.overviewRatingFilter && this.overviewRatingFilter !== 'all') {
+            const ratingLabel = this.overviewRatingFilter === 'unrated' ? '评分: 仅未评分' : `评分: ≥ ${this.overviewRatingFilter}分`
+            pills.push({ type: 'rating', value: this.overviewRatingFilter, label: ratingLabel })
+        }
+        if (this.overviewSearchQuery && this.overviewSearchQuery.trim()) {
+            pills.push({ type: 'search', value: this.overviewSearchQuery.trim(), label: `搜索: "${this.overviewSearchQuery.trim()}"` })
+        }
+
+        if (pills.length === 0) {
+            this.dom.overviewActiveFiltersBar.style.display = 'none'
+            this.dom.overviewActiveFiltersPills.innerHTML = ''
+            return
+        }
+
+        this.dom.overviewActiveFiltersBar.style.display = 'flex'
+        this.dom.overviewActiveFiltersPills.innerHTML = ''
+
+        pills.forEach(p => {
+            const el = document.createElement('span')
+            el.className = 'active-filter-pill'
+            el.innerHTML = `${escapeHTML(p.label)} <span class="pill-remove" title="移除此筛选">×</span>`
+            el.querySelector('.pill-remove')?.addEventListener('click', (e) => {
+                e.stopPropagation()
+                if (p.type === 'tag') {
+                    this.overviewSelectedTags.delete(p.value)
+                } else if (p.type === 'rating') {
+                    this.overviewRatingFilter = 'all'
+                    if (this.dom.overviewRatingFilterSelect) this.dom.overviewRatingFilterSelect.value = 'all'
+                } else if (p.type === 'search') {
+                    this.overviewSearchQuery = ''
+                    if (this.dom.overviewSearchInput) this.dom.overviewSearchInput.value = ''
+                }
+                this.updateOverviewActiveFiltersBar()
+                this.refreshBookshelf()
+            })
+            this.dom.overviewActiveFiltersPills.appendChild(el)
+        })
+    }
+
+    clearOverviewFilters(resetStatus = false) {
+        const hadFilters = (this.overviewSelectedTags && this.overviewSelectedTags.size > 0) ||
+                           (this.overviewRatingFilter && this.overviewRatingFilter !== 'all') ||
+                           (this.overviewSearchQuery && this.overviewSearchQuery.trim() !== '')
+
+        this.overviewSelectedTags.clear()
+        this.overviewRatingFilter = 'all'
+        this.overviewSearchQuery = ''
+        if (this.dom.overviewSearchInput) this.dom.overviewSearchInput.value = ''
+        if (this.dom.overviewRatingFilterSelect) this.dom.overviewRatingFilterSelect.value = 'all'
+
+        if (resetStatus || (!hadFilters && this.overviewStatus !== 'all')) {
+            this.overviewStatus = 'all'
+        }
+
+        this.updateOverviewControlsUI()
+        this.updateOverviewActiveFiltersBar()
+        this.refreshBookshelf()
+    }
+
+    async openGlobalTagsModal() {
+        if (!this.dom.modalGlobalTags) return
+        this.dom.modalGlobalTags.style.display = 'flex'
+        this.tagManagementMode = false
+        if (this.dom.btnToggleTagManagement) {
+            this.dom.btnToggleTagManagement.innerText = '管理模式'
+        }
+        if (this.dom.inputGlobalTagSearch) {
+            this.dom.inputGlobalTagSearch.value = ''
+        }
+        await this.renderGlobalTagsList()
+    }
+
+    closeGlobalTagsModal() {
+        if (this.dom.modalGlobalTags) {
+            this.dom.modalGlobalTags.style.display = 'none'
+        }
+    }
+
+    async renderGlobalTagsList() {
+        if (!this.dom.globalTagsListContainer) return
+        const filterQuery = (this.dom.inputGlobalTagSearch?.value || '').trim().toLowerCase()
+
+        let tagsWithCounts = await getAllTagsWithCounts()
+        if (filterQuery) {
+            tagsWithCounts = tagsWithCounts.filter(t => t.name.toLowerCase().includes(filterQuery))
+        }
+
+        this.dom.globalTagsListContainer.innerHTML = ''
+        if (tagsWithCounts.length === 0) {
+            if (this.dom.globalTagsEmptyHint) this.dom.globalTagsEmptyHint.style.display = 'block'
+            return
+        }
+        if (this.dom.globalTagsEmptyHint) this.dom.globalTagsEmptyHint.style.display = 'none'
+
+        tagsWithCounts.forEach(t => {
+            const chip = document.createElement('div')
+            const isSelected = this.overviewSelectedTags.has(t.name)
+            chip.className = `global-tag-chip ${isSelected ? 'active' : ''}`
+
+            let manageActionsHtml = ''
+            if (this.tagManagementMode) {
+                manageActionsHtml = `
+                    <div class="global-tag-manage-actions">
+                        <button type="button" class="btn-tag-action btn-rename" title="重命名或合并">✏️</button>
+                        <button type="button" class="btn-tag-action btn-delete" title="全库删除此标签">🗑️</button>
+                    </div>
+                `
+            }
+
+            chip.innerHTML = `
+                <span class="global-tag-name">${escapeHTML(t.name)}</span>
+                <span class="global-tag-count">(${t.count})</span>
+                ${manageActionsHtml}
+            `
+
+            if (this.tagManagementMode) {
+                chip.querySelector('.btn-rename')?.addEventListener('click', async (e) => {
+                    e.stopPropagation()
+                    const newName = await this.showInputDialog({
+                        title: '重命名标签',
+                        label: `将标签「${t.name}」重命名为：\n（若与已有标签同名将自动合并，影响 ${t.count} 本书）`,
+                        defaultValue: t.name
+                    })
+                    if (newName && newName.trim() && newName.trim() !== t.name) {
+                        const res = await renameTagGlobally(t.name, newName.trim())
+                        if (res && res.success) {
+                            this.showToast(`已重命名标签，影响 ${res.updatedCount} 本书`, '✓')
+                            if (this.overviewSelectedTags.has(t.name)) {
+                                this.overviewSelectedTags.delete(t.name)
+                                this.overviewSelectedTags.add(normalizeTag(newName.trim()))
+                                this.updateOverviewActiveFiltersBar()
+                            }
+                            await this.renderGlobalTagsList()
+                            await this.refreshBookshelf()
+                        } else {
+                            this.showToast(res?.error || '重命名标签失败', '!')
+                        }
+                    }
+                })
+
+                chip.querySelector('.btn-delete')?.addEventListener('click', async (e) => {
+                    e.stopPropagation()
+                    const confirmed = await this.showConfirmDialog(
+                        `确定要从全库中删除标签「${t.name}」吗？\n（将影响 ${t.count} 本书，仅移除标签元数据，不删除图书）`
+                    )
+                    if (confirmed) {
+                        const res = await deleteTagGlobally(t.name)
+                        if (res && res.success) {
+                            this.showToast(`已删除标签「${t.name}」，影响 ${res.updatedCount} 本书`, '✓')
+                            if (this.overviewSelectedTags.has(t.name)) {
+                                this.overviewSelectedTags.delete(t.name)
+                                this.updateOverviewActiveFiltersBar()
+                            }
+                            await this.renderGlobalTagsList()
+                            await this.refreshBookshelf()
+                        } else {
+                            this.showToast(res?.error || '删除标签失败', '!')
+                        }
+                    }
+                })
+            } else {
+                chip.addEventListener('click', () => {
+                    if (this.overviewSelectedTags.has(t.name)) {
+                        this.overviewSelectedTags.delete(t.name)
+                        chip.classList.remove('active')
+                    } else {
+                        this.overviewSelectedTags.add(t.name)
+                        chip.classList.add('active')
+                    }
+                    this.updateOverviewActiveFiltersBar()
+                    if (this.shelfCategory === 'overview') {
+                        this.refreshBookshelf()
+                    }
+                })
+            }
+
+            this.dom.globalTagsListContainer.appendChild(chip)
+        })
+    }
+
+    renderHeatmapDayDetails(dateStr, payload) {
+        if (!this.dom.statsHeatmapDayDetails) return
+        this.dom.statsHeatmapDayDetails.style.display = 'block'
+        if (this.dom.heatmapDetailDate) {
+            this.dom.heatmapDetailDate.innerText = dateStr
+        }
+        if (this.dom.heatmapDetailTotal) {
+            const durText = payload?.seconds > 0 
+                ? `共阅读 ${formatMinutesClean(payload.minutes || Math.round(payload.seconds / 60))}` 
+                : '未记录阅读时长'
+            this.dom.heatmapDetailTotal.innerText = durText
+        }
+        if (this.dom.heatmapDetailBooksList) {
+            this.dom.heatmapDetailBooksList.innerHTML = ''
+            const books = payload?.books || []
+            if (books.length === 0) {
+                this.dom.heatmapDetailBooksList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.82rem; padding: 6px 0;">这一天暂无阅读记录</div>'
+            } else {
+                books.forEach(b => {
+                    const item = document.createElement('div')
+                    item.className = 'heatmap-detail-book-item'
+                    const bDur = b.seconds > 0 ? tracker.formatDuration(b.seconds) : `${b.minutes || 0} 分钟`
+                    item.innerHTML = `
+                        <div style="flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px;">
+                            <span style="font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(b.title)}</span>
+                            <span style="font-size: 0.76rem; color: var(--text-muted); white-space: nowrap;">${bDur}</span>
+                        </div>
+                        <div class="heatmap-detail-book-actions">
+                            <button type="button" class="btn-heatmap-action btn-detail" title="查看书籍详情">详情</button>
+                            <button type="button" class="btn-heatmap-action btn-read" title="继续阅读">阅读 ›</button>
+                        </div>
+                    `
+                    item.querySelector('.btn-detail')?.addEventListener('click', (e) => {
+                        e.stopPropagation()
+                        this.openBookDetailsModal(b.bookId)
+                    })
+                    item.querySelector('.btn-read')?.addEventListener('click', (e) => {
+                        e.stopPropagation()
+                        this.openBook(b.bookId)
+                    })
+                    this.dom.heatmapDetailBooksList.appendChild(item)
+                })
+            }
+        }
     }
 
     setPDFZoom(zoomVal) {
@@ -4270,6 +4825,10 @@ class UniversalReaderApp {
                 this.closeBookDetailsModal()
                 this.openBook(id)
             },
+            onFilterByTag: (tag) => {
+                this.closeBookDetailsModal()
+                this.switchShelfCategory('overview', { tags: [tag], status: 'all' })
+            },
             onShelfRefresh: () => this.refreshBookshelf()
         })
     }
@@ -4359,6 +4918,210 @@ class UniversalReaderApp {
             })
             container.appendChild(item)
         })
+    }
+
+    showDictionaryCard(selectionInfo) {
+        if (!selectionInfo || !selectionInfo.text) return
+        const card = this.dom.readerDictionaryCard
+        if (!card) return
+
+        const word = selectionInfo.text.trim()
+        const result = this.dictionaryService ? this.dictionaryService.lookup(word) : null
+        this._currentDictResult = result || { word, entries: [], source: '本地离线词典' }
+
+        if (this.dom.dictCardWord) this.dom.dictCardWord.innerText = word
+        if (this.dom.dictCardPhonetic) this.dom.dictCardPhonetic.innerText = result?.phonetic || ''
+        if (this.dom.dictCardSource) this.dom.dictCardSource.innerText = result?.source || '本地离线词典'
+
+        if (this.dom.dictCardBody) {
+            if (result && result.found && result.entries.length > 0) {
+                this.dom.dictCardBody.innerHTML = result.entries.map(e => `
+                    <div class="dict-entry-row">
+                        <span class="dict-pos-tag">${escapeHTML(e.pos)}</span>
+                        <span class="dict-def-text">${escapeHTML(e.def)}</span>
+                    </div>
+                `).join('')
+            } else {
+                this.dom.dictCardBody.innerHTML = `<div class="dict-not-found">本地词典未收录此词条，可点击下方在 AI 中深入询问。</div>`
+            }
+        }
+
+        // Position card near selection or center
+        const rect = selectionInfo.rect
+        card.style.display = 'flex'
+        if (rect && rect.top != null && rect.left != null) {
+            const cardWidth = 290
+            let left = rect.left + window.scrollX
+            let top = rect.bottom + window.scrollY + 8
+            if (left + cardWidth > window.innerWidth - 20) {
+                left = window.innerWidth - cardWidth - 20
+            }
+            if (left < 10) left = 10
+            if (top + 200 > window.innerHeight) {
+                top = Math.max(10, rect.top + window.scrollY - 210)
+            }
+            card.style.transform = 'none'
+            card.style.left = `${left}px`
+            card.style.top = `${top}px`
+        } else {
+            card.style.left = '50%'
+            card.style.top = '30%'
+            card.style.transform = 'translate(-50%, -50%)'
+        }
+    }
+
+    hideDictionaryCard() {
+        if (this.dom.readerDictionaryCard) {
+            this.dom.readerDictionaryCard.style.display = 'none'
+        }
+        this._currentDictResult = null
+    }
+
+    async handleInPlaceParagraphTranslation(selectionInfo) {
+        if (!selectionInfo || !selectionInfo.text) return
+        const card = this.dom.readerParaTranslationCard
+        const content = this.dom.paraTransContent
+        if (!card || !content) return
+
+        this._currentParaOriginal = selectionInfo.text
+        this._currentParaTranslation = ''
+
+        card.style.display = 'flex'
+        content.innerHTML = '<span style="color: var(--text-muted); font-size: 0.82rem;">正在准备翻译...</span>'
+
+        // Position near selection
+        const rect = selectionInfo.rect
+        if (rect && rect.top != null && rect.left != null) {
+            const cardWidth = 380
+            let left = rect.left + window.scrollX
+            let top = rect.bottom + window.scrollY + 8
+            if (left + cardWidth > window.innerWidth - 20) {
+                left = window.innerWidth - cardWidth - 20
+            }
+            if (left < 10) left = 10
+            card.style.transform = 'none'
+            card.style.left = `${left}px`
+            card.style.top = `${top}px`
+        } else {
+            card.style.left = '50%'
+            card.style.top = '50%'
+            card.style.transform = 'translate(-50%, -50%)'
+        }
+
+        const ready = await isAiReady()
+        if (!ready) {
+            content.innerHTML = '<span style="color: #f59e0b; font-size: 0.82rem;">⚠️ 请先在设置中启用并配置 AI API Key</span>'
+            return
+        }
+
+        const promptText = `将以下段落翻译为简体中文，保持原意和段落结构，只输出译文：\n\n${selectionInfo.text.trim()}`
+        const reqId = 'req_para_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)
+        this._activeParaTransReqId = reqId
+
+        // Persist to IndexedDB AI reading history
+        const bookId = this.currentBook?.id || 'general'
+        const bookTitle = this.currentBook?.title || '图书阅读辅导'
+        let convId = null
+        try {
+            if (this.aiSidebar?.currentConversation?.id) {
+                convId = this.aiSidebar.currentConversation.id
+            } else {
+                const existing = await db.getAiConversationsByBook(bookId)
+                if (existing && existing.length > 0) {
+                    convId = existing[0].id
+                } else {
+                    convId = 'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)
+                    await db.saveAiConversation({
+                        id: convId,
+                        bookId,
+                        bookTitle,
+                        title: `${bookTitle} · 阅读对话`,
+                        createdAt: Date.now(),
+                        updatedAt: Date.now(),
+                        schemaVersion: 1
+                    })
+                }
+            }
+        } catch (e) {
+            console.warn('[App] Failed to get/create AI conversation:', e)
+        }
+
+        const userMsg = {
+            id: 'msg_user_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+            conversationId: convId,
+            role: 'user',
+            content: `段落即时翻译: ${selectionInfo.text.trim()}`,
+            actionName: '段落翻译',
+            referenceSnapshot: {
+                selectedText: selectionInfo.text.trim(),
+                cfi: selectionInfo.cfi || null,
+                pageIndex: selectionInfo.pageIndex ?? null,
+                chapterTitle: selectionInfo.chapterTitle || ''
+            },
+            contextSnapshot: null,
+            presetId: 'preset_translate',
+            createdAt: Date.now(),
+            status: 'completed'
+        }
+
+        if (convId) {
+            try {
+                await db.saveAiMessage(userMsg)
+                if (this.aiSidebar && this.aiSidebar.currentConversation?.id === convId && this.aiSidebar.isOpen) {
+                    this.aiSidebar.appendMessageToUI(userMsg)
+                }
+            } catch (e) {
+                console.warn('[App] Failed to save AI user message:', e)
+            }
+        }
+
+        try {
+            content.innerHTML = '<span style="color: var(--text-muted); font-size: 0.82rem;">正在流式生成译文...</span>'
+            const result = await requestAiCompletion({
+                requestId: reqId,
+                prompt: promptText,
+                messages: [{ role: 'user', content: promptText }],
+                maxTokens: this.advancedSettings?.aiMaxTokens || 2048,
+                onChunk: (delta, fullText) => {
+                    this._currentParaTranslation = fullText
+                    content.innerHTML = renderSafeMarkdown(fullText)
+                }
+            })
+            this._currentParaTranslation = result
+            content.innerHTML = renderSafeMarkdown(result)
+
+            if (convId) {
+                const asstMsg = {
+                    id: 'msg_asst_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+                    conversationId: convId,
+                    role: 'assistant',
+                    content: result,
+                    referenceSnapshot: userMsg.referenceSnapshot,
+                    createdAt: Date.now(),
+                    status: 'completed',
+                    usage: null
+                }
+                await db.saveAiMessage(asstMsg)
+                const conv = await db.getAiConversation(convId)
+                if (conv) {
+                    conv.updatedAt = Date.now()
+                    await db.saveAiConversation(conv)
+                }
+                if (this.aiSidebar && this.aiSidebar.currentConversation?.id === convId && this.aiSidebar.isOpen) {
+                    this.aiSidebar.appendMessageToUI(asstMsg)
+                }
+            }
+        } catch (e) {
+            content.innerHTML = `<span style="color: #ef4444; font-size: 0.82rem;">翻译失败: ${escapeHTML(e.message || String(e))}</span>`
+        }
+    }
+
+    hideParaTranslationCard() {
+        if (this.dom.readerParaTranslationCard) {
+            this.dom.readerParaTranslationCard.style.display = 'none'
+        }
+        this._currentParaOriginal = null
+        this._currentParaTranslation = null
     }
 
     openAiAssistantModal() {
@@ -5673,13 +6436,66 @@ class UniversalReaderApp {
             return
         }
         
+        // Update reading status counts across all library books
+        const statusCounts = {
+            all: books.length,
+            unread: 0,
+            want_to_read: 0,
+            reading: 0,
+            on_hold: 0,
+            finished: 0
+        }
+        for (const b of books) {
+            const state = resolveReadingState(b)
+            if (statusCounts[state] != null) {
+                statusCounts[state]++
+            }
+        }
+        if (this.dom.overviewStatusTabs) {
+            for (const [s, cnt] of Object.entries(statusCounts)) {
+                const badge = document.getElementById(`overview-count-${s}`)
+                if (badge) badge.innerText = String(cnt)
+            }
+        }
+
         // 1. Filter by category
-        if (this.shelfCategory === 'favorite') {
+        if (this.shelfCategory === 'overview') {
+            if (this.overviewStatus !== 'all') {
+                books = books.filter(b => resolveReadingState(b) === this.overviewStatus)
+            }
+            if (this.overviewSelectedTags && this.overviewSelectedTags.size > 0) {
+                const reqTags = Array.from(this.overviewSelectedTags)
+                    .map(t => normalizeTag(t))
+                    .filter(Boolean)
+                    .map(t => t.toLowerCase())
+                if (reqTags.length > 0) {
+                    books = books.filter(b => {
+                        const bTags = (b.tags || [])
+                            .map(t => normalizeTag(t))
+                            .filter(Boolean)
+                            .map(t => t.toLowerCase())
+                        return reqTags.every(rt => bTags.includes(rt))
+                    })
+                }
+            }
+            if (this.overviewRatingFilter && this.overviewRatingFilter !== 'all') {
+                if (this.overviewRatingFilter === 'unrated') {
+                    books = books.filter(b => b.rating == null)
+                } else {
+                    const minRating = parseFloat(this.overviewRatingFilter)
+                    books = books.filter(b => typeof b.rating === 'number' && b.rating >= minRating)
+                }
+            }
+            if (this.overviewSearchQuery && this.overviewSearchQuery.trim()) {
+                const oq = this.overviewSearchQuery.trim().toLowerCase()
+                books = books.filter(b => (b.title && b.title.toLowerCase().includes(oq)) || (b.author && b.author.toLowerCase().includes(oq)))
+            }
+        } else if (this.shelfCategory === 'favorite') {
             books = books.filter(b => b.isFavorite)
         } else if (this.shelfCategory === 'unread' || this.shelfCategory === 'list_unread') {
-            books = books.filter(b => b.customListIds?.includes('list_unread') || (!b.progress?.fraction || b.progress.fraction === 0))
+            books = books.filter(b => resolveReadingState(b) === 'unread')
         } else if (this.shelfCategory === 'finished') {
-            books = books.filter(b => b.progress?.fraction && b.progress.fraction >= 0.99)
+            books = books.filter(b => resolveReadingState(b) === 'finished')
         } else if (this.shelfCategory.startsWith('list_')) {
             const listId = this.shelfCategory
             books = books.filter(b => b.customListIds && b.customListIds.includes(listId))
@@ -5707,6 +6523,9 @@ class UniversalReaderApp {
             if (this.sortField === 'progress') {
                 valA = a.progress?.fraction ?? 0
                 valB = b.progress?.fraction ?? 0
+            } else if (this.sortField === 'rating') {
+                valA = typeof a.rating === 'number' ? a.rating : null
+                valB = typeof b.rating === 'number' ? b.rating : null
             } else if (this.sortField === 'lastReadAt') {
                 valA = a.lastReadAt || a.updatedAt || a.addedAt || 0
                 valB = b.lastReadAt || b.updatedAt || b.addedAt || 0
@@ -5939,6 +6758,7 @@ class UniversalReaderApp {
             const isFavView = this.shelfCategory === 'favorite'
             const isCustomList = this.shelfCategory && this.shelfCategory.startsWith('list_')
             const isFinishedView = this.shelfCategory === 'finished'
+            const isOverview = this.shelfCategory === 'overview'
             let svgIcon = ''
             if (isFavView) {
                 svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`
@@ -5946,11 +6766,13 @@ class UniversalReaderApp {
                 svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`
             } else if (isFinishedView) {
                 svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`
+            } else if (isOverview) {
+                svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`
             } else {
                 svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`
             }
-            let emptyTitle = isFavView ? '暂无收藏图书' : (isCustomList ? '此书单暂无图书' : (isFinishedView ? '暂无已读完的图书' : '书架虚席以待'))
-            let emptySub = isFavView ? '点击任意书籍封面左上角的小星标即可收藏' : (isCustomList ? '点击右上角「+」或在图书卡片上点击 📑 即可加入此书单' : (isFinishedView ? '当读完一本书（阅读进度达到 100%）时，它会自动归档在此' : '拖拽电子书到此处，或点击右上角「+」导入图书'))
+            let emptyTitle = isFavView ? '暂无收藏图书' : (isCustomList ? '此书单暂无图书' : (isFinishedView ? '暂无已读完的图书' : (isOverview ? '阅读总览暂无匹配图书' : '书架虚席以待')))
+            let emptySub = isFavView ? '点击任意书籍封面左上角的小星标即可收藏' : (isCustomList ? '点击右上角「+」或在图书卡片上点击 📑 即可加入此书单' : (isFinishedView ? '将书籍标记为已读完后将归档至此' : (isOverview ? '尝试清除或调整筛选条件' : '拖拽电子书到此处，或点击右上角「+」导入图书')))
 
             container.innerHTML = `
                 <div class="wood-shelf-empty-state">
@@ -6049,9 +6871,14 @@ class UniversalReaderApp {
         }
 
         // Clean Understated Progress Tag
+        const readingState = resolveReadingState(book)
         let progressTag = ''
-        if (fraction >= 0.99) {
+        if (readingState === 'finished') {
             progressTag = '<div class="skeuo-clean-tag is-finished">已读完</div>'
+        } else if (readingState === 'want_to_read') {
+            progressTag = '<div class="skeuo-clean-tag is-want">想读</div>'
+        } else if (readingState === 'on_hold') {
+            progressTag = '<div class="skeuo-clean-tag is-hold">搁置</div>'
         } else if (fraction > 0) {
             progressTag = `<div class="skeuo-clean-tag">${progressPct}%</div>`
         } else {
@@ -6120,14 +6947,25 @@ class UniversalReaderApp {
             ? tracker.formatDuration(book.totalReadingSeconds)
             : null
 
+        const readingState = resolveReadingState(book)
         let metaHtml = ''
-        if (fraction === 0) {
-            metaHtml = `<span class="jane-meta-badge-new">新</span><span class="jane-meta-text">未读</span>`
+        if (readingState === 'finished') {
+            metaHtml = `<span class="jane-meta-badge-finished">已读完</span>`
             if (readTimeStr) {
                 metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
             }
-        } else if (fraction >= 0.999 || book.isFinished) {
-            metaHtml = `<span class="jane-meta-badge-finished">已读完</span>`
+        } else if (readingState === 'want_to_read') {
+            metaHtml = `<span class="jane-meta-badge-want">想读</span>`
+            if (readTimeStr) {
+                metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
+            }
+        } else if (readingState === 'on_hold') {
+            metaHtml = `<span class="jane-meta-badge-hold">搁置</span>`
+            if (readTimeStr) {
+                metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
+            }
+        } else if (fraction === 0) {
+            metaHtml = `<span class="jane-meta-badge-new">新</span><span class="jane-meta-text">未读</span>`
             if (readTimeStr) {
                 metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
             }
@@ -6136,6 +6974,9 @@ class UniversalReaderApp {
             if (readTimeStr) {
                 metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
             }
+        }
+        if (typeof book.rating === 'number' && book.rating > 0) {
+            metaHtml += `<span class="jane-meta-dot">·</span><span style="color: #f59e0b; font-weight: 600;">★${Number(book.rating).toFixed(1)}</span>`
         }
 
         const isCloud = !!book.isCloudOnly
@@ -6289,6 +7130,7 @@ class UniversalReaderApp {
             const isFav = this.shelfCategory === 'favorite'
             const isUnread = this.shelfCategory === 'unread'
             const isFinished = this.shelfCategory === 'finished'
+            const isOverview = this.shelfCategory === 'overview'
             if (isCustomList) {
                 this.dom.modernGridBookCount.innerText = `书单藏书 · 共 ${count} 本`
             } else if (isFav) {
@@ -6297,6 +7139,9 @@ class UniversalReaderApp {
                 this.dom.modernGridBookCount.innerText = `待读清单 · 共 ${count} 本`
             } else if (isFinished) {
                 this.dom.modernGridBookCount.innerText = `已读完成 · 共 ${count} 本`
+            } else if (isOverview) {
+                const hasFilters = this.overviewSelectedTags.size > 0 || this.overviewRatingFilter !== 'all' || (this.overviewSearchQuery && this.overviewSearchQuery.trim()) || this.overviewStatus !== 'all'
+                this.dom.modernGridBookCount.innerText = hasFilters ? `符合筛选 · 共 ${count} 本` : `阅读总览 · 共 ${count} 本`
             } else {
                 this.dom.modernGridBookCount.innerText = `共 ${count} 本图书`
             }
@@ -6538,6 +7383,7 @@ class UniversalReaderApp {
             const isFavView = this.shelfCategory === 'favorite'
             const isCustomList = this.shelfCategory && this.shelfCategory.startsWith('list_')
             const isFinishedView = this.shelfCategory === 'finished'
+            const isOverview = this.shelfCategory === 'overview'
             let svgIcon = ''
             if (isFavView) {
                 svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`
@@ -6545,19 +7391,40 @@ class UniversalReaderApp {
                 svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`
             } else if (isFinishedView) {
                 svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`
+            } else if (isOverview) {
+                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`
             } else {
                 svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`
             }
-            let emptyTitle = isFavView ? '暂无收藏图书' : (isCustomList ? '此书单暂无图书' : (isFinishedView ? '暂无已读完的图书' : '书架虚席以待'))
-            let emptySub = isFavView ? '点击书籍封面左上角的小星标即可收录' : (isCustomList ? '点击右上角「+」或在卡片菜单中将图书归类至此' : (isFinishedView ? '读完一本书（阅读进度达 100%）后将自动归档至此' : '拖拽电子书到此处，或点击右上角「+」开启阅读之旅'))
+
+            const hasActiveOverviewFilters = isOverview && (this.overviewSelectedTags.size > 0 || this.overviewRatingFilter !== 'all' || (this.overviewSearchQuery && this.overviewSearchQuery.trim()) || this.overviewStatus !== 'all')
+
+            let emptyTitle = isFavView ? '暂无收藏图书' 
+                : (isCustomList ? '此书单暂无图书' 
+                : (isFinishedView ? '暂无已读完的图书' 
+                : (hasActiveOverviewFilters ? '未找到符合条件的图书' 
+                : (isOverview ? '阅读总览暂无图书' : '书架虚席以待'))))
+            let emptySub = isFavView ? '点击书籍封面左上角的小星标即可收录' 
+                : (isCustomList ? '点击右上角「+」或在卡片菜单中将图书归类至此' 
+                : (isFinishedView ? '将书籍标记为已读完后将归档至此' 
+                : (hasActiveOverviewFilters ? '可以尝试清除或放宽当前筛选条件' 
+                : (isOverview ? '图书将根据您的阅读记录展示在此' : '拖拽电子书到此处，或点击右上角「+」开启阅读之旅'))))
+
+            let clearBtnHtml = hasActiveOverviewFilters 
+                ? `<button type="button" id="btn-grid-empty-clear" class="btn-clear-overview-filters" style="margin-top: 14px; padding: 5px 16px; font-size: 0.82rem; cursor: pointer; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-main);">清除筛选条件</button>`
+                : ''
 
             this.dom.booksGrid.innerHTML = `
                 <div class="jane-empty-state" style="grid-column: 1 / -1; width: 100%; max-width: 520px; margin: 0 auto; padding: 4rem 1.5rem; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center;">
                     <div style="display: flex; justify-content: center; margin-bottom: 0.85rem; opacity: 0.85;">${svgIcon}</div>
                     <h3 style="font-family: var(--font-serif); font-size: 1.15rem; font-weight: 600; color: var(--text-main); margin-bottom: 0.4rem;">${emptyTitle}</h3>
                     <p style="font-size: 0.82rem; color: var(--text-muted);">${emptySub}</p>
+                    ${clearBtnHtml}
                 </div>
             `
+            document.getElementById('btn-grid-empty-clear')?.addEventListener('click', () => {
+                this.clearOverviewFilters()
+            })
             return
         }
 
@@ -6565,6 +7432,47 @@ class UniversalReaderApp {
         this.dom.booksGrid.style.display = 'grid'
         this.dom.booksGrid.style.justifyContent = ''
         this.dom.booksGrid.style.alignItems = ''
+
+        // Group by completed year-month if in overview finished status with grouping enabled
+        if (this.shelfCategory === 'overview' && this.overviewStatus === 'finished' && this.overviewGroupByYearMonth) {
+            const groupMap = new Map()
+            books.forEach(b => {
+                let key = '日期未知'
+                let sortKey = -1
+                if (b.completedAt && typeof b.completedAt === 'number' && b.completedAt > 0) {
+                    const d = new Date(b.completedAt)
+                    key = `${d.getFullYear()}年${d.getMonth() + 1}月`
+                    sortKey = d.getFullYear() * 100 + (d.getMonth() + 1)
+                }
+                if (!groupMap.has(key)) {
+                    groupMap.set(key, { sortKey, books: [] })
+                }
+                groupMap.get(key).books.push(b)
+            })
+
+            const sortedGroups = Array.from(groupMap.entries()).sort((a, b) => b[1].sortKey - a[1].sortKey)
+
+            const gridFragment = document.createDocumentFragment()
+            const unregisterGrid = coverUrlPool.registerPendingRoot(gridFragment)
+            try {
+                let gIdx = 0
+                for (const [groupName, groupData] of sortedGroups) {
+                    const header = document.createElement('div')
+                    header.className = 'overview-group-header'
+                    header.innerHTML = `<span>${escapeHTML(groupName)}</span> <span style="font-size: 0.78rem; font-weight: normal; color: var(--text-muted); margin-left: 8px;">${groupData.books.length} 本</span>`
+                    gridFragment.appendChild(header)
+
+                    groupData.books.forEach(book => {
+                        const card = this.createBookCard(book, gIdx++)
+                        gridFragment.appendChild(card)
+                    })
+                }
+                this.dom.booksGrid.appendChild(gridFragment)
+            } finally {
+                unregisterGrid()
+            }
+            return
+        }
 
         const gridFragment = document.createDocumentFragment()
         const unregisterGrid = coverUrlPool.registerPendingRoot(gridFragment)
@@ -6586,7 +7494,12 @@ class UniversalReaderApp {
             const isFavView = this.shelfCategory === 'favorite'
             const isCustomList = this.shelfCategory && this.shelfCategory.startsWith('list_')
             const isFinishedView = this.shelfCategory === 'finished'
-            let emptyMsg = isFavView ? '暂无收藏图书，点击图书 ★ 按钮即可加入收藏' : (isCustomList ? '此书单暂无图书，点击右上角「+」即可添加图书' : (isFinishedView ? '暂无已读完的图书，阅读进度达到 100% 时将自动收录' : '书架空空如也，暂无图书'))
+            const isOverview = this.shelfCategory === 'overview'
+            let emptyMsg = isFavView ? '暂无收藏图书，点击图书 ★ 按钮即可加入收藏' 
+                : (isCustomList ? '此书单暂无图书，点击右上角「+」即可添加图书' 
+                : (isFinishedView ? '暂无已读完的图书' 
+                : (isOverview ? '未找到符合条件的图书，可尝试清除筛选' 
+                : '书架空空如也，暂无图书')))
             this.dom.booksTableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-tertiary);">${emptyMsg}</td></tr>`
             return
         }
@@ -6776,21 +7689,8 @@ class UniversalReaderApp {
                     return
                 }
 
-                // Deselect built-in library items
-                this.dom.navCategoryItems?.forEach(i => i.classList.remove('active'))
-                document.querySelectorAll('.custom-list-nav-item').forEach(i => i.classList.remove('active'))
-                item.classList.add('active')
-
-                this.shelfCategory = list.id
-                if (this.dom.currentCategoryTitle) {
-                    this.dom.currentCategoryTitle.innerText = list.name
-                    this.dom.currentCategoryTitle.style.display = 'block'
-                }
-
-                if (this.dom.statsDashboardContainer) this.dom.statsDashboardContainer.style.display = 'none'
-                if (this.dom.shelfHeaderActions) this.dom.shelfHeaderActions.style.display = 'flex'
-                if (this.dom.bookCountFooter) this.dom.bookCountFooter.style.display = 'block'
-                this.refreshBookshelf()
+                // Switch to custom list
+                this.switchShelfCategory(list.id)
             })
 
             this.dom.customListsContainer.appendChild(item)
@@ -7882,7 +8782,7 @@ class UniversalReaderApp {
                 if (style === 'underline') {
                     draw(Overlayer.underline, { color, width: 2.6, writingMode })
                 } else if (style === 'dashed') {
-                    draw(Overlayer.dashed, { color: color === '#facc15' ? '#64748b' : color, width: 2, writingMode })
+                    draw(Overlayer.dashed, { color: color === '#facc15' ? '#64748b' : color, width: 1.2, writingMode })
                 } else if (style === 'squiggly') {
                     draw(Overlayer.squiggly, { color, width: 2.2, writingMode })
                 } else if (style === 'strikethrough') {
@@ -9304,17 +10204,18 @@ class UniversalReaderApp {
         }
     }
 
-    async createHighlight(color, style = 'highlight', note = '') {
+    async createHighlight(color, style = 'highlight', note = '', targetRef = null) {
         const activeSession = this._activeSession
         const snapshot = this._currentSnapshot || {}
-        const bookId = activeSession?.bookId || this.currentBookId
+        const bookId = targetRef?.bookId || activeSession?.bookId || this.currentBookId
         if (!bookId || (activeSession && !activeSession.isCurrent())) return
-        if ((!this.selectedTextInfo && (!this.multiSelectedRanges || this.multiSelectedRanges.length === 0))) return
+        const target = targetRef || this.selectedTextInfo
+        if (!target && (!this.multiSelectedRanges || this.multiSelectedRanges.length === 0)) return
         
         const colorVal = color || '#facc15'
 
         // Multi-range batch creation
-        if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
+        if (!targetRef && this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
             const rangesToProcess = [...this.multiSelectedRanges]
             this.clearVirtualMultiSelections()
             for (const item of rangesToProcess) {
@@ -9359,36 +10260,38 @@ class UniversalReaderApp {
             return
         }
 
-        if (this.pdfViewport && (this.selectedTextInfo?.formatType === 'pdf' || this.selectedTextInfo?.pdfTarget)) {
+        if (this.pdfViewport && (target?.formatType === 'pdf' || target?.pdfTarget)) {
             const hl = {
                 id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 bookId: bookId,
                 formatType: 'pdf',
-                text: this.selectedTextInfo.text,
+                text: target.text || '',
                 color: colorVal,
                 style: style,
                 note: note,
-                chapterTitle: this.currentLocation?.tocItem?.label || '正文',
+                chapterTitle: targetRef?.chapterTitle || this.currentLocation?.tocItem?.label || '正文',
                 createdAt: Date.now(),
                 blobRevision: snapshot.blobRevision,
                 revisionOrigin: snapshot.revisionOrigin,
                 documentHash: snapshot.documentHash,
-                pdfTarget: this.selectedTextInfo.pdfTarget
+                pdfTarget: target.pdfTarget
             }
             await db.saveHighlight(hl)
             if (activeSession && !activeSession.isCurrent()) return
             const allHls = await db.getHighlightsByBook(bookId)
             if (activeSession && !activeSession.isCurrent()) return
             this.pdfViewport.setHighlights(allHls, snapshot)
-            window.getSelection()?.removeAllRanges()
-            this.hideSelectionPopup()
+            if (!targetRef) {
+                window.getSelection()?.removeAllRanges()
+                this.hideSelectionPopup()
+            }
             this.loadNotesList()
             this.showToast('已添加高亮笔记', '✓')
             return
         }
 
-        const cfi = this.selectedTextInfo.cfi
-        const text = this.selectedTextInfo.text.trim()
+        const cfi = target.cfi
+        const text = (target.text || '').trim()
 
         // 1. Check if an annotation of the EXACT SAME style already exists on this CFI for current content identity
         const existingNotes = await db.getHighlightsByBook(bookId)
@@ -9428,9 +10331,11 @@ class UniversalReaderApp {
                 } catch (err) {}
             }
 
-            const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
-            iframe?.contentDocument?.getSelection()?.removeAllRanges()
-            this.hideSelectionPopup()
+            if (!targetRef) {
+                const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
+                iframe?.contentDocument?.getSelection()?.removeAllRanges()
+                this.hideSelectionPopup()
+            }
             this.loadNotesList()
             return
         }
@@ -9444,7 +10349,7 @@ class UniversalReaderApp {
             color: colorVal,
             style: style,
             note: note,
-            chapterTitle: this.currentLocation?.tocItem?.label || '正文',
+            chapterTitle: targetRef?.chapterTitle || this.currentLocation?.tocItem?.label || '正文',
             createdAt: Date.now(),
             blobRevision: snapshot.blobRevision,
             revisionOrigin: snapshot.revisionOrigin,
@@ -9468,12 +10373,15 @@ class UniversalReaderApp {
             }
         }
 
-        // Clear text selection
-        const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
-        iframe?.contentDocument?.getSelection()?.removeAllRanges()
+        if (!targetRef) {
+            // Clear text selection
+            const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
+            iframe?.contentDocument?.getSelection()?.removeAllRanges()
+            this.hideSelectionPopup()
+        }
 
-        this.hideSelectionPopup()
         this.loadNotesList()
+        this.showToast('已添加高亮笔记', '✓')
     }
 
     async updateHighlightColor(value, newColor) {
@@ -10340,8 +11248,13 @@ class UniversalReaderApp {
             this.renderRecentSessions(stats.recentSessions)
 
             // 7.5. Reading Calendar Heatmap
+            if (this.dom.statsHeatmapDayDetails) {
+                this.dom.statsHeatmapDayDetails.style.display = 'none'
+            }
             if (this.dom.statsCalendarHeatmap) {
-                renderCalendarHeatmap(this.dom.statsCalendarHeatmap, stats.targetYear || new Date().getFullYear())
+                renderCalendarHeatmap(this.dom.statsCalendarHeatmap, stats.targetYear || new Date().getFullYear(), (dateStr, payload) => {
+                    this.renderHeatmapDayDetails(dateStr, payload)
+                })
             }
 
         } catch (err) {
@@ -10443,7 +11356,7 @@ class UniversalReaderApp {
             // Reading progress bar: strictly reflects genuine reading progress (fraction * 100), clamped [0, 100]
             const rawFraction = (typeof book.progress?.fraction === 'number' && Number.isFinite(book.progress.fraction))
                 ? book.progress.fraction
-                : (book.isFinished ? 1 : 0)
+                : (resolveReadingState(book) === 'finished' ? 1 : 0)
             const fraction = Math.max(0, Math.min(1, rawFraction))
             const rawPct = fraction * 100
             const progressPct = fraction === 0 ? '0' : (rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0)))
@@ -10564,9 +11477,18 @@ class UniversalReaderApp {
             if (iconEl) iconEl.innerText = '🏆'
             if (titleEl) titleEl.innerText = `${periodLabel} 读完的图书 (${stats.periodFinishedBooks?.length || 0} 本)`
 
+            const topAction = document.createElement('div')
+            topAction.style.cssText = 'display: flex; justify-content: flex-end; margin-bottom: 8px;'
+            topAction.innerHTML = `<button type="button" class="btn-secondary-action" style="font-size: 0.78rem; padding: 3px 10px; cursor: pointer;">在阅读总览中查看所有读完图书 ›</button>`
+            topAction.querySelector('button')?.addEventListener('click', () => {
+                this.closeStatsDetailModal()
+                this.switchShelfCategory('overview', { status: 'finished' })
+            })
+            listEl.appendChild(topAction)
+
             const books = stats.periodFinishedBooks || []
             if (books.length === 0) {
-                listEl.innerHTML = '<div style="text-align:center; padding: 2rem; color: var(--text-muted); font-size: 0.88rem;">该周期内暂无读完的图书</div>'
+                listEl.innerHTML += '<div style="text-align:center; padding: 2rem; color: var(--text-muted); font-size: 0.88rem;">该周期内暂无读完的图书</div>'
             } else {
                 books.forEach(b => {
                     const row = document.createElement('div')

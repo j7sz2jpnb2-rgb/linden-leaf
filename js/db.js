@@ -1,7 +1,7 @@
 // db.js - IndexedDB storage wrapper for Universal E-Book Reader (with WeChat Read Statistics)
 
 const DB_NAME = 'UniversalReaderDB'
-const DB_VERSION = 8
+const DB_VERSION = 9
 
 let dbInstance = null
 let _openPromise = null
@@ -86,6 +86,21 @@ export const openDB = () => {
                 const ftStore = db.createObjectStore('fulltext_index', { keyPath: 'bookId' })
                 ftStore.createIndex('indexedAt', 'indexedAt', { unique: false })
                 ftStore.createIndex('extractorVersion', 'extractorVersion', { unique: false })
+            }
+
+            // Store for AI Conversations
+            if (!db.objectStoreNames.contains('ai_conversations')) {
+                const convStore = db.createObjectStore('ai_conversations', { keyPath: 'id' })
+                convStore.createIndex('bookId', 'bookId', { unique: false })
+                convStore.createIndex('createdAt', 'createdAt', { unique: false })
+                convStore.createIndex('updatedAt', 'updatedAt', { unique: false })
+            }
+
+            // Store for AI Messages
+            if (!db.objectStoreNames.contains('ai_messages')) {
+                const msgStore = db.createObjectStore('ai_messages', { keyPath: 'id' })
+                msgStore.createIndex('conversationId', 'conversationId', { unique: false })
+                msgStore.createIndex('createdAt', 'createdAt', { unique: false })
             }
 
             // Migrate DB_VERSION < 4 records (strip blob from books and save to book_files)
@@ -388,6 +403,23 @@ export const getBookNativePath = async id => {
             req.onerror = () => resolve(null)
         } catch { resolve(null) }
     })
+}
+
+export function isValidRating(rating) {
+    if (rating === null) return true
+    if (typeof rating !== 'number' || isNaN(rating)) return false
+    if (rating < 0.5 || rating > 5.0) return false
+    return Math.round(rating * 2) === rating * 2
+}
+
+export const saveBookRating = async (id, rating) => {
+    if (!id || !isValidRating(rating)) return false
+    await saveBook({
+        id,
+        rating,
+        ratingUpdatedAt: Date.now()
+    })
+    return true
 }
 
 export const saveBookNativePath = async (id, nativePath) => {
@@ -2115,5 +2147,207 @@ export const getAllBookSearchIndexes = async () => {
         }
     })
 }
+
+// ============================================================================
+// AI Reading History Persistence (IndexedDB)
+// ============================================================================
+
+export const saveAiConversation = async (conv) => {
+    if (!conv || !conv.id || typeof indexedDB === 'undefined') return false
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('ai_conversations')) return resolve(false)
+            const tx = db.transaction('ai_conversations', 'readwrite')
+            const store = tx.objectStore('ai_conversations')
+            const record = {
+                ...conv,
+                updatedAt: conv.updatedAt || Date.now()
+            }
+            store.put(record)
+            tx.oncomplete = () => resolve(true)
+            tx.onerror = () => resolve(false)
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+export const getAiConversation = async (id) => {
+    if (!id || typeof indexedDB === 'undefined') return null
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('ai_conversations')) return resolve(null)
+            const tx = db.transaction('ai_conversations', 'readonly')
+            const store = tx.objectStore('ai_conversations')
+            const req = store.get(id)
+            req.onsuccess = () => resolve(req.result || null)
+            req.onerror = () => resolve(null)
+        } catch (e) {
+            resolve(null)
+        }
+    })
+}
+
+export const getAiConversationsByBook = async (bookId) => {
+    if (typeof indexedDB === 'undefined') return []
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('ai_conversations')) return resolve([])
+            const tx = db.transaction('ai_conversations', 'readonly')
+            const store = tx.objectStore('ai_conversations')
+            if (bookId) {
+                const idx = store.index('bookId')
+                const req = idx.getAll(bookId)
+                req.onsuccess = () => {
+                    const list = req.result || []
+                    list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+                    resolve(list)
+                }
+                req.onerror = () => resolve([])
+            } else {
+                const req = store.getAll()
+                req.onsuccess = () => {
+                    const list = req.result || []
+                    list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+                    resolve(list)
+                }
+                req.onerror = () => resolve([])
+            }
+        } catch (e) {
+            resolve([])
+        }
+    })
+}
+
+export const getAllAiConversations = async () => {
+    return getAiConversationsByBook(null)
+}
+
+export const deleteAiConversation = async (id) => {
+    if (!id || typeof indexedDB === 'undefined') return false
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            const stores = []
+            if (db.objectStoreNames.contains('ai_conversations')) stores.push('ai_conversations')
+            if (db.objectStoreNames.contains('ai_messages')) stores.push('ai_messages')
+            if (stores.length === 0) return resolve(false)
+
+            const tx = db.transaction(stores, 'readwrite')
+            if (db.objectStoreNames.contains('ai_conversations')) {
+                tx.objectStore('ai_conversations').delete(id)
+            }
+            if (db.objectStoreNames.contains('ai_messages')) {
+                const msgStore = tx.objectStore('ai_messages')
+                const idx = msgStore.index('conversationId')
+                const req = idx.openKeyCursor(IDBKeyRange.only(id))
+                req.onsuccess = (e) => {
+                    const cursor = e.target.result
+                    if (cursor) {
+                        msgStore.delete(cursor.primaryKey)
+                        cursor.continue()
+                    }
+                }
+            }
+            tx.oncomplete = () => resolve(true)
+            tx.onerror = () => resolve(false)
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+export const saveAiMessage = async (msg) => {
+    if (!msg || !msg.id || typeof indexedDB === 'undefined') return false
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('ai_messages')) return resolve(false)
+            const tx = db.transaction('ai_messages', 'readwrite')
+            const store = tx.objectStore('ai_messages')
+            store.put(msg)
+            tx.oncomplete = () => resolve(true)
+            tx.onerror = () => resolve(false)
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+export const getAiMessages = async (conversationId) => {
+    if (!conversationId || typeof indexedDB === 'undefined') return []
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('ai_messages')) return resolve([])
+            const tx = db.transaction('ai_messages', 'readonly')
+            const store = tx.objectStore('ai_messages')
+            const idx = store.index('conversationId')
+            const req = idx.getAll(conversationId)
+            req.onsuccess = () => {
+                const list = req.result || []
+                list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+                resolve(list)
+            }
+            req.onerror = () => resolve([])
+        } catch (e) {
+            resolve([])
+        }
+    })
+}
+
+export const clearAllAiHistory = async () => {
+    if (typeof indexedDB === 'undefined') return false
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            const stores = []
+            if (db.objectStoreNames.contains('ai_conversations')) stores.push('ai_conversations')
+            if (db.objectStoreNames.contains('ai_messages')) stores.push('ai_messages')
+            if (stores.length === 0) return resolve(true)
+            const tx = db.transaction(stores, 'readwrite')
+            stores.forEach(s => tx.objectStore(s).clear())
+            tx.oncomplete = () => resolve(true)
+            tx.onerror = () => resolve(false)
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+export const recoverInterruptedAiMessages = async () => {
+    if (typeof indexedDB === 'undefined') return 0
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('ai_messages')) return resolve(0)
+            const tx = db.transaction('ai_messages', 'readwrite')
+            const store = tx.objectStore('ai_messages')
+            const req = store.openCursor()
+            let recovered = 0
+            req.onsuccess = (e) => {
+                const cursor = e.target.result
+                if (cursor) {
+                    const val = cursor.value
+                    if (val && (val.status === 'streaming' || val.status === 'queued')) {
+                        val.status = 'interrupted'
+                        cursor.update(val)
+                        recovered++
+                    }
+                    cursor.continue()
+                } else {
+                    resolve(recovered)
+                }
+            }
+            req.onerror = () => resolve(0)
+        } catch (e) {
+            resolve(0)
+        }
+    })
+}
+
 
 

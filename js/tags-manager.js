@@ -5,13 +5,54 @@
 
 import * as db from './db.js'
 
-export const VALID_READING_STATUSES = ['unread', 'reading', 'on_hold', 'finished']
+export const VALID_READING_STATUSES = ['unread', 'want_to_read', 'reading', 'on_hold', 'finished']
+
+export const ALL_READING_STATUSES = ['unread', 'want_to_read', 'reading', 'on_hold', 'finished']
 
 export const STATUS_LABELS = {
     unread: '未读',
+    want_to_read: '想读',
     reading: '在读',
     on_hold: '搁置',
     finished: '读完'
+}
+
+/**
+ * Resolves reading state for a book deterministically.
+ * Priority:
+ * 1) Explicit valid readingStatus ('unread', 'want_to_read', 'reading', 'on_hold', 'finished')
+ * 2) Reliable completedAt timestamp (> 0) -> 'finished'
+ * 3) Active reading behavior (progress.fraction > 0 or lastReadAt > 0 or totalReadingSeconds > 0) -> 'reading'
+ * 4) Default 'unread'
+ * *CRITICAL*: NEVER infer 'finished' solely because fraction >= 0.99.
+ * @param {object} book
+ * @returns {'unread' | 'want_to_read' | 'reading' | 'on_hold' | 'finished'}
+ */
+export function resolveReadingState(book) {
+    if (!book || typeof book !== 'object') return 'unread'
+
+    // 1. Explicit valid readingStatus
+    if (book.readingStatus && VALID_READING_STATUSES.includes(book.readingStatus)) {
+        return book.readingStatus
+    }
+
+    // 2. Reliable completedAt timestamp
+    if (typeof book.completedAt === 'number' && book.completedAt > 0) {
+        return 'finished'
+    }
+
+    // 3. Active reading behavior
+    const frac = (book.progress && typeof book.progress.fraction === 'number') ? book.progress.fraction : 0
+    const lastRead = typeof book.lastReadAt === 'number' ? book.lastReadAt : 0
+    const totalSecs = typeof book.totalReadingSeconds === 'number' ? book.totalReadingSeconds
+        : (typeof book.readingTimeSeconds === 'number' ? book.readingTimeSeconds : 0)
+
+    if (frac > 0 || lastRead > 0 || totalSecs > 0) {
+        return 'reading'
+    }
+
+    // 4. Default unread
+    return 'unread'
 }
 
 /**
@@ -51,8 +92,8 @@ export function normalizeTagList(tags, maxTags = 20) {
  * Retrieve all unique tags in use across all books, with counts
  * @returns {Promise<Array<{ name: string, count: number }>>}
  */
-export async function getAllTagsWithCounts() {
-    const books = await db.getAllBooks()
+export async function getAllTagsWithCounts(dbAdapter = db) {
+    const books = await dbAdapter.getAllBooks()
     const counts = new Map() // tag -> count
 
     for (const b of books) {
@@ -157,7 +198,7 @@ export async function batchRemoveTag(bookIds, tag, dbAdapter = db) {
  * @param {string} newTag
  * @returns {Promise<{ success: boolean, updatedCount: number, error?: string }>}
  */
-export async function renameTagGlobally(oldTag, newTag) {
+export async function renameTagGlobally(oldTag, newTag, dbAdapter = db) {
     const normOld = normalizeTag(oldTag)
     const normNew = normalizeTag(newTag)
     if (!normOld || !normNew) {
@@ -167,7 +208,7 @@ export async function renameTagGlobally(oldTag, newTag) {
         return { success: true, updatedCount: 0 }
     }
 
-    const books = await db.getAllBooks()
+    const books = await dbAdapter.getAllBooks()
     let updatedCount = 0
 
     for (const b of books) {
@@ -176,7 +217,7 @@ export async function renameTagGlobally(oldTag, newTag) {
             const set = new Set(tags)
             set.delete(normOld)
             set.add(normNew)
-            await db.saveBook({
+            await dbAdapter.saveBook({
                 id: b.id,
                 tags: Array.from(set),
                 tagsUpdatedAt: Date.now()
@@ -191,13 +232,14 @@ export async function renameTagGlobally(oldTag, newTag) {
 /**
  * Delete a tag globally from all books
  * @param {string} tag
+ * @param {object} [dbAdapter=db]
  * @returns {Promise<{ success: boolean, updatedCount: number }>}
  */
-export async function deleteTagGlobally(tag) {
+export async function deleteTagGlobally(tag, dbAdapter = db) {
     const norm = normalizeTag(tag)
-    if (!norm) return { success: false, updatedCount: 0 }
+    if (!norm) return { success: false, updatedCount: 0, error: '标签名称不能为空' }
 
-    const books = await db.getAllBooks()
+    const books = await dbAdapter.getAllBooks()
     let updatedCount = 0
 
     for (const b of books) {
@@ -205,7 +247,7 @@ export async function deleteTagGlobally(tag) {
         if (tags.includes(norm)) {
             const set = new Set(tags)
             set.delete(norm)
-            await db.saveBook({
+            await dbAdapter.saveBook({
                 id: b.id,
                 tags: Array.from(set),
                 tagsUpdatedAt: Date.now()
@@ -236,9 +278,11 @@ export async function setReadingStatus(bookId, status, completedAt = undefined) 
     }
 
     if (status === 'finished') {
-        patch.completedAt = completedAt !== undefined ? completedAt : (book.completedAt || Date.now())
+        patch.completedAt = (typeof completedAt === 'number' && completedAt > 0)
+            ? completedAt
+            : (book.completedAt || Date.now())
     } else {
-        patch.completedAt = completedAt !== undefined ? completedAt : null
+        patch.completedAt = null
     }
 
     await db.saveBook(patch)

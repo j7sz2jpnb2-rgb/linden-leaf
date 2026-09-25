@@ -228,7 +228,7 @@ export class PageTurnController {
     constructor(options = {}) {
         this.container = options.container || null
         this.adapter = options.adapter || null
-        this.mode = options.mode || 'slide' // 'none' | 'slide' | 'cover' | 'scroll' | 'curl'
+        this.mode = options.mode || 'none' // 'none' | 'slide' | 'cover' | 'scroll' | 'curl'
         this.state = 'idle'
         this.generation = 0
         this.animationDuration = options.animationDuration || 220 // ms
