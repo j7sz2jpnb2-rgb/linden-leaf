@@ -1,7 +1,7 @@
 // db.js - IndexedDB storage wrapper for Universal E-Book Reader (with WeChat Read Statistics)
 
 const DB_NAME = 'UniversalReaderDB'
-const DB_VERSION = 7
+const DB_VERSION = 8
 
 let dbInstance = null
 let _openPromise = null
@@ -79,6 +79,13 @@ export const openDB = () => {
             if (!db.objectStoreNames.contains('pdf_drawings')) {
                 const drawStore = db.createObjectStore('pdf_drawings', { keyPath: 'id' })
                 drawStore.createIndex('bookId', 'bookId', { unique: false })
+            }
+
+            // Store for Local Cross-Book Full-Text Search Indexes
+            if (!db.objectStoreNames.contains('fulltext_index')) {
+                const ftStore = db.createObjectStore('fulltext_index', { keyPath: 'bookId' })
+                ftStore.createIndex('indexedAt', 'indexedAt', { unique: false })
+                ftStore.createIndex('extractorVersion', 'extractorVersion', { unique: false })
             }
 
             // Migrate DB_VERSION < 4 records (strip blob from books and save to book_files)
@@ -307,8 +314,11 @@ export const saveBook = async bookData => {
                     fileStore.put(local)
                 }
             }
-            if (storeNames.includes('deleted_records') && meta.id) {
+            if (storeNames.includes('deleted_records') && meta.id && meta.title != null) {
                 tx.objectStore('deleted_records').delete(meta.id)
+                if (meta.stableKey) {
+                    tx.objectStore('deleted_records').delete(`key:${meta.stableKey}`)
+                }
             }
             tx.oncomplete = () => {
                 if (previousSnapshotPath && previousSnapshotPath !== nativeSnapshotPath &&
@@ -969,7 +979,7 @@ export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Dat
     const db = await openDB()
     return new Promise((resolve, reject) => {
         try {
-            const allPossibleStores = ['books', 'book_files', 'bookmarks', 'highlights', 'deleted_records', 'pdf_drawings']
+            const allPossibleStores = ['books', 'book_files', 'bookmarks', 'highlights', 'deleted_records', 'pdf_drawings', 'fulltext_index']
             const storeNames = allPossibleStores.filter(name => db.objectStoreNames.contains(name))
             const tx = db.transaction(storeNames, 'readwrite')
             
@@ -995,6 +1005,9 @@ export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Dat
                     oldSnapshotPath = fileReq.result?.nativeSnapshotPath || null
                     fileStore.delete(id)
                 }
+            }
+            if (storeNames.includes('fulltext_index')) {
+                tx.objectStore('fulltext_index').delete(id)
             }
             
             // Safely clean up associated bookmarks, highlights, and pdf_drawings
@@ -1359,7 +1372,7 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
 
     // 1. Overall Stats
     const todaySeconds = dailyMap[todayStr] || 0
-    const finishedCount = books.filter(b => b.progress?.fraction && b.progress.fraction >= 0.99).length
+    const finishedCount = books.filter(b => b.readingStatus === 'finished' || Boolean(b.completedAt)).length
     const companionDays = Math.max(1, Math.floor((now.getTime() - earliestTime) / (86400 * 1000)) + 1)
 
     // 2. View Specific Distribution Charts
@@ -2019,4 +2032,81 @@ export const getAllPdfDrawings = async () => {
         req.onerror = () => reject(req.error || new Error('Failed to get all PDF drawings'))
     })
 }
+
+// ==========================================
+// Cross-Book Full-Text Search Index Storage
+// ==========================================
+export const saveBookSearchIndex = async (bookId, indexRecord) => {
+    if (!bookId || !indexRecord || typeof indexedDB === 'undefined') return false
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        try {
+            if (!db.objectStoreNames.contains('fulltext_index')) return resolve(false)
+            const tx = db.transaction('fulltext_index', 'readwrite')
+            const store = tx.objectStore('fulltext_index')
+            store.put({
+                ...indexRecord,
+                bookId,
+                updatedAt: Date.now()
+            })
+            tx.oncomplete = () => resolve(true)
+            tx.onerror = () => reject(tx.error || new Error(`Failed to save search index for ${bookId}`))
+            tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving search index'))
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+export const getBookSearchIndex = async (bookId) => {
+    if (!bookId || typeof indexedDB === 'undefined') return null
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('fulltext_index')) return resolve(null)
+            const tx = db.transaction('fulltext_index', 'readonly')
+            const store = tx.objectStore('fulltext_index')
+            const req = store.get(bookId)
+            req.onsuccess = () => resolve(req.result || null)
+            req.onerror = () => resolve(null)
+        } catch (e) {
+            resolve(null)
+        }
+    })
+}
+
+export const deleteBookSearchIndex = async (bookId) => {
+    if (!bookId || typeof indexedDB === 'undefined') return false
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('fulltext_index')) return resolve(false)
+            const tx = db.transaction('fulltext_index', 'readwrite')
+            const store = tx.objectStore('fulltext_index')
+            store.delete(bookId)
+            tx.oncomplete = () => resolve(true)
+            tx.onerror = () => resolve(false)
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+export const getAllBookSearchIndexes = async () => {
+    if (typeof indexedDB === 'undefined') return []
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('fulltext_index')) return resolve([])
+            const tx = db.transaction('fulltext_index', 'readonly')
+            const store = tx.objectStore('fulltext_index')
+            const req = store.getAll()
+            req.onsuccess = () => resolve(req.result || [])
+            req.onerror = () => resolve([])
+        } catch (e) {
+            resolve([])
+        }
+    })
+}
+
 

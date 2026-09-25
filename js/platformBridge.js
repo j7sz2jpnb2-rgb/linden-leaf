@@ -40,7 +40,7 @@ class PlatformBridge {
             this.platform = 'electron';
         } else {
             this.platform = 'web';
-            if (typeof window !== 'undefined') {
+            if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
                 window.addEventListener('DOMContentLoaded', () => {
                     if (this.isTauri && !this._loggingBridgeInitialized) {
                         this.platform = 'tauri';
@@ -103,6 +103,282 @@ class PlatformBridge {
      */
     getPlatform() {
         return this.platform;
+    }
+
+    /**
+     * Detect running operating system
+     * @returns {'windows' | 'android' | 'linux' | 'macos' | 'browser'}
+     */
+    getOS() {
+        if (typeof window === 'undefined' || typeof navigator === 'undefined') return 'browser';
+        const ua = navigator.userAgent || '';
+        if (/android/i.test(ua)) return 'android';
+        if (/windows|win32|win64/i.test(ua)) return 'windows';
+        if (/macintosh|mac os x/i.test(ua)) return 'macos';
+        if (/linux/i.test(ua)) return 'linux';
+        return 'browser';
+    }
+
+    /**
+     * Deep capability matrix for cross-platform fallback and Android readiness
+     * @returns {Readonly<{
+     *   platform: string,
+     *   os: string,
+     *   isAndroid: boolean,
+     *   isWindows: boolean,
+     *   hasNativeMuPdf: boolean,
+     *   hasContentUriSupport: boolean,
+     *   hasPersistentUriPermission: boolean,
+     *   hasPrivateCacheStreaming: boolean,
+     *   hasSecureStorage: boolean,
+     *   hasExternalBrowserIntent: boolean,
+     *   hasWindowControls: boolean
+     * }>}
+     */
+    getCapabilities() {
+        const os = this.getOS();
+        const isTauri = this.isTauri;
+        const isElectron = this.isElectron;
+        const isAndroid = os === 'android';
+        const isWindows = os === 'windows';
+
+        return Object.freeze({
+            platform: this.platform, // 'tauri' | 'electron' | 'web'
+            os,
+            isAndroid,
+            isWindows,
+            // Native compiled MuPDF only available on Windows desktop in current build
+            hasNativeMuPdf: Boolean(isTauri && isWindows),
+            // Android SAF (Storage Access Framework) content:// URIs - NOT yet implemented in native layer
+            hasContentUriSupport: false,
+            // Persistent permissions require Android ContentResolver takePersistableUriPermission - NOT yet implemented
+            hasPersistentUriPermission: false,
+            // Streaming copy to app-private cache snapshot
+            hasPrivateCacheStreaming: Boolean((isTauri && isWindows) || isElectron),
+            // Secure credential storage (Windows DPAPI)
+            hasSecureStorage: Boolean((isTauri && isWindows) || isElectron),
+            hasExternalBrowserIntent: true,
+            // Desktop window controls (minimize, maximize, close)
+            hasWindowControls: Boolean((isTauri || isElectron) && !isAndroid)
+        });
+    }
+
+    /**
+     * Set runtime memory and cache budget
+     * @param {object} budget
+     * @param {number} [budget.maxMemoryMb]
+     * @param {number} [budget.maxCacheMb]
+     * @param {number} [budget.maxConcurrentTasks]
+     */
+    setResourceBudget(budget = {}) {
+        const isWin = this.getOS() === 'windows';
+        this._resourceBudget = {
+            maxMemoryMb: budget.maxMemoryMb || (isWin ? 1024 : 384),
+            maxCacheMb: budget.maxCacheMb || (isWin ? 512 : 128),
+            maxConcurrentTasks: budget.maxConcurrentTasks || (isWin ? 3 : 1),
+            ...budget
+        };
+        return this._resourceBudget;
+    }
+
+    getResourceBudget() {
+        if (!this._resourceBudget) {
+            this.setResourceBudget();
+        }
+        return this._resourceBudget;
+    }
+
+    /**
+     * Check if a given string or path is an Android content:// URI
+     * @param {string} uriString
+     * @returns {boolean}
+     */
+    isContentUri(uriString) {
+        if (!uriString || typeof uriString !== 'string') return false;
+        return uriString.trim().toLowerCase().startsWith('content://');
+    }
+
+    /**
+     * Take persistent URI read permission for an Android SAF source.
+     * Must return explicit capability failure if unsupported; NEVER returns fake success.
+     * @param {string} contentUri
+     * @returns {Promise<{ success: boolean, supported: boolean, uri?: string, error?: string }>}
+     */
+    async takePersistentUriPermission(contentUri) {
+        if (!contentUri || !this.isContentUri(contentUri)) {
+            return {
+                success: false,
+                supported: false,
+                error: '非法的 Content URI'
+            };
+        }
+
+        const caps = this.getCapabilities();
+        if (!caps.hasPersistentUriPermission) {
+            return {
+                success: false,
+                supported: false,
+                error: '当前平台或环境不支持持久化 Content URI 权限 (仅在 Android 原生端可用)'
+            };
+        }
+
+        try {
+            const res = await this._invokeTauri('saf_take_persistent_permission', { uri: contentUri });
+            return {
+                success: Boolean(res?.success),
+                supported: true,
+                uri: contentUri,
+                error: res?.error || null
+            };
+        } catch (err) {
+            return {
+                success: false,
+                supported: true,
+                error: `获取持久化权限失败: ${err.message || err}`
+            };
+        }
+    }
+
+    /**
+     * Release persistent URI permission for an Android SAF source.
+     * @param {string} contentUri
+     * @returns {Promise<{ success: boolean, supported: boolean, error?: string }>}
+     */
+    async releasePersistentUriPermission(contentUri) {
+        if (!contentUri || !this.isContentUri(contentUri)) {
+            return {
+                success: false,
+                supported: false,
+                error: '非法的 Content URI'
+            };
+        }
+
+        const caps = this.getCapabilities();
+        if (!caps.hasPersistentUriPermission) {
+            return {
+                success: false,
+                supported: false,
+                error: '当前平台不支持 Content URI 权限释放'
+            };
+        }
+
+        try {
+            const res = await this._invokeTauri('saf_release_persistent_permission', { uri: contentUri });
+            return {
+                success: Boolean(res?.success),
+                supported: true,
+                error: res?.error || null
+            };
+        } catch (err) {
+            return {
+                success: false,
+                supported: true,
+                error: `释放持久化权限失败: ${err.message || err}`
+            };
+        }
+    }
+
+    /**
+     * Stream copy a document source (file, blob, or content URI) into app private snapshot cache.
+     * Contract: Ensures that file-seekable engines like MuPDF have an isolated private file.
+     * @param {object} source
+     * @param {string} [source.path]
+     * @param {string} [source.contentUri]
+     * @param {Blob} [source.blob]
+     * @param {ArrayBuffer} [source.buffer]
+     * @param {string} [source.filename]
+     * @param {object} [options]
+     * @param {string} [options.destinationFilename]
+     * @param {Function} [options.onProgress]
+     * @param {AbortSignal} [options.signal]
+     * @returns {Promise<{ success: boolean, cachedPath?: string, bytesWritten?: number, error?: string }>}
+     */
+    async copySourceToPrivateCache(source, options = {}) {
+        if (!source) {
+            return { success: false, error: '缺少输入源' };
+        }
+
+        const caps = this.getCapabilities();
+        if (!caps.hasPrivateCacheStreaming) {
+            return {
+                success: false,
+                error: '当前环境无私有文件系统缓存能力 (Web 或沙箱不可用)'
+            };
+        }
+
+        if (options.signal?.aborted) {
+            return { success: false, error: '操作已取消' };
+        }
+
+        // 1. If contentUri is provided on Android
+        if (source.contentUri && this.isContentUri(source.contentUri)) {
+            if (!caps.hasContentUriSupport) {
+                return { success: false, error: '当前环境不支持通过 ContentResolver 复制 Content URI' };
+            }
+            try {
+                const res = await this._invokeTauri('saf_copy_to_private_cache', {
+                    uri: source.contentUri,
+                    destinationFilename: options.destinationFilename || source.filename || 'cached_doc'
+                });
+                return res || { success: false, error: 'Content URI 流式复制失败' };
+            } catch (err) {
+                return { success: false, error: `Content URI 复制异常: ${err.message || err}` };
+            }
+        }
+
+        // 2. If native local file path is available
+        if (source.path && typeof source.path === 'string') {
+            try {
+                // If it's a PDF, we can reuse stagePdfSource
+                if (/\.pdf$/i.test(source.path) && this.stagePdfSource) {
+                    const staged = await this.stagePdfSource(source.path);
+                    const snapPath = typeof staged === 'string' ? staged : staged?.snapshotPath;
+                    if (snapPath) {
+                        return {
+                            success: true,
+                            cachedPath: snapPath,
+                            bytesWritten: typeof staged === 'object' ? (staged?.size || 0) : 0
+                        };
+                    }
+                }
+
+                // Generic snapshot creation for any document file
+                const buf = await this.readFileBuffer(source.path, { signal: options.signal });
+                if (buf && this.createBookSnapshot) {
+                    const fname = options.destinationFilename || source.filename || source.path.split(/[\\/]/).pop();
+                    const snapPath = await this.createBookSnapshot(fname, buf);
+                    if (snapPath) {
+                        return {
+                            success: true,
+                            cachedPath: snapPath,
+                            bytesWritten: buf.byteLength
+                        };
+                    }
+                }
+            } catch (err) {
+                return { success: false, error: `本地文件缓存复制失败: ${err.message || err}` };
+            }
+        }
+
+        // 3. If Blob or ArrayBuffer is provided
+        const buffer = source.buffer || (source.blob ? await source.blob.arrayBuffer() : null);
+        if (buffer && this.createBookSnapshot) {
+            try {
+                const fname = options.destinationFilename || source.filename || `doc_${Date.now()}`;
+                const snapPath = await this.createBookSnapshot(fname, buffer);
+                if (snapPath) {
+                    return {
+                        success: true,
+                        cachedPath: snapPath,
+                        bytesWritten: buffer.byteLength
+                    };
+                }
+            } catch (err) {
+                return { success: false, error: `内存流写入私有缓存失败: ${err.message || err}` };
+            }
+        }
+
+        return { success: false, error: '未能匹配可执行的私有缓存复制策略' };
     }
 
     /**
@@ -189,8 +465,11 @@ class PlatformBridge {
      * @param {string} filePath
      * @returns {Promise<ArrayBuffer | null>}
      */
-    async readFileBuffer(filePath) {
+    async readFileBuffer(filePath, options = {}) {
         if (!filePath) return null;
+        if (options.signal?.aborted) {
+            throw new DOMException('The operation was aborted', 'AbortError');
+        }
 
         if (this._getNativeElectron()?.readFileBuffer) {
             return await this._getNativeElectron().readFileBuffer(filePath);
@@ -743,6 +1022,109 @@ class PlatformBridge {
             }
         } catch (e) {}
         return '';
+    }
+
+    /**
+     * Securely store credential using OS DPAPI / Keychain when available
+     * @param {string} key
+     * @param {string} value
+     * @returns {Promise<boolean>}
+     */
+    async secureStoreCredential(key, value) {
+        if (!key) return false;
+        if (this._getNativeElectron()?.secureStoreCredential) {
+            return await this._getNativeElectron().secureStoreCredential(key, value);
+        }
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('secure_store_credential', { key, value });
+            } catch (e) {
+                console.warn('[PlatformBridge] secure_store_credential error:', e);
+                return false;
+            }
+        }
+        try {
+            sessionStorage.setItem(`__sec_${key}`, value);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * Securely load credential using OS DPAPI / Keychain when available
+     * @param {string} key
+     * @returns {Promise<string | null>}
+     */
+    async secureLoadCredential(key) {
+        if (!key) return null;
+        if (this._getNativeElectron()?.secureLoadCredential) {
+            return await this._getNativeElectron().secureLoadCredential(key);
+        }
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('secure_load_credential', { key });
+            } catch (e) {
+                console.warn('[PlatformBridge] secure_load_credential error:', e);
+                return null;
+            }
+        }
+        try {
+            return sessionStorage.getItem(`__sec_${key}`) || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * Check if credential exists
+     * @param {string} key
+     * @returns {Promise<boolean>}
+     */
+    async secureHasCredential(key) {
+        if (!key) return false;
+        if (this._getNativeElectron()?.secureHasCredential) {
+            return await this._getNativeElectron().secureHasCredential(key);
+        }
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('secure_has_credential', { key });
+            } catch (e) {
+                console.warn('[PlatformBridge] secure_has_credential error:', e);
+                return false;
+            }
+        }
+        try {
+            return Boolean(sessionStorage.getItem(`__sec_${key}`));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * Delete stored credential
+     * @param {string} key
+     * @returns {Promise<boolean>}
+     */
+    async secureDeleteCredential(key) {
+        if (!key) return false;
+        if (this._getNativeElectron()?.secureDeleteCredential) {
+            return await this._getNativeElectron().secureDeleteCredential(key);
+        }
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('secure_delete_credential', { key });
+            } catch (e) {
+                console.warn('[PlatformBridge] secure_delete_credential error:', e);
+                return false;
+            }
+        }
+        try {
+            sessionStorage.removeItem(`__sec_${key}`);
+            return true;
+        } catch (e) {
+            return false;
+        }
     }
 
     /**

@@ -46,28 +46,119 @@ export const isAutoUploadEligible = (bookMeta) => {
 }
 
 /**
+ * Pure deterministic reconciliation function for book sync metadata
+ * Handles tags, readingStatus, completedAt (with explicit null preservation),
+ * lists, favorites, progress, and cloud backup.
+ * Both mergeSyncData and applyMergedPayloadToLocal MUST use this exact function.
+ */
+export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localClientId = '', incomingClientId = '') => {
+    const isIncomingNewer = (inTime, locTime) => {
+        const iT = inTime || 0
+        const lT = locTime || 0
+        if (iT !== lT) return iT > lT
+        return (incomingClientId || '') > (localClientId || '')
+    }
+
+    // 1. Tags: LWW based on explicit tagsUpdatedAt. Missing incoming tags never deletes local tags.
+    let tags = localBook.tags || []
+    let tagsUpdatedAt = localBook.tagsUpdatedAt || 0
+    if (Array.isArray(incomingMeta.tags)) {
+        if (isIncomingNewer(incomingMeta.tagsUpdatedAt, localBook.tagsUpdatedAt)) {
+            tags = incomingMeta.tags
+            tagsUpdatedAt = incomingMeta.tagsUpdatedAt || 0
+        }
+    }
+
+    // 2. Reading Status & completedAt: LWW based on statusUpdatedAt
+    let readingStatus = localBook.readingStatus || 'unread'
+    let statusUpdatedAt = localBook.statusUpdatedAt || 0
+    let completedAt = localBook.completedAt !== undefined ? localBook.completedAt : null
+
+    if (incomingMeta.readingStatus && isIncomingNewer(incomingMeta.statusUpdatedAt, localBook.statusUpdatedAt)) {
+        readingStatus = incomingMeta.readingStatus
+        statusUpdatedAt = incomingMeta.statusUpdatedAt || 0
+        // Explicitly preserve null when un-marking finished!
+        if (incomingMeta.completedAt !== undefined) {
+            completedAt = incomingMeta.completedAt
+        } else {
+            completedAt = (incomingMeta.readingStatus === 'finished') ? (incomingMeta.statusUpdatedAt || Date.now()) : null
+        }
+    }
+
+    // 3. Custom Lists: LWW based on listsUpdatedAt
+    let customListIds = localBook.customListIds || []
+    let listsUpdatedAt = localBook.listsUpdatedAt || 0
+    if (Array.isArray(incomingMeta.customListIds)) {
+        if (isIncomingNewer(incomingMeta.listsUpdatedAt, localBook.listsUpdatedAt)) {
+            customListIds = incomingMeta.customListIds
+            listsUpdatedAt = incomingMeta.listsUpdatedAt || 0
+        }
+    }
+
+    // 4. Favorite: LWW based on favoriteUpdatedAt
+    let isFavorite = Boolean(localBook.isFavorite)
+    let favoriteUpdatedAt = localBook.favoriteUpdatedAt || 0
+    if (incomingMeta.favoriteUpdatedAt || incomingMeta.isFavorite !== undefined) {
+        if (isIncomingNewer(incomingMeta.favoriteUpdatedAt, localBook.favoriteUpdatedAt)) {
+            isFavorite = Boolean(incomingMeta.isFavorite)
+            favoriteUpdatedAt = incomingMeta.favoriteUpdatedAt || 0
+        }
+    }
+
+    // 5. Reading Progress & Last Read
+    const localReadTime = localBook.lastReadAt || 0
+    const inReadTime = incomingMeta.lastReadAt || 0
+    let isIncomingReadNewer = false
+    if (inReadTime !== localReadTime) {
+        isIncomingReadNewer = inReadTime > localReadTime
+    } else {
+        isIncomingReadNewer = (incomingMeta.progress?.fraction || 0) > (localBook.progress?.fraction || 0)
+    }
+
+    const progress = isIncomingReadNewer ? (incomingMeta.progress || localBook.progress) : (localBook.progress || incomingMeta.progress)
+    const lastReadAt = Math.max(localReadTime, inReadTime)
+    const totalReadingSeconds = Math.max(localBook.totalReadingSeconds || 0, incomingMeta.totalReadingSeconds || 0)
+
+    // 6. Cloud Backup: newer uploadedAt wins
+    let cloudBackup = localBook.cloudBackup || null
+    if (incomingMeta.cloudBackup) {
+        const inUp = incomingMeta.cloudBackup.uploadedAt || 0
+        const locUp = localBook.cloudBackup?.uploadedAt || 0
+        if (inUp >= locUp || !localBook.cloudBackup?.hasBackup) {
+            cloudBackup = incomingMeta.cloudBackup
+        }
+    }
+
+    return {
+        tags,
+        tagsUpdatedAt,
+        readingStatus,
+        statusUpdatedAt,
+        completedAt,
+        customListIds,
+        listsUpdatedAt,
+        isFavorite,
+        favoriteUpdatedAt,
+        progress,
+        lastReadAt,
+        totalReadingSeconds,
+        cloudBackup
+    }
+}
+
+/**
  * 1. Export local sync payload from IndexedDB
  */
-export const exportSyncPayload = async () => {
-    const allBooks = await db.getAllBooks()
-    const allLists = await db.getAllCustomLists()
-    const allHighlights = await db.getAllHighlights()
-    const allBookmarks = await db.getAllBookmarks()
-    const allSessions = await db.getAllReadingSessions()
-    const deletedRecords = await db.getAllDeletedRecords()
-    const allPdfDrawings = (typeof db.getAllPdfDrawings === 'function') ? (await db.getAllPdfDrawings()) : []
-    const settings = (await db.getSetting('readerSettings')) || (await db.getSetting('reader_settings')) || {}
-
-    const booksMeta = allBooks.map(b => {
-        const rawIdent = b.identifier
-        const isEphemeral = typeof rawIdent === 'string' && /^(txt|docx|pdf)-\d{10,}$/.test(rawIdent)
-        const validIdent = isEphemeral ? null : rawIdent
-        const stableKey = b.stableKey || validIdent || `${b.title || ''}_${b.size || 0}_${b.format || ''}`.replace(/\s+/g, '').toLowerCase()
-        return {
-            id: b.id,
-            stableKey,
-            identifier: validIdent,
-            title: b.title,
+export const buildBookSyncMeta = (b) => {
+    const rawIdent = b.identifier
+    const isEphemeral = typeof rawIdent === 'string' && /^(txt|docx|pdf)-\d{10,}$/.test(rawIdent)
+    const validIdent = isEphemeral ? null : rawIdent
+    const stableKey = b.stableKey || validIdent || `${b.title || ''}_${b.size || 0}_${b.format || ''}`.replace(/\s+/g, '').toLowerCase()
+    return {
+        id: b.id,
+        stableKey,
+        identifier: validIdent,
+        title: b.title,
         author: b.author,
         format: b.format,
         size: b.size,
@@ -77,6 +168,11 @@ export const exportSyncPayload = async () => {
         customListIds: b.customListIds || [],
         listsUpdatedAt: b.listsUpdatedAt || b.updatedAt || 0,
         progress: b.progress || { fraction: 0 },
+        tags: Array.isArray(b.tags) ? b.tags : [],
+        tagsUpdatedAt: b.tagsUpdatedAt || 0,
+        readingStatus: b.readingStatus || (b.lastReadAt > 0 ? 'reading' : 'unread'),
+        statusUpdatedAt: b.statusUpdatedAt || 0,
+        completedAt: b.completedAt || null,
         lastReadAt: b.lastReadAt || 0,
         totalReadingSeconds: b.totalReadingSeconds || 0,
         addedAt: b.addedAt || Date.now(),
@@ -88,7 +184,20 @@ export const exportSyncPayload = async () => {
             format: b.format,
             uploadedAt: b.cloudBackupUploadedAt || Date.now()
         } : null)
-    } })
+    }
+}
+
+export const exportSyncPayload = async () => {
+    const allBooks = await db.getAllBooks()
+    const allLists = await db.getAllCustomLists()
+    const allHighlights = await db.getAllHighlights()
+    const allBookmarks = await db.getAllBookmarks()
+    const allSessions = await db.getAllReadingSessions()
+    const deletedRecords = await db.getAllDeletedRecords()
+    const allPdfDrawings = (typeof db.getAllPdfDrawings === 'function') ? (await db.getAllPdfDrawings()) : []
+    const settings = (await db.getSetting('readerSettings')) || (await db.getSetting('reader_settings')) || {}
+
+    const booksMeta = allBooks.map(buildBookSyncMeta)
 
 
     return {
@@ -208,6 +317,8 @@ export const mergeSyncData = (localPayload, remotePayload) => {
                 lastReadAt: clampTime(b.lastReadAt),
                 favoriteUpdatedAt: clampTime(b.favoriteUpdatedAt),
                 listsUpdatedAt: clampTime(b.listsUpdatedAt),
+                tagsUpdatedAt: clampTime(b.tagsUpdatedAt),
+                statusUpdatedAt: clampTime(b.statusUpdatedAt),
                 updatedAt: clampTime(b.updatedAt),
                 isLocal: true
             })
@@ -220,6 +331,8 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         const rUpdated = clampTime(remoteBook.updatedAt)
         const rFavUpdated = clampTime(remoteBook.favoriteUpdatedAt)
         const rListsUpdated = clampTime(remoteBook.listsUpdatedAt)
+        const rTagsUpdated = clampTime(remoteBook.tagsUpdatedAt)
+        const rStatusUpdated = clampTime(remoteBook.statusUpdatedAt)
 
         const safeFormat = sanitizeSyncFormat(remoteBook.format)
         let safeCloud = remoteBook.cloudBackup
@@ -241,6 +354,11 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         if (!localBook) {
             bookMap.set(cleanRemoteBook.id, {
                 ...cleanRemoteBook,
+                tags: Array.isArray(cleanRemoteBook.tags) ? cleanRemoteBook.tags : [],
+                tagsUpdatedAt: rTagsUpdated,
+                readingStatus: cleanRemoteBook.readingStatus || 'unread',
+                statusUpdatedAt: rStatusUpdated,
+                completedAt: cleanRemoteBook.completedAt || null,
                 lastReadAt: rLastRead,
                 updatedAt: rUpdated,
                 favoriteUpdatedAt: rFavUpdated,
@@ -251,44 +369,7 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         } else {
             const localReadTime = localBook.lastReadAt || 0
             const remoteReadTime = rLastRead || 0
-            let isRemoteReadNewer = false
-
-            // Strict read time comparison: only devices that actually opened/read the book (> 0) compete on read time
-            if (remoteReadTime !== localReadTime) {
-                isRemoteReadNewer = remoteReadTime > localReadTime
-            } else {
-                // If read timestamps tie (e.g. both 0 or same timestamp), higher reading fraction wins
-                isRemoteReadNewer = (cleanRemoteBook.progress?.fraction || 0) > (localBook.progress?.fraction || 0)
-            }
-
-            const newestProgress = isRemoteReadNewer ? (cleanRemoteBook.progress || localBook.progress) : (localBook.progress || cleanRemoteBook.progress)
-            const newestLastReadAt = Math.max(localReadTime, remoteReadTime)
-
-            // Total Reading Seconds: max
-            const mergedTotalSeconds = Math.max(localBook.totalReadingSeconds || 0, cleanRemoteBook.totalReadingSeconds || 0)
-
-            // Custom lists & Favorites: LWW based on explicit timestamp
-            const localMetaTime = Math.max(localBook.updatedAt || 0, localBook.lastReadAt || 0)
-            const remoteMetaTime = Math.max(rUpdated || 0, rLastRead || 0)
-            const isRemoteMetaNewer = remoteMetaTime > localMetaTime
-
-            const isFav = (rFavUpdated || localBook.favoriteUpdatedAt)
-                ? (rFavUpdated >= (localBook.favoriteUpdatedAt || 0) ? cleanRemoteBook.isFavorite : localBook.isFavorite)
-                : (isRemoteMetaNewer ? cleanRemoteBook.isFavorite : localBook.isFavorite)
-
-            const mergedLists = (rListsUpdated || localBook.listsUpdatedAt)
-                ? (rListsUpdated >= (localBook.listsUpdatedAt || 0) ? (cleanRemoteBook.customListIds || []) : (localBook.customListIds || []))
-                : (isRemoteMetaNewer ? (cleanRemoteBook.customListIds || []) : (localBook.customListIds || []))
-
-            // Cloud Backup: select by uploadedAt timestamp rather than blind fallback
-            const rCloud = cleanRemoteBook.cloudBackup
-            const lCloud = localBook.cloudBackup
-            let mergedCloud = null
-            if (rCloud && lCloud) {
-                mergedCloud = (rCloud.uploadedAt || 0) >= (lCloud.uploadedAt || 0) ? rCloud : lCloud
-            } else {
-                mergedCloud = rCloud || lCloud || null
-            }
+            const reconciled = reconcileBookSyncMeta(localBook, cleanRemoteBook, localPayload.clientId, remotePayload.clientId)
 
             if (remoteReadTime > localReadTime || cleanRemoteBook.totalReadingSeconds !== localBook.totalReadingSeconds) {
                 stats.booksUpdated++
@@ -298,14 +379,19 @@ export const mergeSyncData = (localPayload, remotePayload) => {
                 ...localBook,
                 format: sanitizeSyncFormat(localBook.format || cleanRemoteBook.format),
                 stableKey: localBook.stableKey || cleanRemoteBook.stableKey,
-                cloudBackup: mergedCloud,
-                progress: newestProgress,
-                lastReadAt: newestLastReadAt,
-                totalReadingSeconds: mergedTotalSeconds,
-                customListIds: mergedLists,
-                isFavorite: !!isFav,
-                favoriteUpdatedAt: Math.max(localBook.favoriteUpdatedAt || 0, rFavUpdated),
-                listsUpdatedAt: Math.max(localBook.listsUpdatedAt || 0, rListsUpdated),
+                cloudBackup: reconciled.cloudBackup,
+                progress: reconciled.progress,
+                lastReadAt: reconciled.lastReadAt,
+                totalReadingSeconds: reconciled.totalReadingSeconds,
+                customListIds: reconciled.customListIds,
+                tags: reconciled.tags,
+                tagsUpdatedAt: reconciled.tagsUpdatedAt,
+                readingStatus: reconciled.readingStatus,
+                statusUpdatedAt: reconciled.statusUpdatedAt,
+                completedAt: reconciled.completedAt,
+                isFavorite: reconciled.isFavorite,
+                favoriteUpdatedAt: reconciled.favoriteUpdatedAt,
+                listsUpdatedAt: reconciled.listsUpdatedAt,
                 updatedAt: Math.max(localBook.updatedAt || 0, rUpdated)
             })
         }
@@ -566,38 +652,41 @@ export const applyMergedPayload = async mergedPayload => {
             }
             if (localBook) {
                 let changed = false
-                const isRemoteReadNewer = (meta.lastReadAt || 0) > (localBook.lastReadAt || 0) ||
-                    (meta.lastReadAt === localBook.lastReadAt && (meta.progress?.fraction || 0) > (localBook.progress?.fraction || 0))
-                
-                if (meta.progress && isRemoteReadNewer) {
-                    localBook.progress = meta.progress
-                    localBook.lastReadAt = meta.lastReadAt || localBook.lastReadAt
+                const reconciled = reconcileBookSyncMeta(localBook, meta, '', 'incoming')
+
+                if (JSON.stringify(localBook.tags || []) !== JSON.stringify(reconciled.tags || [])) {
+                    localBook.tags = reconciled.tags
+                    localBook.tagsUpdatedAt = reconciled.tagsUpdatedAt
                     changed = true
                 }
-                if (meta.totalReadingSeconds != null && meta.totalReadingSeconds > (localBook.totalReadingSeconds || 0)) {
-                    localBook.totalReadingSeconds = meta.totalReadingSeconds
+                if (localBook.readingStatus !== reconciled.readingStatus || localBook.completedAt !== reconciled.completedAt) {
+                    localBook.readingStatus = reconciled.readingStatus
+                    localBook.statusUpdatedAt = reconciled.statusUpdatedAt
+                    localBook.completedAt = reconciled.completedAt
                     changed = true
                 }
-                if (meta.isFavorite !== localBook.isFavorite) {
-                    localBook.isFavorite = meta.isFavorite
-                    localBook.favoriteUpdatedAt = meta.favoriteUpdatedAt || localBook.favoriteUpdatedAt || Date.now()
+                if (JSON.stringify(localBook.customListIds || []) !== JSON.stringify(reconciled.customListIds || [])) {
+                    localBook.customListIds = reconciled.customListIds
+                    localBook.listsUpdatedAt = reconciled.listsUpdatedAt
                     changed = true
                 }
-                if (Array.isArray(meta.customListIds)) {
-                    const isRemoteListNewer = (meta.listsUpdatedAt || 0) >= (localBook.listsUpdatedAt || 0)
-                    if (isRemoteListNewer) {
-                        localBook.customListIds = meta.customListIds
-                        localBook.listsUpdatedAt = meta.listsUpdatedAt || Date.now()
-                        changed = true
-                    }
+                if (localBook.isFavorite !== reconciled.isFavorite) {
+                    localBook.isFavorite = reconciled.isFavorite
+                    localBook.favoriteUpdatedAt = reconciled.favoriteUpdatedAt
+                    changed = true
                 }
-                if (meta.cloudBackup && meta.cloudBackup.hasBackup) {
-                    const rUp = meta.cloudBackup.uploadedAt || 0
-                    const lUp = localBook.cloudBackup?.uploadedAt || 0
-                    if (rUp >= lUp || !localBook.cloudBackup?.hasBackup) {
-                        localBook.cloudBackup = meta.cloudBackup
-                        changed = true
-                    }
+                if (reconciled.lastReadAt > (localBook.lastReadAt || 0) || (reconciled.progress && !localBook.progress)) {
+                    localBook.progress = reconciled.progress
+                    localBook.lastReadAt = reconciled.lastReadAt
+                    changed = true
+                }
+                if (reconciled.totalReadingSeconds > (localBook.totalReadingSeconds || 0)) {
+                    localBook.totalReadingSeconds = reconciled.totalReadingSeconds
+                    changed = true
+                }
+                if (reconciled.cloudBackup && (!localBook.cloudBackup || (reconciled.cloudBackup.uploadedAt || 0) >= (localBook.cloudBackup?.uploadedAt || 0))) {
+                    localBook.cloudBackup = reconciled.cloudBackup
+                    changed = true
                 }
                 if (changed) {
                     localBook.updatedAt = meta.updatedAt || localBook.updatedAt || Date.now()
@@ -617,6 +706,11 @@ export const applyMergedPayload = async mergedPayload => {
                     format: sanitizeSyncFormat(meta.format),
                     isCloudOnly: true,
                     hasLocalFile: false,
+                    tags: Array.isArray(meta.tags) ? meta.tags : [],
+                    tagsUpdatedAt: meta.tagsUpdatedAt || 0,
+                    readingStatus: meta.readingStatus || 'unread',
+                    statusUpdatedAt: meta.statusUpdatedAt || 0,
+                    completedAt: meta.completedAt || null,
                     cloudBackup: meta.cloudBackup,
                     cloudBackupState: isAutoEligible ? 'pending_auto_download' : 'cloud_only',
                     addedAt: meta.addedAt || Date.now(),
