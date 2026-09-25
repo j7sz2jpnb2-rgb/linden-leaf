@@ -560,6 +560,7 @@ export const mergeSyncData = (localPayload, remotePayload) => {
 
     const merged = {
         version: 1,
+        clientId: localPayload.clientId || (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || '',
         updatedAt: Date.now(),
         settings: mergedSettings,
         customLists: mergedCustomLists,
@@ -637,6 +638,8 @@ export const applyMergedPayload = async mergedPayload => {
     const bookIdRemap = new Map()
     const pendingAutoDownloads = []
     if (Array.isArray(mergedPayload.booksMeta)) {
+        const localClientId = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || ''
+        const incomingClientId = mergedPayload.clientId || ''
         for (const meta of mergedPayload.booksMeta) {
             if (!meta || !meta.id) continue
             if (deletedBookIds.includes(meta.id) || (meta.stableKey && deletedStableKeys.has(meta.stableKey))) {
@@ -652,7 +655,7 @@ export const applyMergedPayload = async mergedPayload => {
             }
             if (localBook) {
                 let changed = false
-                const reconciled = reconcileBookSyncMeta(localBook, meta, '', 'incoming')
+                const reconciled = reconcileBookSyncMeta(localBook, meta, localClientId, incomingClientId)
 
                 if (JSON.stringify(localBook.tags || []) !== JSON.stringify(reconciled.tags || [])) {
                     localBook.tags = reconciled.tags

@@ -1278,7 +1278,14 @@ export const getAllReadingSessions = async () => {
 // Calculate WeChat Read Full Statistics (Supports Week, Month, Year, Total views)
 export const getReadingStats = async (viewMode = 'month', targetYear = new Date().getFullYear(), targetMonth = new Date().getMonth() + 1, weekOffset = 0) => {
     const allRawSessions = await getAllReadingSessions()
-    const sessions = allRawSessions.filter(s => s && (s.durationSeconds || 0) > 0)
+    const getSessionDur = s => {
+        if (!s) return 0
+        const v = s.durationSeconds != null ? s.durationSeconds
+            : s.readingSeconds != null ? s.readingSeconds
+            : s.seconds != null ? s.seconds : 0
+        return typeof v === 'number' && !isNaN(v) && v > 0 ? Math.round(v) : 0
+    }
+    const sessions = allRawSessions.filter(s => s && getSessionDur(s) > 0)
     const books = await getAllBooks()
     const highlights = await getAllHighlights()
 
@@ -1292,7 +1299,7 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
     let earliestTime = now.getTime()
 
     for (const sess of sessions) {
-        const dur = sess.durationSeconds || 0
+        const dur = getSessionDur(sess)
         totalSeconds += dur
         const d = sess.date || toLocalDateKey(sess.startTime || now)
         dailyMap[d] = (dailyMap[d] || 0) + dur

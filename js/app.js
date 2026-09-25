@@ -1533,7 +1533,8 @@ class UniversalReaderApp {
             if (this.settings.theme) localStorage.setItem('linden_leaf_theme', this.settings.theme)
             localStorage.setItem('linden_leaf_view_mode', 'grid')
         } catch (e) {}
-        this.pageTurnController?.setMode(this.settings.pageTurnMode || 'slide')
+        const validTurnModes = ['none', 'slide', 'cover', 'curl']
+        this.pageTurnController?.setMode(validTurnModes.includes(this.settings.pageTurnMode) ? this.settings.pageTurnMode : 'slide')
         this.updateSettingsUI()
     }
 
@@ -1604,10 +1605,12 @@ class UniversalReaderApp {
         if (this.dom.layoutSelect) {
             this.dom.layoutSelect.value = this.settings.layout || 'paginated'
         }
+        const validTurnModes = ['none', 'slide', 'cover', 'curl']
+        const turnMode = validTurnModes.includes(this.settings.pageTurnMode) ? this.settings.pageTurnMode : 'slide'
         if (this.dom.turnAnimationSelect) {
-            this.dom.turnAnimationSelect.value = this.settings.pageTurnMode || 'slide'
+            this.dom.turnAnimationSelect.value = turnMode
         }
-        this.pageTurnController?.setMode(this.settings.pageTurnMode || 'slide')
+        this.pageTurnController?.setMode(turnMode)
         const writingModeSelect = document.getElementById('setting-writing-mode')
         if (writingModeSelect) {
             writingModeSelect.value = this.settings.writingMode || 'horizontal'
@@ -2544,8 +2547,10 @@ class UniversalReaderApp {
         })
 
         this.dom.turnAnimationSelect?.addEventListener('change', e => {
-            this.settings.pageTurnMode = e.target.value
-            this.pageTurnController?.setMode(this.settings.pageTurnMode)
+            const validTurnModes = ['none', 'slide', 'cover', 'curl']
+            const mode = validTurnModes.includes(e.target.value) ? e.target.value : 'slide'
+            this.settings.pageTurnMode = mode
+            this.pageTurnController?.setMode(mode)
             this.saveSettings()
         })
 

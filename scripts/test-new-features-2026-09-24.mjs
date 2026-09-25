@@ -2,13 +2,14 @@
 // Automated verification suite for Linden Leaf 2026-09-24 Roadmap Features
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import './test-idb-setup.mjs'
 import { parsePageRange, formatSpansToText, cleanOcrChineseSpaces, OcrService } from '../js/ocr-service.js'
 import { validateSearchTemplate, buildSearchUrl, SEARCH_ENGINES } from '../js/search-config.js'
 import { formatMinutesClean, formatAxisLabel, aggregateSessions, getSessionDurationSeconds } from '../js/stats-heatmap.js'
 import { normalizeTag, normalizeTagList, VALID_READING_STATUSES, setReadingStatus } from '../js/tags-manager.js'
 import { renderSafeMarkdown, createTranslationPrompt, createExplainPrompt, createQuestionPrompt, validateEndpointUrl, saveAiConfig, getAiConfig, getAiApiKey } from '../js/reading-ai-assistant.js'
-import { ImportQueue } from '../js/import-queue.js'
+import { ImportQueue, findDuplicateBook } from '../js/import-queue.js'
 import { isCanvasBlankWhite } from '../js/pdf-cover.js'
 import { escapeHTML as escapeHTMLDetails, BookDetailsModal } from '../js/book-details.js'
 import { tokenizeText, createExcerptSnippet, escapeHTML as escapeHTMLSearch, FullTextSearchEngine, EXTRACTOR_VERSION, SUPPORTED_SEARCH_FORMATS, extractCleanTextFromHtml } from '../js/fulltext-search.js'
@@ -1160,6 +1161,19 @@ async function runAll() {
         assert.equal(agg.dayMap.size, 0)
     })
 
+    await test('25.3 getReadingStats extracts duration from durationSeconds, readingSeconds, and seconds', async () => {
+        const legacySessions = [
+            { id: 'sess_dur', bookId: 'b_test', startTime: Date.now() - 3600000, durationSeconds: 600 },
+            { id: 'sess_read', bookId: 'b_test', startTime: Date.now() - 1800000, readingSeconds: 400 },
+            { id: 'sess_sec', bookId: 'b_test', startTime: Date.now() - 600000, seconds: 200 }
+        ]
+        for (const s of legacySessions) {
+            await db.saveReadingSession(s, false)
+        }
+        const stats = await db.getReadingStats('total')
+        assert.equal(stats.totalSeconds >= 1200, true, `Expected totalSeconds >= 1200, got ${stats.totalSeconds}`)
+    })
+
     // ---------------------------------------------------------------------
     // 26. R2: Import Queue Collision Barrier & Resource Release
     // ---------------------------------------------------------------------
@@ -1189,6 +1203,85 @@ async function runAll() {
         queue._releaseTerminalJobResources(job)
         assert.equal(job.rawItem.filePath, 'C:/book.pdf')
         assert.equal(job.rawItem.buffer, undefined)
+    })
+
+    await test('26.3 _releaseTerminalJobResources drops File/Blob reference on cancelled or failed jobs', () => {
+        const queue = new ImportQueue()
+        const fakeBlob = new Blob(['sample content'], { type: 'application/pdf' })
+        const job = {
+            id: 'j3',
+            filename: 'document.pdf',
+            fileSize: 14,
+            status: 'cancelled',
+            rawItem: fakeBlob,
+            fileBuffer: new ArrayBuffer(1024)
+        }
+        queue._releaseTerminalJobResources(job)
+        assert.equal(job.fileBuffer, null)
+        assert.equal(job.rawItem instanceof Blob, false)
+        assert.deepEqual(job.rawItem, {
+            filename: 'document.pdf',
+            fileSize: 14,
+            requiresReSelect: true
+        })
+    })
+
+    await test('26.4 findDuplicateBook matches generic-titled books when stableKey or size+filename match', () => {
+        const existingBooks = [
+            {
+                id: 'b1',
+                title: '未命名',
+                filename: 'document.pdf',
+                format: 'pdf',
+                size: 2048,
+                stableKey: 'pdf_stable_123'
+            },
+            {
+                id: 'b2',
+                title: 'document',
+                filename: 'document.epub',
+                format: 'epub',
+                size: 4096,
+                identifier: 'epub-isbn-999'
+            }
+        ]
+
+        // 1. Matches by stableKey even if title is generic
+        const matchStable = findDuplicateBook(existingBooks, {
+            format: 'pdf',
+            fileName: 'another_name.pdf',
+            fileObj: { size: 9999 },
+            metadata: { title: '未命名' },
+            computedStableKey: 'pdf_stable_123'
+        })
+        assert.equal(matchStable?.id, 'b1')
+
+        // 2. Matches by identifier even if title is generic
+        const matchIdent = findDuplicateBook(existingBooks, {
+            format: 'epub',
+            fileName: 'diff_name.epub',
+            fileObj: { size: 1234 },
+            metadata: { title: 'document', identifier: 'epub-isbn-999' }
+        })
+        assert.equal(matchIdent?.id, 'b2')
+
+        // 3. Matches by exact size + filename when stableKey/identifier absent
+        const matchSizeFile = findDuplicateBook(existingBooks, {
+            format: 'pdf',
+            fileName: 'document.pdf',
+            fileObj: { size: 2048 },
+            metadata: { title: '未命名' }
+        })
+        assert.equal(matchSizeFile?.id, 'b1')
+
+        // 4. Does NOT match different file with same generic title if size or filename differ
+        const noMatch = findDuplicateBook(existingBooks, {
+            format: 'pdf',
+            fileName: 'other_document.pdf',
+            fileObj: { size: 99999 },
+            metadata: { title: '未命名' }
+        })
+        assert.equal(noMatch, null)
     })
 
     // ---------------------------------------------------------------------
@@ -1318,6 +1411,28 @@ async function runAll() {
             }
             platformBridge.getCapabilities = origGetCaps
         }
+    })
+
+    // ---------------------------------------------------------------------
+    // 31. HTML Structure & Modal Isolation
+    // ---------------------------------------------------------------------
+    console.log('\n--- Suite 31: HTML Structure & Modal Isolation ---')
+
+    await test('31.1 Import dock badge and task panel are not descendants of modal-ai-assistant', () => {
+        const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8')
+        const aiModalIdx = html.indexOf('id="modal-ai-assistant"')
+        assert.equal(aiModalIdx > 0, true)
+
+        const importDockIdx = html.indexOf('id="import-dock-badge"')
+        assert.equal(importDockIdx > 0, true)
+        assert.equal(importDockIdx > aiModalIdx, true)
+
+        // Find the slice between modal-ai-assistant and import-dock-badge
+        const slice = html.substring(aiModalIdx, importDockIdx)
+        // Count opening <div and closing </div tags
+        const opens = (slice.match(/<div[\s>]/g) || []).length
+        const closes = (slice.match(/<\/div>/g) || []).length
+        assert.equal(opens, closes, `Expected opening divs (${opens}) to equal closing divs (${closes}) before import-dock-badge`)
     })
 
     console.log('\n========================================================')

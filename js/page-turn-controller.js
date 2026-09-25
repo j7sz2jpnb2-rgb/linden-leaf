@@ -164,9 +164,8 @@ export class CurlSimulator {
 
         ctx.save()
 
-        // 1. Draw page base / under sheet
-        ctx.fillStyle = bgColor
-        ctx.fillRect(0, 0, width, height)
+        // 1. Transparent page base: keep underlying reader page content visible, only overlaying the curled flap & shadows
+        // (Do not draw an opaque solid rect over the whole screen)
 
         // 2. Draw soft drop shadow under the curled flap
         const shadowWidth = Math.min(80, width * 0.15)
@@ -415,23 +414,23 @@ export class PageTurnController {
                 await new Promise(r => setTimeout(r, this.animationDuration * 0.5))
 
             } else if (mode === 'cover') {
-                // Cover Page Peel Animation with overlay shadow
+                // Cover Page Peel Animation with themed sheet & edge shadow
                 if (this._overlayEl) {
+                    const bg = (typeof document !== 'undefined' && document.documentElement?.style?.backgroundColor) || '#FAF9F5'
                     this._overlayEl.style.display = 'block'
                     this._overlayEl.innerHTML = `
                         <div class="cover-peel-sheet" style="
                             position: absolute;
                             inset: 0;
-                            background: rgba(0, 0, 0, 0.08);
-                            box-shadow: ${isNext ? '-8px 0 24px rgba(0,0,0,0.18)' : '8px 0 24px rgba(0,0,0,0.18)'};
+                            background: ${bg};
+                            box-shadow: ${isNext ? '-12px 0 28px rgba(0,0,0,0.18)' : '12px 0 28px rgba(0,0,0,0.18)'};
                             transform: translate3d(0, 0, 0);
-                            transition: transform ${this.animationDuration}ms cubic-bezier(0.25, 1, 0.5, 1), opacity ${this.animationDuration}ms ease;
+                            transition: transform ${this.animationDuration}ms cubic-bezier(0.25, 1, 0.5, 1);
                         "></div>
                     `
                     const sheet = this._overlayEl.querySelector('.cover-peel-sheet')
                     sheet.offsetHeight // reflow
                     sheet.style.transform = `translate3d(${isNext ? -width : width}px, 0, 0)`
-                    sheet.style.opacity = '0'
                 }
 
                 await (isNext ? this.adapter.turnNext() : this.adapter.turnPrev())
@@ -458,9 +457,10 @@ export class PageTurnController {
                 const startTime = performance.now()
                 const dur = this.animationDuration * 1.2
                 let pageTurnCommitted = false
+                let turnPromise = null
 
                 await new Promise((resolve) => {
-                    const animateCurl = async (now) => {
+                    const animateCurl = (now) => {
                         if (curGen !== this.generation) {
                             resolve()
                             return
@@ -475,12 +475,10 @@ export class PageTurnController {
                             direction
                         })
 
-                        // Commit page turn halfway through curl atomically
+                        // Trigger page turn halfway through curl without stalling the animation loop
                         if (progress >= 0.5 && !pageTurnCommitted) {
                             pageTurnCommitted = true
-                            try {
-                                await (isNext ? this.adapter.turnNext() : this.adapter.turnPrev())
-                            } catch (_) {}
+                            turnPromise = (isNext ? this.adapter.turnNext() : this.adapter.turnPrev()).catch(() => {})
                         }
 
                         if (progress < 1 && curGen === this.generation) {
@@ -491,6 +489,10 @@ export class PageTurnController {
                     }
                     requestAnimationFrame(animateCurl)
                 })
+
+                if (turnPromise) {
+                    await turnPromise
+                }
             }
         } catch (err) {
             console.warn('[PageTurnController] Transition failed, fallback to jump:', err)

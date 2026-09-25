@@ -6,6 +6,46 @@ import * as db from './db.js'
 import { platformBridge } from './platformBridge.js'
 import { extractPdfCover } from './pdf-cover.js'
 
+export const findDuplicateBook = (existingBooks, { format, fileName = '', fileObj = {}, metadata = {}, computedStableKey = '' }) => {
+    if (!Array.isArray(existingBooks) || existingBooks.length === 0) return null
+    const GENERIC_TITLES = ['未命名', '未命名书籍', '未命名电子书', 'pdf 文档', 'document', 'untitled', '新文件', '文档']
+    const rawTitle = (metadata.title || '').trim().toLowerCase()
+    const rawBase = fileName.replace(/\.[^/.]+$/, '').trim().toLowerCase()
+    const isGenericTitle = !rawTitle || GENERIC_TITLES.includes(rawTitle) || GENERIC_TITLES.includes(rawBase)
+
+    return existingBooks.find(b => {
+        if (b.format !== format) return false
+        // Strict stableKey / identifier match always proves duplicate identity even for generic title
+        if (b.stableKey && computedStableKey && b.stableKey === computedStableKey) return true
+        if (metadata.identifier && b.identifier && metadata.identifier === b.identifier) return true
+
+        // Generic title without stableKey or identifier match must not match by fuzzy title alone
+        if (isGenericTitle) {
+            return Boolean(b.size && fileObj.size && b.size === fileObj.size &&
+                           b.filename && b.filename.toLowerCase() === fileName.toLowerCase())
+        }
+
+        const bTitle = (b.title || '').trim().toLowerCase()
+        const titleMatches = bTitle === rawTitle || bTitle === rawBase
+        if (!titleMatches) return false
+
+        const bAuthor = (b.author || '').trim().toLowerCase()
+        const metaAuthor = (metadata.author || '').trim().toLowerCase()
+        const isKnownAuthor = metaAuthor && !metaAuthor.includes('未知') && !metaAuthor.includes('unknown')
+        const isKnownBAuthor = bAuthor && !bAuthor.includes('未知') && !bAuthor.includes('unknown')
+
+        // If both books have distinct, known authors, they are definitely different books!
+        if (isKnownAuthor && isKnownBAuthor && bAuthor !== metaAuthor) {
+            return false
+        }
+
+        if (b.size && fileObj.size && b.size === fileObj.size) return true
+        if (isKnownAuthor && bAuthor && bAuthor === metaAuthor) return true
+        if (b.filename && b.filename.toLowerCase() === fileName.toLowerCase()) return true
+        return false
+    }) || null
+}
+
 export class ImportQueue {
     constructor(options = {}) {
         this.maxConcurrent = options.maxConcurrent || 2
@@ -179,7 +219,11 @@ export class ImportQueue {
             if (job.rawItem.filePath) {
                 // Retain only light path metadata for potential retry, discard heavy blobs/buffers
                 job.rawItem = { filePath: job.rawItem.filePath, filename: job.filename }
+            } else if (job.rawItem instanceof File || job.rawItem instanceof Blob) {
+                // User-selected File/Blob: release heavy heap reference, retain filename and mark re-select required
+                job.rawItem = { filename: job.filename, fileSize: job.fileSize, requiresReSelect: true }
             }
+            job.fileBuffer = null
         }
     }
 
@@ -486,37 +530,13 @@ const formatContributor = contributor => {
             activeStableKey = computedStableKey
             this._inFlightStableKeys.add(computedStableKey)
 
-            // Check for duplicate matching (respecting distinct known authors)
-            const GENERIC_TITLES = ['未命名', '未命名书籍', '未命名电子书', 'pdf 文档', 'document', 'untitled', '新文件', '文档']
-            const rawTitle = (metadata.title || '').trim().toLowerCase()
-            const rawBase = fileName.replace(/\.[^/.]+$/, '').trim().toLowerCase()
-            const isGenericTitle = !rawTitle || GENERIC_TITLES.includes(rawTitle) || GENERIC_TITLES.includes(rawBase)
-
             const existingBooks = await db.getAllBooks()
-            const match = isGenericTitle ? null : existingBooks.find(b => {
-                if (b.format !== format) return false
-                const bTitle = (b.title || '').trim().toLowerCase()
-                const titleMatches = bTitle === rawTitle || bTitle === rawBase
-                if (!titleMatches) return false
-
-                const bAuthor = (b.author || '').trim().toLowerCase()
-                const metaAuthor = (metadata.author || '').trim().toLowerCase()
-                const isKnownAuthor = metaAuthor && !metaAuthor.includes('未知') && !metaAuthor.includes('unknown')
-                const isKnownBAuthor = bAuthor && !bAuthor.includes('未知') && !bAuthor.includes('unknown')
-
-                // If both books have distinct, known authors, they are definitely different books!
-                if (isKnownAuthor && isKnownBAuthor && bAuthor !== metaAuthor) {
-                    return false
-                }
-
-                if (metadata.identifier && b.identifier && metadata.identifier === b.identifier) {
-                    return true
-                }
-                if (b.stableKey && b.stableKey === computedStableKey) return true
-                if (b.size && fileObj.size && b.size === fileObj.size) return true
-                if (isKnownAuthor && bAuthor && bAuthor === metaAuthor) return true
-                if (b.filename && b.filename.toLowerCase() === fileName.toLowerCase()) return true
-                return false
+            const match = findDuplicateBook(existingBooks, {
+                format,
+                fileName,
+                fileObj,
+                metadata,
+                computedStableKey
             })
 
             if (isAborted()) {
