@@ -310,6 +310,7 @@
                 <line x1="21" y1="21" x2="16.65" y2="16.65"/>
               </svg>
               <input type="text" id="shelf-search" placeholder="搜索图书、作者..."/>
+              <button id="btn-open-cross-search" type="button" style="background: var(--bg-tertiary); border: 1px solid var(--border-color); font-size: 0.72rem; color: var(--accent-purple); cursor: pointer; padding: 2px 6px; border-radius: 4px; margin-right: 4px; font-weight: 600; white-space: nowrap;" title="跨书全文检索">全文</button>
             </div>
 
             <!-- Add Books to List Button (Shown when in a custom list) -->
@@ -327,6 +328,14 @@
             <button class="btn-header-action" id="btn-header-favorite" title="只看收藏的书 / 快速切换收藏">
               <svg class="icon icon-sm" viewBox="0 0 24 24">
                 <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+              </svg>
+            </button>
+
+            <!-- Multi-Select Mode Toggle Button (批量管理) -->
+            <button class="btn-header-action" id="btn-batch-mode" title="多选模式 (批量标签/移除)">
+              <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 11 12 14 22 4"/>
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
               </svg>
             </button>
 
@@ -584,6 +593,15 @@
               <div id="stats-peak-pill" class="stats-peak-pill" style="display: none;">
                 <span id="stats-peak-text">3日阅读最久 · 1小时10分钟</span>
               </div>
+            </div>
+
+            <!-- Reading Activity Calendar Heatmap Card -->
+            <div class="wechat-stats-card stats-heatmap-card">
+              <div class="stats-section-header">
+                <div class="stats-section-title">全年阅读日历热力图</div>
+                <div class="stats-section-subtitle" id="stats-heatmap-year-subtitle">2026年</div>
+              </div>
+              <div id="stats-calendar-heatmap-container" style="min-height: 100px;"></div>
             </div>
 
             <!-- Top Books Leaderboard Card -->
@@ -887,10 +905,19 @@
               </select>
             </div>
             <div class="control-row">
-              <span class="control-label">翻页模式</span>
+              <span class="control-label">页面排版</span>
               <select id="setting-layout-mode" class="setting-select">
-                <option value="paginated" selected>左右双页/单页仿真分页</option>
+                <option value="paginated" selected>左右分页阅读</option>
                 <option value="scrolled">纵向连续平滑滚动</option>
+              </select>
+            </div>
+            <div class="control-row" id="setting-turn-animation-row">
+              <span class="control-label">翻页动效</span>
+              <select id="setting-turn-animation-mode" class="setting-select">
+                <option value="slide" selected>横向滑动 (推荐)</option>
+                <option value="cover">覆盖翻页 (实验性)</option>
+                <option value="curl">仿真卷页 (实验性)</option>
+                <option value="none">无动画 (瞬切/墨水屏)</option>
               </select>
             </div>
             <div class="control-row">
@@ -952,6 +979,58 @@
             </div>
           </div>
 
+          <!-- Configurable Selection Search Engine -->
+          <div class="setting-section" id="search-settings-section">
+            <div class="setting-title">
+              <span>划词网页搜索设置</span>
+            </div>
+            <p style="font-size: 0.76rem; color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
+              阅读选中文本时，快捷调用外部网页搜索引擎或百科查词。
+            </p>
+            <div class="control-row">
+              <span class="control-label">默认搜索引擎</span>
+              <select id="setting-search-engine" class="setting-select" style="max-width: 150px;">
+                <option value="baidu" selected>百度</option>
+                <option value="bing">必应 (Bing)</option>
+                <option value="google">Google</option>
+                <option value="duckduckgo">DuckDuckGo</option>
+                <option value="custom">自定义 URL</option>
+              </select>
+            </div>
+            <div class="control-row" id="setting-search-custom-row" style="display: none; flex-direction: column; align-items: stretch; gap: 4px; margin-top: 6px;">
+              <span class="control-label" style="font-size: 0.75rem;">自定义 URL 模板 (需含 {query})</span>
+              <input type="text" id="setting-search-custom-url" class="jane-modal-input" placeholder="https://example.com/search?q={query}" style="font-size: 0.78rem; padding: 4px 8px; width: 100%; box-sizing: border-box;" />
+            </div>
+          </div>
+
+          <!-- Self-Configured AI Assistant -->
+          <div class="setting-section" id="ai-settings-section">
+            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>自配 API 阅读助手</span>
+              <label class="toggle-switch" title="启用基于 OpenAI 兼容接口的选文翻译与上下文问答">
+                <input type="checkbox" id="setting-ai-enabled" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <p style="font-size: 0.76rem; color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
+              支持任何 OpenAI 兼容的第三方大模型 API，用于划词即时翻译与文意问答。API Key 仅存储于本机安全沙箱，绝不上载云端。
+            </p>
+            <div id="ai-custom-inputs-wrap" style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.5rem; margin-top: 0.4rem; display: flex; flex-direction: column; gap: 6px;">
+              <div class="control-row">
+                <span class="control-label">接口地址 (Endpoint)</span>
+                <input type="text" id="setting-ai-endpoint" class="jane-modal-input" placeholder="https://api.openai.com/v1" value="https://api.openai.com/v1" style="font-size: 0.78rem; padding: 4px 8px; width: 160px;" />
+              </div>
+              <div class="control-row">
+                <span class="control-label">模型名称 (Model)</span>
+                <input type="text" id="setting-ai-model" class="jane-modal-input" placeholder="gpt-4o-mini" value="gpt-4o-mini" style="font-size: 0.78rem; padding: 4px 8px; width: 160px;" />
+              </div>
+              <div class="control-row">
+                <span class="control-label">API 密钥 (Key)</span>
+                <input type="password" id="setting-ai-key" class="jane-modal-input" placeholder="sk-..." style="font-size: 0.78rem; padding: 4px 8px; width: 160px;" />
+              </div>
+            </div>
+          </div>
+
           <!-- Cloud Synchronization Setting Card -->
           <div class="setting-section" id="sync-settings-section">
             <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
@@ -1003,9 +1082,10 @@
       <button id="popup-copy" class="btn-tool" style="width: 28px; height: 28px;" title="复制文本 (支持 Ctrl 多选合并复制)">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
       </button>
-      <button id="popup-search" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-blue);" title="网络搜索 / 百科查词">
+      <button id="popup-search" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-blue);" title="网页搜索 / 百科查词">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       </button>
+      <button id="popup-ai" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple); font-size: 13px;" title="AI 翻译与智能问答">✨</button>
       <button id="popup-note" class="btn-tool" style="width: 28px; height: 28px;" title="写想法/笔记">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
       </button>
@@ -1417,30 +1497,190 @@
     <div class="global-modal-card" style="max-width: 640px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
       <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
         <div style="display: flex; align-items: center; gap: 8px;">
-          <span style="font-size: 1.25rem;">🔍</span>
+          <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 7V4h3M20 7V4h-3M4 17v3h3M20 17v3h-3M9 12h6M12 9v6"/></svg>
           <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">图片 PDF 文本识别提取 (OCR)</span>
         </div>
         <button id="btn-close-pdf-ocr" class="footnote-popup-close" title="关闭">×</button>
       </div>
       <div style="padding: 1rem 0 0.5rem 0; flex: 1; display: flex; flex-direction: column; gap: 10px;">
+        <!-- Config row: Page range & Mode -->
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; background: var(--bg-tertiary); padding: 8px 12px; border-radius: 8px; font-size: 0.82rem; align-items: center;">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <label for="pdf-ocr-page-range" style="color: var(--text-secondary); font-weight: 500;">识别页码:</label>
+            <input type="text" id="pdf-ocr-page-range" placeholder="例如: 12 或 12-15" class="jane-modal-input" style="width: 130px; padding: 3px 6px; font-size: 0.8rem;" />
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <label for="pdf-ocr-mode" style="color: var(--text-secondary); font-weight: 500;">模式:</label>
+            <select id="pdf-ocr-mode" class="setting-select" style="padding: 3px 6px; font-size: 0.8rem;">
+              <option value="auto" selected>智能优先内嵌 (遇图自动OCR)</option>
+              <option value="force_image">强制页面图片 OCR (破损乱码/扫描件)</option>
+            </select>
+          </div>
+          <button type="button" id="btn-start-pdf-ocr" class="btn-primary-action" style="padding: 3px 12px; font-size: 0.8rem; margin-left: auto;">开始识别</button>
+        </div>
         <div id="pdf-ocr-status" style="font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 8px;">
-          <span id="pdf-ocr-status-icon">⏳</span>
-          <span id="pdf-ocr-status-text">正在初始化 OCR 本地识别引擎...</span>
+          <span id="pdf-ocr-status-icon" style="display: inline-flex; align-items: center;"><svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+          <span id="pdf-ocr-status-text">就绪：输入页码或直接点击开始识别当前页</span>
         </div>
         <div style="position: relative; flex: 1;">
-          <textarea id="pdf-ocr-result-text" placeholder="识别出的文字将显示在此处，可自由选取和复制..." style="width: 100%; height: 260px; padding: 12px; font-size: 0.9rem; line-height: 1.6; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary); color: var(--text-main); resize: vertical; box-sizing: border-box; font-family: var(--font-sans);"></textarea>
+          <textarea id="pdf-ocr-result-text" placeholder="识别出的文字将显示在此处，可自由选取和复制..." style="width: 100%; height: 230px; padding: 12px; font-size: 0.9rem; line-height: 1.6; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary); color: var(--text-main); resize: vertical; box-sizing: border-box; font-family: var(--font-sans);"></textarea>
         </div>
       </div>
       <div class="global-modal-footer" style="display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border-color); margin-top: 0.5rem;">
         <span id="pdf-ocr-char-count" style="font-size: 0.8rem; color: var(--text-muted);">共 0 字</span>
         <div style="display: flex; gap: 8px;">
-          <button type="button" id="btn-cancel-pdf-ocr" class="btn-secondary-action" style="padding: 0.45rem 1rem; font-size: 0.82rem;">关闭</button>
+          <button type="button" id="btn-cancel-pdf-ocr" class="btn-secondary-action" style="padding: 0.45rem 1rem; font-size: 0.82rem;">关闭 / 取消</button>
           <button type="button" id="btn-copy-pdf-ocr" class="btn-primary-action" style="padding: 0.45rem 1.25rem; font-size: 0.82rem;">
             <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             <span>一键复制文字</span>
           </button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Floating Batch Actions Bar (多选模式操作条) -->
+  <div id="batch-actions-bar" class="batch-actions-bar" style="display: none;">
+    <div class="batch-bar-left">
+      <button type="button" id="btn-batch-select-all" class="btn-batch-action">全选</button>
+      <span id="batch-selected-count" class="batch-count-label">已选 0 本</span>
+    </div>
+    <div class="batch-bar-right">
+      <button type="button" id="btn-batch-tags" class="btn-batch-action" disabled>批量标签</button>
+      <button type="button" id="btn-batch-delete" class="btn-batch-action btn-batch-danger" disabled>批量移除</button>
+      <button type="button" id="btn-batch-exit" class="btn-batch-action btn-batch-exit">退出多选</button>
+    </div>
+  </div>
+
+  <!-- Modal: Batch Tagging (批量管理标签) -->
+  <div id="modal-batch-tags" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 480px; width: 92vw;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">批量管理标签</span>
+        <button id="btn-close-batch-tags" class="footnote-popup-close" title="关闭">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 1rem 0; display: flex; flex-direction: column; gap: 12px;">
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin: 0;" id="batch-tags-prompt">已选择 0 本图书，请选择操作：</p>
+        <div style="display: flex; gap: 8px;">
+          <input type="text" id="input-batch-tag" class="global-modal-input" placeholder="输入要添加的标签名..." maxlength="20" style="flex: 1;" />
+          <button type="button" id="btn-batch-add-tag-action" class="btn-primary-action" style="padding: 0.45rem 1rem;">添加标签</button>
+        </div>
+        <div id="batch-existing-tags-section" style="display: flex; flex-direction: column; gap: 6px;">
+          <span style="font-size: 0.78rem; font-weight: 600; color: var(--text-muted);">选中图书中包含的已有标签（点击可批量移除）：</span>
+          <div id="batch-existing-tags-list" class="tags-badge-container" style="min-height: 32px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Single Book Details Drawer -->
+  <div id="modal-book-details" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card book-details-modal-card">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">书籍详情与回顾</span>
+        <button id="btn-close-book-details" class="footnote-popup-close" title="关闭">×</button>
+      </div>
+      <div id="book-details-body" class="global-modal-body" style="padding: 1rem 0; overflow-y: auto; flex: 1;">
+        <!-- Dynamically rendered by BookDetailsModal -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Cross-Book Local Full-Text Search -->
+  <div id="modal-cross-book-search" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 640px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">跨书全文搜索 (本地离线)</span>
+        </div>
+        <button id="btn-close-cross-search" class="footnote-popup-close" title="关闭">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 1rem 0; display: flex; flex-direction: column; gap: 10px; flex: 1; overflow: hidden;">
+        <div style="display: flex; gap: 8px;">
+          <input type="text" id="input-cross-search" class="global-modal-input" placeholder="输入关键词检索所有支持的电子书 (支持中英文、短词)..." style="flex: 1;" />
+          <button type="button" id="btn-exec-cross-search" class="btn-primary-action" style="padding: 0.45rem 1.25rem;">检索</button>
+        </div>
+        <div id="cross-search-status" style="font-size: 0.8rem; color: var(--text-muted);">支持 EPUB / TXT / MD / DOCX 格式，检索结果可点击直接跳转</div>
+        <div id="cross-search-results" style="flex: 1; overflow-y: auto; padding-right: 4px; max-height: 52vh;">
+          <!-- Dynamically populated search items -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Reading AI Assistant (Translation & Q&A) -->
+  <div id="modal-ai-assistant" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 620px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+          <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">AI 阅读助手</span>
+        </div>
+        <button id="btn-close-ai-assistant" class="footnote-popup-close" title="关闭">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 1rem 0; display: flex; flex-direction: column; gap: 10px; flex: 1; overflow: hidden;">
+        <div id="ai-selected-preview" style="max-height: 85px; overflow-y: auto; background: var(--bg-tertiary); padding: 8px 12px; border-radius: 6px; font-size: 0.82rem; color: var(--text-secondary); border-left: 3px solid var(--accent-purple); line-height: 1.45;"></div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button type="button" id="btn-ai-translate" class="btn-secondary-action" style="padding: 0.35rem 0.8rem; font-size: 0.82rem;">忠实翻译</button>
+          <button type="button" id="btn-ai-explain" class="btn-secondary-action" style="padding: 0.35rem 0.8rem; font-size: 0.82rem;">解读书意</button>
+          <div style="flex: 1; min-width: 200px; display: flex; gap: 6px;">
+            <input type="text" id="input-ai-prompt" class="jane-modal-input" placeholder="针对选文自由提问..." style="flex: 1; font-size: 0.82rem; padding: 4px 8px;" />
+            <button type="button" id="btn-ai-ask" class="btn-primary-action" style="padding: 0.35rem 1rem; font-size: 0.82rem;">发送</button>
+          </div>
+        </div>
+        <div id="ai-response-area" style="flex: 1; overflow-y: auto; background: var(--bg-secondary); padding: 12px; border-radius: 8px; font-size: 0.88rem; line-height: 1.6; border: 1px solid var(--border-color); min-height: 180px; max-height: 48vh;">
+          <span style="color: var(--text-muted); font-size: 0.82rem;">点击上方快捷指令或输入问题开启 AI 辅助阅读...</span>
+        </div>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border-color); margin-top: 0.5rem;">
+        <span id="ai-status-hint" style="font-size: 0.78rem; color: var(--text-muted);"></span>
+        <div style="display: flex; gap: 8px;">
+          <button type="button" id="btn-ai-save-note" class="btn-secondary-action" style="padding: 0.4rem 0.9rem; font-size: 0.82rem;">保存为笔记想法</button>
+          <button type="button" id="btn-ai-copy" class="btn-primary-action" style="padding: 0.4rem 1.1rem; font-size: 0.82rem;">复制回答</button>
+        </div>
+      </div>
+  <!-- Import Task Center (Float Panel & Dock Pill) -->
+  <div id="import-dock-badge" class="import-dock-badge" style="display: none;">
+    <div class="import-dock-content">
+      <div class="import-dock-spinner" id="import-dock-spinner"></div>
+      <svg class="import-dock-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="7 10 12 15 17 10"/>
+        <line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
+      <span id="import-dock-text">导入任务 (0)</span>
+    </div>
+  </div>
+
+  <div id="import-task-panel" class="import-task-panel" style="display: none;">
+    <div class="import-panel-header">
+      <div class="import-panel-title-group">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <span class="import-panel-title">导入任务中心</span>
+        <span id="import-panel-summary-badge" class="import-panel-badge">0 项</span>
+      </div>
+      <div class="import-panel-actions">
+        <button id="btn-import-retry-failed" class="btn-import-header-action" title="重试全部失败任务" style="display: none;">重试失败项</button>
+        <button id="btn-import-cancel-all" class="btn-import-header-action btn-import-danger" title="取消所有未完成任务">全部取消</button>
+        <button id="btn-import-minimize" class="btn-import-icon-action" title="最小化面板">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <button id="btn-import-close" class="btn-import-icon-action" title="关闭面板">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="import-task-list" class="import-task-list">
+      <!-- Dynamically rendered jobs -->
+    </div>
+    <div class="import-panel-footer">
+      <span id="import-panel-stats" class="import-panel-stats">就绪</span>
+      <button id="btn-import-clear-done" class="btn-import-footer-action">清除已完成</button>
     </div>
   </div>
 

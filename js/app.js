@@ -13,6 +13,16 @@ import { PdfViewport } from './pdf-viewport.js'
 import { AdaptivePdfDriver } from './pdf-driver.js'
 import { buildPdfTocIndex, pdfTocAtPage } from './pdf-toc.js'
 import { platformBridge } from './platformBridge.js'
+import { importQueue } from './import-queue.js'
+import { extractPdfCover, regenerateBookCover } from './pdf-cover.js'
+import { ocrService, parsePageRange } from './ocr-service.js'
+import { performWebSearch, SEARCH_ENGINES, validateSearchTemplate } from './search-config.js'
+import { renderCleanBarChart, renderCalendarHeatmap, formatAxisLabel, formatMinutesClean } from './stats-heatmap.js'
+import { bookDetailsModal } from './book-details.js'
+import { fullTextSearchEngine } from './fulltext-search.js'
+import { isAiReady, getAiConfig, saveAiConfig, getAiApiKey, requestAiCompletion, createTranslationPrompt, createExplainPrompt, createQuestionPrompt, renderSafeMarkdown, SYSTEM_PROMPTS } from './reading-ai-assistant.js'
+import { batchAddTag, batchRemoveTag, normalizeTag } from './tags-manager.js'
+import { PageTurnController, FoliatePageTurnAdapter, PdfPageTurnAdapter } from './page-turn-controller.js'
 
 // Format language map helper
 const escapeHTML = str => {
@@ -764,7 +774,27 @@ class UniversalReaderApp {
             enableReadingGoals: false,
             readingGoalYear: 12,
             readingGoalMonth: 20,
-            readingGoalToday: 45
+            readingGoalToday: 45,
+            searchEngine: 'baidu',
+            searchCustomUrl: '',
+            pageTurnMode: 'slide'
+        }
+
+        // Import Queue Integration
+        this.importQueue = importQueue
+        this.importQueue.onBookSaved = async (bookId) => {
+            await this.refreshBookshelf()
+        }
+        this.importQueue.onProgress = (summary) => {
+            if (summary.running > 0) {
+                this.showToast(`正在导入图书 (等待: ${summary.queued}, 进行中: ${summary.running})`, '⏳')
+            }
+        }
+        this.importQueue.onBatchComplete = (summary) => {
+            if (summary.total > 1) {
+                this.showToast(`导入完成: 成功 ${summary.succeeded} 本，失败 ${summary.failed} 本`, summary.failed > 0 ? '⚠️' : '✓')
+            }
+            this.refreshBookshelf()
         }
 
         // WeChat Read Stats State
@@ -807,8 +837,26 @@ class UniversalReaderApp {
         this._pdfOcrTaskId = 0
         this._pdfOcrAbortController = null
 
+        // Shelf Batch Multi-Select Mode
+        this.isBatchMode = false
+        this.selectedBookIds = new Set()
+
         this.initDOM()
+
+        // Unified Page Turn Controller
+        this.pageTurnController = new PageTurnController({
+            container: this.dom.readerContentArea,
+            mode: this.settings.pageTurnMode || 'slide',
+            isBlockedCallback: () => Boolean(
+                this.pdfDrawTool ||
+                (this.pdfViewport && this.pdfViewport.scale > 1.05) ||
+                (this.activeDrawer && this.activeDrawer !== 'none') ||
+                (this.dom.selectionPopup && this.dom.selectionPopup.style.display !== 'none')
+            )
+        })
+
         this.bindEvents()
+        this.initImportCenter()
         this.clearSearchState(true)
 
         // Persist reading progress & session time when the window is closed
@@ -816,6 +864,9 @@ class UniversalReaderApp {
         window.electronAPI?.onFlushBeforeQuit?.(() => this.flushReaderStateOnExit())
 
         this.checkFirstTimeUser()
+        const initialBudget = platformBridge.setResourceBudget()
+        this.importQueue.setResourceBudget(initialBudget)
+        fullTextSearchEngine?.setResourceBudget?.(initialBudget)
         this.loadSettings().then(async () => {
             this.applyTheme(this.settings.theme)
             await this.ensureRecoveryBarrier()
@@ -866,6 +917,20 @@ class UniversalReaderApp {
             readerContentArea: document.getElementById('reader-content-area'),
             fileInput: document.getElementById('file-input'),
             dropZoneOverlay: document.getElementById('drop-zone-overlay'),
+
+            // Import Task Center
+            importDockBadge: document.getElementById('import-dock-badge'),
+            importDockSpinner: document.getElementById('import-dock-spinner'),
+            importDockText: document.getElementById('import-dock-text'),
+            importTaskPanel: document.getElementById('import-task-panel'),
+            importTaskList: document.getElementById('import-task-list'),
+            importPanelSummaryBadge: document.getElementById('import-panel-summary-badge'),
+            importPanelStats: document.getElementById('import-panel-stats'),
+            btnImportRetryFailed: document.getElementById('btn-import-retry-failed'),
+            btnImportCancelAll: document.getElementById('btn-import-cancel-all'),
+            btnImportMinimize: document.getElementById('btn-import-minimize'),
+            btnImportClose: document.getElementById('btn-import-close'),
+            btnImportClearDone: document.getElementById('btn-import-clear-done'),
 
             // Bookshelf elements
             shelfSearch: document.getElementById('shelf-search'),
@@ -1014,6 +1079,7 @@ class UniversalReaderApp {
             gapValue: document.getElementById('value-gap'),
             columnCountSelect: document.getElementById('setting-column-count'),
             layoutSelect: document.getElementById('setting-layout-mode'),
+            turnAnimationSelect: document.getElementById('setting-turn-animation-mode'),
             settingRealisticPen: document.getElementById('setting-realistic-pen'),
             settingFullscreenAutohide: document.getElementById('setting-fullscreen-autohide'),
 
@@ -1178,7 +1244,69 @@ class UniversalReaderApp {
             updateReleaseNotes: document.getElementById('update-release-notes'),
             btnCloseUpdateModal: document.getElementById('btn-close-update-modal'),
             btnUpdateLater: document.getElementById('btn-update-later'),
-            btnUpdateDownload: document.getElementById('btn-update-download')
+            btnUpdateDownload: document.getElementById('btn-update-download'),
+
+            // Configurable Web Search & Reading AI Assistant Elements
+            settingSearchEngine: document.getElementById('setting-search-engine'),
+            settingSearchCustomRow: document.getElementById('setting-search-custom-row'),
+            settingSearchCustomUrl: document.getElementById('setting-search-custom-url'),
+            settingAiEnabled: document.getElementById('setting-ai-enabled'),
+            aiCustomInputsWrap: document.getElementById('ai-custom-inputs-wrap'),
+            settingAiEndpoint: document.getElementById('setting-ai-endpoint'),
+            settingAiModel: document.getElementById('setting-ai-model'),
+            settingAiKey: document.getElementById('setting-ai-key'),
+            popupAi: document.getElementById('popup-ai'),
+
+            // PDF OCR Page Range & Mode Elements
+            pdfOcrPageRange: document.getElementById('pdf-ocr-page-range'),
+            pdfOcrMode: document.getElementById('pdf-ocr-mode'),
+            btnStartPdfOcr: document.getElementById('btn-start-pdf-ocr'),
+
+            // Single Book Details Elements
+            modalBookDetails: document.getElementById('modal-book-details'),
+            btnCloseBookDetails: document.getElementById('btn-close-book-details'),
+            bookDetailsBody: document.getElementById('book-details-body'),
+
+            // Cross-Book Full-Text Search Elements
+            modalCrossSearch: document.getElementById('modal-cross-book-search'),
+            btnCloseCrossSearch: document.getElementById('btn-close-cross-search'),
+            btnOpenCrossSearch: document.getElementById('btn-open-cross-search'),
+            inputCrossSearch: document.getElementById('input-cross-search'),
+            btnExecCrossSearch: document.getElementById('btn-exec-cross-search'),
+            crossSearchResults: document.getElementById('cross-search-results'),
+            crossSearchStatus: document.getElementById('cross-search-status'),
+
+            // AI Assistant Modal Elements
+            modalAiAssistant: document.getElementById('modal-ai-assistant'),
+            btnCloseAiAssistant: document.getElementById('btn-close-ai-assistant'),
+            aiSelectedPreview: document.getElementById('ai-selected-preview'),
+            btnAiTranslate: document.getElementById('btn-ai-translate'),
+            btnAiExplain: document.getElementById('btn-ai-explain'),
+            inputAiPrompt: document.getElementById('input-ai-prompt'),
+            btnAiAsk: document.getElementById('btn-ai-ask'),
+            aiResponseArea: document.getElementById('ai-response-area'),
+            aiStatusHint: document.getElementById('ai-status-hint'),
+            btnAiSaveNote: document.getElementById('btn-ai-save-note'),
+            btnAiCopy: document.getElementById('btn-ai-copy'),
+
+            // Calendar Heatmap Container
+            statsCalendarHeatmap: document.getElementById('stats-calendar-heatmap-container'),
+
+            // Batch Mode & Batch Operations
+            btnBatchMode: document.getElementById('btn-batch-mode'),
+            batchActionsBar: document.getElementById('batch-actions-bar'),
+            batchSelectedCount: document.getElementById('batch-selected-count'),
+            btnBatchSelectAll: document.getElementById('btn-batch-select-all'),
+            btnBatchTags: document.getElementById('btn-batch-tags'),
+            btnBatchDelete: document.getElementById('btn-batch-delete'),
+            btnBatchExit: document.getElementById('btn-batch-exit'),
+            modalBatchTags: document.getElementById('modal-batch-tags'),
+            btnCloseBatchTags: document.getElementById('btn-close-batch-tags'),
+            batchTagsPrompt: document.getElementById('batch-tags-prompt'),
+            inputBatchTag: document.getElementById('input-batch-tag'),
+            btnBatchAddTagAction: document.getElementById('btn-batch-add-tag-action'),
+            batchExistingTagsSection: document.getElementById('batch-existing-tags-section'),
+            batchExistingTagsList: document.getElementById('batch-existing-tags-list')
         }
     }
 
@@ -1284,11 +1412,7 @@ class UniversalReaderApp {
         if (this.dom.globalToastIcon) {
             this.dom.globalToastIcon.innerHTML = toastSvgMap[mappedKey] || toastSvgMap['info']
         }
-        // Strip leading decorative emojis from message body so messages are clean and unified with the SVG icon
-        const cleanMsg = typeof msg === 'string'
-            ? msg.replace(/^[\s\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1FA00}-\u{1FAFF}\u{FE00}-\u{FE0F}✓✨🎉🗑️📋✅⭐⚠️🔴🟢🌱💾📖📄📑📝⏳]+\s*/u, '')
-            : msg
-        if (this.dom.globalToastMsg) this.dom.globalToastMsg.innerText = cleanMsg
+        if (this.dom.globalToastMsg) this.dom.globalToastMsg.innerText = typeof msg === 'string' ? msg : String(msg || '')
         this.dom.globalToast.style.display = 'flex'
         requestAnimationFrame(() => {
             this.dom.globalToast?.classList.add('show')
@@ -1409,6 +1533,7 @@ class UniversalReaderApp {
             if (this.settings.theme) localStorage.setItem('linden_leaf_theme', this.settings.theme)
             localStorage.setItem('linden_leaf_view_mode', 'grid')
         } catch (e) {}
+        this.pageTurnController?.setMode(this.settings.pageTurnMode || 'slide')
         this.updateSettingsUI()
     }
 
@@ -1479,6 +1604,10 @@ class UniversalReaderApp {
         if (this.dom.layoutSelect) {
             this.dom.layoutSelect.value = this.settings.layout || 'paginated'
         }
+        if (this.dom.turnAnimationSelect) {
+            this.dom.turnAnimationSelect.value = this.settings.pageTurnMode || 'slide'
+        }
+        this.pageTurnController?.setMode(this.settings.pageTurnMode || 'slide')
         const writingModeSelect = document.getElementById('setting-writing-mode')
         if (writingModeSelect) {
             writingModeSelect.value = this.settings.writingMode || 'horizontal'
@@ -1506,6 +1635,35 @@ class UniversalReaderApp {
         }
         if (this.dom.settingGoalToday) {
             this.dom.settingGoalToday.value = this.settings.readingGoalToday || 45
+        }
+
+        // Web search engine & AI assistant preferences
+        if (this.dom.settingSearchEngine) {
+            this.dom.settingSearchEngine.value = this.settings.searchEngine || 'baidu'
+            if (this.dom.settingSearchCustomRow) {
+                this.dom.settingSearchCustomRow.style.display = (this.settings.searchEngine === 'custom') ? 'flex' : 'none'
+            }
+        }
+        if (this.dom.settingSearchCustomUrl) {
+            this.dom.settingSearchCustomUrl.value = this.settings.searchCustomUrl || ''
+        }
+        const aiCfg = getAiConfig()
+        if (this.dom.settingAiEnabled) {
+            this.dom.settingAiEnabled.checked = !!aiCfg.enabled
+            if (this.dom.aiCustomInputsWrap) {
+                this.dom.aiCustomInputsWrap.style.display = aiCfg.enabled ? 'flex' : 'none'
+            }
+        }
+        if (this.dom.settingAiEndpoint) {
+            this.dom.settingAiEndpoint.value = aiCfg.endpoint || 'https://api.openai.com/v1'
+        }
+        if (this.dom.settingAiModel) {
+            this.dom.settingAiModel.value = aiCfg.model || 'gpt-4o-mini'
+        }
+        if (this.dom.settingAiKey) {
+            getAiApiKey().then(k => {
+                if (this.dom.settingAiKey) this.dom.settingAiKey.value = k || ''
+            })
         }
 
         // View mode switcher buttons
@@ -1538,6 +1696,7 @@ class UniversalReaderApp {
     }
 
     applyTheme(theme) {
+        this.pageTurnController?.cancelCurrent()
         document.documentElement.setAttribute('data-theme', theme)
         let bg = '#FAF9F5'
         if (theme === 'dark' || theme === 'black') bg = '#262624'
@@ -1550,6 +1709,7 @@ class UniversalReaderApp {
     }
 
     applySettingsToReader() {
+        this.pageTurnController?.cancelCurrent()
         if (!this.foliateView || !this.foliateView.renderer) return
         const r = this.foliateView.renderer
         
@@ -1585,54 +1745,7 @@ class UniversalReaderApp {
                 try {
                     const fileItems = await window.electronAPI.openFileDialog()
                     if (fileItems && fileItems.length > 0) {
-                        const total = fileItems.length
-                        let successCount = 0
-                        for (let i = 0; i < total; i++) {
-                            const f = fileItems[i]
-                            let nativeSnapshotPath = null
-                            try {
-                                if (total > 1) {
-                                    this.showToast(`正在导入 (${i + 1}/${total}): ${f.filename}...`, '⏳')
-                                }
-                                nativeSnapshotPath = await platformBridge.stagePdfSource(f.filePath)
-                                let buffer = nativeSnapshotPath ? await platformBridge.readFileBuffer(nativeSnapshotPath) : null
-                                if (!buffer || buffer.byteLength === 0 || buffer.length === 0) {
-                                    if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
-                                        platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
-                                    }
-                                    nativeSnapshotPath = null
-                                    buffer = f.buffer || (window.electronAPI.readFileBuffer ? await window.electronAPI.readFileBuffer(f.filePath) : null)
-                                }
-                                if (buffer) {
-                                    if (Array.isArray(buffer)) {
-                                        buffer = new Uint8Array(buffer).buffer
-                                    } else if (ArrayBuffer.isView(buffer) && !(buffer instanceof ArrayBuffer)) {
-                                        buffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
-                                    } else if (typeof buffer.arrayBuffer === 'function') {
-                                        buffer = await buffer.arrayBuffer()
-                                    }
-                                    const fileObj = new File([buffer], f.filename)
-                                    await this.processAndSaveBook(fileObj, undefined, f.filePath, nativeSnapshotPath)
-                                    successCount++
-                                } else {
-                                    if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
-                                        platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
-                                    }
-                                    console.warn('[Import] Failed to read buffer for file:', f.filePath)
-                                    this.showToast(`无法读取文件: ${f.filename}`, '⚠️')
-                                }
-                            } catch (itemErr) {
-                                if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
-                                    platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
-                                }
-                                console.error(`[Import] Failed to import ${f.filename}:`, itemErr)
-                                this.showToast(`导入 ${f.filename} 失败: ${itemErr.message || itemErr}`, '⚠️')
-                            }
-                        }
-                        await this.refreshBookshelf()
-                        if (total > 1) {
-                            this.showToast(`成功导入 ${successCount}/${total} 本图书`, '✓')
-                        }
+                        this.importQueue.enqueue(fileItems)
                     }
                 } catch (dialogErr) {
                     console.error('[Import] Dialog error:', dialogErr)
@@ -1837,6 +1950,7 @@ class UniversalReaderApp {
 
         let resizeTimer = null
         window.addEventListener('resize', () => {
+            this.pageTurnController?.cancelCurrent()
             this.updateCachedDimensions()
             clearTimeout(resizeTimer)
             resizeTimer = setTimeout(() => {
@@ -2310,6 +2424,11 @@ class UniversalReaderApp {
             this.toggleReaderUI()
         })
 
+        // Touch gestures for page turning
+        this.dom.readerContentArea?.addEventListener('touchstart', e => this.pageTurnController?.handleTouchStart(e), { passive: true })
+        this.dom.readerContentArea?.addEventListener('touchmove', e => this.pageTurnController?.handleTouchMove(e), { passive: false })
+        this.dom.readerContentArea?.addEventListener('touchend', e => this.pageTurnController?.handleTouchEnd(e))
+
         // Progress Slider (text updates live; actual seek happens on release to avoid
         // re-render storms on large PDFs while dragging)
         this.dom.progressSlider?.addEventListener('input', e => {
@@ -2419,7 +2538,14 @@ class UniversalReaderApp {
         })
 
         this.dom.layoutSelect?.addEventListener('change', e => {
+            this.pageTurnController?.cancelCurrent()
             this.settings.layout = e.target.value
+            this.saveSettings()
+        })
+
+        this.dom.turnAnimationSelect?.addEventListener('change', e => {
+            this.settings.pageTurnMode = e.target.value
+            this.pageTurnController?.setMode(this.settings.pageTurnMode)
             this.saveSettings()
         })
 
@@ -2524,6 +2650,56 @@ class UniversalReaderApp {
             this.saveSettings()
         })
 
+        // Web Search Engine Settings
+        this.dom.settingSearchEngine?.addEventListener('change', async e => {
+            this.settings.searchEngine = e.target.value
+            if (this.dom.settingSearchCustomRow) {
+                this.dom.settingSearchCustomRow.style.display = (e.target.value === 'custom') ? 'flex' : 'none'
+            }
+            await this.saveSettings()
+        })
+        this.dom.settingSearchCustomUrl?.addEventListener('input', e => {
+            this.settings.searchCustomUrl = e.target.value.trim()
+            this.saveSettingsDebounced()
+        })
+
+        // Reading AI Assistant Settings
+        this.dom.settingAiEnabled?.addEventListener('change', async e => {
+            const enabled = e.target.checked
+            if (this.dom.aiCustomInputsWrap) {
+                this.dom.aiCustomInputsWrap.style.display = enabled ? 'flex' : 'none'
+            }
+            try {
+                await saveAiConfig({ enabled })
+            } catch (err) {
+                this.showToast(err.message, '⚠️')
+            }
+        })
+        this.dom.settingAiEndpoint?.addEventListener('change', async e => {
+            try {
+                await saveAiConfig({ endpoint: e.target.value.trim() })
+                this.showToast('AI 接口地址已保存', '✓')
+            } catch (err) {
+                this.showToast(err.message, '⚠️')
+            }
+        })
+        this.dom.settingAiModel?.addEventListener('change', async e => {
+            try {
+                await saveAiConfig({ model: e.target.value.trim() })
+                this.showToast('AI 模型已保存', '✓')
+            } catch (err) {
+                this.showToast(err.message, '⚠️')
+            }
+        })
+        this.dom.settingAiKey?.addEventListener('change', async e => {
+            try {
+                await saveAiConfig({ apiKey: e.target.value.trim() })
+                this.showToast('API Key 已安全保存', '✓')
+            } catch (err) {
+                this.showToast(`保存失败: ${err.message}`, '⚠️')
+            }
+        })
+
         // Prevent popup clicks from losing selection
         ;[this.dom.selectionPopup, this.dom.highlightActionPopup].forEach(p => {
             if (p) {
@@ -2556,12 +2732,17 @@ class UniversalReaderApp {
             await this.copyMultiSelectionOrSingle()
         })
         this.dom.btnPopupSearch?.addEventListener('click', () => {
-            const text = this.selectedTextInfo?.text
+            const text = (this.multiSelectedRanges && this.multiSelectedRanges.length > 0)
+                ? this.multiSelectedRanges.map(r => r.text).filter(Boolean).join(' ')
+                : (this.selectedTextInfo?.text || '')
             if (text) {
-                const query = encodeURIComponent(text.slice(0, 100))
-                platformBridge.openExternal(`https://www.baidu.com/s?wd=${query}`)
+                performWebSearch(this.settings, text, (msg, icon) => this.showToast(msg, icon))
                 this.hideSelectionPopup()
             }
+        })
+        this.dom.popupAi?.addEventListener('click', () => {
+            this.hideSelectionPopup()
+            this.openAiAssistantModal()
         })
 
 
@@ -2918,8 +3099,9 @@ class UniversalReaderApp {
             this.showToast(isTwoPage ? '已清空当前双页手绘批注' : '已清空当前页手绘批注', 'delete')
         })
 
-        // PDF OCR Extract Button
+        // PDF OCR Extract Button & Modal
         this.dom.btnPdfOcrExtract?.addEventListener('click', () => this.handlePdfOcrExtract())
+        this.dom.btnStartPdfOcr?.addEventListener('click', () => this.startPdfOcrExtraction())
         this.dom.btnClosePdfOcr?.addEventListener('click', () => this.closePdfOcrModal())
         this.dom.btnCancelPdfOcr?.addEventListener('click', () => this.closePdfOcrModal())
         this.dom.modalPdfOcr?.addEventListener('click', e => {
@@ -2936,6 +3118,116 @@ class UniversalReaderApp {
             }).catch(() => {
                 this.showToast('复制失败，请手动选取复制', 'warning')
             })
+        })
+
+        // Single Book Details Modal
+        this.dom.btnCloseBookDetails?.addEventListener('click', () => this.closeBookDetailsModal())
+        this.dom.modalBookDetails?.addEventListener('click', e => {
+            if (e.target === this.dom.modalBookDetails) this.closeBookDetailsModal()
+        })
+
+        // Cross-Book Full-Text Search Modal
+        this.dom.btnOpenCrossSearch?.addEventListener('click', () => this.openCrossSearchModal())
+        this.dom.btnCloseCrossSearch?.addEventListener('click', () => this.closeCrossSearchModal())
+        this.dom.modalCrossSearch?.addEventListener('click', e => {
+            if (e.target === this.dom.modalCrossSearch) this.closeCrossSearchModal()
+        })
+        this.dom.btnExecCrossSearch?.addEventListener('click', () => {
+            this.executeCrossSearch(this.dom.inputCrossSearch?.value)
+        })
+        this.dom.inputCrossSearch?.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                this.executeCrossSearch(this.dom.inputCrossSearch?.value)
+            }
+        })
+
+        // AI Assistant Modal
+        this.dom.btnCloseAiAssistant?.addEventListener('click', () => this.closeAiAssistantModal())
+        this.dom.modalAiAssistant?.addEventListener('click', e => {
+            if (e.target === this.dom.modalAiAssistant) this.closeAiAssistantModal()
+        })
+        this.dom.btnAiTranslate?.addEventListener('click', () => {
+            const text = (this.selectedTextInfo?.text || '').trim()
+            if (text) this.runAiRequest(createTranslationPrompt(text), SYSTEM_PROMPTS.translate)
+        })
+        this.dom.btnAiExplain?.addEventListener('click', () => {
+            const text = (this.selectedTextInfo?.text || '').trim()
+            if (text) this.runAiRequest(createExplainPrompt(text), SYSTEM_PROMPTS.explain)
+        })
+        this.dom.btnAiAsk?.addEventListener('click', () => {
+            const q = (this.dom.inputAiPrompt?.value || '').trim()
+            const text = (this.selectedTextInfo?.text || '').trim()
+            if (q) {
+                this.runAiRequest(createQuestionPrompt(text, q), SYSTEM_PROMPTS.qa)
+                if (this.dom.inputAiPrompt) this.dom.inputAiPrompt.value = ''
+            }
+        })
+        this.dom.inputAiPrompt?.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                const q = (this.dom.inputAiPrompt?.value || '').trim()
+                const text = (this.selectedTextInfo?.text || '').trim()
+                if (q) {
+                    this.runAiRequest(createQuestionPrompt(text, q), SYSTEM_PROMPTS.qa)
+                    if (this.dom.inputAiPrompt) this.dom.inputAiPrompt.value = ''
+                }
+            }
+        })
+        this.dom.btnAiCopy?.addEventListener('click', () => {
+            const text = this.dom.aiResponseArea?.innerText || ''
+            if (!text.trim()) {
+                this.showToast('没有可复制的 AI 内容', 'warning')
+                return
+            }
+            navigator.clipboard.writeText(text).then(() => {
+                this.showToast('AI 内容已复制到剪贴板', 'success')
+            }).catch(() => {
+                this.showToast('复制失败', 'warning')
+            })
+        })
+        this.dom.btnAiSaveNote?.addEventListener('click', async () => {
+            const aiText = (this.dom.aiResponseArea?.innerText || '').trim()
+            if (!aiText) {
+                this.showToast('暂无可保存的 AI 内容', 'warning')
+                return
+            }
+            if (this.selectedTextInfo?.cfi || this.selectedTextInfo?.pdfTarget) {
+                await this.createHighlight('#3b82f6', 'highlight', `[AI 辅助]: ${aiText}`)
+                this.showToast('已将 AI 解读保存为划线批注', 'success')
+                this.closeAiAssistantModal()
+            } else {
+                navigator.clipboard.writeText(aiText).then(() => {
+                    this.showToast('已复制 AI 内容到剪贴板', 'success')
+                })
+            }
+        })
+
+        // Shelf Batch Multi-Select Mode Event Listeners
+        this.dom.btnBatchMode?.addEventListener('click', () => {
+            this.toggleBatchMode()
+        })
+        this.dom.btnBatchSelectAll?.addEventListener('click', () => {
+            this.handleBatchSelectAll()
+        })
+        this.dom.btnBatchTags?.addEventListener('click', () => {
+            this.openBatchTagsModal()
+        })
+        this.dom.btnBatchDelete?.addEventListener('click', () => {
+            this.handleBatchDelete()
+        })
+        this.dom.btnBatchExit?.addEventListener('click', () => {
+            this.toggleBatchMode(false)
+        })
+        this.dom.btnCloseBatchTags?.addEventListener('click', () => {
+            this.closeBatchTagsModal()
+        })
+        this.dom.modalBatchTags?.addEventListener('click', e => {
+            if (e.target === this.dom.modalBatchTags) this.closeBatchTagsModal()
+        })
+        this.dom.btnBatchAddTagAction?.addEventListener('click', () => {
+            this.handleBatchAddTag()
+        })
+        this.dom.inputBatchTag?.addEventListener('keydown', e => {
+            if (e.key === 'Enter') this.handleBatchAddTag()
         })
 
         // Click Page Number to Jump
@@ -3053,6 +3345,7 @@ class UniversalReaderApp {
     }
 
     setPDFZoom(zoomVal) {
+        this.pageTurnController?.cancelCurrent()
         if (this.pdfViewport) {
             this.pdfViewport.setZoom(zoomVal)
             let sliderVal = Math.round(this.pdfViewport.scale * 100)
@@ -3871,148 +4164,501 @@ class UniversalReaderApp {
         return lines.map(line => line.map(s => s.text).join(' ').trim()).filter(Boolean).join('\n')
     }
 
-    async handlePdfOcrExtract() {
+    handlePdfOcrExtract() {
         if (!this.dom.modalPdfOcr) return
-
         this.dom.modalPdfOcr.style.display = 'flex'
         requestAnimationFrame(() => {
             this.dom.modalPdfOcr?.classList.add('show')
         })
-        if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⏳'
-        if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '正在提取当前页面文本或图像...'
+
+        const curPage = (this.pdfViewport ? (this.pdfViewport.currentPage ?? 0) : (this.currentPdfPageIndex ?? 0)) + 1
+        if (this.dom.pdfOcrPageRange) {
+            this.dom.pdfOcrPageRange.value = String(curPage)
+        }
+        if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = 'ℹ️'
+        if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = `就绪：输入页码 (当前第 ${curPage} 页) 后点击“开始识别”`
         if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = ''
         if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = '共 0 字'
+    }
 
-        const taskId = ++this._pdfOcrTaskId
-        this._pdfOcrAbortController?.abort()
-        this._pdfOcrAbortController = new AbortController()
-        const signal = this._pdfOcrAbortController.signal
+    async startPdfOcrExtraction() {
+        const curPage = (this.pdfViewport ? (this.pdfViewport.currentPage ?? 0) : (this.currentPdfPageIndex ?? 0)) + 1
+        const rangeStr = (this.dom.pdfOcrPageRange?.value || '').trim() || String(curPage)
+        const mode = this.dom.pdfOcrMode?.value || 'auto'
+        const totalPages = this.currentLocation?.totalPages || this.pdfDriver?.pageCount || 9999
+
+        const check = parsePageRange(rangeStr, totalPages, curPage, 5)
+        if (!check.valid) {
+            if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
+            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = check.error
+            this.showToast(check.error, 'warning')
+            return
+        }
 
         const activeSession = this._activeSession
-        const currentBookId = this.currentBookId
-        const targetPageIndex = this.pdfViewport ? (this.pdfViewport.currentPage ?? 0) : (this.currentPdfPageIndex ?? 0)
+        const driver = this.pdfDriver || activeSession?.driver
+        if (!driver) {
+            this.showToast('PDF 驱动不可用', 'warning')
+            return
+        }
+
+        if (this._isPdfOcrRunning) {
+            ocrService.abort().catch(() => {})
+            this._isPdfOcrRunning = false
+            if (this.dom.btnStartPdfOcr) this.dom.btnStartPdfOcr.innerText = '开始识别'
+            if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
+            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '识别已停止'
+            return
+        }
+
+        this._isPdfOcrRunning = true
+        if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⏳'
+        if (this.dom.btnStartPdfOcr) this.dom.btnStartPdfOcr.innerText = '停止识别'
 
         try {
-            const driver = this.pdfDriver || activeSession?.driver
-
-            // 1. Try driver text layer (embedded text) first
-            let nativeText = ''
-            if (driver?.getTextLayer) {
-                try {
-                    const layer = await driver.getTextLayer(targetPageIndex)
-                    if (layer?.spans?.length) {
-                        nativeText = this._formatSpansToText(layer.spans)
-                    }
-                } catch (e) {
-                    console.warn('[PDF OCR] getTextLayer check failed:', e)
+            const res = await ocrService.extractText({
+                driver,
+                pages: check.pages,
+                mode,
+                onProgress: (msg) => {
+                    if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = msg
                 }
-            }
-
-            // Fallback check DOM text layer
-            if (!nativeText || nativeText.length <= 5) {
-                const activeObj = this.getPdfActiveDocAndTarget()
-                const textLayerEl = activeObj?.container?.querySelector('.pdf-text-layer, .textLayer') || activeObj?.doc?.querySelector('.pdf-text-layer, .textLayer')
-                const domText = (textLayerEl ? (textLayerEl.innerText || textLayerEl.textContent || '') : '').trim()
-                if (domText.length > 5) nativeText = domText
-            }
-
-            if (signal.aborted || taskId !== this._pdfOcrTaskId || this.currentBookId !== currentBookId) return
-
-            if (nativeText && nativeText.trim().length > 5) {
-                const trimmed = nativeText.trim()
-                if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = trimmed
-                if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = `共 ${trimmed.length} 字`
-                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '✅'
-                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '已提取页面内嵌文本！可在上方选择或点击下方快速复制'
-                return
-            }
-
-            // 2. Pure scanned bitmap OCR: request dedicated unclipped full-page canvas from driver
-            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '正在获取整页高保真图像用于文字识别...'
-
-            let imageSource = null
-            if (driver?.renderPage) {
-                try {
-                    imageSource = await driver.renderPage(targetPageIndex, 1.5, signal, null)
-                } catch (renderErr) {
-                    if (signal.aborted) return
-                    console.warn('[PDF OCR] driver full-page renderPage failed, falling back:', renderErr)
-                }
-            }
-
-            if (!imageSource) {
-                const activeObj = this.getPdfActiveDocAndTarget()
-                if (activeObj?.img) {
-                    try {
-                        const offCanvas = document.createElement('canvas')
-                        offCanvas.width = activeObj.img.naturalWidth || activeObj.img.width || 1200
-                        offCanvas.height = activeObj.img.naturalHeight || activeObj.img.height || 1600
-                        const offCtx = offCanvas.getContext('2d')
-                        offCtx.drawImage(activeObj.img, 0, 0)
-                        imageSource = offCanvas.toDataURL('image/png')
-                    } catch (imgErr) {
-                        imageSource = activeObj.img.src
-                    }
-                } else if (activeObj?.canvas) {
-                    imageSource = activeObj.canvas
-                } else {
-                    const anyCanvas = document.querySelector('#reader-content-area canvas:not(.pdf-draw-overlay-canvas)')
-                    if (anyCanvas) imageSource = anyCanvas
-                }
-            }
-
-            if (signal.aborted || taskId !== this._pdfOcrTaskId || this.currentBookId !== currentBookId) return
-
-            if (!imageSource) {
-                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
-                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '未找到可识别的页面图像，请确认页面已完全载入。'
-                return
-            }
-
-            if (typeof Tesseract === 'undefined') {
-                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
-                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = 'OCR 识别引擎未就绪，请检查网络或刷新重试。'
-                return
-            }
-
-            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = 'OCR 引擎分析识别中 (中文/英文)...'
-
-            const result = await Tesseract.recognize(imageSource, 'chi_sim+eng', {
-                workerPath: './vendor/tesseract/worker.min.js',
-                corePath: 'https://npmmirror.com/mirrors/tesseract.js-core/v4.0.4/tesseract-core.wasm.js',
-                langPath: 'https://npmmirror.com/mirrors/tessdata/4.0.0'
             })
 
-            if (signal.aborted || taskId !== this._pdfOcrTaskId || this.currentBookId !== currentBookId) return
-
-            const recognizedText = (result?.data?.text || '').trim()
-            if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = recognizedText
-            if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = `共 ${recognizedText.length} 字`
-
-            if (recognizedText.length > 0) {
+            if (res.success) {
+                if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = res.fullText
+                if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = `共 ${res.fullText.length} 字`
                 if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '✅'
-                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '识别完成！可在上方选词或点击下方按钮快速复制'
+                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = `完成提取 (共 ${check.pages.length} 页)`
             } else {
-                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = 'ℹ️'
-                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = '识别结束，当前页未检测到明显文字或图像较模糊。'
+                if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
+                if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = res.error || '提取未完成'
             }
-        } catch (err) {
-            if (signal.aborted) return
-            console.error('PDF OCR error:', err)
+        } catch (e) {
             if (this.dom.pdfOcrStatusIcon) this.dom.pdfOcrStatusIcon.innerText = '⚠️'
-            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = `识别提示: ${err.message || '网络连接超时或语言包加载受限'}`
+            if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = `提取失败: ${e.message || e}`
+        } finally {
+            this._isPdfOcrRunning = false
+            if (this.dom.btnStartPdfOcr) {
+                this.dom.btnStartPdfOcr.innerText = '开始识别'
+                this.dom.btnStartPdfOcr.disabled = false
+            }
         }
     }
 
     closePdfOcrModal() {
-        this._pdfOcrTaskId++
-        this._pdfOcrAbortController?.abort()
+        ocrService.abort().catch(() => {})
         if (this.dom.modalPdfOcr) {
             this.dom.modalPdfOcr.classList.remove('show')
             setTimeout(() => {
                 if (this.dom.modalPdfOcr) this.dom.modalPdfOcr.style.display = 'none'
             }, 200)
         }
+    }
+
+    openBookDetailsModal(bookId) {
+        if (!this.dom.modalBookDetails || !this.dom.bookDetailsBody) return
+        this.dom.modalBookDetails.style.display = 'flex'
+        requestAnimationFrame(() => this.dom.modalBookDetails.classList.add('show'))
+        bookDetailsModal.render(this.dom.bookDetailsBody, bookId, {
+            onOpenBook: (id) => {
+                this.closeBookDetailsModal()
+                this.openBook(id)
+            },
+            onShelfRefresh: () => this.refreshBookshelf()
+        })
+    }
+
+    closeBookDetailsModal() {
+        bookDetailsModal.cleanup?.()
+        if (!this.dom.modalBookDetails) return
+        this.dom.modalBookDetails.classList.remove('show')
+        setTimeout(() => {
+            if (this.dom.modalBookDetails) this.dom.modalBookDetails.style.display = 'none'
+        }, 200)
+    }
+
+    openCrossSearchModal() {
+        if (!this.dom.modalCrossSearch) return
+        this.dom.modalCrossSearch.style.display = 'flex'
+        requestAnimationFrame(() => this.dom.modalCrossSearch.classList.add('show'))
+        this.dom.inputCrossSearch?.focus()
+    }
+
+    closeCrossSearchModal() {
+        this._searchQueryGeneration = (this._searchQueryGeneration || 0) + 1
+        if (this._searchAbortController) {
+            this._searchAbortController.abort()
+            this._searchAbortController = null
+        }
+        if (!this.dom.modalCrossSearch) return
+        this.dom.modalCrossSearch.classList.remove('show')
+        setTimeout(() => {
+            if (this.dom.modalCrossSearch) this.dom.modalCrossSearch.style.display = 'none'
+        }, 200)
+    }
+
+    async executeCrossSearch(query) {
+        if (!query || !query.trim()) return
+        const container = this.dom.crossSearchResults
+        const status = this.dom.crossSearchStatus
+        if (!container) return
+
+        this._searchQueryGeneration = (this._searchQueryGeneration || 0) + 1
+        const currentGen = this._searchQueryGeneration
+        if (this._searchAbortController) {
+            this._searchAbortController.abort()
+        }
+        this._searchAbortController = new AbortController()
+        const signal = this._searchAbortController.signal
+
+        container.innerHTML = '<div style="color: var(--text-muted); padding: 1rem; text-align: center;">正在检索全书库...</div>'
+        if (status) status.innerText = '正在索引与检索相关书籍...'
+
+        const books = (await db.getAllBooks()) || []
+        for (const b of books) {
+            if (signal.aborted || this._searchQueryGeneration !== currentGen) return
+            await fullTextSearchEngine.indexBook(b.id, signal)
+        }
+
+        if (signal.aborted || this._searchQueryGeneration !== currentGen) return
+
+        const results = fullTextSearchEngine.search(query.trim())
+        if (this._searchQueryGeneration !== currentGen) return
+
+        if (status) {
+            status.innerText = `在已索引图书中找到 ${results.length} 处匹配`
+        }
+
+        if (results.length === 0) {
+            container.innerHTML = '<div style="text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 2rem;">未找到相关内容</div>'
+            return
+        }
+
+        container.innerHTML = ''
+        results.forEach(res => {
+            const item = document.createElement('div')
+            item.className = 'cross-search-item'
+            const granLabel = res.granularity === 'paragraph' ? '段落级' : '章级'
+            item.innerHTML = `
+                <div class="cross-search-item-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <span class="cross-search-book-title">${escapeHTML(res.bookTitle)}</span>
+                    <span class="cross-search-granularity-badge" style="font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; background: var(--bg-hover, rgba(0,0,0,0.06)); color: var(--text-muted);">${granLabel}</span>
+                </div>
+                <div class="cross-search-section-title">${escapeHTML(res.sectionTitle || '')}</div>
+                <div class="cross-search-snippet">${res.snippet}</div>
+            `
+            item.addEventListener('click', () => {
+                this.closeCrossSearchModal()
+                this.openBook(res.bookId, res.location)
+            })
+            container.appendChild(item)
+        })
+    }
+
+    openAiAssistantModal() {
+        if (!this.dom.modalAiAssistant) return
+        const selected = (this.selectedTextInfo?.text || '').trim()
+        this.dom.modalAiAssistant.style.display = 'flex'
+        requestAnimationFrame(() => this.dom.modalAiAssistant.classList.add('show'))
+        if (this.dom.aiSelectedPreview) {
+            this.dom.aiSelectedPreview.innerText = selected || '（未选取文本）'
+        }
+        if (this.dom.aiResponseArea) {
+            this.dom.aiResponseArea.innerHTML = '<span style="color: var(--text-muted); font-size: 0.82rem;">点击上方快捷指令或输入问题开启 AI 辅助阅读...</span>'
+        }
+        if (this.dom.aiStatusHint) {
+            isAiReady().then(ready => {
+                if (this.dom.aiStatusHint) {
+                    this.dom.aiStatusHint.innerText = ready ? 'AI 服务已就绪' : '⚠️ 尚未配置 API Key，请在设置中配置'
+                    this.dom.aiStatusHint.style.color = ready ? 'var(--text-muted)' : '#f59e0b'
+                }
+            })
+        }
+    }
+
+    closeAiAssistantModal() {
+        this._aiReqGeneration = (this._aiReqGeneration || 0) + 1
+        if (this._aiAbortController) {
+            this._aiAbortController.abort()
+            this._aiAbortController = null
+        }
+        this._isAiRunning = false
+        if (this.dom.btnAiAsk) this.dom.btnAiAsk.innerText = '发送'
+        if (!this.dom.modalAiAssistant) return
+        this.dom.modalAiAssistant.classList.remove('show')
+        setTimeout(() => {
+            if (this.dom.modalAiAssistant) this.dom.modalAiAssistant.style.display = 'none'
+        }, 200)
+    }
+
+    async runAiRequest(promptText, systemPrompt = SYSTEM_PROMPTS.qa) {
+        if (!promptText) return
+
+        // If a request is currently streaming, clicking toggles stop
+        if (this._isAiRunning) {
+            this._aiReqGeneration = (this._aiReqGeneration || 0) + 1
+            if (this._aiAbortController) {
+                this._aiAbortController.abort()
+                this._aiAbortController = null
+            }
+            this._isAiRunning = false
+            if (this.dom.btnAiAsk) this.dom.btnAiAsk.innerText = '发送'
+            if (this.dom.aiStatusHint) this.dom.aiStatusHint.innerText = '已停止生成'
+            return
+        }
+
+        const cfg = getAiConfig()
+        const apiKey = await getAiApiKey()
+        if (!cfg.enabled || !apiKey) {
+            this.showToast('请先在阅读器设置中启用并配置 AI API Key', 'warning')
+            return
+        }
+
+        const reqGen = ++this._aiReqGeneration
+        this._aiAbortController = new AbortController()
+        const signal = this._aiAbortController.signal
+        this._isAiRunning = true
+
+        const area = this.dom.aiResponseArea
+        const hint = this.dom.aiStatusHint
+        if (this.dom.btnAiAsk) this.dom.btnAiAsk.innerText = '停止'
+        if (area) area.innerHTML = '<span style="color: var(--text-muted);">正在思考生成中...</span>'
+        if (hint) hint.innerText = '正在请求大模型...'
+
+        try {
+            await requestAiCompletion({
+                endpoint: cfg.endpoint,
+                model: cfg.model,
+                apiKey,
+                prompt: promptText,
+                systemPrompt,
+                signal,
+                onChunk: (delta, fullText) => {
+                    if (reqGen !== this._aiReqGeneration) return
+                    if (area) {
+                        area.innerHTML = renderSafeMarkdown(fullText)
+                    }
+                }
+            })
+            if (reqGen === this._aiReqGeneration && hint) hint.innerText = '生成完成'
+        } catch (err) {
+            if (reqGen !== this._aiReqGeneration) return
+            if (signal.aborted || err.name === 'AbortError') {
+                if (hint) hint.innerText = '已停止生成'
+            } else {
+                if (area) {
+                    area.innerHTML = `<span style="color: #ef4444;">请求出错: ${escapeHTML(err.message || String(err))}</span>`
+                }
+                if (hint) hint.innerText = '请求失败'
+            }
+        } finally {
+            if (reqGen === this._aiReqGeneration) {
+                this._isAiRunning = false
+                if (this.dom.btnAiAsk) this.dom.btnAiAsk.innerText = '发送'
+                this._aiAbortController = null
+            }
+        }
+    }
+
+    toggleBatchMode(enable) {
+        this.isBatchMode = typeof enable === 'boolean' ? enable : !this.isBatchMode
+        if (!this.isBatchMode) {
+            this.selectedBookIds.clear()
+        }
+        if (this.dom.bookshelfView) {
+            this.dom.bookshelfView.classList.toggle('is-batch-mode', this.isBatchMode)
+        }
+        if (this.dom.btnBatchMode) {
+            this.dom.btnBatchMode.classList.toggle('active', this.isBatchMode)
+        }
+        if (this.dom.batchActionsBar) {
+            this.dom.batchActionsBar.style.display = this.isBatchMode ? 'flex' : 'none'
+        }
+        this.updateBatchSelectionUI()
+        this.refreshBookshelf()
+    }
+
+    toggleBookSelection(bookId) {
+        if (!bookId) return
+        if (this.selectedBookIds.has(bookId)) {
+            this.selectedBookIds.delete(bookId)
+        } else {
+            this.selectedBookIds.add(bookId)
+        }
+        this.updateBatchSelectionUI()
+    }
+
+    updateBatchSelectionUI() {
+        const count = this.selectedBookIds.size
+        if (this.dom.batchSelectedCount) {
+            this.dom.batchSelectedCount.innerText = `已选 ${count} 本`
+        }
+        if (this.dom.btnBatchTags) {
+            this.dom.btnBatchTags.disabled = count === 0
+        }
+        if (this.dom.btnBatchDelete) {
+            this.dom.btnBatchDelete.disabled = count === 0
+        }
+        if (this.dom.btnBatchSelectAll) {
+            const total = (this.currentBooksList || []).length
+            this.dom.btnBatchSelectAll.innerText = (total > 0 && count === total) ? '取消全选' : '全选'
+        }
+
+        const shelfCards = document.querySelectorAll('.skeuo-book, .jane-book-card, .jane-table-row')
+        shelfCards.forEach(card => {
+            const id = card.dataset.id
+            if (!id) return
+            const isSel = this.selectedBookIds.has(id)
+            card.classList.toggle('selected', isSel)
+            const checkbox = card.querySelector('.card-batch-checkbox')
+            if (checkbox) {
+                checkbox.classList.toggle('selected', isSel)
+                checkbox.title = isSel ? '取消选中' : '选中'
+            }
+        })
+    }
+
+    handleBatchSelectAll() {
+        const total = (this.currentBooksList || []).length
+        if (total === 0) return
+        if (this.selectedBookIds.size === total) {
+            this.selectedBookIds.clear()
+        } else {
+            for (const b of this.currentBooksList) {
+                if (b.id) this.selectedBookIds.add(b.id)
+            }
+        }
+        this.updateBatchSelectionUI()
+    }
+
+    openBatchTagsModal() {
+        if (this.selectedBookIds.size === 0) {
+            this.showToast('请先选择要操作的图书', 'warning')
+            return
+        }
+        if (!this.dom.modalBatchTags) return
+
+        if (this.dom.batchTagsPrompt) {
+            this.dom.batchTagsPrompt.innerText = `已选择 ${this.selectedBookIds.size} 本图书，请选择操作：`
+        }
+        if (this.dom.inputBatchTag) {
+            this.dom.inputBatchTag.value = ''
+        }
+
+        const selectedBooks = (this.currentBooksList || []).filter(b => this.selectedBookIds.has(b.id))
+        const tagCounts = new Map()
+        for (const book of selectedBooks) {
+            const tags = Array.isArray(book.tags) ? book.tags : []
+            for (const t of tags) {
+                tagCounts.set(t, (tagCounts.get(t) || 0) + 1)
+            }
+        }
+
+        if (this.dom.batchExistingTagsList) {
+            this.dom.batchExistingTagsList.innerHTML = ''
+            if (tagCounts.size === 0) {
+                this.dom.batchExistingTagsList.innerHTML = '<span style="font-size: 0.8rem; color: var(--text-muted);">所选图书当前暂无标签</span>'
+            } else {
+                for (const [tag, count] of tagCounts.entries()) {
+                    const badge = document.createElement('span')
+                    badge.className = 'tags-badge'
+                    badge.style.cursor = 'pointer'
+                    badge.style.display = 'inline-flex'
+                    badge.style.alignItems = 'center'
+                    badge.style.gap = '4px'
+                    badge.style.padding = '3px 8px'
+                    badge.style.borderRadius = '12px'
+                    badge.style.background = 'var(--bg-tertiary)'
+                    badge.style.border = '1px solid var(--border-color)'
+                    badge.style.fontSize = '0.78rem'
+                    badge.title = `点击为所选图书移除标签 "${tag}"`
+                    badge.innerHTML = `<span>${escapeHTML(tag)} (${count}/${selectedBooks.length})</span><span style="color: #ef4444; font-weight: bold; margin-left: 2px;">×</span>`
+                    badge.addEventListener('click', async () => {
+                        await this.handleBatchRemoveTag(tag)
+                    })
+                    this.dom.batchExistingTagsList.appendChild(badge)
+                }
+            }
+        }
+
+        this.dom.modalBatchTags.style.display = 'flex'
+        requestAnimationFrame(() => this.dom.modalBatchTags.classList.add('show'))
+        this.dom.inputBatchTag?.focus()
+    }
+
+    closeBatchTagsModal() {
+        if (!this.dom.modalBatchTags) return
+        this.dom.modalBatchTags.classList.remove('show')
+        setTimeout(() => {
+            if (this.dom.modalBatchTags) this.dom.modalBatchTags.style.display = 'none'
+        }, 200)
+    }
+
+    async handleBatchAddTag() {
+        const rawTag = this.dom.inputBatchTag?.value
+        const norm = normalizeTag(rawTag)
+        if (!norm) {
+            this.showToast('请输入有效的标签名称（不能包含控制字符）', 'warning')
+            return
+        }
+        const ids = Array.from(this.selectedBookIds)
+        if (ids.length === 0) return
+
+        try {
+            const updated = await batchAddTag(ids, norm)
+            this.showToast(`已为 ${updated} 本图书添加标签 "${norm}"`, 'success')
+            this.closeBatchTagsModal()
+            await this.refreshBookshelf()
+        } catch (err) {
+            console.error('[BatchTags] Add tag failed:', err)
+            this.showToast('批量添加标签失败', 'error')
+        }
+    }
+
+    async handleBatchRemoveTag(tag) {
+        if (!tag) return
+        const ids = Array.from(this.selectedBookIds)
+        if (ids.length === 0) return
+
+        try {
+            const updated = await batchRemoveTag(ids, tag)
+            this.showToast(`已为 ${updated} 本图书移除标签 "${tag}"`, 'success')
+            this.openBatchTagsModal()
+            await this.refreshBookshelf()
+        } catch (err) {
+            console.error('[BatchTags] Remove tag failed:', err)
+            this.showToast('批量移除标签失败', 'error')
+        }
+    }
+
+    async handleBatchDelete() {
+        const count = this.selectedBookIds.size
+        if (count === 0) return
+
+        const confirmed = await this.showConfirmDialog(
+            `批量删除 ${count} 本图书？`,
+            `确定要从书架删除选中的 ${count} 本图书吗？\n\n此操作将同时清理关联的阅读历史、缓存封面与本地全文检索索引。`
+        )
+        if (!confirmed) return
+
+        const ids = Array.from(this.selectedBookIds)
+        let deletedCount = 0
+        for (const id of ids) {
+            try {
+                await db.deleteBook(id, true)
+                coverUrlPool.revoke(id)
+                fullTextSearchEngine.removeBookIndex(id)
+                deletedCount++
+            } catch (err) {
+                console.error(`[BatchDelete] Failed to delete book ${id}:`, err)
+            }
+        }
+
+        this.showToast(`已成功删除 ${deletedCount} 本图书`, 'success')
+        this.selectedBookIds.clear()
+        this.toggleBatchMode(false)
+        await this.refreshBookshelf()
     }
 
     extractFootnoteFromTarget(targetEl, anchorEl = null) {
@@ -4157,6 +4803,10 @@ class UniversalReaderApp {
 
     turnPageNext() {
         this.hideFootnotePopup()
+        if (this.pageTurnController) {
+            this.pageTurnController.turnNext()
+            return
+        }
         if (this.pdfViewport) {
             const total = this.pdfViewport.pageOffsets?.length || this.pdfViewport.pageSizes?.length || 1
             const cur = this.pdfViewport.currentPage ?? 0
@@ -4175,6 +4825,10 @@ class UniversalReaderApp {
 
     turnPagePrev() {
         this.hideFootnotePopup()
+        if (this.pageTurnController) {
+            this.pageTurnController.turnPrev()
+            return
+        }
         if (this.pdfViewport) {
             const cur = this.pdfViewport.currentPage ?? 0
             if (cur > 0) {
@@ -4539,24 +5193,231 @@ class UniversalReaderApp {
     }
 
     async importFiles(files) {
-        const total = files.length
-        let successCount = 0
-        for (let i = 0; i < total; i++) {
-            const file = files[i]
-            try {
-                if (total > 1) {
-                    this.showToast(`正在导入 (${i + 1}/${total}): ${file.name}...`, '⏳')
+        if (!files || files.length === 0) return
+        this.importQueue.enqueue(files)
+        const isReaderOpen = this.dom.readerView && this.dom.readerView.style.display !== 'none'
+        if (!isReaderOpen) {
+            this.showImportPanel()
+        } else {
+            this.minimizeImportPanel()
+        }
+    }
+
+    initImportCenter() {
+        if (!this.dom.importTaskPanel) return
+
+        this.importCenterMinimized = false
+
+        this.dom.importDockBadge?.addEventListener('click', () => {
+            this.showImportPanel()
+        })
+
+        this.dom.btnImportMinimize?.addEventListener('click', () => {
+            this.minimizeImportPanel()
+        })
+
+        this.dom.btnImportClose?.addEventListener('click', () => {
+            this.closeImportPanel()
+        })
+
+        this.dom.btnImportCancelAll?.addEventListener('click', () => {
+            this.importQueue.cancelAll()
+            this.renderImportTaskList()
+        })
+
+        this.dom.btnImportRetryFailed?.addEventListener('click', () => {
+            for (const job of this.importQueue.jobs.values()) {
+                if (job.status === 'failed') {
+                    this.importQueue.retry(job.id)
                 }
-                await this.processAndSaveBook(file)
-                successCount++
-            } catch (err) {
-                console.error(`Failed to import file ${file.name}:`, err)
-                this.showToast(`导入书籍 ${file.name} 失败: ${err.message || err}`, '⚠️')
+            }
+            this.renderImportTaskList()
+        })
+
+        this.dom.btnImportClearDone?.addEventListener('click', () => {
+            for (const [id, job] of this.importQueue.jobs.entries()) {
+                if (job.status === 'succeeded' || job.status === 'cancelled') {
+                    this.importQueue.jobs.delete(id)
+                }
+            }
+            this.renderImportTaskList()
+            const summary = this.importQueue.getSummary()
+            this.updateImportCenterUI(summary)
+            if (summary.total === 0) {
+                this.closeImportPanel()
+            }
+        })
+
+        this.importQueue.onJobChange = (job) => {
+            this.renderImportTaskItem(job)
+            this.updateImportCenterUI(this.importQueue.getSummary())
+        }
+
+        this.importQueue.onProgress = (summary) => {
+            this.updateImportCenterUI(summary)
+        }
+
+        this.importQueue.onBatchComplete = (summary) => {
+            this.updateImportCenterUI(summary)
+            this.refreshBookshelf()
+        }
+    }
+
+    showImportPanel() {
+        if (!this.dom.importTaskPanel) return
+        this.importCenterMinimized = false
+        this.dom.importTaskPanel.style.display = 'flex'
+        if (this.dom.importDockBadge) this.dom.importDockBadge.style.display = 'none'
+        this.renderImportTaskList()
+    }
+
+    minimizeImportPanel() {
+        if (!this.dom.importTaskPanel) return
+        this.importCenterMinimized = true
+        this.dom.importTaskPanel.style.display = 'none'
+        const summary = this.importQueue.getSummary()
+        if (this.dom.importDockBadge && summary.total > 0) {
+            this.dom.importDockBadge.style.display = 'flex'
+        }
+    }
+
+    closeImportPanel() {
+        if (!this.dom.importTaskPanel) return
+        this.dom.importTaskPanel.style.display = 'none'
+        const summary = this.importQueue.getSummary()
+        if (summary.running > 0 || summary.queued > 0) {
+            this.minimizeImportPanel()
+        } else {
+            if (this.dom.importDockBadge) this.dom.importDockBadge.style.display = 'none'
+        }
+    }
+
+    updateImportCenterUI(summary) {
+        if (!summary) summary = this.importQueue.getSummary()
+
+        if (this.dom.importPanelSummaryBadge) {
+            this.dom.importPanelSummaryBadge.textContent = `${summary.total} 项`
+        }
+
+        if (this.dom.importPanelStats) {
+            if (summary.total === 0) {
+                this.dom.importPanelStats.textContent = '暂无任务'
+            } else if (summary.running > 0 || summary.queued > 0) {
+                this.dom.importPanelStats.textContent = `进行中: ${summary.running} · 等待: ${summary.queued} · 成功: ${summary.succeeded}` + (summary.failed > 0 ? ` · 失败: ${summary.failed}` : '')
+            } else {
+                this.dom.importPanelStats.textContent = `导入完成: 成功 ${summary.succeeded} 项` + (summary.failed > 0 ? ` · 失败 ${summary.failed} 项` : '')
             }
         }
-        await this.refreshBookshelf()
-        if (total > 1) {
-            this.showToast(`成功导入 ${successCount}/${total} 本图书`, '✓')
+
+        if (this.dom.btnImportRetryFailed) {
+            this.dom.btnImportRetryFailed.style.display = summary.failed > 0 ? 'inline-block' : 'none'
+        }
+
+        const isReaderOpen = this.dom.readerView && this.dom.readerView.style.display !== 'none'
+
+        if (summary.total > 0) {
+            if (isReaderOpen) {
+                if (this.dom.importTaskPanel) this.dom.importTaskPanel.style.display = 'none'
+                if (this.dom.importDockBadge) this.dom.importDockBadge.style.display = 'flex'
+            } else if (!this.importCenterMinimized) {
+                if (this.dom.importTaskPanel?.style.display !== 'flex') {
+                    this.showImportPanel()
+                }
+            } else if (this.importCenterMinimized && this.dom.importDockBadge) {
+                this.dom.importDockBadge.style.display = 'flex'
+            }
+        } else {
+            if (this.dom.importDockBadge) this.dom.importDockBadge.style.display = 'none'
+            if (this.dom.importTaskPanel) this.dom.importTaskPanel.style.display = 'none'
+        }
+
+        if (this.dom.importDockSpinner) {
+            if (summary.running > 0 || summary.queued > 0) {
+                this.dom.importDockSpinner.classList.add('active')
+            } else {
+                this.dom.importDockSpinner.classList.remove('active')
+            }
+        }
+
+        if (this.dom.importDockText) {
+            if (summary.running > 0 || summary.queued > 0) {
+                this.dom.importDockText.textContent = `导入中 (${summary.succeeded + summary.failed}/${summary.total})`
+            } else {
+                this.dom.importDockText.textContent = `导入完成 (${summary.succeeded}/${summary.total})`
+            }
+        }
+    }
+
+    renderImportTaskList() {
+        if (!this.dom.importTaskList) return
+        this.dom.importTaskList.innerHTML = ''
+        const jobs = Array.from(this.importQueue.jobs.values())
+        if (jobs.length === 0) {
+            this.dom.importTaskList.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-muted); font-size: 0.82rem;">暂无导入任务</div>'
+            return
+        }
+        for (const job of jobs) {
+            this.renderImportTaskItem(job)
+        }
+    }
+
+    renderImportTaskItem(job) {
+        if (!this.dom.importTaskList) return
+        let itemEl = document.getElementById(`import-item-${job.id}`)
+        if (!itemEl) {
+            const emptyEl = this.dom.importTaskList.querySelector('div:only-child')
+            if (emptyEl && emptyEl.textContent === '暂无导入任务') {
+                this.dom.importTaskList.innerHTML = ''
+            }
+            itemEl = document.createElement('div')
+            itemEl.id = `import-item-${job.id}`
+            itemEl.className = 'import-task-item'
+            this.dom.importTaskList.appendChild(itemEl)
+        }
+
+        const sizeStr = job.fileSize ? ` · ${(job.fileSize / (1024 * 1024)).toFixed(1)} MB` : ''
+        const statusMap = {
+            queued: { label: '排队中', cls: 'queued' },
+            running: { label: job.progressText || '处理中', cls: 'running' },
+            cancelling: { label: '取消中...', cls: 'cancelling' },
+            succeeded: { label: '导入成功', cls: 'succeeded' },
+            failed: { label: '导入失败', cls: 'failed' },
+            cancelled: { label: '已取消', cls: 'cancelled' }
+        }
+        const st = statusMap[job.status] || { label: job.status, cls: 'queued' }
+        const errHint = job.error ? `<div style="color: #ef4444; font-size: 0.7rem; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHTML(job.error)}">${escapeHTML(job.error)}</div>` : ''
+
+        let actionBtn = ''
+        if (job.status === 'queued' || job.status === 'running') {
+            actionBtn = `<button class="import-task-btn" data-action="cancel" data-id="${job.id}">取消</button>`
+        } else if (job.status === 'failed') {
+            actionBtn = `<button class="import-task-btn" data-action="retry" data-id="${job.id}">重试</button>`
+        }
+
+        itemEl.innerHTML = `
+            <div class="import-task-meta">
+                <div class="import-task-title" title="${escapeHTML(job.filename)}">${escapeHTML(job.filename)}</div>
+                <div class="import-task-sub">
+                    <span class="import-task-status-chip ${st.cls}">${st.label}</span>
+                    <span>${sizeStr}</span>
+                </div>
+                ${errHint}
+            </div>
+            <div class="import-task-action-wrap">
+                ${actionBtn}
+            </div>
+        `
+
+        const btn = itemEl.querySelector('.import-task-btn')
+        if (btn) {
+            btn.onclick = () => {
+                const act = btn.getAttribute('data-action')
+                if (act === 'cancel') {
+                    this.importQueue.cancel(job.id)
+                } else if (act === 'retry') {
+                    this.importQueue.retry(job.id)
+                }
+            }
         }
     }
 
@@ -4914,6 +5775,20 @@ class UniversalReaderApp {
             const target = e.target
             if (!target) return
 
+            // If in batch mode, any card click or checkbox click toggles selection
+            if (this.isBatchMode) {
+                const card = target.closest('.skeuo-book, .jane-book-card, .jane-table-row')
+                if (card) {
+                    const bookId = card.dataset?.id
+                    if (bookId) {
+                        e.stopPropagation()
+                        e.preventDefault()
+                        this.toggleBookSelection(bookId)
+                    }
+                }
+                return
+            }
+
             // 1. Favorite button
             const favBtn = target.closest('.skeuo-fav-btn, .grid-fav-btn, .table-fav-btn')
             if (favBtn) {
@@ -5006,6 +5881,18 @@ class UniversalReaderApp {
                 return
             }
 
+            // 4.5. Book details button
+            const detailsBtn = target.closest('.skeuo-details-btn, .grid-details-btn, .table-details-btn')
+            if (detailsBtn) {
+                e.stopPropagation()
+                const card = detailsBtn.closest('.skeuo-book, .jane-book-card, .jane-table-row')
+                const bookId = card?.dataset?.id
+                if (bookId) {
+                    this.openBookDetailsModal(bookId)
+                }
+                return
+            }
+
             // 5. Open book
             const card = target.closest('.skeuo-book, .jane-book-card, .jane-table-row')
             if (card) {
@@ -5021,9 +5908,21 @@ class UniversalReaderApp {
             }
         }
 
+        const handleShelfContextMenu = e => {
+            const card = e.target?.closest?.('.skeuo-book, .jane-book-card, .jane-table-row')
+            if (card && card.dataset?.id) {
+                e.preventDefault()
+                this.openBookDetailsModal(card.dataset.id)
+            }
+        }
+
         this.dom.booksShelf?.addEventListener('click', handleShelfClick)
         this.dom.booksGrid?.addEventListener('click', handleShelfClick)
         this.dom.booksTableBody?.addEventListener('click', handleShelfClick)
+
+        this.dom.booksShelf?.addEventListener('contextmenu', handleShelfContextMenu)
+        this.dom.booksGrid?.addEventListener('contextmenu', handleShelfContextMenu)
+        this.dom.booksTableBody?.addEventListener('contextmenu', handleShelfContextMenu)
     }
 
     renderBooksShelf(books) {
@@ -5170,11 +6069,21 @@ class UniversalReaderApp {
         const favClass = book.isFavorite ? 'is-favorite' : ''
         const favTitle = book.isFavorite ? '取消收藏' : '加入收藏'
 
+        const isSelected = this.isBatchMode && this.selectedBookIds.has(book.id)
+        if (isSelected) {
+            card.classList.add('selected')
+        }
+        const batchCheckboxHtml = this.isBatchMode
+            ? `<div class="card-batch-checkbox ${isSelected ? 'selected' : ''}" title="${isSelected ? '取消选中' : '选中'}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></div>`
+            : ''
+
         card.innerHTML = `
             <div class="skeuo-book-cover ${favClass} ${isCloud ? 'is-cloud-only' : ''}">
+                ${batchCheckboxHtml}
                 <button class="skeuo-fav-btn ${favActive}" title="${favTitle}">★</button>
                 <button class="skeuo-cloud-btn ${cloudBtnClass}" title="${cloudBtnTitle}"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></button>
                 <button class="skeuo-list-btn" title="加入与管理书单"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
+                <button class="skeuo-details-btn" title="查看书籍详情与统计" style="position: absolute; bottom: 6px; right: 6px; width: 22px; height: 22px; border-radius: 50%; background: rgba(0,0,0,0.6); color: #fff; border: 1px solid rgba(255,255,255,0.2); font-size: 11px; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 10; opacity: 0; transition: opacity 0.2s;"><svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg></button>
                 <button class="skeuo-delete-btn" title="从书架删除">×</button>
                 ${progressTag}
                 ${skeuoCloudBadge}
@@ -5246,11 +6155,21 @@ class UniversalReaderApp {
         const favClass = book.isFavorite ? 'is-favorite' : ''
         const favTitle = book.isFavorite ? '取消收藏' : '加入收藏'
 
+        const isSelected = this.isBatchMode && this.selectedBookIds.has(book.id)
+        if (isSelected) {
+            card.classList.add('selected')
+        }
+        const batchCheckboxHtml = this.isBatchMode
+            ? `<div class="card-batch-checkbox ${isSelected ? 'selected' : ''}" title="${isSelected ? '取消选中' : '选中'}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></div>`
+            : ''
+
         card.innerHTML = `
             <div class="jane-cover-box ${favClass} ${cloudBoxClass}" style="position: relative;">
+                ${batchCheckboxHtml}
                 <button class="grid-fav-btn ${favActive}" title="${favTitle}">★</button>
                 <button class="grid-cloud-btn ${cloudBtnClass}" title="${cloudBtnTitle}"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></button>
                 <button class="grid-list-btn" title="加入与管理书单"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
+                <button class="grid-details-btn" title="查看书籍详情与统计"><svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg></button>
                 <button class="grid-delete-btn" title="从书架删除">×</button>
                 ${cloudBadgeHtml}
                 ${coverUrl 
@@ -5674,6 +6593,10 @@ class UniversalReaderApp {
                 const row = document.createElement('tr')
                 row.className = 'jane-table-row'
                 row.dataset.id = book.id
+                if (this.isBatchMode && this.selectedBookIds.has(book.id)) {
+                    row.classList.add('selected')
+                    row.style.background = 'var(--accent-purple-soft, rgba(139,92,246,0.1))'
+                }
 
                 const fraction = book.progress?.fraction || 0
                 const rawPct = fraction * 100
@@ -5699,6 +6622,7 @@ class UniversalReaderApp {
                     <td class="jane-table-cell" style="text-align: center; white-space: nowrap;">
                         <button class="table-cloud-btn" title="坚果云备份/拉取" style="${cloudBtnStyle} padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>${cloudBtnText}</button>
                         <button class="table-list-btn" title="加入与管理书单" style="color: var(--claude-terracotta, #da7756); border: 1px solid rgba(218, 119, 86, 0.25); background: rgba(218, 119, 86, 0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>书单</button>
+                        <button class="table-details-btn" title="查看书籍详情与统计" style="color: var(--accent-purple, #8b5cf6); border: 1px solid rgba(139,92,246,0.25); background: rgba(139,92,246,0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;">详情</button>
                         <button class="table-delete-btn" title="从书架删除" style="color: #ef4444; border: 1px solid rgba(239,68,68,0.25); background: rgba(239,68,68,0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; transition: all 0.2s;">删除</button>
                     </td>
                 `
@@ -5753,6 +6677,7 @@ class UniversalReaderApp {
         try {
             await db.deleteBook(book.id, shouldRecordTombstone)
             coverUrlPool.revoke(book.id)
+            fullTextSearchEngine.removeBookIndex(book.id)
 
             if (shouldDeleteCloudFile && (this.syncConfig?.enabled || this.syncConfig?.username)) {
                 const fileName = book.cloudBackup?.fileName || `${book.stableKey || book.id}.${book.format}`
@@ -6362,6 +7287,7 @@ class UniversalReaderApp {
     }
 
     async openBook(bookOrId) {
+        const initialLocation = arguments[1] || null
         const bookId = (typeof bookOrId === 'object' && bookOrId !== null) ? bookOrId.id : bookOrId
         if (!bookId) return this.showToast('找不到该书籍！', '⚠️')
 
@@ -6408,6 +7334,9 @@ class UniversalReaderApp {
             const prevLoc = prevSession.location
 
             prevSession.abortController?.abort()
+            ocrService.abort().catch(() => {})
+            this.closePdfOcrModal?.()
+            this.closeAiAssistantModal?.()
             if (prevSession.view) {
                 try { prevSession.view.close?.() } catch (e) {}
                 try { prevSession.view.remove?.() } catch (e) {}
@@ -6517,6 +7446,7 @@ class UniversalReaderApp {
             this.dom.bookshelfView.style.display = 'none'
             this.dom.readerView.style.display = 'block'
             this.dom.readerView.classList.add('active')
+            this.minimizeImportPanel()
             this.dom.readerBookTitle.innerText = bookData.title || snapshot.title || '阅读'
 
             // Clean up previous views if any
@@ -6693,6 +7623,9 @@ class UniversalReaderApp {
                 this.pdfViewport = sessionViewport
 
                 const initialPageFn = (totalPages) => {
+                    if (initialLocation?.page != null && totalPages > 0) {
+                        return Math.max(0, Math.min(totalPages - 1, initialLocation.page - 1))
+                    }
                     const progressMeta = bookData?.progress
                     if (progressMeta?.blobRevision && !db.isContentIdentityMatching(progressMeta, snapshot).matches) {
                         return 0 // Content replaced, do not reuse old page
@@ -6733,6 +7666,14 @@ class UniversalReaderApp {
                 const existingHls = await db.getHighlightsByBook(bookId)
                 if (!readerSession.isCurrent()) return
                 sessionViewport.setHighlights(existingHls, snapshot)
+
+                // Apply platform resource budget & connect PageTurnController
+                const currentBudget = platformBridge.getResourceBudget()
+                sessionViewport.setResourceBudget({
+                    isLowMemoryDevice: !platformBridge.getCapabilities().isWindows,
+                    bitmapCacheLimitBytes: Math.round(currentBudget.maxCacheMb * 1024 * 1024 / 2)
+                })
+                this.pageTurnController?.setAdapter(new PdfPageTurnAdapter(sessionViewport))
 
                 if (this.dom.pdfZoomBar) this.dom.pdfZoomBar.style.display = 'flex'
                 if (this.dom.readerPageNumber) {
@@ -6989,12 +7930,28 @@ class UniversalReaderApp {
             
             // Set initial styles & flow
             this.applySettingsToReader()
+            this.pageTurnController?.setAdapter(new FoliatePageTurnAdapter(this.foliateView))
 
-            // Restore location with content identity check
+            // Restore location with content identity check or jump to initialLocation
             let lastLoc = 0
             const progressMeta = bookData.progress
             const isProgressIdentityMatching = !progressMeta || !progressMeta.blobRevision || db.isContentIdentityMatching(progressMeta, snapshot).matches
-            if (isProgressIdentityMatching) {
+
+            if (initialLocation) {
+                if (typeof initialLocation === 'string') {
+                    lastLoc = initialLocation
+                } else if (initialLocation.href) {
+                    lastLoc = initialLocation.href
+                } else if (initialLocation.sectionIndex != null) {
+                    lastLoc = initialLocation.sectionIndex
+                } else if (initialLocation.cfi) {
+                    lastLoc = initialLocation.cfi
+                } else if (initialLocation.fraction != null) {
+                    lastLoc = { fraction: initialLocation.fraction }
+                } else if (initialLocation.page != null) {
+                    lastLoc = initialLocation.page
+                }
+            } else if (isProgressIdentityMatching) {
                 if (bookData.progress?.cfi && bookData.progress.cfi.split('!')[1]?.split('/').length > 2) {
                     lastLoc = bookData.progress.cfi
                 } else if (bookData.progress?.fraction != null && bookData.progress.fraction > 0) {
@@ -7011,6 +7968,16 @@ class UniversalReaderApp {
                     this.foliateView = null
                 }
                 return
+            }
+
+            if (initialLocation?.sectionIndex != null && sessionView?.goTo) {
+                try {
+                    await sessionView.goTo(initialLocation.sectionIndex)
+                } catch (e) {}
+            } else if (initialLocation?.href && sessionView?.goTo) {
+                try {
+                    await sessionView.goTo(initialLocation.href)
+                } catch (e) {}
             }
 
             // Ensure any already-loaded content doc is initialized
@@ -7241,7 +8208,12 @@ class UniversalReaderApp {
         }
 
         // 1. Immediately and synchronously abort closing session so its callbacks become no-op
+        this.pageTurnController?.cancelCurrent()
+        this.pageTurnController?.setAdapter(null)
         closingSession.abortController?.abort()
+        ocrService.abort().catch(() => {})
+        this.closePdfOcrModal?.()
+        this.closeAiAssistantModal?.()
 
         // 2. Synchronously capture session's fixed parameters and views
         const closingBookId = closingSession.bookId
@@ -7256,6 +8228,8 @@ class UniversalReaderApp {
         if (this.pdfViewport === closingPdfViewport) this.pdfViewport = null
         if (this.pdfDriver === closingPdfDriver) this.pdfDriver = null
         if (this._activeSession === closingSession) this.currentPdfTOC = null
+        this.pageTurnController?.cancelCurrent()
+        this.pageTurnController?.setAdapter(null)
 
         // 4. Synchronously settle paginator and destroy closing views
         try {
@@ -8255,6 +9229,19 @@ class UniversalReaderApp {
         popup.style.top = `${top}px`
         popup.style.left = `${left}px`
         popup.classList.add('active')
+
+        if (this.dom.btnPopupSearch) {
+            const engine = this.settings?.searchEngine || 'baidu'
+            const engineNames = {
+                baidu: '百度',
+                bing: '必应',
+                google: 'Google',
+                duckduckgo: 'DuckDuckGo',
+                custom: '自定义'
+            }
+            const name = engineNames[engine] || '网页搜索'
+            this.dom.btnPopupSearch.title = `使用 ${name} 搜索选中文字`
+        }
     }
 
     hideSelectionPopup() {
@@ -9347,6 +10334,11 @@ class UniversalReaderApp {
             // 7. Recent Sessions Timeline
             this.renderRecentSessions(stats.recentSessions)
 
+            // 7.5. Reading Calendar Heatmap
+            if (this.dom.statsCalendarHeatmap) {
+                renderCalendarHeatmap(this.dom.statsCalendarHeatmap, stats.targetYear || new Date().getFullYear())
+            }
+
         } catch (err) {
             console.error('Failed to render stats dashboard:', err)
         }
@@ -9363,15 +10355,16 @@ class UniversalReaderApp {
             return
         }
 
-        const maxMins = Math.max(30, ...data.map(d => d.minutes))
+        const rawMax = Math.max(...data.map(d => d.minutes || 0), 10)
+        const maxMins = Math.ceil(rawMax * 1.15)
         
         // Update Y Axis Reference Labels
         if (this.dom.statsYMax) {
-            this.dom.statsYMax.innerText = maxMins >= 60 ? `${(maxMins/60).toFixed(0)}h` : `${maxMins}m`
+            this.dom.statsYMax.innerText = formatAxisLabel(maxMins)
         }
         if (this.dom.statsYMid) {
             const mid = Math.round(maxMins / 2)
-            this.dom.statsYMid.innerText = mid >= 60 ? `${(mid/60).toFixed(0)}h` : `${mid}m`
+            this.dom.statsYMid.innerText = formatAxisLabel(mid)
         }
 
         // Update Chart Card Title
@@ -9385,24 +10378,8 @@ class UniversalReaderApp {
             else if (stats.viewMode === 'total') chartTitleEl.innerText = '历年阅读时长总分布'
         }
 
-        data.forEach(item => {
-            const col = document.createElement('div')
-            col.className = 'chart-bar-col'
-
-            const heightPct = item.minutes > 0 ? Math.max(8, Math.round((item.minutes / maxMins) * 100)) : 0
-            const isZero = item.minutes === 0
-
-            const showLabel = stats.viewMode === 'month' ? (item.isKeyTick || item.isCurrent) : true
-
-            col.innerHTML = `
-                <div class="chart-tooltip">${item.fullDate || item.label}: ${item.minutes} 分钟</div>
-                <div class="chart-bar-track">
-                    <div class="chart-bar-pill ${item.isCurrent ? 'today' : ''} ${isZero ? 'zero' : ''}" style="height: ${heightPct}%;"></div>
-                </div>
-                <div class="chart-day-label ${item.isCurrent ? 'today' : ''}">${showLabel ? item.label : ''}</div>
-            `
-            container.appendChild(col)
-        })
+        // Render clean, trackless bar chart without false 8% floor
+        renderCleanBarChart(container, data)
 
         // Update Peak Pill
         if (this.dom.statsPeakPill && this.dom.statsPeakText) {
