@@ -507,6 +507,7 @@ export class AdaptivePdfDriver {
         return fallback.open(blobToOpen)
     }
 
+    get numPages() { return this.backend?.numPages || 0 }
     getPageSizes(...args) { return this.backend.getPageSizes(...args) }
     renderPage(...args) { return this.backend.renderPage(...args) }
     renderTextLayer(...args) { return this.backend.renderTextLayer?.(...args) }

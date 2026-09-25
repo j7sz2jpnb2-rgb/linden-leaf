@@ -80,6 +80,40 @@ export class PdfViewport {
         this._bindEvents()
     }
 
+    /**
+     * Configure runtime resource budget (concurrency, pixel limit, cache memory)
+     * @param {object} [budget]
+     * @param {number} [budget.renderConcurrency]
+     * @param {number} [budget.maxCanvasPixels]
+     * @param {number} [budget.bitmapCacheLimitBytes]
+     * @param {number} [budget.bufferPages]
+     * @param {boolean} [budget.isLowMemoryDevice]
+     */
+    setResourceBudget(budget = {}) {
+        if (typeof budget.renderConcurrency === 'number' && budget.renderConcurrency > 0) {
+            this._renderConcurrency = budget.renderConcurrency
+        }
+        if (typeof budget.maxCanvasPixels === 'number' && budget.maxCanvasPixels > 0) {
+            this.options.maxCanvasPixels = budget.maxCanvasPixels
+        }
+        if (typeof budget.bitmapCacheLimitBytes === 'number' && budget.bitmapCacheLimitBytes > 0) {
+            this._bitmapCacheLimitBytes = budget.bitmapCacheLimitBytes
+            this.options.bitmapCacheLimitBytes = budget.bitmapCacheLimitBytes
+            this._pruneBitmapCache(0)
+        }
+        if (typeof budget.bufferPages === 'number' && budget.bufferPages >= 0) {
+            this.options.bufferPages = budget.bufferPages
+        }
+        if (budget.isLowMemoryDevice) {
+            this._renderConcurrency = 1
+            this.options.bufferPages = 1
+            this._bitmapCacheLimitBytes = 16 * 1024 * 1024
+            this.options.bitmapCacheLimitBytes = 16 * 1024 * 1024
+            this.options.maxCanvasPixels = 4_000_000
+            this._pruneBitmapCache(0)
+        }
+    }
+
     _initDOM() {
         this.container.innerHTML = ''
         this.container.classList.add('pdf-viewport-container')
@@ -434,6 +468,13 @@ export class PdfViewport {
         slot.renderAbort?.abort()
         if (slot.geometryIdleId != null) window.cancelIdleCallback?.(slot.geometryIdleId)
         if (slot.geometryTimer != null) clearTimeout(slot.geometryTimer)
+        try {
+            const canvases = slot.querySelectorAll('canvas')
+            for (const cvs of canvases) {
+                cvs.width = 0
+                cvs.height = 0
+            }
+        } catch (e) {}
         slot.remove()
         this.activeSlots.delete(page)
         const inFlight = this._inFlightRenders.get(page)
@@ -637,10 +678,38 @@ export class PdfViewport {
             if (!victimKey) victimKey = this._bitmapCache.keys().next().value
             const victim = this._bitmapCache.get(victimKey)
             this._bitmapCacheBytes -= victim.bytes
+            if (victim?.canvas) {
+                try {
+                    victim.canvas.width = 0
+                    victim.canvas.height = 0
+                } catch (e) {}
+            }
             this._bitmapCache.delete(victimKey)
         }
         this._bitmapCache.set(key, { canvas, bytes, page, scale, clip, time: performance.now() })
         this._bitmapCacheBytes += bytes
+    }
+
+    _pruneBitmapCache(slackBytes = 0) {
+        const target = Math.max(0, this._bitmapCacheLimitBytes - slackBytes)
+        while (this._bitmapCacheBytes > target && this._bitmapCache.size > 0) {
+            let victimKey = null
+            for (const [k, entry] of this._bitmapCache) {
+                if (entry.page === this.currentPage) continue
+                victimKey = k
+                break
+            }
+            if (!victimKey) victimKey = this._bitmapCache.keys().next().value
+            const victim = this._bitmapCache.get(victimKey)
+            this._bitmapCacheBytes -= victim.bytes
+            if (victim?.canvas) {
+                try {
+                    victim.canvas.width = 0
+                    victim.canvas.height = 0
+                } catch (e) {}
+            }
+            this._bitmapCache.delete(victimKey)
+        }
     }
 
     async _renderPageContent(page, slot, token, signal, renderEntry = null) {
@@ -950,14 +1019,14 @@ export class PdfViewport {
     }
 
     _toRgba(color, alpha = .38) {
-        if (!color) return `rgba(250,204,21,${alpha})`
+        if (!color) return `rgba(250, 204, 21, ${alpha})`
         if (color.startsWith('rgba')) return color
-        if (color.startsWith('rgb(')) return color.replace('rgb(', 'rgba(').replace(')', `,${alpha})`)
-        const named = { yellow:[250,204,21],green:[34,197,94],blue:[59,130,246],pink:[236,72,153],purple:[168,85,247],red:[239,68,68],orange:[249,115,22],gray:[148,163,184] }
-        if (named[color.toLowerCase?.()]) return `rgba(${named[color.toLowerCase()].join(',')},${alpha})`
+        if (color.startsWith('rgb(')) return color.replace('rgb(', 'rgba(').replace(')', `, ${alpha})`)
+        const named = { yellow:[250, 204, 21], green:[34, 197, 94], blue:[59, 130, 246], pink:[236, 72, 153], purple:[168, 85, 247], red:[239, 68, 68], orange:[249, 115, 22], gray:[148, 163, 184] }
+        if (named[color.toLowerCase?.()]) return `rgba(${named[color.toLowerCase()].join(', ')}, ${alpha})`
         if (/^#[0-9a-f]{3,6}$/i.test(color)) {
             let c = color.slice(1); if (c.length === 3) c = c.split('').map(x => x + x).join('')
-            const n = parseInt(c, 16); return `rgba(${n>>16&255},${n>>8&255},${n&255},${alpha})`
+            const n = parseInt(c, 16); return `rgba(${n>>16&255}, ${n>>8&255}, ${n&255}, ${alpha})`
         }
         return color
     }
