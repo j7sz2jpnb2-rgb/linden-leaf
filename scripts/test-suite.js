@@ -6,17 +6,10 @@ import { platformBridge } from '../js/platformBridge.js';
 
 console.log('=== Starting Linden Leaf Verification Suite ===\n');
 
-let passedTests = 0;
+const tests = [];
 
 function runTest(name, fn) {
-    try {
-        fn();
-        console.log(`[PASS] ${name}`);
-        passedTests++;
-    } catch (e) {
-        console.error(`[FAIL] ${name}:`, e);
-        process.exit(1);
-    }
+    tests.push({ name, fn });
 }
 
 // 1. WebDAVService Tests
@@ -383,5 +376,17 @@ runTest('PDF highlight hit testing detects clicked note within bounds', () => {
     assert.strictEqual(hitTest(2, 0.05, 0.05), null);
     assert.strictEqual(hitTest(1, 0.25, 0.22), null);
 });
+
+let passedTests = 0;
+for (const { name, fn } of tests) {
+    try {
+        await fn();
+        console.log(`[PASS] ${name}`);
+        passedTests++;
+    } catch (e) {
+        console.error(`[FAIL] ${name}:`, e);
+        process.exit(1);
+    }
+}
 
 console.log(`\n=== All ${passedTests} Tests Passed Successfully! ===`);
