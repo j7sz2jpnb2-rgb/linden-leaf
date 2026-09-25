@@ -106,11 +106,10 @@ fn encrypt_password(plain: &str) -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn encrypt_password(plain: &str) -> Result<String, String> {
-    Ok(base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        plain.as_bytes(),
-    ))
+fn encrypt_password(_plain: &str) -> Result<String, String> {
+    // Base64 encoding is not encryption and must never be used to store credentials on disk.
+    // On Android/mobile/Linux, a platform Keystore or Keyring bridge is required.
+    Err("Safe credential storage (Keystore) is not yet configured for this platform. Credentials cannot be persisted to disk safely.".to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -158,10 +157,8 @@ fn decrypt_password(cipher_b64: &str) -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn decrypt_password(cipher_b64: &str) -> Result<String, String> {
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cipher_b64)
-        .map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&bytes).to_string())
+fn decrypt_password(_cipher_b64: &str) -> Result<String, String> {
+    Err("Safe credential decryption is not supported on this platform without native Keystore.".to_string())
 }
 
 #[tauri::command]
@@ -1008,6 +1005,83 @@ pub async fn sync_delete_book_binary(
             buffer: None,
             error: Some(e.to_string()),
         }),
+    }
+}
+
+fn get_credentials_dir() -> PathBuf {
+    let mut dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    dir.push("com.lindenleaf.reader");
+    dir.push("credentials");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+fn sanitize_credential_key(key: &str) -> String {
+    key.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+
+#[tauri::command]
+pub fn secure_store_credential(key: String, value: String) -> Result<bool, String> {
+    if key.trim().is_empty() {
+        return Err("Credential key cannot be empty".to_string());
+    }
+    let sanitized = sanitize_credential_key(&key);
+    let mut file_path = get_credentials_dir();
+    file_path.push(format!("{}.enc", sanitized));
+
+    let encrypted = encrypt_password(&value)?;
+    fs::write(&file_path, encrypted).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn secure_load_credential(key: String) -> Result<Option<String>, String> {
+    if key.trim().is_empty() {
+        return Ok(None);
+    }
+    let sanitized = sanitize_credential_key(&key);
+    let mut file_path = get_credentials_dir();
+    file_path.push(format!("{}.enc", sanitized));
+
+    if !file_path.exists() {
+        return Ok(None);
+    }
+
+    let encrypted = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+    if encrypted.trim().is_empty() {
+        return Ok(Some(String::new()));
+    }
+    let decrypted = decrypt_password(encrypted.trim())?;
+    Ok(Some(decrypted))
+}
+
+#[tauri::command]
+pub fn secure_has_credential(key: String) -> Result<bool, String> {
+    if key.trim().is_empty() {
+        return Ok(false);
+    }
+    let sanitized = sanitize_credential_key(&key);
+    let mut file_path = get_credentials_dir();
+    file_path.push(format!("{}.enc", sanitized));
+    Ok(file_path.exists())
+}
+
+#[tauri::command]
+pub fn secure_delete_credential(key: String) -> Result<bool, String> {
+    if key.trim().is_empty() {
+        return Ok(false);
+    }
+    let sanitized = sanitize_credential_key(&key);
+    let mut file_path = get_credentials_dir();
+    file_path.push(format!("{}.enc", sanitized));
+
+    if file_path.exists() {
+        fs::remove_file(&file_path).map_err(|e| e.to_string())?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 

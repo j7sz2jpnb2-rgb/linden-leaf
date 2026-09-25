@@ -157,10 +157,20 @@ pub async fn shell_open_external(url: String) -> Result<bool, String> {
             .spawn();
         Ok(true)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+        Ok(true)
+    }
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "ios"))))]
     {
         let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
         Ok(true)
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        eprintln!("[shell_open_external] Process spawn is unsupported on mobile; delegate to mobile intent/browser handler: {}", url);
+        Ok(false)
     }
 }
 

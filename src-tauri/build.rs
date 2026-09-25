@@ -56,14 +56,16 @@ fn main() {
             .compile("ll_mupdf_bridge");
 
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
-        let default_libs = if cfg!(windows) {
+        let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        let is_target_windows = target_os == "windows" || (target_os.is_empty() && cfg!(windows));
+        let default_libs = if is_target_windows {
             "libmupdf;libthirdparty;libresources"
         } else {
             "mupdf"
         };
         let libs = env::var("LL_MUPDF_LIBS").unwrap_or_else(|_| default_libs.into());
         for lib in libs.split(|c| c == ';' || c == ',').map(str::trim).filter(|x| !x.is_empty()) {
-            if require_native && cfg!(windows) {
+            if require_native && is_target_windows {
                 let candidate = lib_dir.join(format!("{lib}.lib"));
                 if !candidate.exists() {
                     panic!("FATAL: Native MuPDF library file does not exist: {}", candidate.display());

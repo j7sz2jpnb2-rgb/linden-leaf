@@ -12,35 +12,39 @@ fn app_write_debug_log(message: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            use tauri::Emitter;
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+    let builder = tauri::Builder::default();
 
-            let file_paths = extract_book_paths_from_args_with_cwd(&argv, Some(&_cwd));
-            if !file_paths.is_empty() {
-                let state = app.state::<AppState>();
-                let is_ready = *state.is_renderer_ready.lock().unwrap();
-                for file_path in file_paths {
-                    if is_ready {
-                        match load_open_file_payload(&file_path) {
-                            Ok(payload) => {
-                                let _ = app.emit("app:open-file", payload);
-                            }
-                            Err(e) => {
-                                eprintln!("[single_instance] Error loading file: {}", e);
-                            }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        use tauri::Emitter;
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+
+        let file_paths = extract_book_paths_from_args_with_cwd(&argv, Some(&_cwd));
+        if !file_paths.is_empty() {
+            let state = app.state::<AppState>();
+            let is_ready = *state.is_renderer_ready.lock().unwrap();
+            for file_path in file_paths {
+                if is_ready {
+                    match load_open_file_payload(&file_path) {
+                        Ok(payload) => {
+                            let _ = app.emit("app:open-file", payload);
                         }
-                    } else {
-                        state.pending_files.lock().unwrap().push(file_path);
+                        Err(e) => {
+                            eprintln!("[single_instance] Error loading file: {}", e);
+                        }
                     }
+                } else {
+                    state.pending_files.lock().unwrap().push(file_path);
                 }
             }
-        }))
+        }
+    }));
+
+    builder
         .setup(|app| {
             eprintln!("[TAURI SETUP] Setting up application...");
             if let Ok(exe_path) = std::env::current_exe() {
@@ -158,6 +162,10 @@ pub fn run() {
             sync_upload_book_binary,
             sync_download_book_binary,
             sync_delete_book_binary,
+            secure_store_credential,
+            secure_load_credential,
+            secure_has_credential,
+            secure_delete_credential,
             // MuPDF Native Reader
             mupdf_is_available,
             mupdf_stage_pdf,
