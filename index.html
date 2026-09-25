@@ -1235,13 +1235,13 @@
 
           <!-- Advanced Settings Trigger Row (3-click unlock) -->
           <div class="setting-section" id="advanced-settings-trigger-section" style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.8rem;">
-            <div id="row-advanced-settings-trigger" class="advanced-settings-trigger-row" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none;">
+            <button type="button" id="row-advanced-settings-trigger" class="advanced-settings-trigger-row" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; width: 100%; background: none; border: none; padding: 0; font-family: inherit; text-align: left;">
               <div style="display: flex; align-items: center; gap: 6px;">
                 <span style="font-size: 0.84rem; font-weight: 600; color: var(--text-secondary);">⚙️ 高级设置</span>
                 <span id="badge-advanced-status" style="font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; background: var(--bg-tertiary); color: var(--text-muted);">未解锁</span>
               </div>
               <span id="hint-advanced-trigger" style="font-size: 0.74rem; color: var(--accent-purple);">连续点击3次解锁</span>
-            </div>
+            </button>
 
             <!-- Advanced Settings Container (Unlocked only) -->
             <div id="advanced-settings-container" style="display: none; margin-top: 0.8rem; flex-direction: column; gap: 12px;">
@@ -1349,19 +1349,36 @@
 
     <!-- Standalone Offline Dictionary Card (Decoupled from AI, no 10s cooldown, instant POS & definition) -->
     <div id="reader-dictionary-card" class="reader-dictionary-card" style="display: none;">
+      <div class="dict-card-quick-tools" id="dict-card-quick-tools" style="display: flex; align-items: center; justify-content: space-between; padding: 4px 10px; border-bottom: 1px solid var(--border-color); background: var(--bg-tertiary); border-radius: 8px 8px 0 0;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <div class="color-dot color-yellow dict-color-dot" data-color="#facc15" title="黄色高亮" style="width: 14px; height: 14px; border-radius: 50%; cursor: pointer;"></div>
+          <div class="color-dot color-green dict-color-dot" data-color="#4ade80" title="绿色高亮" style="width: 14px; height: 14px; border-radius: 50%; cursor: pointer;"></div>
+          <div class="color-dot color-blue dict-color-dot" data-color="#60a5fa" title="蓝色高亮" style="width: 14px; height: 14px; border-radius: 50%; cursor: pointer;"></div>
+          <div class="color-dot color-pink dict-color-dot" data-color="#f472b6" title="粉色高亮" style="width: 14px; height: 14px; border-radius: 50%; cursor: pointer;"></div>
+          <div style="width: 1px; height: 14px; background: var(--border-color); margin: 0 2px;"></div>
+          <button type="button" class="btn-tool" id="btn-dict-underline" style="width: 22px; height: 22px; font-size: 11px; font-weight: 700; text-decoration: underline; padding: 0;" title="实线下划线">U</button>
+          <button type="button" class="btn-tool" id="btn-dict-note" style="width: 22px; height: 22px; padding: 2px;" title="添加想法/批注">
+            <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          </button>
+          <button type="button" class="btn-tool" id="btn-dict-copy-word" style="width: 22px; height: 22px; padding: 2px;" title="复制所选单词">
+            <svg class="icon icon-xs" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+        </div>
+        <button type="button" class="dict-card-close" id="btn-close-dict-card" title="关闭 (Esc)">×</button>
+      </div>
       <div class="dict-card-header">
         <div class="dict-word-info">
           <span class="dict-word-text" id="dict-card-word">word</span>
           <span class="dict-phonetic" id="dict-card-phonetic"></span>
         </div>
-        <button type="button" class="dict-card-close" id="btn-close-dict-card" title="关闭 (Esc)">×</button>
       </div>
       <div class="dict-card-body" id="dict-card-body">
         <!-- Definitions rendered here -->
       </div>
       <div class="dict-card-footer">
-        <span class="dict-source-badge" id="dict-card-source">已安装的英汉词典</span>
+        <span class="dict-source-badge" id="dict-card-source">基础离线词库</span>
         <div class="dict-card-actions">
+          <button type="button" class="btn-dict-action" id="btn-dict-search" title="网页搜索单词">搜索</button>
           <button type="button" class="btn-dict-action" id="btn-dict-copy" title="复制释义">复制</button>
           <button type="button" class="btn-dict-action btn-dict-ai" id="btn-dict-ask-ai" title="在 AI 中询问 (附上选词，需主动点击发送)">在 AI 中询问</button>
         </div>
@@ -2026,7 +2043,7 @@
       </div>
       <div class="global-modal-body" style="padding: 1rem 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px;">
         <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0; line-height: 1.5;">
-          阅读侧栏最多同时启用 4 个快捷操作按钮（包含内置的翻译和解读）。不要求填满。点击编辑自定义名称与提示词。管理和保存预设不调用模型。
+          最多启用 4 个快捷操作，可随时编辑名称和指令。
         </p>
 
         <!-- Presets List Container -->
@@ -2037,9 +2054,9 @@
         <!-- Add Custom Preset Section -->
         <div style="background: var(--bg-card); border: 1px dashed var(--border-color); border-radius: 8px; padding: 12px; margin-top: 6px;">
           <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; color: var(--text-main);">＋ 新增自定义快捷指令</div>
-          <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-            <input type="text" id="input-new-preset-name" class="global-modal-input" placeholder="按钮名称 (如：润色译文、总结要点)" style="width: 160px; font-size: 0.82rem;" maxlength="12" />
-            <input type="text" id="input-new-preset-prompt" class="global-modal-input" placeholder="指令提示词 (如：将引用内容精练总结为三条核心论点)" style="flex: 1; font-size: 0.82rem;" />
+          <div style="display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
+            <input type="text" id="input-new-preset-name" class="global-modal-input" placeholder="按钮名称 (如：润色译文、总结要点)" style="min-width: 180px; flex: 0 1 200px; font-size: 0.82rem;" maxlength="12" />
+            <input type="text" id="input-new-preset-prompt" class="global-modal-input" placeholder="指令提示词 (如：将引用内容精练总结为三条核心论点)" style="flex: 1 1 240px; font-size: 0.82rem;" />
             <button type="button" id="btn-add-new-preset" class="btn-primary-action" style="padding: 0.35rem 0.9rem; font-size: 0.82rem; white-space: nowrap;">添加</button>
           </div>
         </div>

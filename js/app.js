@@ -1313,7 +1313,12 @@ class UniversalReaderApp {
             dictCardSource: document.getElementById('dict-card-source'),
             btnCloseDictCard: document.getElementById('btn-close-dict-card'),
             btnDictCopy: document.getElementById('btn-dict-copy'),
+            btnDictSearch: document.getElementById('btn-dict-search'),
             btnDictAskAi: document.getElementById('btn-dict-ask-ai'),
+            btnDictUnderline: document.getElementById('btn-dict-underline'),
+            btnDictNote: document.getElementById('btn-dict-note'),
+            btnDictCopyWord: document.getElementById('btn-dict-copy-word'),
+            dictColorDots: document.querySelectorAll('.dict-color-dot'),
 
             // In-place Paragraph Translation Card Elements
             readerParaTranslationCard: document.getElementById('reader-para-translation-card'),
@@ -2796,29 +2801,29 @@ class UniversalReaderApp {
         this.dom.btnPopupSearch?.addEventListener('click', () => {
             const text = (this.multiSelectedRanges && this.multiSelectedRanges.length > 0)
                 ? this.multiSelectedRanges.map(r => r.text).filter(Boolean).join(' ')
-                : (this.selectedTextInfo?.text || '')
+                : (this.selectedTextInfo?.text || this._frozenSelectionSnapshot?.text || '')
             if (text) {
                 performWebSearch(this.settings, text, (msg, icon) => this.showToast(msg, icon))
                 this.hideSelectionPopup()
             }
         })
         this.dom.popupDict?.addEventListener('click', () => {
-            const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : null
+            const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : (this._frozenSelectionSnapshot ? { ...this._frozenSelectionSnapshot } : null)
             this.hideSelectionPopup()
             if (selInfo && selInfo.text) {
                 this.showDictionaryCard(selInfo)
             }
         })
         this.dom.popupTranslatePara?.addEventListener('click', async () => {
-            const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : null
+            const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : (this._frozenSelectionSnapshot ? { ...this._frozenSelectionSnapshot } : null)
             this.hideSelectionPopup()
             if (selInfo && selInfo.text) {
                 await this.handleInPlaceParagraphTranslation(selInfo)
             }
         })
         this.dom.popupAi?.addEventListener('click', () => {
-            // Snapshot selectedTextInfo BEFORE hideSelectionPopup clears it!
-            const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : null
+            // Snapshot selectedTextInfo or frozen selection snapshot BEFORE hideSelectionPopup clears it!
+            const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : (this._frozenSelectionSnapshot ? { ...this._frozenSelectionSnapshot } : null)
             this.hideSelectionPopup()
             if (this.aiSidebar && selInfo) {
                 this.aiSidebar.openWithSelection(selInfo)
@@ -2831,6 +2836,36 @@ class UniversalReaderApp {
 
         // Standalone Dictionary Card button listeners
         this.dom.btnCloseDictCard?.addEventListener('click', () => this.hideDictionaryCard())
+        this.dom.dictColorDots?.forEach(dot => {
+            dot.addEventListener('click', (e) => {
+                e.stopPropagation()
+                const color = dot.dataset.color || '#facc15'
+                this.createHighlight(color, 'highlight')
+                this.hideDictionaryCard()
+            })
+        })
+        this.dom.btnDictUnderline?.addEventListener('click', (e) => {
+            e.stopPropagation()
+            this.createHighlight('#2563eb', 'underline')
+            this.hideDictionaryCard()
+        })
+        this.dom.btnDictNote?.addEventListener('click', async (e) => {
+            e.stopPropagation()
+            const noteText = await this.showInputDialog({
+                title: '💭 添加划线想法 / 批注',
+                placeholder: '记录你对该单词的思考或体会...',
+                isMultiline: true
+            })
+            if (noteText !== null) {
+                await this.createHighlight('#facc15', 'highlight', noteText)
+            }
+            this.hideDictionaryCard()
+        })
+        this.dom.btnDictCopyWord?.addEventListener('click', async (e) => {
+            e.stopPropagation()
+            await this.copyMultiSelectionOrSingle()
+            this.hideDictionaryCard()
+        })
         this.dom.btnDictCopy?.addEventListener('click', () => {
             if (this._currentDictResult) {
                 const text = `${this._currentDictResult.word} ${this._currentDictResult.phonetic || ''}\n` +
@@ -2838,6 +2873,13 @@ class UniversalReaderApp {
                 navigator.clipboard?.writeText(text).then(() => {
                     this.showToast('词典释义已复制', 'success')
                 })
+            }
+        })
+        this.dom.btnDictSearch?.addEventListener('click', () => {
+            const word = this._currentDictResult?.word || this._currentDictResult?.normalizedWord
+            this.hideDictionaryCard()
+            if (word) {
+                performWebSearch(this.settings, word, (msg, icon) => this.showToast(msg, icon))
             }
         })
         this.dom.btnDictAskAi?.addEventListener('click', () => {
@@ -4927,11 +4969,11 @@ class UniversalReaderApp {
 
         const word = selectionInfo.text.trim()
         const result = this.dictionaryService ? this.dictionaryService.lookup(word) : null
-        this._currentDictResult = result || { word, entries: [], source: '本地离线词典' }
+        this._currentDictResult = result || { word, entries: [], source: '基础离线词库' }
 
         if (this.dom.dictCardWord) this.dom.dictCardWord.innerText = word
         if (this.dom.dictCardPhonetic) this.dom.dictCardPhonetic.innerText = result?.phonetic || ''
-        if (this.dom.dictCardSource) this.dom.dictCardSource.innerText = result?.source || '本地离线词典'
+        if (this.dom.dictCardSource) this.dom.dictCardSource.innerText = result?.source || '基础离线词库'
 
         if (this.dom.dictCardBody) {
             if (result && result.found && result.entries.length > 0) {
@@ -4942,7 +4984,7 @@ class UniversalReaderApp {
                     </div>
                 `).join('')
             } else {
-                this.dom.dictCardBody.innerHTML = `<div class="dict-not-found">本地词典未收录此词条，可点击下方在 AI 中深入询问。</div>`
+                this.dom.dictCardBody.innerHTML = `<div class="dict-not-found">基础词库未收录此词条，可使用下方 AI 或搜索深入查询。</div>`
             }
         }
 
@@ -5554,9 +5596,10 @@ class UniversalReaderApp {
                 this.showToast('复制失败，请重试', 'warning')
                 return false
             }
-        } else if (this.selectedTextInfo?.text) {
+        } else if (this.selectedTextInfo?.text || this._frozenSelectionSnapshot?.text) {
+            const textToCopy = this.selectedTextInfo?.text || this._frozenSelectionSnapshot?.text
             try {
-                await navigator.clipboard.writeText(this.selectedTextInfo.text)
+                await navigator.clipboard.writeText(textToCopy)
                 this.showToast('已复制选中文字到剪贴板', 'success')
                 this.hideSelectionPopup()
                 return true
@@ -6056,12 +6099,26 @@ class UniversalReaderApp {
         if (summary.running > 0 || summary.queued > 0) {
             this.minimizeImportPanel()
         } else {
+            this.importBatchDismissed = true
+            const currentBatchId = this.importQueue._batchId || 1
+            try {
+                localStorage.setItem('linden_import_dismissed_batch', String(currentBatchId))
+            } catch (e) {}
+            if (typeof this.importQueue.clearCompleted === 'function') {
+                this.importQueue.clearCompleted()
+            }
             if (this.dom.importDockBadge) this.dom.importDockBadge.style.display = 'none'
         }
     }
 
     updateImportCenterUI(summary) {
         if (!summary) summary = this.importQueue.getSummary()
+
+        const dismissedBatch = localStorage.getItem('linden_import_dismissed_batch')
+        const currentBatchId = this.importQueue._batchId || 0
+        if (dismissedBatch && String(currentBatchId) === String(dismissedBatch)) {
+            this.importBatchDismissed = true
+        }
 
         if (this.dom.importPanelSummaryBadge) {
             this.dom.importPanelSummaryBadge.textContent = `${summary.total} 项`
@@ -6083,16 +6140,28 @@ class UniversalReaderApp {
 
         const isReaderOpen = this.dom.readerView && this.dom.readerView.style.display !== 'none'
 
-        if (summary.total > 0) {
+        if (summary.running > 0 || summary.queued > 0) {
+            this.importBatchDismissed = false
+        }
+
+        if (summary.total > 0 && !this.importBatchDismissed) {
             if (isReaderOpen) {
                 if (this.dom.importTaskPanel) this.dom.importTaskPanel.style.display = 'none'
-                if (this.dom.importDockBadge) this.dom.importDockBadge.style.display = 'flex'
+                if (summary.running > 0 || summary.queued > 0) {
+                    if (this.dom.importDockBadge) this.dom.importDockBadge.style.display = 'flex'
+                } else {
+                    if (this.dom.importDockBadge) this.dom.importDockBadge.style.display = 'none'
+                }
             } else if (!this.importCenterMinimized) {
                 if (this.dom.importTaskPanel?.style.display !== 'flex') {
                     this.showImportPanel()
                 }
             } else if (this.importCenterMinimized && this.dom.importDockBadge) {
-                this.dom.importDockBadge.style.display = 'flex'
+                if (summary.running > 0 || summary.queued > 0) {
+                    this.dom.importDockBadge.style.display = 'flex'
+                } else {
+                    this.dom.importDockBadge.style.display = 'none'
+                }
             }
         } else {
             if (this.dom.importDockBadge) this.dom.importDockBadge.style.display = 'none'
@@ -8191,8 +8260,8 @@ class UniversalReaderApp {
         }
     }
 
-    async openBook(bookOrId) {
-        const initialLocation = arguments[1] || null
+    async openBook(bookOrId, initialLocation = null) {
+        initialLocation = initialLocation || arguments[1] || null
         const bookId = (typeof bookOrId === 'object' && bookOrId !== null) ? bookOrId.id : bookOrId
         if (!bookId) return this.showToast('找不到该书籍！', '⚠️')
 
@@ -8471,7 +8540,15 @@ class UniversalReaderApp {
                             rect: selInfo.clientRect
                         }
                         this.hideHighlightActionPopup()
-                        this.showSelectionPopup(selInfo.clientRect)
+                        const trimmed = (selInfo.text || '').trim()
+                        const isSingleWord = /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && (this.dictionaryService?.isEnabled !== false)
+                        if (isSingleWord) {
+                            this.hideSelectionPopup()
+                            this.showDictionaryCard(this.selectedTextInfo)
+                        } else {
+                            this.hideDictionaryCard()
+                            this.showSelectionPopup(selInfo.clientRect)
+                        }
                     },
                     onHighlightCreate: async (hl) => {
                         const newHl = {
@@ -8842,15 +8919,36 @@ class UniversalReaderApp {
             const progressMeta = bookData.progress
             const isProgressIdentityMatching = !progressMeta || !progressMeta.blobRevision || db.isContentIdentityMatching(progressMeta, snapshot).matches
 
+            let resolvedSearchCfi = null
+            if (initialLocation?.query && initialLocation?.sectionIndex != null && typeof sessionView.search === 'function') {
+                try {
+                    const targetMatchIndex = initialLocation.matchIndex || 0
+                    let currentMatchIdx = 0
+                    for await (const match of sessionView.search({ query: initialLocation.query, index: initialLocation.sectionIndex })) {
+                        if (match.cfi) {
+                            if (currentMatchIdx === targetMatchIndex) {
+                                resolvedSearchCfi = match.cfi
+                                break
+                            }
+                            currentMatchIdx++
+                        }
+                    }
+                } catch (searchErr) {
+                    console.warn('[openBook] Failed to resolve search CFI:', searchErr)
+                }
+            }
+
             if (initialLocation) {
-                if (typeof initialLocation === 'string') {
+                if (resolvedSearchCfi) {
+                    lastLoc = resolvedSearchCfi
+                } else if (initialLocation.cfi) {
+                    lastLoc = initialLocation.cfi
+                } else if (typeof initialLocation === 'string') {
                     lastLoc = initialLocation
                 } else if (initialLocation.href) {
                     lastLoc = initialLocation.href
                 } else if (initialLocation.sectionIndex != null) {
                     lastLoc = initialLocation.sectionIndex
-                } else if (initialLocation.cfi) {
-                    lastLoc = initialLocation.cfi
                 } else if (initialLocation.fraction != null) {
                     lastLoc = { fraction: initialLocation.fraction }
                 } else if (initialLocation.page != null) {
@@ -8875,14 +8973,11 @@ class UniversalReaderApp {
                 return
             }
 
-            if (initialLocation?.sectionIndex != null && sessionView?.goTo) {
-                try {
-                    await sessionView.goTo(initialLocation.sectionIndex)
-                } catch (e) {}
-            } else if (initialLocation?.href && sessionView?.goTo) {
-                try {
-                    await sessionView.goTo(initialLocation.href)
-                } catch (e) {}
+            const targetHighlightCfi = resolvedSearchCfi || (initialLocation?.cfi ? initialLocation.cfi : null)
+            if (targetHighlightCfi && typeof sessionView.setActiveSearchMatch === 'function') {
+                sessionView.setActiveSearchMatch(targetHighlightCfi)
+            } else if (initialLocation?.query && !resolvedSearchCfi) {
+                this.showToast('搜索定位已失效或索引过期，已打开章节起始位置', 'warning')
             }
 
             // Ensure any already-loaded content doc is initialized
@@ -9691,15 +9786,39 @@ class UniversalReaderApp {
             if (e.key === 'Control' || e.key === 'Meta') isCtrlActive = false
         })
         doc.addEventListener('pointerdown', e => {
-            if (!e.ctrlKey && !e.metaKey && !isCtrlActive) {
+            if (this.dom.readerDictionaryCard && this.dom.readerDictionaryCard.style.display !== 'none') {
+                if (!this.dom.readerDictionaryCard.contains(e.target)) {
+                    this.hideDictionaryCard()
+                }
+            }
+            if (e.button === 0 && !e.ctrlKey && !e.metaKey && !isCtrlActive) {
                 const sel = doc.getSelection()
                 if (sel && sel.isCollapsed) {
-                    this.clearVirtualMultiSelections()
-                    this.multiSelectedRanges = []
-                    if (this.dom.popupMultiBadge) this.dom.popupMultiBadge.style.display = 'none'
+                    if (!this.multiSelectedRanges || this.multiSelectedRanges.length <= 1) {
+                        this.clearVirtualMultiSelections()
+                        this.multiSelectedRanges = []
+                        if (this.dom.popupMultiBadge) this.dom.popupMultiBadge.style.display = 'none'
+                    }
                 }
             }
         })
+        doc.addEventListener('contextmenu', e => {
+            const sel = doc.getSelection()
+            if (sel && !sel.isCollapsed && sel.toString().trim()) {
+                const text = sel.toString().trim()
+                let cfi = null
+                try {
+                    const r = sel.getRangeAt(0)
+                    cfi = this.foliateView?.getCFI?.(index, r)
+                } catch (ce) {}
+                this._frozenSelectionSnapshot = {
+                    text,
+                    cfi,
+                    index,
+                    bookId: this.currentBookId
+                }
+            }
+        }, true)
 
         const checkSelection = (evt) => {
             const sel = doc.getSelection()
@@ -9765,8 +9884,18 @@ class UniversalReaderApp {
                 }
 
                 this.selectedTextInfo = currentItem
+                this._frozenSelectionSnapshot = { ...currentItem, bookId: this.currentBookId }
                 this.hideHighlightActionPopup()
-                this.showSelectionPopup(absRect)
+
+                const trimmed = text.trim()
+                const isSingleWord = !isCtrl && /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && (this.dictionaryService?.isEnabled !== false)
+                if (isSingleWord) {
+                    this.hideSelectionPopup()
+                    this.showDictionaryCard(currentItem)
+                } else {
+                    this.hideDictionaryCard()
+                    this.showSelectionPopup(absRect)
+                }
             } catch (err) {
                 console.warn('checkSelection warning:', err)
             }
@@ -10209,7 +10338,7 @@ class UniversalReaderApp {
         const snapshot = this._currentSnapshot || {}
         const bookId = targetRef?.bookId || activeSession?.bookId || this.currentBookId
         if (!bookId || (activeSession && !activeSession.isCurrent())) return
-        const target = targetRef || this.selectedTextInfo
+        const target = targetRef || this.selectedTextInfo || this._frozenSelectionSnapshot
         if (!target && (!this.multiSelectedRanges || this.multiSelectedRanges.length === 0)) return
         
         const colorVal = color || '#facc15'

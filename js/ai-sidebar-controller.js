@@ -344,20 +344,60 @@ export class AiSidebarController {
     }
 
     extractContextForSelection(selectionInfo) {
+        const rawBudget = this.app?.advancedSettings?.aiContextTokenBudget ?? this.app?.advancedSettings?.config?.aiContextTokenBudget
+        const budget = Number.isFinite(Number(rawBudget)) ? Math.max(0, Math.min(10000, Number(rawBudget))) : 1000
+
+        if (budget === 0) {
+            return { beforeText: '', afterText: '', contextText: '', tokenCount: 0 }
+        }
+
         let beforeText = ''
         let afterText = ''
 
         try {
             // 1. Attempt extracting from Foliate iframe (EPUB/TXT/HTML)
             const iframe = this.app?.foliateView?.shadowRoot?.querySelector('iframe') || this.app?.foliateView?.querySelector('iframe')
-            if (iframe?.contentDocument?.body) {
-                const text = iframe.contentDocument.body.innerText || ''
-                const selText = (selectionInfo.text || '').trim()
-                if (selText) {
-                    const pos = text.indexOf(selText)
-                    if (pos >= 0) {
-                        beforeText = text.slice(Math.max(0, pos - 1500), pos)
-                        afterText = text.slice(pos + selText.length, pos + selText.length + 1500)
+            const doc = iframe?.contentDocument
+            if (doc?.body) {
+                let domRange = selectionInfo.range
+                if ((!domRange || !domRange.startContainer) && selectionInfo.cfi && this.app?.foliateView && doc) {
+                    try {
+                        const resolved = this.app.foliateView.resolveCFI(selectionInfo.cfi)
+                        if (resolved && typeof resolved.anchor === 'function') {
+                            domRange = resolved.anchor(doc)
+                        }
+                    } catch (cfiErr) {
+                        console.warn('[AI Sidebar] Failed to resolve CFI to Range:', cfiErr)
+                    }
+                }
+
+                // If Range is available, extract precise DOM boundaries without indexOf collisions
+                if (domRange && domRange.startContainer) {
+                    try {
+                        const preRange = doc.createRange()
+                        preRange.selectNodeContents(doc.body)
+                        preRange.setEnd(domRange.startContainer, domRange.startOffset)
+                        beforeText = preRange.toString()
+
+                        const postRange = doc.createRange()
+                        postRange.selectNodeContents(doc.body)
+                        postRange.setStart(domRange.endContainer, domRange.endOffset)
+                        afterText = postRange.toString()
+                    } catch (rErr) {
+                        console.warn('[AI Sidebar] Range context extraction fallback:', rErr)
+                    }
+                }
+
+                // Fallback if beforeText/afterText couldn't be extracted via Range
+                if (!beforeText && !afterText) {
+                    const text = doc.body.innerText || ''
+                    const selText = (selectionInfo.text || '').trim()
+                    if (selText) {
+                        const pos = text.indexOf(selText)
+                        if (pos >= 0) {
+                            beforeText = text.slice(Math.max(0, pos - 2500), pos)
+                            afterText = text.slice(pos + selText.length, pos + selText.length + 2500)
+                        }
                     }
                 }
             } else if (this.app?.pdfViewport) {
@@ -370,17 +410,15 @@ export class AiSidebarController {
                     if (selText) {
                         const pos = text.indexOf(selText)
                         if (pos >= 0) {
-                            beforeText = text.slice(Math.max(0, pos - 1500), pos)
-                            afterText = text.slice(pos + selText.length, pos + selText.length + 1500)
+                            beforeText = text.slice(Math.max(0, pos - 2500), pos)
+                            afterText = text.slice(pos + selText.length, pos + selText.length + 2500)
                         }
                     }
                 }
             }
-        } catch (e) {}
-
-        const budget = this.app?.advancedSettings?.config?.contextTokenBudget != null 
-            ? this.app.advancedSettings.config.contextTokenBudget 
-            : 1000
+        } catch (e) {
+            console.warn('[AI Sidebar] Context extraction exception:', e)
+        }
 
         return buildSurroundingContext({
             beforeText,
@@ -423,11 +461,32 @@ export class AiSidebarController {
         const content = this.dom.aiContextPreviewContent
         if (!bar) return
 
-        const tokens = this.currentContext ? this.currentContext.tokenCount : 0
-        bar.innerText = tokens > 0 ? `约 ${tokens} token` : '未附带'
+        const rawBudget = this.app?.advancedSettings?.aiContextTokenBudget ?? this.app?.advancedSettings?.config?.aiContextTokenBudget
+        const budget = Number.isFinite(Number(rawBudget)) ? Math.max(0, Math.min(10000, Number(rawBudget))) : 1000
+        const isChecked = this.dom.aiChkIncludeContext ? this.dom.aiChkIncludeContext.checked : true
+
+        if (!isChecked) {
+            bar.innerText = '用户已关闭'
+        } else if (budget === 0) {
+            bar.innerText = '预算为 0'
+        } else if (!this.currentReference) {
+            bar.innerText = '无选文引用'
+        } else if (this.currentContext && this.currentContext.tokenCount > 0) {
+            bar.innerText = `待发约 ${this.currentContext.tokenCount} token`
+        } else {
+            bar.innerText = '未取得正文'
+        }
 
         if (content) {
-            content.innerText = this.currentContext?.contextText || '（暂无提取到的附近正文）'
+            if (!isChecked) {
+                content.innerText = '（已在上方复选框中取消附带附近正文）'
+            } else if (budget === 0) {
+                content.innerText = '（高级设置中附近正文上限设为 0，不附带额外正文）'
+            } else if (!this.currentReference) {
+                content.innerText = '（当前未选取引文字段）'
+            } else {
+                content.innerText = this.currentContext?.contextText || '（正文提取失败或当前章节无额外正文）'
+            }
         }
     }
 
@@ -546,6 +605,33 @@ export class AiSidebarController {
         const refSnapshot = this.currentReference
         const ctxSnapshot = (this.dom.aiChkIncludeContext?.checked && this.currentContext) ? this.currentContext : null
 
+        const rawBudget = this.app?.advancedSettings?.aiContextTokenBudget ?? this.app?.advancedSettings?.config?.aiContextTokenBudget
+        const budget = Number.isFinite(Number(rawBudget)) ? Math.max(0, Math.min(10000, Number(rawBudget))) : 1000
+        const isChecked = this.dom.aiChkIncludeContext ? this.dom.aiChkIncludeContext.checked : true
+
+        let ctxReason = ''
+        if (!isChecked) {
+            ctxReason = '用户关闭'
+        } else if (budget === 0) {
+            ctxReason = '预算为 0'
+        } else if (!refSnapshot) {
+            ctxReason = '无选文引用'
+        } else if (this.currentContext && this.currentContext.tokenCount > 0) {
+            ctxReason = `已附带约 ${this.currentContext.tokenCount} token`
+        } else {
+            ctxReason = '未取得正文'
+        }
+
+        console.log('[AI Context Debug]', {
+            hasReference: Boolean(refSnapshot),
+            anchorType: refSnapshot?.cfi ? 'cfi' : (refSnapshot?.pageIndex != null ? 'pdf-page' : 'text'),
+            includeContext: Boolean(ctxSnapshot),
+            contextLength: ctxSnapshot?.contextText?.length || 0,
+            estimatedTokens: ctxSnapshot?.tokenCount || 0,
+            budget,
+            ctxReason
+        })
+
         // 2. Build User Message Record
         const userMsg = {
             id: 'msg_user_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
@@ -555,6 +641,7 @@ export class AiSidebarController {
             actionName: actionName || '提问',
             referenceSnapshot: refSnapshot,
             contextSnapshot: ctxSnapshot,
+            contextReason: ctxReason,
             presetId: presetId || null,
             createdAt: Date.now(),
             status: 'completed'
@@ -606,7 +693,7 @@ export class AiSidebarController {
         const metaDiv = msgElement?.querySelector('.ai-msg-meta-bar')
 
         try {
-            const configuredMaxTokens = this.app?.advancedSettings?.aiMaxTokens || getAiConfig().maxTokens || 2048
+            const configuredMaxTokens = this.app?.advancedSettings?.aiMaxTokens || this.app?.advancedSettings?.config?.aiMaxTokens || getAiConfig().maxTokens || 2048
             const resultText = await requestAiCompletion({
                 requestId: this.activeRequestId,
                 messages,
@@ -659,7 +746,7 @@ export class AiSidebarController {
             // Calculate actual remaining cooldown since dispatch time:
             // "第一条立即发送；若 3 秒就完成，还需等 7 秒才能再发。若 15 秒完成，可立即发送下一条。"
             const elapsedSecs = Math.floor((Date.now() - (this.dispatchedAt || 0)) / 1000)
-            const configuredCooldown = this.app?.advancedSettings?.aiCooldownSeconds || 10
+            const configuredCooldown = this.app?.advancedSettings?.aiCooldownSeconds || this.app?.advancedSettings?.config?.aiCooldownSeconds || 10
             const remaining = Math.max(0, configuredCooldown - elapsedSecs)
 
             if (remaining > 0) {
@@ -829,10 +916,22 @@ export class AiSidebarController {
         if (msg.referenceSnapshot && msg.referenceSnapshot.selectedText) {
             const shortText = msg.referenceSnapshot.selectedText.slice(0, 100) + (msg.referenceSnapshot.selectedText.length > 100 ? '...' : '')
             const chapterMeta = msg.referenceSnapshot.chapterOrPage ? ` · ${escapeUntrustedHtml(msg.referenceSnapshot.chapterOrPage)}` : ''
+            let contextLabel = ''
+            if (msg.contextSnapshot?.tokenCount > 0) {
+                contextLabel = `📖 已附带约 ${msg.contextSnapshot.tokenCount} token 附近正文`
+            } else if (msg.contextReason) {
+                contextLabel = `附近正文: ${msg.contextReason}`
+            } else if (isUser) {
+                contextLabel = '未附带附近正文'
+            }
+            const contextInfo = contextLabel
+                ? `<div style="font-size: 0.68rem; color: ${msg.contextSnapshot?.tokenCount > 0 ? 'var(--accent-purple, #8b5cf6)' : 'var(--text-muted)'}; margin-top: 3px;">${escapeUntrustedHtml(contextLabel)}</div>`
+                : ''
             refHtml = `
                 <div class="ai-message-ref-card" title="点击定位到原文段落">
                     <div style="font-size: 0.7rem; font-weight: 600; color: var(--accent-purple, #8b5cf6);">引用原文${chapterMeta}</div>
                     <div>“${escapeUntrustedHtml(shortText)}”</div>
+                    ${contextInfo}
                 </div>
             `
         }

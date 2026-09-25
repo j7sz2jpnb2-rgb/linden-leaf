@@ -329,7 +329,7 @@ export class PageTurnController {
         }
 
         const viewEl = this.adapter?.getViewElement?.()
-        if (viewEl) {
+        if (viewEl?.style) {
             viewEl.style.transition = ''
             viewEl.style.transform = ''
             viewEl.style.opacity = ''

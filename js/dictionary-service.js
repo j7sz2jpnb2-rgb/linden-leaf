@@ -6,6 +6,89 @@
 
 // Embedded offline English-Chinese vocabulary covering common reading terms
 const BUILTIN_DICTIONARY = {
+    'hello': {
+        phonetic: '/həˈləʊ/',
+        entries: [
+            { pos: 'int.', def: '喂；你好' },
+            { pos: 'n.', def: '招呼；问候' }
+        ]
+    },
+    'hi': {
+        phonetic: '/haɪ/',
+        entries: [
+            { pos: 'int.', def: '嗨；你好' }
+        ]
+    },
+    'collision': {
+        phonetic: '/kəˈlɪʒn/',
+        entries: [
+            { pos: 'n.', def: '碰撞；冲突；抵触；相撞' }
+        ]
+    },
+    'limousine': {
+        phonetic: '/ˌlɪməˈziːn/',
+        entries: [
+            { pos: 'n.', def: '豪华轿车；大型豪华旅行车' }
+        ]
+    },
+    'author': {
+        phonetic: '/ˈɔːθə(r)/',
+        entries: [
+            { pos: 'n.', def: '作者；作家；创始人' },
+            { pos: 'v.', def: '编写；创作' }
+        ]
+    },
+    'novel': {
+        phonetic: '/ˈnɒvl/',
+        entries: [
+            { pos: 'n.', def: '长篇小说' },
+            { pos: 'adj.', def: '新奇的；异常的' }
+        ]
+    },
+    'literature': {
+        phonetic: '/ˈlɪtrətʃə(r)/',
+        entries: [
+            { pos: 'n.', def: '文学；文献；文学作品' }
+        ]
+    },
+    'character': {
+        phonetic: '/ˈkærəktə(r)/',
+        entries: [
+            { pos: 'n.', def: '性格；品质；人物；角色；汉字，字符' }
+        ]
+    },
+    'plot': {
+        phonetic: '/plɒt/',
+        entries: [
+            { pos: 'n.', def: '情节；阴谋；小块土地' },
+            { pos: 'v.', def: '密谋；绘制；标出' }
+        ]
+    },
+    'meaning': {
+        phonetic: '/ˈmiːnɪŋ/',
+        entries: [
+            { pos: 'n.', def: '意义；含义；意思；意图' }
+        ]
+    },
+    'paragraph': {
+        phonetic: '/ˈpærəɡrɑːf/',
+        entries: [
+            { pos: 'n.', def: '段落；短评' }
+        ]
+    },
+    'summary': {
+        phonetic: '/ˈsʌməri/',
+        entries: [
+            { pos: 'n.', def: '总结；概要；摘要' },
+            { pos: 'adj.', def: '简略的；即决的' }
+        ]
+    },
+    'theme': {
+        phonetic: '/θiːm/',
+        entries: [
+            { pos: 'n.', def: '主题；主旨；题目' }
+        ]
+    },
     'book': {
         phonetic: '/bʊk/',
         entries: [
@@ -980,7 +1063,7 @@ export class DictionaryService {
                 normalizedWord: '',
                 phonetic: '',
                 entries: [],
-                source: '本地离线词典'
+                source: '基础离线词库'
             }
         }
 
@@ -1012,7 +1095,7 @@ export class DictionaryService {
             normalizedWord: matchedWord,
             phonetic: record?.phonetic || '',
             entries: record?.entries || [],
-            source: '本地离线词典'
+            source: '基础离线词库'
         }
 
         this.cache.set(norm, result)

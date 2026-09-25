@@ -117,17 +117,17 @@
 @keyframes readerSpringOpen {
   0% {
     opacity: 0;
-    transform: scale(0.94) translateY(20px);
+    transform: translateY(20px);
     filter: blur(4px);
   }
   70% {
     opacity: 1;
-    transform: scale(1.006) translateY(-1px);
+    transform: translateY(-1px);
     filter: blur(0);
   }
   100% {
     opacity: 1;
-    transform: scale(1) translateY(0);
+    transform: translateY(0);
     filter: blur(0);
   }
 }
@@ -135,11 +135,11 @@
 @keyframes readerSpringClose {
   0% {
     opacity: 1;
-    transform: scale(1) translateY(0);
+    transform: translateY(0);
   }
   100% {
     opacity: 0;
-    transform: scale(0.96) translateY(14px);
+    transform: translateY(14px);
     filter: blur(4px);
   }
 }
@@ -2576,12 +2576,12 @@ input#file-input[type="file"] {
 @keyframes readerSpringClose {
   0% {
     opacity: 1;
-    transform: scale(1) translateY(0);
+    transform: translateY(0);
     filter: blur(0);
   }
   100% {
     opacity: 0;
-    transform: scale(0.96) translateY(14px);
+    transform: translateY(14px);
     filter: blur(3px);
   }
 }

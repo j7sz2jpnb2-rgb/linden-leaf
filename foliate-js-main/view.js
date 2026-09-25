@@ -658,6 +658,9 @@ export class View extends HTMLElement {
         if (list) for (const item of list) this.addAnnotation(item)
 
         this.#emit('create-overlay', { index })
+        if (this._pendingActiveSearchCfi) {
+            setTimeout(() => this.setActiveSearchMatch(this._pendingActiveSearchCfi), 10)
+        }
         return overlayer
     }
     async showAnnotation(annotation) {
@@ -692,7 +695,10 @@ export class View extends HTMLElement {
                 if (target > 0 && target < 1) return this.resolveNavigation({ fraction: target })
                 return { index: Math.max(0, Math.min(this.book.sections.length - 1, Math.floor(target))) }
             }
-            if (typeof target?.index === 'number') return { index: Math.max(0, Math.min(this.book.sections.length - 1, Math.floor(target.index))) }
+            if (typeof target?.index === 'number') {
+                const index = Math.max(0, Math.min(this.book.sections.length - 1, Math.floor(target.index)))
+                return target.anchor ? { index, anchor: target.anchor } : { index }
+            }
             if (typeof target.fraction === 'number') {
                 if (this.#sectionProgress) {
                     const [index, anchor] = this.#sectionProgress.getSection(target.fraction)
@@ -711,12 +717,16 @@ export class View extends HTMLElement {
     async goTo(target) {
         const resolved = this.resolveNavigation(target)
         try {
-            await this.renderer.goTo(resolved)
-            this.history.pushState(target)
-            return resolved
+            const success = await this.renderer.goTo(resolved)
+            if (success) {
+                this.history.pushState(target)
+                return resolved
+            }
+            return null
         } catch(e) {
             console.error(e)
             console.error(`Could not go to ${target}`)
+            throw e
         }
     }
     async goToFraction(frac) {
@@ -893,6 +903,7 @@ export class View extends HTMLElement {
     }
     setActiveSearchMatch(cfi) {
         if (!cfi) return
+        this._pendingActiveSearchCfi = cfi
         const contents = this.renderer?.getContents?.() || []
         for (const { doc } of contents) {
             if (doc?.defaultView?.CSS?.highlights) {
@@ -927,6 +938,7 @@ export class View extends HTMLElement {
         }
     }
     clearSearch() {
+        this._pendingActiveSearchCfi = null
         this.#searchHighlights.clear()
         for (const list of this.#searchResults.values())
             for (const item of list) this.deleteAnnotation(item)

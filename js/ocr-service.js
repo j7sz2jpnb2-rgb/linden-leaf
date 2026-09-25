@@ -172,10 +172,11 @@ export class OcrService {
         this._workerInitPromise = (async () => {
             let worker = null
             try {
-                worker = await Tesseract.createWorker({
+                worker = await Tesseract.createWorker(['chi_sim', 'eng'], 1, {
                     workerPath: './vendor/tesseract/worker.min.js',
-                    corePath: 'https://npmmirror.com/mirrors/tesseract.js-core/v4.0.4/tesseract-core.wasm.js',
-                    langPath: 'https://npmmirror.com/mirrors/tessdata/4.0.0',
+                    corePath: './vendor/tesseract',
+                    langPath: './vendor/tesseract/tessdata',
+                    workerBlobURL: false,
                     logger: (m) => {
                         if (m.status === 'recognizing text') {
                             const pct = Math.round((m.progress || 0) * 100)
@@ -184,6 +185,8 @@ export class OcrService {
                             onStageChange?.('正在加载 OCR 计算核心...')
                         } else if (m.status === 'loading language traineddata') {
                             onStageChange?.('正在加载中英文字库模型...')
+                        } else if (m.status === 'initializing tesseract') {
+                            onStageChange?.('正在初始化 OCR 引擎...')
                         }
                     }
                 })
@@ -193,14 +196,6 @@ export class OcrService {
                     throw new Error('任务已取消')
                 }
 
-                await worker.loadLanguage('chi_sim+eng')
-
-                if (initToken !== this._workerInitToken || (jobId !== undefined && jobId !== this._currentJobId)) {
-                    await worker.terminate().catch(() => {})
-                    throw new Error('任务已取消')
-                }
-
-                await worker.initialize('chi_sim+eng')
                 await worker.setParameters({
                     tessedit_pageseg_mode: Tesseract.PSM.AUTO
                 })
@@ -217,7 +212,11 @@ export class OcrService {
                     await worker.terminate().catch(() => {})
                 }
                 if (err.message === '任务已取消') throw err
-                throw new Error(`OCR 引擎初始化失败: ${err.message || '语言包加载或环境受限'}`)
+                let msg = err.message || '语言包加载或环境受限'
+                if (/NetworkError|Failed to fetch|failed to load/i.test(msg)) {
+                    msg = `核心或语言包资源缺失或加载失败: ${msg}`
+                }
+                throw new Error(`OCR 引擎初始化失败: ${msg}`)
             } finally {
                 this._workerInitializing = false
                 this._workerInitPromise = null
@@ -332,6 +331,7 @@ export class OcrService {
                     page: pageNum,
                     text: pageText,
                     isImageOcr,
+                    source: isImageOcr ? 'image_ocr' : 'embedded_text',
                     error: null
                 })
 

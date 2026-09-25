@@ -96,6 +96,8 @@ export class ImportQueue {
      */
     enqueue(items) {
         if (!items || !items.length) return []
+        this._batchCompletedFired = false
+        this._batchId = (this._batchId || 0) + 1
         const jobIds = []
 
         for (const item of items) {
@@ -204,6 +206,18 @@ export class ImportQueue {
     }
 
     /**
+     * Purge completed and cancelled jobs to keep memory bounded and prevent resurrecting badges
+     */
+    clearCompleted() {
+        for (const [id, job] of this.jobs.entries()) {
+            if (job.status === 'succeeded' || job.status === 'cancelled') {
+                this.jobs.delete(id)
+            }
+        }
+        this._notifyProgress()
+    }
+
+    /**
      * Free heavy heap references (e.g. buffers) on jobs that reached a terminal state
      * @param {object} job
      */
@@ -302,7 +316,8 @@ export class ImportQueue {
 
     _checkBatchFinished() {
         const summary = this.getSummary()
-        if (summary.isIdle) {
+        if (summary.isIdle && summary.total > 0 && !this._batchCompletedFired) {
+            this._batchCompletedFired = true
             try { this.onBatchComplete(summary) } catch (e) {}
         }
     }

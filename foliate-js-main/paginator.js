@@ -530,6 +530,7 @@ export class Paginator extends HTMLElement {
     #anchor = 0 // anchor view to a fraction (0-1), Range, or Element
     #justAnchored = false
     #locked = false // while true, prevent any further navigation
+    #pendingNav = null // coalesced pending navigation request
     #displayGeneration = 0
     #styles
     #styleMap = new WeakMap()
@@ -789,7 +790,8 @@ export class Paginator extends HTMLElement {
         // this is needed because the iframe does not fill the whole element
         this.#background.style.background = background
 
-        const { width, height } = this.#container.getBoundingClientRect()
+        const width = this.#container.clientWidth || this.#container.getBoundingClientRect().width
+        const height = this.#container.clientHeight || this.#container.getBoundingClientRect().height
         const size = vertical ? height : width
 
         const style = getComputedStyle(this.#top)
@@ -878,10 +880,18 @@ export class Paginator extends HTMLElement {
             : scrolled ? 'height' : 'width'
     }
     get size() {
-        return this.#container.getBoundingClientRect()[this.sideProp]
+        const prop = this.sideProp
+        if (prop === 'width') return this.#container.clientWidth || this.#container.getBoundingClientRect().width
+        if (prop === 'height') return this.#container.clientHeight || this.#container.getBoundingClientRect().height
+        return this.#container.getBoundingClientRect()[prop]
     }
     get viewSize() {
-        return this.#view.element.getBoundingClientRect()[this.sideProp]
+        const prop = this.sideProp
+        const el = this.#view?.element
+        if (!el) return 0
+        if (prop === 'width') return el.offsetWidth || el.getBoundingClientRect().width
+        if (prop === 'height') return el.offsetHeight || el.getBoundingClientRect().height
+        return el.getBoundingClientRect()[prop]
     }
     get start() {
         return Math.abs(this.#container[this.scrollProp])
@@ -1212,13 +1222,22 @@ export class Paginator extends HTMLElement {
         }
     }
     async goTo(target) {
-        if (this.#locked) return
+        if (this.#locked) {
+            return new Promise((resolve, reject) => {
+                if (this.#pendingNav) {
+                    this.#pendingNav.resolve(false)
+                }
+                this.#pendingNav = { target, resolve, reject }
+            })
+        }
         this.#locked = true
         try {
             const resolved = await target
             if (resolved && this.#canGoToIndex(resolved.index)) {
                 await this.#goTo(resolved)
+                return true
             }
+            return false
         } catch (err) {
             console.warn('Paginator goTo error:', err)
             if (err?.name !== 'AbortError') {
@@ -1226,8 +1245,14 @@ export class Paginator extends HTMLElement {
                     detail: { error: err, index: Number.isInteger(err?.sectionIndex) ? err.sectionIndex : this.#index },
                 }))
             }
+            throw err
         } finally {
             this.#locked = false
+            if (this.#pendingNav) {
+                const next = this.#pendingNav
+                this.#pendingNav = null
+                this.goTo(next.target).then(next.resolve, next.reject)
+            }
         }
     }
     #scrollPrev(distance) {
@@ -1283,6 +1308,11 @@ export class Paginator extends HTMLElement {
             console.warn('Paginator #turnPage error:', err)
         } finally {
             this.#locked = false
+            if (this.#pendingNav) {
+                const next = this.#pendingNav
+                this.#pendingNav = null
+                this.goTo(next.target).then(next.resolve, next.reject)
+            }
         }
     }
     prev(distance) {

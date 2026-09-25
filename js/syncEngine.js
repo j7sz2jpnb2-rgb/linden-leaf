@@ -112,7 +112,13 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
     if (inReadTime !== localReadTime) {
         isIncomingReadNewer = inReadTime > localReadTime
     } else {
-        isIncomingReadNewer = (incomingMeta.progress?.fraction || 0) > (localBook.progress?.fraction || 0)
+        const inFrac = incomingMeta.progress?.fraction || 0
+        const locFrac = localBook.progress?.fraction || 0
+        if (inFrac !== locFrac) {
+            isIncomingReadNewer = inFrac > locFrac
+        } else {
+            isIncomingReadNewer = String(incomingClientId || '') > String(localClientId || '')
+        }
     }
 
     const progress = isIncomingReadNewer ? (incomingMeta.progress || localBook.progress) : (localBook.progress || incomingMeta.progress)
@@ -676,33 +682,35 @@ export const applyMergedPayload = async mergedPayload => {
                 let changed = false
                 const reconciled = reconcileBookSyncMeta(localBook, meta, localClientId, incomingClientId)
 
-                if (JSON.stringify(localBook.tags || []) !== JSON.stringify(reconciled.tags || [])) {
+                if (JSON.stringify(localBook.tags || []) !== JSON.stringify(reconciled.tags || []) || (reconciled.tagsUpdatedAt || 0) > (localBook.tagsUpdatedAt || 0)) {
                     localBook.tags = reconciled.tags
                     localBook.tagsUpdatedAt = reconciled.tagsUpdatedAt
                     changed = true
                 }
-                if (localBook.readingStatus !== reconciled.readingStatus || localBook.completedAt !== reconciled.completedAt) {
+                if (localBook.readingStatus !== reconciled.readingStatus || localBook.completedAt !== reconciled.completedAt || (reconciled.statusUpdatedAt || 0) > (localBook.statusUpdatedAt || 0)) {
                     localBook.readingStatus = reconciled.readingStatus
                     localBook.statusUpdatedAt = reconciled.statusUpdatedAt
                     localBook.completedAt = reconciled.completedAt
                     changed = true
                 }
-                if (JSON.stringify(localBook.customListIds || []) !== JSON.stringify(reconciled.customListIds || [])) {
+                if (JSON.stringify(localBook.customListIds || []) !== JSON.stringify(reconciled.customListIds || []) || (reconciled.listsUpdatedAt || 0) > (localBook.listsUpdatedAt || 0)) {
                     localBook.customListIds = reconciled.customListIds
                     localBook.listsUpdatedAt = reconciled.listsUpdatedAt
                     changed = true
                 }
-                if (localBook.isFavorite !== reconciled.isFavorite) {
+                if (localBook.isFavorite !== reconciled.isFavorite || (reconciled.favoriteUpdatedAt || 0) > (localBook.favoriteUpdatedAt || 0)) {
                     localBook.isFavorite = reconciled.isFavorite
                     localBook.favoriteUpdatedAt = reconciled.favoriteUpdatedAt
                     changed = true
                 }
-                if (localBook.rating !== reconciled.rating) {
+                if (localBook.rating !== reconciled.rating || (reconciled.ratingUpdatedAt || 0) > (localBook.ratingUpdatedAt || 0)) {
                     localBook.rating = reconciled.rating
                     localBook.ratingUpdatedAt = reconciled.ratingUpdatedAt
                     changed = true
                 }
-                if (reconciled.lastReadAt > (localBook.lastReadAt || 0) || (reconciled.progress && !localBook.progress)) {
+                const progressChanged = JSON.stringify(localBook.progress || null) !== JSON.stringify(reconciled.progress || null)
+                const lastReadChanged = (reconciled.lastReadAt || 0) !== (localBook.lastReadAt || 0)
+                if (progressChanged || lastReadChanged || (reconciled.progress && !localBook.progress)) {
                     localBook.progress = reconciled.progress
                     localBook.lastReadAt = reconciled.lastReadAt
                     changed = true

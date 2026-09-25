@@ -39,10 +39,10 @@ export function tokenizeText(text) {
  * @param {number} [padding=36]
  * @returns {string} HTML snippet with <mark> tags
  */
-export function createExcerptSnippet(text, keyword, padding = 36) {
+export function createExcerptSnippet(text, keyword, padding = 36, matchPos = -1) {
     if (!text || !keyword) return ''
     const cleanKw = keyword.trim().toLowerCase()
-    let idx = text.toLowerCase().indexOf(cleanKw)
+    let idx = (matchPos >= 0 && matchPos < text.length) ? matchPos : text.toLowerCase().indexOf(cleanKw)
     let matchLen = cleanKw.length
 
     if (idx === -1) {
@@ -421,40 +421,51 @@ export class FullTextSearchEngine {
             const bookTitle = entry.meta.title
 
             for (const section of entry.sections) {
-                let isMatch = false
+                const secLower = (section.text || '').toLowerCase()
+                const matchPositions = []
 
-                if (isExactPhrase) {
-                    // Strict exact phrase matching
-                    if (section.text.toLowerCase().includes(q)) {
-                        isMatch = true
-                    }
-                } else {
-                    if (section.text.toLowerCase().includes(q)) {
-                        isMatch = true
-                    } else if (queryTokens && queryTokens.size > 0) {
-                        let matchedCount = 0
-                        for (const qt of queryTokens) {
-                            if (section.tokens.has(qt)) matchedCount++
-                        }
-                        if (matchedCount === queryTokens.size) {
-                            isMatch = true
+                let searchIdx = 0
+                while (searchIdx <= secLower.length - q.length) {
+                    const pos = secLower.indexOf(q, searchIdx)
+                    if (pos === -1) break
+                    matchPositions.push({ pos, len: q.length, query: q })
+                    searchIdx = pos + Math.max(1, q.length)
+                }
+
+                // If not found and not an exact quote, and query contains whitespace-separated words:
+                if (matchPositions.length === 0 && !isExactPhrase && q.includes(' ')) {
+                    const words = q.split(/\s+/).filter(Boolean)
+                    if (words.length > 1 && words.every(w => secLower.includes(w))) {
+                        const firstPos = secLower.indexOf(words[0])
+                        if (firstPos !== -1) {
+                            matchPositions.push({ pos: firstPos, len: words[0].length, query: words[0] })
                         }
                     }
                 }
 
-                if (isMatch) {
-                    const snippet = createExcerptSnippet(section.text, q)
-                    results.push({
-                        bookId,
-                        bookTitle,
-                        sectionTitle: section.sectionTitle,
-                        granularity: section.granularity || 'chapter',
-                        location: section.location,
-                        snippet,
-                        matchCount: 1
-                    })
+                if (matchPositions.length > 0) {
+                    for (let mIdx = 0; mIdx < matchPositions.length; mIdx++) {
+                        const m = matchPositions[mIdx]
+                        const snippet = createExcerptSnippet(section.text, m.query, 36, m.pos)
+                        results.push({
+                            bookId,
+                            bookTitle,
+                            sectionTitle: section.sectionTitle,
+                            granularity: section.granularity || 'chapter',
+                            location: {
+                                ...section.location,
+                                matchIndex: mIdx,
+                                matchPos: m.pos,
+                                query: q
+                            },
+                            query: q,
+                            snippet,
+                            excerpt: snippet,
+                            matchCount: matchPositions.length
+                        })
 
-                    if (results.length >= limit) return results
+                        if (results.length >= limit) return results
+                    }
                 }
             }
         }

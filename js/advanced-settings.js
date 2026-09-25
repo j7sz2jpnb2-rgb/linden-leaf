@@ -42,8 +42,9 @@ export class AdvancedSettingsManager {
                     ...DEFAULT_ADVANCED_SETTINGS,
                     ...parsed
                 }
-                // Enforce budget bounds [0, 10000]
-                this.config.aiContextTokenBudget = Math.max(0, Math.min(10000, Number(this.config.aiContextTokenBudget) || 1000))
+                // Enforce budget bounds [0, 10000] (0 is a valid budget that disables extra context)
+                const rawBudget = Number(this.config.aiContextTokenBudget)
+                this.config.aiContextTokenBudget = Number.isFinite(rawBudget) ? Math.max(0, Math.min(10000, rawBudget)) : 1000
                 this.config.aiMaxTokens = Math.max(256, Math.min(4096, Number(this.config.aiMaxTokens) || 2048))
                 this.config.aiCooldownSeconds = [10, 20, 30].includes(Number(this.config.aiCooldownSeconds)) ? Number(this.config.aiCooldownSeconds) : 10
                 this.config.aiDailyLimit = Math.max(0, Number(this.config.aiDailyLimit) || 0)
@@ -158,8 +159,19 @@ export class AdvancedSettingsManager {
         this.dom.rowAdvancedSettingsTrigger?.addEventListener('click', () => {
             this.handleTriggerClick()
         })
+        this.dom.rowAdvancedSettingsTrigger?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                this.handleTriggerClick()
+            }
+        })
 
-        // Confirmation modal buttons
+        // Confirmation modal buttons & backdrop click
+        this.dom.modalAdvancedSettingsConfirm?.addEventListener('click', (e) => {
+            if (e.target === this.dom.modalAdvancedSettingsConfirm) {
+                this.closeConfirmModal()
+            }
+        })
         this.dom.btnCloseAdvancedConfirm?.addEventListener('click', () => {
             this.closeConfirmModal()
         })
@@ -275,11 +287,13 @@ export class AdvancedSettingsManager {
     openConfirmModal() {
         if (this.dom.modalAdvancedSettingsConfirm) {
             this.dom.modalAdvancedSettingsConfirm.style.display = 'flex'
+            this.dom.modalAdvancedSettingsConfirm.classList.add('show')
         }
     }
 
     closeConfirmModal() {
         if (this.dom.modalAdvancedSettingsConfirm) {
+            this.dom.modalAdvancedSettingsConfirm.classList.remove('show')
             this.dom.modalAdvancedSettingsConfirm.style.display = 'none'
         }
     }
@@ -304,7 +318,12 @@ export class AdvancedSettingsManager {
     }
 
     get aiContextTokenBudget() {
-        return Math.max(0, Math.min(10000, Number(this.config.aiContextTokenBudget) || 1000))
+        const raw = Number(this.config.aiContextTokenBudget)
+        return Number.isFinite(raw) ? Math.max(0, Math.min(10000, raw)) : 1000
+    }
+
+    get contextTokenBudget() {
+        return this.aiContextTokenBudget
     }
 
     get inPlaceParagraphTranslation() {
