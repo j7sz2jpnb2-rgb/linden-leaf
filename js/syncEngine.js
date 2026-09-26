@@ -667,12 +667,18 @@ export const applyMergedPayload = async mergedPayload => {
         const incomingClientId = mergedPayload.clientId || ''
         for (const meta of mergedPayload.booksMeta) {
             if (!meta || !meta.id) continue
-            if (deletedBookIds.includes(meta.id) || (meta.stableKey && deletedStableKeys.has(meta.stableKey))) {
+            // Re-check tombstones with fresh DB query to avoid race with concurrent local delete
+            const allDeleted = typeof db.getAllDeletedRecords === 'function' ? await db.getAllDeletedRecords() : []
+            const tombstone = allDeleted.find(t => (t.id === meta.id || (meta.stableKey && t.stableKey === meta.stableKey)))
+            if (tombstone && (tombstone.deletedAt || 0) >= (meta.updatedAt || meta.addedAt || 0)) {
                 continue
             }
-            let localBook = allLocalBooks.find(b => b.id === meta.id)
+
+            // Fresh read directly from DB rather than stale snapshot to avoid clobbering concurrent user edits
+            let localBook = await db.getBook(meta.id)
             if (!localBook && meta.stableKey) {
-                localBook = allLocalBooks.find(b => (b.stableKey && b.stableKey === meta.stableKey) || 
+                const currentBooks = typeof db.getAllBooks === 'function' ? await db.getAllBooks() : allLocalBooks
+                localBook = currentBooks.find(b => (b.stableKey && b.stableKey === meta.stableKey) || 
                     (meta.title && meta.size > 0 && b.title === meta.title && b.size === meta.size))
             }
             if (localBook && localBook.id !== meta.id) {
@@ -724,9 +730,18 @@ export const applyMergedPayload = async mergedPayload => {
                     changed = true
                 }
                 if (changed) {
-                    localBook.updatedAt = meta.updatedAt || localBook.updatedAt || Date.now()
-                    localBook._preserveUpdatedAt = true
-                    await db.saveBook(localBook)
+                    // Check if book was deleted right before saving
+                    const liveCheck = await db.getBook(localBook.id)
+                    if (liveCheck) {
+                        // Preserve any higher timestamps that occurred locally between read and write
+                        if ((liveCheck.tagsUpdatedAt || 0) > (localBook.tagsUpdatedAt || 0)) {
+                            localBook.tags = liveCheck.tags
+                            localBook.tagsUpdatedAt = liveCheck.tagsUpdatedAt
+                        }
+                        localBook.updatedAt = meta.updatedAt || localBook.updatedAt || Date.now()
+                        localBook._preserveUpdatedAt = true
+                        await db.saveBook(localBook)
+                    }
                 }
                 if (localBook.isCloudOnly && isAutoDownloadEligible(meta)) {
                     localBook.cloudBackupState = 'pending_auto_download'

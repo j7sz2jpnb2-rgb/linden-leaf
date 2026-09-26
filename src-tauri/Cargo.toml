@@ -27,6 +27,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 base64 = "0.22"
 rayon = "1.10"
 dirs = "6.0"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2.0"

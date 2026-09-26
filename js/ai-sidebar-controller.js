@@ -357,7 +357,7 @@ export class AiSidebarController {
         try {
             // 1. Attempt extracting from Foliate iframe (EPUB/TXT/HTML)
             const iframe = this.app?.foliateView?.shadowRoot?.querySelector('iframe') || this.app?.foliateView?.querySelector('iframe')
-            const doc = iframe?.contentDocument
+            const doc = iframe?.contentDocument || this.app?.foliateView?.renderer?.getContents?.()?.[0]?.doc
             if (doc?.body) {
                 let domRange = selectionInfo.range
                 if ((!domRange || !domRange.startContainer) && selectionInfo.cfi && this.app?.foliateView && doc) {
@@ -400,10 +400,11 @@ export class AiSidebarController {
                         }
                     }
                 }
-            } else if (this.app?.pdfViewport) {
-                // 2. Attempt extracting from PDF page container
-                const pIdx = selectionInfo.pageIndex != null ? selectionInfo.pageIndex : this.app.currentPdfPageIndex
-                const pageEl = document.querySelector(`.pdf-page-container[data-page-index="${pIdx}"]`) || document.querySelector('.pdf-page-container')
+            } else if (this.app?.pdfViewport || this.app?.pdfRenderer || document.querySelector('.pdf-page-slot') || document.querySelector('.pdf-page-container')) {
+                // 2. Attempt extracting from PDF page container / slot
+                const pIdx = selectionInfo.pageIndex != null ? selectionInfo.pageIndex : this.app?.currentPdfPageIndex
+                const pageEl = (pIdx != null ? document.querySelector(`.pdf-page-slot[data-page-index="${pIdx}"], .pdf-page-container[data-page-index="${pIdx}"]`) : null)
+                    || document.querySelector('.pdf-page-slot.active, .pdf-page-slot, .pdf-page-container')
                 if (pageEl) {
                     const text = pageEl.innerText || ''
                     const selText = (selectionInfo.text || '').trim()
@@ -603,11 +604,10 @@ export class AiSidebarController {
         await this.ensureActiveConversation()
 
         const refSnapshot = this.currentReference
-        const ctxSnapshot = (this.dom.aiChkIncludeContext?.checked && this.currentContext) ? this.currentContext : null
-
         const rawBudget = this.app?.advancedSettings?.aiContextTokenBudget ?? this.app?.advancedSettings?.config?.aiContextTokenBudget
         const budget = Number.isFinite(Number(rawBudget)) ? Math.max(0, Math.min(10000, Number(rawBudget))) : 1000
         const isChecked = this.dom.aiChkIncludeContext ? this.dom.aiChkIncludeContext.checked : true
+        const ctxSnapshot = (isChecked && budget > 0 && this.currentContext) ? this.currentContext : null
 
         let ctxReason = ''
         if (!isChecked) {
@@ -631,6 +631,22 @@ export class AiSidebarController {
             budget,
             ctxReason
         })
+
+        // Retrieve prior messages in this conversation for multi-turn chat context
+        let priorMessages = []
+        try {
+            const allConvMsgs = await getAiMessages(this.currentConversation.id)
+            if (Array.isArray(allConvMsgs)) {
+                priorMessages = allConvMsgs
+                    .filter(m => m.status === 'completed' && (m.role === 'user' || m.role === 'assistant'))
+                    .map(m => ({
+                        role: m.role,
+                        content: m.content || ''
+                    }))
+            }
+        } catch (e) {
+            console.warn('[AI Sidebar] Failed to load prior conversation history:', e)
+        }
 
         // 2. Build User Message Record
         const userMsg = {
@@ -686,7 +702,8 @@ export class AiSidebarController {
             userSupplement,
             referenceSnapshot: refSnapshot,
             contextSnapshot: ctxSnapshot,
-            includeContext: Boolean(ctxSnapshot)
+            includeContext: Boolean(ctxSnapshot),
+            historyMessages: priorMessages
         })
 
         const contentDiv = msgElement?.querySelector('.ai-msg-content')
@@ -1019,6 +1036,14 @@ export class AiSidebarController {
     async jumpToReference(ref) {
         if (!ref) return
         try {
+            // Support cross-book navigation if reference belongs to another book
+            if (ref.bookId && this.app?.currentBookId && ref.bookId !== this.app.currentBookId) {
+                if (typeof this.app.openBook === 'function') {
+                    await this.app.openBook(ref.bookId)
+                    // Wait briefly for book renderer to mount
+                    await new Promise(r => setTimeout(r, 450))
+                }
+            }
             if (ref.cfi && this.app?.foliateView?.goTo) {
                 await this.app.foliateView.goTo(ref.cfi)
                 this.app?.showToast?.('已定位至引用原文', 'info')

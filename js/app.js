@@ -4962,29 +4962,64 @@ class UniversalReaderApp {
         })
     }
 
-    showDictionaryCard(selectionInfo) {
+    async showDictionaryCard(selectionInfo) {
         if (!selectionInfo || !selectionInfo.text) return
         const card = this.dom.readerDictionaryCard
         if (!card) return
 
+        this._frozenSelectionSnapshot = { ...selectionInfo }
+        this.selectedTextInfo = { ...selectionInfo }
+
         const word = selectionInfo.text.trim()
-        const result = this.dictionaryService ? this.dictionaryService.lookup(word) : null
+        const result = this.dictionaryService ? await this.dictionaryService.lookup(word) : null
         this._currentDictResult = result || { word, entries: [], source: '基础离线词库' }
 
         if (this.dom.dictCardWord) this.dom.dictCardWord.innerText = word
         if (this.dom.dictCardPhonetic) this.dom.dictCardPhonetic.innerText = result?.phonetic || ''
-        if (this.dom.dictCardSource) this.dom.dictCardSource.innerText = result?.source || '基础离线词库'
+        if (this.dom.dictCardSource) this.dom.dictCardSource.innerText = result?.source || 'ECDICT 离线词库'
 
         if (this.dom.dictCardBody) {
-            if (result && result.found && result.entries.length > 0) {
+            if (result && result.notInstalled) {
+                this.dom.dictCardBody.innerHTML = `
+                    <div class="dict-state-container dict-not-installed" style="padding:4px 0;">
+                        <div class="dict-state-title" style="font-weight:600;font-size:13px;margin-bottom:4px;color:var(--text-primary,#111827);">尚未安装英汉词库</div>
+                        <div class="dict-state-desc" style="font-size:12px;color:var(--text-secondary,#6b7280);line-height:1.4;margin-bottom:8px;">未检测到 ECDICT 离线英汉词典（77万词条）。安装后可完全离线连续查词。</div>
+                        <div class="dict-state-actions" style="display:flex;gap:6px;">
+                            <button class="dict-btn-install" id="btn-dict-install-action" style="padding:4px 10px;font-size:12px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;">下载安装词库</button>
+                        </div>
+                    </div>
+                `
+                const btnInstall = this.dom.dictCardBody.querySelector('#btn-dict-install-action')
+                btnInstall?.addEventListener('click', async () => {
+                    btnInstall.disabled = true
+                    btnInstall.innerText = '正在安装...'
+                    try {
+                        if (this.dictionaryService?.installBuiltinOrDownload) {
+                            await this.dictionaryService.installBuiltinOrDownload()
+                        }
+                        this.showDictionaryCard(selectionInfo)
+                    } catch (e) {
+                        this.showToast('安装词库失败: ' + e.message, 'warning')
+                        btnInstall.disabled = false
+                        btnInstall.innerText = '重试安装'
+                    }
+                })
+            } else if (result && result.corrupted) {
+                this.dom.dictCardBody.innerHTML = `
+                    <div class="dict-state-container dict-corrupted" style="padding:4px 0;">
+                        <div class="dict-state-title" style="font-weight:600;font-size:13px;margin-bottom:4px;color:#ef4444;">词典数据校验未通过</div>
+                        <div class="dict-state-desc" style="font-size:12px;color:var(--text-secondary,#6b7280);line-height:1.4;margin-bottom:8px;">本地词典数据库已损坏，请重新安装或从文件导入。</div>
+                    </div>
+                `
+            } else if (result && result.found && result.entries && result.entries.length > 0) {
                 this.dom.dictCardBody.innerHTML = result.entries.map(e => `
                     <div class="dict-entry-row">
-                        <span class="dict-pos-tag">${escapeHTML(e.pos)}</span>
-                        <span class="dict-def-text">${escapeHTML(e.def)}</span>
+                        <span class="dict-pos-tag">${escapeHTML(e.pos || '')}</span>
+                        <span class="dict-def-text">${escapeHTML(e.def || '')}</span>
                     </div>
                 `).join('')
             } else {
-                this.dom.dictCardBody.innerHTML = `<div class="dict-not-found">基础词库未收录此词条，可使用下方 AI 或搜索深入查询。</div>`
+                this.dom.dictCardBody.innerHTML = `<div class="dict-not-found" style="font-size:12px;color:var(--text-secondary,#6b7280);">ECDICT 词库（77万词条）未收录此词条，可使用下方 AI 或搜索深入查询。</div>`
             }
         }
 
@@ -8539,12 +8574,17 @@ class UniversalReaderApp {
                             },
                             rect: selInfo.clientRect
                         }
+                        this._frozenSelectionSnapshot = { ...this.selectedTextInfo }
                         this.hideHighlightActionPopup()
                         const trimmed = (selInfo.text || '').trim()
-                        const isSingleWord = /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && (this.dictionaryService?.isEnabled !== false)
+                        const dictEnabled = typeof this.dictionaryService?.isEnabled === 'function' ? this.dictionaryService.isEnabled() : (this.dictionaryService?.isEnabled !== false)
+                        const isSingleWord = /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && dictEnabled
                         if (isSingleWord) {
-                            this.hideSelectionPopup()
-                            this.showDictionaryCard(this.selectedTextInfo)
+                            const wordSnapshot = { ...this.selectedTextInfo }
+                            this.hideSelectionPopup(true)
+                            this.selectedTextInfo = wordSnapshot
+                            this._frozenSelectionSnapshot = wordSnapshot
+                            this.showDictionaryCard(wordSnapshot)
                         } else {
                             this.hideDictionaryCard()
                             this.showSelectionPopup(selInfo.clientRect)
@@ -9888,10 +9928,14 @@ class UniversalReaderApp {
                 this.hideHighlightActionPopup()
 
                 const trimmed = text.trim()
-                const isSingleWord = !isCtrl && /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && (this.dictionaryService?.isEnabled !== false)
+                const dictEnabled = typeof this.dictionaryService?.isEnabled === 'function' ? this.dictionaryService.isEnabled() : (this.dictionaryService?.isEnabled !== false)
+                const isSingleWord = !isCtrl && /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && dictEnabled
                 if (isSingleWord) {
-                    this.hideSelectionPopup()
-                    this.showDictionaryCard(currentItem)
+                    const wordItem = { ...currentItem }
+                    this._frozenSelectionSnapshot = wordItem
+                    this.selectedTextInfo = wordItem
+                    this.hideSelectionPopup(true)
+                    this.showDictionaryCard(wordItem)
                 } else {
                     this.hideDictionaryCard()
                     this.showSelectionPopup(absRect)
@@ -10278,12 +10322,14 @@ class UniversalReaderApp {
         }
     }
 
-    hideSelectionPopup() {
+    hideSelectionPopup(preserveSelection = false) {
         if (this.dom.selectionPopup) {
             this.dom.selectionPopup.classList.remove('active')
             this.dom.selectionPopup.style.display = 'none'
         }
-        this.selectedTextInfo = null
+        if (!preserveSelection) {
+            this.selectedTextInfo = null
+        }
     }
 
     showHighlightActionPopup(rect) {
@@ -10342,6 +10388,9 @@ class UniversalReaderApp {
         if (!target && (!this.multiSelectedRanges || this.multiSelectedRanges.length === 0)) return
         
         const colorVal = color || '#facc15'
+        const targetBlobRevision = targetRef ? (targetRef.blobRevision || (targetRef.bookId === this.currentBookId ? snapshot.blobRevision : null)) : snapshot.blobRevision
+        const targetRevisionOrigin = targetRef ? (targetRef.revisionOrigin || (targetRef.bookId === this.currentBookId ? snapshot.revisionOrigin : null)) : snapshot.revisionOrigin
+        const targetDocHash = targetRef ? (targetRef.documentHash || (targetRef.bookId === this.currentBookId ? snapshot.documentHash : null)) : snapshot.documentHash
 
         // Multi-range batch creation
         if (!targetRef && this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
@@ -10362,9 +10411,9 @@ class UniversalReaderApp {
                     note: note,
                     chapterTitle: this.currentLocation?.tocItem?.label || '正文',
                     createdAt: Date.now(),
-                    blobRevision: snapshot.blobRevision,
-                    revisionOrigin: snapshot.revisionOrigin,
-                    documentHash: snapshot.documentHash
+                    blobRevision: targetBlobRevision,
+                    revisionOrigin: targetRevisionOrigin,
+                    documentHash: targetDocHash
                 }
                 await db.saveHighlight(hl)
                 if (activeSession && !activeSession.isCurrent()) return
@@ -10389,20 +10438,22 @@ class UniversalReaderApp {
             return
         }
 
+        const text = (target.text || target.selectedText || targetRef?.selectedText || targetRef?.text || '').trim()
+
         if (this.pdfViewport && (target?.formatType === 'pdf' || target?.pdfTarget)) {
             const hl = {
                 id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 bookId: bookId,
                 formatType: 'pdf',
-                text: target.text || '',
+                text: text,
                 color: colorVal,
                 style: style,
                 note: note,
                 chapterTitle: targetRef?.chapterTitle || this.currentLocation?.tocItem?.label || '正文',
                 createdAt: Date.now(),
-                blobRevision: snapshot.blobRevision,
-                revisionOrigin: snapshot.revisionOrigin,
-                documentHash: snapshot.documentHash,
+                blobRevision: targetBlobRevision,
+                revisionOrigin: targetRevisionOrigin,
+                documentHash: targetDocHash,
                 pdfTarget: target.pdfTarget
             }
             await db.saveHighlight(hl)
@@ -10420,7 +10471,6 @@ class UniversalReaderApp {
         }
 
         const cfi = target.cfi
-        const text = (target.text || '').trim()
 
         // 1. Check if an annotation of the EXACT SAME style already exists on this CFI for current content identity
         const existingNotes = await db.getHighlightsByBook(bookId)
@@ -10480,9 +10530,9 @@ class UniversalReaderApp {
             note: note,
             chapterTitle: targetRef?.chapterTitle || this.currentLocation?.tocItem?.label || '正文',
             createdAt: Date.now(),
-            blobRevision: snapshot.blobRevision,
-            revisionOrigin: snapshot.revisionOrigin,
-            documentHash: snapshot.documentHash
+            blobRevision: targetBlobRevision,
+            revisionOrigin: targetRevisionOrigin,
+            documentHash: targetDocHash
         }
 
         await db.saveHighlight(hl)

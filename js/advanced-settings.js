@@ -69,8 +69,9 @@ export class AdvancedSettingsManager {
         const limit = this.config.aiDailyLimit || 0
 
         try {
-            if (globalThis.window?.__TAURI__?.core?.invoke) {
-                await globalThis.window.__TAURI__.core.invoke('ai_set_cooldown_and_limit', {
+            const invoke = globalThis.__TAURI__?.core?.invoke || globalThis.window?.__TAURI__?.core?.invoke
+            if (invoke) {
+                await invoke('ai_set_cooldown_and_limit', {
                     cooldownSeconds: cooldown,
                     dailyLimit: limit,
                     cooldown_seconds: cooldown,
@@ -84,6 +85,7 @@ export class AdvancedSettingsManager {
 
     bindUI(domElements = {}) {
         this.dom = domElements
+        this.syncNativeBackendLimits()
         this.renderUIState()
         this.attachEventListeners()
     }

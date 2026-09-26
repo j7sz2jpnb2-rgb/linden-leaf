@@ -494,15 +494,16 @@ export class FixedLayout extends HTMLElement {
     }
     async goTo(target) {
         const { book } = this
-        if (!book?.sections) return
+        if (!book?.sections) return false
         const resolved = await target
         const secIndex = typeof resolved === 'number' ? resolved : (resolved?.index ?? 0)
         const section = book.sections[secIndex]
-        if (!section) return
+        if (!section) return false
         const spreadObj = this.getSpreadOf(section)
-        if (!spreadObj) return
+        if (!spreadObj) return false
         const { index, side } = spreadObj
         await this.goToSpread(index, side)
+        return true
     }
     async next() {
         const s = this.rtl ? this.#goLeft() : this.#goRight()

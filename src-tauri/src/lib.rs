@@ -175,6 +175,11 @@ pub fn run() {
             ai_clear_audit_log,
             ai_set_cooldown_and_limit,
             ai_bind_credential,
+            // Offline ECDICT SQLite Dictionary
+            dict_get_status,
+            dict_lookup,
+            dict_install_from_file,
+            dict_uninstall,
             // MuPDF Native Reader
             mupdf_is_available,
             mupdf_stage_pdf,

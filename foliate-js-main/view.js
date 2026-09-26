@@ -718,7 +718,7 @@ export class View extends HTMLElement {
         const resolved = this.resolveNavigation(target)
         try {
             const success = await this.renderer.goTo(resolved)
-            if (success) {
+            if (success !== false && success != null) {
                 this.history.pushState(target)
                 return resolved
             }

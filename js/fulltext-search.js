@@ -91,6 +91,17 @@ export function escapeHTML(str) {
 export function extractCleanTextFromHtml(html) {
     if (!html || typeof html !== 'string') return ''
     let cleaned = html
+
+    // If <body> tag is present, extract its content to match Foliate's body-only search walker
+    const bodyMatch = cleaned.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
+    if (bodyMatch) {
+        cleaned = bodyMatch[1]
+    } else {
+        // Otherwise strip <head>...</head> so titles and metadata do not pollute index ordinals
+        cleaned = cleaned.replace(/<head\b[^<]*(?:(?!<\/head>)<[^<]*)*<\/head>/gi, ' ')
+    }
+
+    cleaned = cleaned
         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ')
         .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ')
         .replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, ' ')

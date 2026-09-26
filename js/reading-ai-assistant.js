@@ -75,8 +75,29 @@ export function validateEndpointUrl(url) {
  */
 export function getAiConfig() {
     try {
+        let advCooldown = 10
+        let advDaily = 0
+        const advRaw = localStorage.getItem('linden_advanced_settings_config')
+        if (advRaw) {
+            const adv = JSON.parse(advRaw)
+            if (typeof adv.aiCooldownSeconds === 'number') advCooldown = adv.aiCooldownSeconds
+            if (typeof adv.aiDailyLimit === 'number') advDaily = adv.aiDailyLimit
+        }
         const raw = localStorage.getItem(LOCAL_STORAGE_KEY_AI_CONFIG)
-        if (raw) return { ...DEFAULT_AI_CONFIG, ...JSON.parse(raw) }
+        if (raw) {
+            const parsed = JSON.parse(raw)
+            return {
+                ...DEFAULT_AI_CONFIG,
+                ...parsed,
+                cooldownSeconds: advRaw ? advCooldown : (parsed.cooldownSeconds ?? 10),
+                dailyLimit: advRaw ? advDaily : (parsed.dailyLimit ?? 100)
+            }
+        }
+        return {
+            ...DEFAULT_AI_CONFIG,
+            cooldownSeconds: advCooldown,
+            dailyLimit: advDaily
+        }
     } catch (e) {}
     return { ...DEFAULT_AI_CONFIG }
 }
@@ -107,9 +128,21 @@ export async function saveAiConfig(cfg = {}) {
     }
     if (typeof cfg.cooldownSeconds === 'number') {
         merged.cooldownSeconds = Math.max(5, Math.min(60, cfg.cooldownSeconds))
+        try {
+            const advRaw = localStorage.getItem('linden_advanced_settings_config') || '{}'
+            const adv = JSON.parse(advRaw)
+            adv.aiCooldownSeconds = merged.cooldownSeconds
+            localStorage.setItem('linden_advanced_settings_config', JSON.stringify(adv))
+        } catch (_) {}
     }
     if (typeof cfg.dailyLimit === 'number') {
         merged.dailyLimit = Math.max(0, cfg.dailyLimit)
+        try {
+            const advRaw = localStorage.getItem('linden_advanced_settings_config') || '{}'
+            const adv = JSON.parse(advRaw)
+            adv.aiDailyLimit = merged.dailyLimit
+            localStorage.setItem('linden_advanced_settings_config', JSON.stringify(adv))
+        } catch (_) {}
     }
     if (typeof cfg.maxTokens === 'number') {
         merged.maxTokens = Math.max(64, Math.min(8192, cfg.maxTokens))

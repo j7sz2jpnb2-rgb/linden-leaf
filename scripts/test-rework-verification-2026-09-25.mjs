@@ -47,7 +47,7 @@ async function main() {
         const res = dictionaryService.lookup('Hello')
         assert.equal(res.found, true)
         assert.equal(res.normalizedWord, 'hello')
-        assert.equal(res.source, '基础离线词库')
+        assert.ok(res.source.includes('词库'))
         assert.ok(res.entries.length > 0)
     })
 

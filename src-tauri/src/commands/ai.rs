@@ -234,7 +234,9 @@ struct RequestLockGuard<'a> {
 impl<'a> Drop for RequestLockGuard<'a> {
     fn drop(&mut self) {
         let mut active = self.state.active_request_id.lock().unwrap();
-        *active = None;
+        if active.as_deref() == Some(&self.request_id) {
+            *active = None;
+        }
         let mut tx_guard = self.state.abort_tx.lock().unwrap();
         *tx_guard = None;
 
@@ -299,7 +301,13 @@ pub fn ai_abort_request(state: tauri::State<'_, AiState>, request_id: Option<Str
         if let Some(tx) = tx_guard.take() {
             let _ = tx.send(());
         }
-        *active = None;
+        if let Some(ref req) = request_id {
+            if active.as_deref() == Some(req) {
+                *active = None;
+            }
+        } else {
+            *active = None;
+        }
         true
     } else {
         false
@@ -518,39 +526,71 @@ pub async fn ai_request_chat_completion(
         "stream_options": { "include_usage": true }
     });
 
-    let send_result = client
+    let send_future = client
         .post(&full_url)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&req_body)
-        .send()
-        .await;
+        .send();
 
-    let mut response = match send_result {
-        Ok(res) => res,
-        Err(err) => {
-            let err_msg = format!("网络连接失败: {}", err);
+    let mut response = tokio::select! {
+        _ = &mut abort_rx => {
+            {
+                let mut status_guard = _guard.final_status.lock().unwrap();
+                *status_guard = "cancelled".to_string();
+            }
             append_audit_entry(AiAuditEntry {
                 id: format!("audit_{}", req_id),
                 timestamp: iso_time,
                 request_id: req_id.clone(),
                 model: payload.model.clone(),
                 endpoint_host: parsed_url.host_str().unwrap_or("").to_string(),
-                status: "failed".to_string(),
+                status: "cancelled".to_string(),
                 prompt_tokens: None,
                 completion_tokens: None,
                 total_tokens: None,
                 duration_ms: start_time.elapsed().as_millis(),
-                error_message: Some(err_msg.clone()),
+                error_message: Some("用户主动取消请求".to_string()),
             });
             let _ = window.emit(
-                &format!("ai:error:{}", req_id),
+                &format!("ai:stopped:{}", req_id),
                 serde_json::json!({
-                    "status": 0,
-                    "message": err_msg
+                    "partialText": ""
                 }),
             );
-            return Err(err_msg);
+            return Ok(serde_json::json!({
+                "stopped": true,
+                "partialText": ""
+            }));
+        }
+        res = send_future => {
+            match res {
+                Ok(r) => r,
+                Err(err) => {
+                    let err_msg = format!("网络连接失败: {}", err);
+                    append_audit_entry(AiAuditEntry {
+                        id: format!("audit_{}", req_id),
+                        timestamp: iso_time,
+                        request_id: req_id.clone(),
+                        model: payload.model.clone(),
+                        endpoint_host: parsed_url.host_str().unwrap_or("").to_string(),
+                        status: "failed".to_string(),
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        duration_ms: start_time.elapsed().as_millis(),
+                        error_message: Some(err_msg.clone()),
+                    });
+                    let _ = window.emit(
+                        &format!("ai:error:{}", req_id),
+                        serde_json::json!({
+                            "status": 0,
+                            "message": err_msg
+                        }),
+                    );
+                    return Err(err_msg);
+                }
+            }
         }
     };
 
@@ -584,10 +624,11 @@ pub async fn ai_request_chat_completion(
     }
 
     // 7. Process SSE Stream with Stop / Abort Interruption
-    let mut buffer = String::new();
+    let mut byte_buffer: Vec<u8> = Vec::new();
     let mut full_text = String::new();
     let mut usage_val: Option<serde_json::Value> = None;
     let mut was_cancelled = false;
+    let mut has_stream_error = false;
 
     loop {
         tokio::select! {
@@ -604,12 +645,12 @@ pub async fn ai_request_chat_completion(
             chunk_res = response.chunk() => {
                 match chunk_res {
                     Ok(Some(bytes)) => {
-                        let chunk_str = String::from_utf8_lossy(&bytes);
-                        buffer.push_str(&chunk_str);
+                        byte_buffer.extend_from_slice(&bytes);
 
-                        while let Some(newline_pos) = buffer.find('\n') {
-                            let line = buffer[..newline_pos].trim().to_string();
-                            buffer = buffer[newline_pos + 1..].to_string();
+                        while let Some(newline_pos) = byte_buffer.iter().position(|&b| b == b'\n') {
+                            let line_bytes = &byte_buffer[..newline_pos];
+                            let line = String::from_utf8_lossy(line_bytes).trim().to_string();
+                            byte_buffer = byte_buffer[newline_pos + 1..].to_vec();
 
                             if line.is_empty() || line.starts_with(':') {
                                 continue;
@@ -646,6 +687,7 @@ pub async fn ai_request_chat_completion(
                         break;
                     }
                     Err(e) => {
+                        has_stream_error = true;
                         let err_msg = format!("数据流读取中断: {}", e);
                         let _ = window.emit(
                             &format!("ai:error:{}", req_id),
@@ -661,7 +703,13 @@ pub async fn ai_request_chat_completion(
         }
     }
 
-    let final_status = if was_cancelled { "cancelled" } else { "completed" };
+    let final_status = if was_cancelled {
+        "cancelled"
+    } else if has_stream_error {
+        "failed"
+    } else {
+        "completed"
+    };
     {
         let mut status_guard = _guard.final_status.lock().unwrap();
         *status_guard = final_status.to_string();
