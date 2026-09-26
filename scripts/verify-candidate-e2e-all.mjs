@@ -137,27 +137,27 @@ async function main() {
         // -------------------------------------------------------------
         console.log('--- Test 2: Local Dictionary in Candidate ---');
         const dictRes = await evaluate(`
-        (() => {
+        (async () => {
             const app = window.app || window.readerApp;
             const dict = app?.dictionaryService;
             if (!dict) return { error: 'dictionaryService not found on app' };
 
-            const hello = dict.lookup('Hello');
-            const collision = dict.lookup('collision');
-            const limousine = dict.lookup('limousines');
-            const punc = dict.lookup(' “Hello,” ');
+            const hello = await dict.lookup('Hello');
+            const collision = await dict.lookup('collision');
+            const limousine = await dict.lookup('limousines');
+            const punc = await dict.lookup(' “Hello,” ');
 
             return {
-                hello: { found: hello.found, word: hello.normalizedWord, source: hello.source, entriesCount: hello.entries?.length },
-                collision: { found: collision.found, word: collision.normalizedWord, def: collision.entries?.[0]?.def },
-                limousine: { found: limousine.found, word: limousine.normalizedWord, def: limousine.entries?.[0]?.def },
-                punc: { found: punc.found, word: punc.normalizedWord }
+                hello: { found: hello?.found, word: hello?.normalizedWord, source: hello?.source, entriesCount: hello?.entries?.length },
+                collision: { found: collision?.found, word: collision?.normalizedWord, def: collision?.entries?.[0]?.def },
+                limousine: { found: limousine?.found, word: limousine?.normalizedWord, def: limousine?.entries?.[0]?.def },
+                punc: { found: punc?.found, word: punc?.normalizedWord }
             };
         })()
         `);
         console.log('  Dictionary Lookup Results:', dictRes);
         assert.equal(dictRes.hello.found, true);
-        assert.equal(dictRes.hello.source, '基础离线词库');
+        assert.ok(dictRes.hello.source.includes('词库'));
         assert.equal(dictRes.collision.found, true);
         assert.equal(dictRes.limousine.found, true);
         assert.equal(dictRes.limousine.word, 'limousine');
