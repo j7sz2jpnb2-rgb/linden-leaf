@@ -212,6 +212,19 @@ export class AiSidebarController {
 
         // Render presets strip initially
         this.renderQuickPresets()
+
+        // Prevent mouse wheel inside AI sidebar and AI modals from bubbling to window reader page flipper
+        const stopWheelInside = (el) => {
+            el?.addEventListener('wheel', (e) => {
+                e.stopPropagation()
+            }, { passive: true })
+        }
+        stopWheelInside(this.dom.readerAiSidebar)
+        stopWheelInside(this.dom.aiChatMessages)
+        stopWheelInside(this.dom.modalAiPresets)
+        stopWheelInside(this.dom.modalAiHistory)
+        stopWheelInside(this.dom.modalAiAudit)
+        stopWheelInside(this.dom.aiContextPreviewDrawer)
     }
 
     setupResizer() {
@@ -298,6 +311,20 @@ export class AiSidebarController {
     relayoutReader() {
         // Trigger smooth reflow of Foliate / PDF viewer without losing reading position
         try {
+            if (this.app?.foliateView?.renderer) {
+                const renderer = this.app.foliateView.renderer
+                if (typeof renderer.settle === 'function') {
+                    renderer.settle()
+                }
+                if (typeof renderer.render === 'function') {
+                    renderer.render()
+                }
+            }
+            if (this.app?.currentBookData?.format === 'pdf' || this.app?.foliateView?.isFixedLayout) {
+                if (typeof this.app.renderPdfDrawingOverlayForCurrentPage === 'function') {
+                    this.app.renderPdfDrawingOverlayForCurrentPage()
+                }
+            }
             if (this.app?.rendition?.resize) {
                 this.app.rendition.resize()
             }

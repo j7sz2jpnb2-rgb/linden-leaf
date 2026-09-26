@@ -620,6 +620,12 @@ export class View extends HTMLElement {
             }
             return
         }
+        if (remove && (!value || typeof value !== 'string') && annotation.id) {
+            for (const item of this.renderer?.getContents?.() || []) {
+                item.overlayer?.remove?.(annotation.id)
+            }
+            return
+        }
         const rawCFI = value.includes('::') ? value.split('::')[0] : value
         const annotKey = annotation.id || value
         const resolved = await this.resolveNavigation(rawCFI)

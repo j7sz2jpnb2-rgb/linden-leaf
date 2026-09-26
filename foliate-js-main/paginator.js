@@ -2,7 +2,7 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 const debounce = (f, wait, immediate) => {
     let timeout
-    return (...args) => {
+    const debounced = (...args) => {
         const later = () => {
             timeout = null
             if (!immediate) f(...args)
@@ -12,6 +12,13 @@ const debounce = (f, wait, immediate) => {
         timeout = setTimeout(later, wait)
         if (callNow) f(...args)
     }
+    debounced.cancel = () => {
+        if (timeout) {
+            clearTimeout(timeout)
+            timeout = null
+        }
+    }
+    return debounced
 }
 
 const lerp = (min, max, x) => x * (max - min) + min
@@ -541,6 +548,10 @@ export class Paginator extends HTMLElement {
     #touchScrolled
     #lastVisibleRange
     #relocateTimeout = null
+    #isPointerSelecting = false
+    #checkPointerSelection = null
+    #lastResizeTime = 0
+    #globalPointerUpListener = null
     constructor() {
         super()
         this.#root.innerHTML = `<style>
@@ -681,7 +692,8 @@ export class Paginator extends HTMLElement {
                 else setSelectionTo(this.#anchor, -1)
             }
         })
-        const checkPointerSelection = debounce((range, sel) => {
+        this.#checkPointerSelection = debounce((range, sel) => {
+            if (Date.now() - this.#lastResizeTime < 1000) return
             if (!sel.rangeCount) return
             const selRange = sel.getRangeAt(0)
             const backward = selectionIsBackward(sel)
@@ -690,21 +702,31 @@ export class Paginator extends HTMLElement {
             else if (!backward && selRange.compareBoundaryPoints(Range.END_TO_END, range) > 0)
                 this.next()
         }, 700)
+        this.#globalPointerUpListener = () => this.#clearPointerSelecting()
+        window.addEventListener('pointerup', this.#globalPointerUpListener)
+        window.addEventListener('pointercancel', this.#globalPointerUpListener)
         this.addEventListener('load', ({ detail: { doc } }) => {
-            let isPointerSelecting = false
-            doc.addEventListener('pointerdown', () => isPointerSelecting = true)
-            doc.addEventListener('pointerup', () => isPointerSelecting = false)
+            doc.addEventListener('pointerdown', () => {
+                if (Date.now() - this.#lastResizeTime >= 300) {
+                    this.#isPointerSelecting = true
+                }
+            })
+            doc.addEventListener('pointerup', this.#globalPointerUpListener)
+            doc.addEventListener('pointercancel', this.#globalPointerUpListener)
+            doc.defaultView?.addEventListener('pointerup', this.#globalPointerUpListener)
+            doc.defaultView?.addEventListener('pointercancel', this.#globalPointerUpListener)
             let isKeyboardSelecting = false
             doc.addEventListener('keydown', () => isKeyboardSelecting = true)
             doc.addEventListener('keyup', () => isKeyboardSelecting = false)
             doc.addEventListener('selectionchange', () => {
                 if (this.scrolled) return
+                if (Date.now() - this.#lastResizeTime < 1000) return
                 const range = this.#lastVisibleRange
                 if (!range) return
                 const sel = doc.getSelection()
                 if (!sel.rangeCount) return
-                if (isPointerSelecting && sel.type === 'Range')
-                    checkPointerSelection(range, sel)
+                if (this.#isPointerSelecting && sel.type === 'Range')
+                    this.#checkPointerSelection(range, sel)
                 else if (isKeyboardSelecting) {
                     const selRange = sel.getRangeAt(0).cloneRange()
                     const backward = selectionIsBackward(sel)
@@ -858,7 +880,22 @@ export class Paginator extends HTMLElement {
 
         return { height, width, margin, gap, columnWidth }
     }
+    #clearPointerSelecting() {
+        this.#isPointerSelecting = false
+        this.#checkPointerSelection?.cancel?.()
+    }
     render() {
+        this.#clearPointerSelecting()
+        this.#lastResizeTime = Date.now()
+        if (this.#relocateTimeout) {
+            clearTimeout(this.#relocateTimeout)
+            this.#relocateTimeout = null
+            const range = this.#getVisibleRange()
+            if (range) {
+                this.#lastVisibleRange = range
+                this.#anchor = range
+            }
+        }
         if (!this.#view) return
         this.#view.render(this.#beforeRender({
             vertical: this.#vertical,
@@ -1391,6 +1428,12 @@ export class Paginator extends HTMLElement {
     destroy() {
         ++this.#displayGeneration
         this.settle()
+        if (this.#globalPointerUpListener) {
+            window.removeEventListener('pointerup', this.#globalPointerUpListener)
+            window.removeEventListener('pointercancel', this.#globalPointerUpListener)
+            this.#globalPointerUpListener = null
+        }
+        this.#clearPointerSelecting()
         this.#observer?.disconnect?.() ?? this.#observer?.unobserve?.(this.#container)
         this.#view?.destroy?.()
         this.#view = null

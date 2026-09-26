@@ -433,12 +433,30 @@
                       <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                       <input type="text" id="overview-search-input" class="overview-search-input" placeholder="在当前结果中搜索..." />
                     </div>
-                    <button type="button" id="btn-overview-open-tags" class="btn-overview-action" title="管理与筛选全库标签">
-                      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
-                      <span>标签</span>
-                    </button>
-                    <div class="overview-rating-select-wrap">
-                      <select id="overview-rating-filter" class="overview-select" title="按评分筛选">
+                    <div class="overview-popover-wrap">
+                      <button type="button" id="btn-overview-open-tags" class="btn-overview-action" title="按标签筛选图书">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
+                        <span id="overview-tags-btn-text">标签</span>
+                        <svg class="popover-chevron-icon" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                      </button>
+                      <div id="overview-tags-popover" class="overview-popover-panel" style="display: none;">
+                        <div class="overview-popover-header">
+                          <span>按标签筛选</span>
+                          <button type="button" class="btn-popover-header-action" id="btn-popover-manage-tags" title="打开全库标签管理">管理标签</button>
+                        </div>
+                        <div class="overview-tags-popover-list" id="overview-tags-popover-list">
+                          <!-- Dynamically rendered -->
+                        </div>
+                      </div>
+                    </div>
+                    <div class="overview-popover-wrap">
+                      <button type="button" id="btn-overview-rating-trigger" class="btn-overview-action" title="按评分筛选图书">
+                        <span style="color: #f59e0b; font-size: 11px;">★</span>
+                        <span id="overview-rating-trigger-text">评分: 全部</span>
+                        <svg class="popover-chevron-icon" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                      </button>
+                      <!-- Hidden fallback select for backward compatibility -->
+                      <select id="overview-rating-filter" style="display: none;">
                         <option value="all">评分: 全部</option>
                         <option value="5.0">★★★★★ 5.0分</option>
                         <option value="4.5">★ ≥ 4.5分</option>
@@ -447,6 +465,31 @@
                         <option value="3.0">★ ≥ 3.0分</option>
                         <option value="unrated">仅未评分</option>
                       </select>
+                      <div id="overview-rating-popover" class="overview-popover-panel overview-rating-popover" style="display: none;">
+                        <div class="overview-popover-header">
+                          <span>评分区间筛选</span>
+                          <span class="overview-rating-val-display" id="overview-rating-val-display">全部评分</span>
+                        </div>
+                        <div class="overview-rating-slider-row">
+                          <span class="rating-slider-label">0</span>
+                          <input type="range" id="overview-rating-slider" min="0" max="5.0" step="0.1" value="0" class="overview-range-slider" />
+                          <span class="rating-slider-label">5.0</span>
+                        </div>
+                        <div class="overview-rating-quick-pills">
+                          <button type="button" class="rating-quick-pill active" data-val="0">全部</button>
+                          <button type="button" class="rating-quick-pill" data-val="3.0">≥ 3.0</button>
+                          <button type="button" class="rating-quick-pill" data-val="4.0">≥ 4.0</button>
+                          <button type="button" class="rating-quick-pill" data-val="4.5">≥ 4.5</button>
+                          <button type="button" class="rating-quick-pill" data-val="5.0">5.0</button>
+                        </div>
+                        <div class="overview-rating-footer">
+                          <label class="overview-unrated-checkbox-label">
+                            <input type="checkbox" id="overview-unrated-checkbox" />
+                            <span>仅看未评分</span>
+                          </label>
+                          <button type="button" class="btn-reset-rating" id="btn-reset-rating">重置</button>
+                        </div>
+                      </div>
                     </div>
                     <button type="button" id="btn-overview-toggle-grouping" class="btn-overview-action" title="读完书籍按完成年月分组" style="display: none;">
                       <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
@@ -1380,7 +1423,7 @@
         <div class="dict-card-actions">
           <button type="button" class="btn-dict-action" id="btn-dict-search" title="网页搜索单词">搜索</button>
           <button type="button" class="btn-dict-action" id="btn-dict-copy" title="复制释义">复制</button>
-          <button type="button" class="btn-dict-action btn-dict-ai" id="btn-dict-ask-ai" title="在 AI 中询问 (附上选词，需主动点击发送)">在 AI 中询问</button>
+          <button type="button" class="btn-dict-action btn-dict-ai" id="btn-dict-ask-ai" title="在 AI 中询问 (附上选词，需主动点击发送)">问 AI</button>
         </div>
       </div>
     </div>
@@ -1580,10 +1623,10 @@
         <span id="modal-create-list-title" class="global-modal-title">新建自定义书单</span>
         <button id="btn-close-create-list" class="footnote-popup-close">×</button>
       </div>
-      <div class="global-modal-body" style="padding: 1rem 0; display: flex; flex-direction: column; gap: 0.85rem;">
+      <div class="global-modal-body" style="padding: 0.5rem 0 0.75rem 0; display: flex; flex-direction: column; gap: 0.85rem;">
         <div>
           <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 0.4rem;">书单名称</label>
-          <input type="text" id="input-custom-list-name" class="global-modal-input" placeholder="例如：夜读精选、哲学思考、文史漫步、工作精进..." maxlength="30" />
+          <input type="text" id="input-custom-list-name" class="global-modal-input" placeholder="例如：社科阅读" maxlength="30" />
         </div>
         <div style="width: 100%;">
           <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 0.4rem;">选择书单图标</label>

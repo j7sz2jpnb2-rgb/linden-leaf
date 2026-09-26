@@ -1394,6 +1394,17 @@ class UniversalReaderApp {
             overviewStatusTabs: document.getElementById('overview-status-tabs'),
             overviewSearchInput: document.getElementById('overview-search-input'),
             btnOverviewOpenTags: document.getElementById('btn-overview-open-tags'),
+            overviewTagsBtnText: document.getElementById('overview-tags-btn-text'),
+            overviewTagsPopover: document.getElementById('overview-tags-popover'),
+            overviewTagsPopoverList: document.getElementById('overview-tags-popover-list'),
+            btnPopoverManageTags: document.getElementById('btn-popover-manage-tags'),
+            btnOverviewRatingTrigger: document.getElementById('btn-overview-rating-trigger'),
+            overviewRatingTriggerText: document.getElementById('overview-rating-trigger-text'),
+            overviewRatingPopover: document.getElementById('overview-rating-popover'),
+            overviewRatingSlider: document.getElementById('overview-rating-slider'),
+            overviewRatingValDisplay: document.getElementById('overview-rating-val-display'),
+            overviewUnratedCheckbox: document.getElementById('overview-unrated-checkbox'),
+            btnResetRating: document.getElementById('btn-reset-rating'),
             overviewRatingFilterSelect: document.getElementById('overview-rating-filter'),
             btnOverviewToggleGrouping: document.getElementById('btn-overview-toggle-grouping'),
             overviewGroupingText: document.getElementById('overview-grouping-text'),
@@ -3490,8 +3501,10 @@ class UniversalReaderApp {
             }
         })
 
-        // Prevent wheel events originating inside drawer or modals from bubbling to reader page flipper
-        const stopWheelElements = document.querySelectorAll('#sidebar-drawer, #quote-card-backdrop, #modal-pdf-ocr, .global-modal-backdrop')
+        // Prevent wheel events originating inside drawer, modals, or AI sidebar from bubbling to reader page flipper
+        const stopWheelElements = document.querySelectorAll(
+            '#sidebar-drawer, #quote-card-backdrop, #modal-pdf-ocr, .global-modal-backdrop, #reader-ai-sidebar, .reader-ai-sidebar, #ai-chat-messages, #modal-ai-presets, #modal-ai-history, #modal-ai-audit, .reader-dictionary-card'
+        )
         stopWheelElements.forEach(el => {
             el?.addEventListener('wheel', e => {
                 e.stopPropagation()
@@ -3501,12 +3514,12 @@ class UniversalReaderApp {
         // Ctrl + Mouse Wheel Zoom on Reader or Page Flip in Reader
         let outerWheelCooldown = false
         window.addEventListener('wheel', e => {
-            // When drawer, quote-card modal, or any dialog is open, do NOT flip reader pages
+            // When drawer, quote-card modal, AI sidebar, or any dialog is open, do NOT flip reader pages
             const isAnyModalOpen = !!document.querySelector(
-                '#quote-card-backdrop:not([style*="display: none"]), #modal-pdf-ocr:not([style*="display: none"]), .global-modal-backdrop:not([style*="display: none"]), .modal-backdrop:not([style*="display: none"]), .modal.show'
+                '#quote-card-backdrop:not([style*="display: none"]), #modal-pdf-ocr:not([style*="display: none"]), .global-modal-backdrop:not([style*="display: none"]), .modal-backdrop:not([style*="display: none"]), .modal.show, #modal-ai-presets:not([style*="display: none"]), #modal-ai-history:not([style*="display: none"]), #modal-ai-audit:not([style*="display: none"])'
             )
             if (this.activeDrawer || isAnyModalOpen || e.target?.closest?.(
-                '#sidebar-drawer, #quote-card-backdrop, #quote-card-dialog, .global-modal-backdrop, .global-modal-card, .drawer-body, .drawer-panel, .modal-card, .modal-dialog, .dropdown-menu, .popup-menu, .modal'
+                '#sidebar-drawer, #quote-card-backdrop, #quote-card-dialog, .global-modal-backdrop, .global-modal-card, .drawer-body, .drawer-panel, .modal-card, .modal-dialog, .dropdown-menu, .popup-menu, .modal, #reader-ai-sidebar, .reader-ai-sidebar, .ai-sidebar-inner, #ai-chat-messages, .ai-chat-messages, #modal-ai-presets, #modal-ai-history, #modal-ai-audit, .ai-modal, .reader-dictionary-card'
             )) {
                 return
             }
@@ -3562,16 +3575,108 @@ class UniversalReaderApp {
             }, 150)
         })
 
-        // Rating filter dropdown
-        this.dom.overviewRatingFilterSelect?.addEventListener('change', (e) => {
-            this.overviewRatingFilter = e.target.value
+        // Rating filter popover trigger
+        this.dom.btnOverviewRatingTrigger?.addEventListener('click', (e) => {
+            e.stopPropagation()
+            const isOpen = this.dom.overviewRatingPopover && this.dom.overviewRatingPopover.style.display !== 'none'
+            this.closeOverviewPopovers()
+            if (!isOpen && this.dom.overviewRatingPopover) {
+                this.dom.overviewRatingPopover.style.display = 'block'
+                this.dom.btnOverviewRatingTrigger.closest('.overview-popover-wrap')?.classList.add('open')
+                this.syncRatingPopoverUI()
+            }
+        })
+
+        this.dom.overviewRatingPopover?.addEventListener('click', (e) => {
+            e.stopPropagation()
+        })
+
+        let ratingSliderTimer = null
+        this.dom.overviewRatingSlider?.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value)
+            if (this.dom.overviewUnratedCheckbox) this.dom.overviewUnratedCheckbox.checked = false
+            if (val === 0) {
+                this.overviewRatingFilter = 'all'
+            } else {
+                this.overviewRatingFilter = val.toFixed(1)
+            }
+            this.syncRatingPopoverUI(false)
+            clearTimeout(ratingSliderTimer)
+            ratingSliderTimer = setTimeout(() => {
+                this.updateOverviewActiveFiltersBar()
+                this.refreshBookshelf()
+            }, 120)
+        })
+
+        this.dom.overviewRatingPopover?.querySelectorAll('.rating-quick-pill').forEach(pill => {
+            pill.addEventListener('click', (e) => {
+                e.stopPropagation()
+                const val = parseFloat(pill.dataset.val)
+                if (this.dom.overviewUnratedCheckbox) this.dom.overviewUnratedCheckbox.checked = false
+                if (val === 0) {
+                    this.overviewRatingFilter = 'all'
+                } else {
+                    this.overviewRatingFilter = val.toFixed(1)
+                }
+                this.syncRatingPopoverUI()
+                this.updateOverviewActiveFiltersBar()
+                this.refreshBookshelf()
+            })
+        })
+
+        this.dom.overviewUnratedCheckbox?.addEventListener('change', (e) => {
+            if (e.target.checked) {
+                this.overviewRatingFilter = 'unrated'
+            } else {
+                const sliderVal = parseFloat(this.dom.overviewRatingSlider?.value || 0)
+                this.overviewRatingFilter = sliderVal > 0 ? sliderVal.toFixed(1) : 'all'
+            }
+            this.syncRatingPopoverUI(false)
             this.updateOverviewActiveFiltersBar()
             this.refreshBookshelf()
         })
 
-        // Open global tags modal
-        this.dom.btnOverviewOpenTags?.addEventListener('click', () => {
+        this.dom.btnResetRating?.addEventListener('click', (e) => {
+            e.stopPropagation()
+            this.overviewRatingFilter = 'all'
+            this.syncRatingPopoverUI()
+            this.updateOverviewActiveFiltersBar()
+            this.refreshBookshelf()
+        })
+
+        // Tags dropdown popover trigger
+        this.dom.btnOverviewOpenTags?.addEventListener('click', async (e) => {
+            e.stopPropagation()
+            const isOpen = this.dom.overviewTagsPopover && this.dom.overviewTagsPopover.style.display !== 'none'
+            this.closeOverviewPopovers()
+            if (!isOpen && this.dom.overviewTagsPopover) {
+                this.dom.overviewTagsPopover.style.display = 'block'
+                this.dom.btnOverviewOpenTags.closest('.overview-popover-wrap')?.classList.add('open')
+                await this.renderOverviewTagsPopoverList()
+            }
+        })
+
+        this.dom.overviewTagsPopover?.addEventListener('click', (e) => {
+            e.stopPropagation()
+        })
+
+        this.dom.btnPopoverManageTags?.addEventListener('click', (e) => {
+            e.stopPropagation()
+            this.closeOverviewPopovers()
             this.openGlobalTagsModal()
+        })
+
+        // Global dismiss for overview popovers
+        document.addEventListener('click', () => {
+            this.closeOverviewPopovers()
+        })
+
+        // Rating filter fallback select change
+        this.dom.overviewRatingFilterSelect?.addEventListener('change', (e) => {
+            this.overviewRatingFilter = e.target.value
+            this.syncRatingPopoverUI()
+            this.updateOverviewActiveFiltersBar()
+            this.refreshBookshelf()
         })
 
         // Toggle Year-Month Grouping for finished books
@@ -3691,12 +3796,136 @@ class UniversalReaderApp {
         await this.refreshBookshelf()
     }
 
+    closeOverviewPopovers() {
+        if (this.dom.overviewRatingPopover) this.dom.overviewRatingPopover.style.display = 'none'
+        if (this.dom.overviewTagsPopover) this.dom.overviewTagsPopover.style.display = 'none'
+        document.querySelectorAll('.overview-popover-wrap.open').forEach(w => w.classList.remove('open'))
+    }
+
+    syncRatingPopoverUI(syncSlider = true) {
+        const isUnrated = this.overviewRatingFilter === 'unrated'
+        const isAll = this.overviewRatingFilter === 'all'
+        const numVal = (!isUnrated && !isAll) ? parseFloat(this.overviewRatingFilter) : 0
+
+        if (this.dom.overviewUnratedCheckbox) {
+            this.dom.overviewUnratedCheckbox.checked = isUnrated
+        }
+
+        if (syncSlider && this.dom.overviewRatingSlider) {
+            this.dom.overviewRatingSlider.value = isUnrated ? 0 : numVal
+        }
+
+        if (this.dom.overviewRatingValDisplay) {
+            if (isUnrated) {
+                this.dom.overviewRatingValDisplay.innerText = '仅看未评分'
+            } else if (isAll || numVal === 0) {
+                this.dom.overviewRatingValDisplay.innerText = '全部评分'
+            } else {
+                this.dom.overviewRatingValDisplay.innerText = `★ ≥ ${numVal.toFixed(1)} 分`
+            }
+        }
+
+        if (this.dom.overviewRatingTriggerText) {
+            if (isUnrated) {
+                this.dom.overviewRatingTriggerText.innerText = '评分: 未评分'
+            } else if (isAll || numVal === 0) {
+                this.dom.overviewRatingTriggerText.innerText = '评分: 全部'
+            } else {
+                this.dom.overviewRatingTriggerText.innerText = `★ ≥ ${numVal.toFixed(1)}`
+            }
+        }
+
+        if (this.dom.btnOverviewRatingTrigger) {
+            this.dom.btnOverviewRatingTrigger.classList.toggle('active', !isAll)
+        }
+
+        if (this.dom.overviewRatingFilterSelect) {
+            this.dom.overviewRatingFilterSelect.value = this.overviewRatingFilter
+        }
+
+        // Update quick pills active state
+        this.dom.overviewRatingPopover?.querySelectorAll('.rating-quick-pill').forEach(pill => {
+            const pVal = parseFloat(pill.dataset.val)
+            if (isUnrated) {
+                pill.classList.remove('active')
+            } else if ((isAll || numVal === 0) && pVal === 0) {
+                pill.classList.add('active')
+            } else if (!isAll && numVal > 0 && Math.abs(pVal - numVal) < 0.05) {
+                pill.classList.add('active')
+            } else {
+                pill.classList.remove('active')
+            }
+        })
+    }
+
+    async renderOverviewTagsPopoverList() {
+        if (!this.dom.overviewTagsPopoverList) return
+        const container = this.dom.overviewTagsPopoverList
+        container.innerHTML = '<div style="padding: 8px; color: var(--text-muted); font-size: 0.78rem;">加载标签中...</div>'
+
+        const tagsWithCounts = await getAllTagsWithCounts()
+        container.innerHTML = ''
+
+        // All tags (clear filter) option
+        const allItem = document.createElement('div')
+        const isAllActive = (!this.overviewSelectedTags || this.overviewSelectedTags.size === 0)
+        allItem.className = `overview-tag-popover-item ${isAllActive ? 'active' : ''}`
+        allItem.innerHTML = `<span>全部图书 (不限标签)</span>`
+        allItem.addEventListener('click', () => {
+            this.overviewSelectedTags.clear()
+            this.updateOverviewControlsUI()
+            this.updateOverviewActiveFiltersBar()
+            this.refreshBookshelf()
+            this.closeOverviewPopovers()
+        })
+        container.appendChild(allItem)
+
+        if (tagsWithCounts.length === 0) {
+            const emptyHint = document.createElement('div')
+            emptyHint.style.cssText = 'padding: 8px; color: var(--text-muted); font-size: 0.75rem;'
+            emptyHint.innerText = '暂无标签（可右键或点击书籍详情添加）'
+            container.appendChild(emptyHint)
+            return
+        }
+
+        tagsWithCounts.forEach(t => {
+            const item = document.createElement('div')
+            const isSelected = this.overviewSelectedTags && this.overviewSelectedTags.has(t.name)
+            item.className = `overview-tag-popover-item ${isSelected ? 'active' : ''}`
+            item.innerHTML = `
+                <span class="overview-tag-popover-name">${escapeHTML(t.name)}</span>
+                <span class="overview-tag-popover-count">${t.count} 本</span>
+            `
+            item.addEventListener('click', () => {
+                if (this.overviewSelectedTags.has(t.name)) {
+                    this.overviewSelectedTags.delete(t.name)
+                } else {
+                    this.overviewSelectedTags.clear()
+                    this.overviewSelectedTags.add(t.name)
+                }
+                this.updateOverviewControlsUI()
+                this.updateOverviewActiveFiltersBar()
+                this.refreshBookshelf()
+                this.closeOverviewPopovers()
+            })
+            container.appendChild(item)
+        })
+    }
+
     updateOverviewControlsUI() {
         this.dom.overviewStatusTabs?.querySelectorAll('.overview-tab-btn').forEach(btn => {
             btn.classList.toggle('active', btn.dataset.status === this.overviewStatus)
         })
-        if (this.dom.overviewRatingFilterSelect) {
-            this.dom.overviewRatingFilterSelect.value = this.overviewRatingFilter
+        this.syncRatingPopoverUI()
+        if (this.dom.overviewTagsBtnText && this.dom.btnOverviewOpenTags) {
+            if (this.overviewSelectedTags && this.overviewSelectedTags.size > 0) {
+                const tagArr = Array.from(this.overviewSelectedTags)
+                this.dom.overviewTagsBtnText.innerText = tagArr.length === 1 ? `标签: ${tagArr[0]}` : `标签 (${tagArr.length})`
+                this.dom.btnOverviewOpenTags.classList.add('active')
+            } else {
+                this.dom.overviewTagsBtnText.innerText = '标签'
+                this.dom.btnOverviewOpenTags.classList.remove('active')
+            }
         }
         if (this.dom.overviewSearchInput && this.dom.overviewSearchInput.value !== this.overviewSearchQuery) {
             this.dom.overviewSearchInput.value = this.overviewSearchQuery
@@ -3747,7 +3976,7 @@ class UniversalReaderApp {
                     this.overviewSelectedTags.delete(p.value)
                 } else if (p.type === 'rating') {
                     this.overviewRatingFilter = 'all'
-                    if (this.dom.overviewRatingFilterSelect) this.dom.overviewRatingFilterSelect.value = 'all'
+                    this.syncRatingPopoverUI()
                 } else if (p.type === 'search') {
                     this.overviewSearchQuery = ''
                     if (this.dom.overviewSearchInput) this.dom.overviewSearchInput.value = ''
@@ -3768,7 +3997,7 @@ class UniversalReaderApp {
         this.overviewRatingFilter = 'all'
         this.overviewSearchQuery = ''
         if (this.dom.overviewSearchInput) this.dom.overviewSearchInput.value = ''
-        if (this.dom.overviewRatingFilterSelect) this.dom.overviewRatingFilterSelect.value = 'all'
+        this.syncRatingPopoverUI()
 
         if (resetStatus || (!hadFilters && this.overviewStatus !== 'all')) {
             this.overviewStatus = 'all'
@@ -4870,6 +5099,17 @@ class UniversalReaderApp {
             onFilterByTag: (tag) => {
                 this.closeBookDetailsModal()
                 this.switchShelfCategory('overview', { tags: [tag], status: 'all' })
+            },
+            onManageLists: (id) => {
+                this.openManageBookListsModal(id)
+            },
+            onDeleteBook: async (id) => {
+                let book = (this.currentBooksList || []).find(b => b.id === id)
+                if (!book) book = await db.getBook(id)
+                if (book) {
+                    this.closeBookDetailsModal()
+                    this.handleDeleteBook(book)
+                }
             },
             onShelfRefresh: () => this.refreshBookshelf()
         })
@@ -7033,10 +7273,6 @@ class UniversalReaderApp {
             <div class="skeuo-book-cover ${favClass} ${isCloud ? 'is-cloud-only' : ''}">
                 ${batchCheckboxHtml}
                 <button class="skeuo-fav-btn ${favActive}" title="${favTitle}">★</button>
-                <button class="skeuo-cloud-btn ${cloudBtnClass}" title="${cloudBtnTitle}"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></button>
-                <button class="skeuo-list-btn" title="加入与管理书单"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
-                <button class="skeuo-details-btn" title="查看书籍详情与统计" style="position: absolute; bottom: 6px; right: 6px; width: 22px; height: 22px; border-radius: 50%; background: rgba(0,0,0,0.6); color: #fff; border: 1px solid rgba(255,255,255,0.2); font-size: 11px; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 10; opacity: 0; transition: opacity 0.2s;"><svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg></button>
-                <button class="skeuo-delete-btn" title="从书架删除">×</button>
                 ${progressTag}
                 ${skeuoCloudBadge}
                 ${coverInner}
@@ -7133,10 +7369,6 @@ class UniversalReaderApp {
             <div class="jane-cover-box ${favClass} ${cloudBoxClass}" style="position: relative;">
                 ${batchCheckboxHtml}
                 <button class="grid-fav-btn ${favActive}" title="${favTitle}">★</button>
-                <button class="grid-cloud-btn ${cloudBtnClass}" title="${cloudBtnTitle}"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></button>
-                <button class="grid-list-btn" title="加入与管理书单"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
-                <button class="grid-details-btn" title="查看书籍详情与统计"><svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg></button>
-                <button class="grid-delete-btn" title="从书架删除">×</button>
                 ${cloudBadgeHtml}
                 ${coverUrl 
                     ? `<img class="jane-cover-img" src="${coverUrl}" alt="${escapeHTML(book.title)}" loading="lazy"/>`
@@ -7844,6 +8076,7 @@ class UniversalReaderApp {
         if (!this.dom.modalCreateList) return
         if (this.dom.inputCustomListName) {
             this.dom.inputCustomListName.value = ''
+            this.dom.inputCustomListName.placeholder = (this.customLists && this.customLists.length > 0) ? '输入书单名称' : '例如：社科阅读'
         }
         this.selectedListIcon = 'book'
         this.renderIconPicker()
@@ -9406,7 +9639,7 @@ class UniversalReaderApp {
         if (!this.currentBookId) return
         if (session && this._activeSession !== session) return
         this.hideFootnotePopup()
-        if (this.multiSelectedRanges && this.multiSelectedRanges.length > 0) {
+        if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
             this.renderVirtualMultiSelections()
         }
         const activeBookId = this.currentBookId
@@ -9778,7 +10011,7 @@ class UniversalReaderApp {
         // Industrial-grade DOM Normalization (Prune ghost pagebreaks, format headings, normalize poetry)
         this.normalizeEpubDocument(doc)
 
-        if (this.multiSelectedRanges && this.multiSelectedRanges.length > 0) {
+        if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
             setTimeout(() => this.renderVirtualMultiSelections(), 60)
         }
 
@@ -9996,15 +10229,18 @@ class UniversalReaderApp {
         // Selection change listener inside iframe
         doc.addEventListener('selectionchange', (e) => {
             if (selectionTimeout) clearTimeout(selectionTimeout)
-            selectionTimeout = setTimeout(() => {
-                const sel = doc.getSelection()
-                if (!sel || sel.isCollapsed || sel.toString().trim().length === 0) {
-                    if (!this.multiSelectedRanges || this.multiSelectedRanges.length <= 1) {
-                        this.hideSelectionPopup()
-                    }
-                } else {
-                    checkSelection(e)
+            const sel = doc.getSelection()
+            if (!sel || sel.isCollapsed || sel.toString().trim().length === 0) {
+                if (!this.multiSelectedRanges || this.multiSelectedRanges.length <= 1) {
+                    this.clearVirtualMultiSelections()
+                    this.multiSelectedRanges = []
+                    if (this.dom.popupMultiBadge) this.dom.popupMultiBadge.style.display = 'none'
+                    this.hideSelectionPopup()
                 }
+                return
+            }
+            selectionTimeout = setTimeout(() => {
+                checkSelection(e)
             }, 120)
         })
 
@@ -10238,11 +10474,21 @@ class UniversalReaderApp {
 
             this.hideFootnotePopup()
 
-            if (e.target.closest('button') || e.target.closest('input') || e.target.closest('.selection-popup') || e.target.closest('.highlight-action-popup')) return
+            if (e.target.closest('button') || e.target.closest('input') || e.target.closest('.selection-popup') || e.target.closest('.highlight-action-popup') || e.target.closest('.reader-dictionary-card')) return
             const sel = doc.getSelection()
             if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
                 this.hideHighlightActionPopup()
                 return
+            }
+
+            if (!e.ctrlKey && !e.metaKey && !isCtrlActive) {
+                if (!this.multiSelectedRanges || this.multiSelectedRanges.length <= 1) {
+                    this.clearVirtualMultiSelections()
+                    this.multiSelectedRanges = []
+                    if (this.dom.popupMultiBadge) this.dom.popupMultiBadge.style.display = 'none'
+                    this.hideSelectionPopup()
+                    this.hideDictionaryCard()
+                }
             }
 
             this.hideHighlightActionPopup()
@@ -10306,7 +10552,10 @@ class UniversalReaderApp {
     }
 
     renderVirtualMultiSelections() {
-        if (!this.foliateView || !this.multiSelectedRanges) return
+        if (!this.foliateView || !this.multiSelectedRanges || this.multiSelectedRanges.length <= 1) {
+            this.clearVirtualMultiSelections()
+            return
+        }
         this.clearVirtualMultiSelections()
         this.multiSelectedRanges.forEach((item, idx) => {
             if (item.cfi) {
@@ -10325,17 +10574,24 @@ class UniversalReaderApp {
     }
 
     clearVirtualMultiSelections() {
-        if (!this.foliateView || !this.multiSelectedRanges) return
-        this.multiSelectedRanges.forEach((item, idx) => {
-            if (item.cfi) {
-                try {
-                    this.foliateView.deleteAnnotation({
-                        value: item.cfi,
-                        id: `__vsel_${idx}__`
-                    })
-                } catch (e) {}
-            }
-        })
+        if (!this.foliateView) return
+        if (this.multiSelectedRanges && this.multiSelectedRanges.length > 0) {
+            this.multiSelectedRanges.forEach((item, idx) => {
+                if (item.cfi) {
+                    try {
+                        this.foliateView.deleteAnnotation({
+                            value: item.cfi,
+                            id: `__vsel_${idx}__`
+                        })
+                    } catch (e) {}
+                }
+            })
+        }
+        for (let i = 0; i < 20; i++) {
+            try {
+                this.foliateView.deleteAnnotation({ id: `__vsel_${i}__` })
+            } catch (e) {}
+        }
     }
 
 

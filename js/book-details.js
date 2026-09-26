@@ -229,7 +229,9 @@ export class BookDetailsModal {
 
                 <footer class="book-details-actions">
                     <button class="btn-primary" id="btn-details-read">开始阅读</button>
+                    <button class="btn-secondary" id="btn-details-manage-lists" title="将此书加入或移出自定义书单">加入书单</button>
                     <button class="btn-secondary" id="btn-details-regen-cover">重新生成封面</button>
+                    <button class="btn-danger" id="btn-details-delete" title="从书架中移除此书">移出书架</button>
                 </footer>
             </div>
         `
@@ -370,6 +372,14 @@ export class BookDetailsModal {
 
         container.querySelector('#btn-details-read')?.addEventListener('click', () => {
             callbacks.onOpenBook?.(bookId)
+        })
+
+        container.querySelector('#btn-details-manage-lists')?.addEventListener('click', () => {
+            callbacks.onManageLists?.(bookId)
+        })
+
+        container.querySelector('#btn-details-delete')?.addEventListener('click', () => {
+            callbacks.onDeleteBook?.(bookId)
         })
 
         container.querySelector('#btn-details-regen-cover')?.addEventListener('click', async () => {
