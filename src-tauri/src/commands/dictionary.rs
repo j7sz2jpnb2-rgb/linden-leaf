@@ -392,7 +392,7 @@ pub fn dict_lookup(word: String) -> DictLookupResult {
             phonetic: if phonetic.is_empty() { String::new() } else { format!("/{}/", phonetic) },
             entries,
             translation_raw: translation,
-            source: "ECDICT 离线词库 (77万词条)".to_string(),
+            source: "ECDICT 离线词库".to_string(),
         };
     }
 
@@ -418,7 +418,7 @@ pub fn dict_lookup(word: String) -> DictLookupResult {
                 phonetic: if phonetic.is_empty() { String::new() } else { format!("/{}/", phonetic) },
                 entries,
                 translation_raw: translation,
-                source: "ECDICT 离线词库 (77万词条)".to_string(),
+                source: "ECDICT 离线词库".to_string(),
             };
         }
     }
@@ -431,7 +431,7 @@ pub fn dict_lookup(word: String) -> DictLookupResult {
         phonetic: String::new(),
         entries: Vec::new(),
         translation_raw: String::new(),
-        source: "ECDICT 离线词库 (77万词条)".to_string(),
+        source: "ECDICT 离线词库".to_string(),
     }
 }
 

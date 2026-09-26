@@ -250,6 +250,12 @@ export const makeTXT = async file => {
         }
     }
 
+    // Detect primary language from rawText sample
+    const sample = rawText.slice(0, 10000)
+    const cjkChars = (sample.match(/[\u4e00-\u9fa5\u3040-\u30ff]/g) || []).length
+    const latinChars = (sample.match(/[a-zA-Z]/g) || []).length
+    const detectedLanguage = (latinChars > 100 && cjkChars < latinChars * 0.1) ? 'en' : 'zh-CN'
+
     // Split text into lines
     const lines = rawText.split(/\r?\n/)
 
@@ -543,7 +549,7 @@ export const makeTXT = async file => {
         metadata: {
             title,
             author,
-            language: 'zh-CN',
+            language: detectedLanguage,
             identifier: null
         },
         sections: sectionData.map(s => ({

@@ -4976,14 +4976,16 @@ class UniversalReaderApp {
 
         if (this.dom.dictCardWord) this.dom.dictCardWord.innerText = word
         if (this.dom.dictCardPhonetic) this.dom.dictCardPhonetic.innerText = result?.phonetic || ''
-        if (this.dom.dictCardSource) this.dom.dictCardSource.innerText = result?.source || 'ECDICT 离线词库'
+        const rawSource = result?.source || 'ECDICT 离线词库'
+        const cleanSource = rawSource.replace(/\s*[\(（][^）\)]*[\)）]/g, '').trim()
+        if (this.dom.dictCardSource) this.dom.dictCardSource.innerText = cleanSource || 'ECDICT 离线词库'
 
         if (this.dom.dictCardBody) {
             if (result && result.notInstalled) {
                 this.dom.dictCardBody.innerHTML = `
                     <div class="dict-state-container dict-not-installed" style="padding:4px 0;">
                         <div class="dict-state-title" style="font-weight:600;font-size:13px;margin-bottom:4px;color:var(--text-primary,#111827);">尚未安装英汉词库</div>
-                        <div class="dict-state-desc" style="font-size:12px;color:var(--text-secondary,#6b7280);line-height:1.4;margin-bottom:8px;">未检测到 ECDICT 离线英汉词典（77万词条）。安装后可完全离线连续查词。</div>
+                        <div class="dict-state-desc" style="font-size:12px;color:var(--text-secondary,#6b7280);line-height:1.4;margin-bottom:8px;">未检测到 ECDICT 离线英汉词典。安装后可完全离线连续查词。</div>
                         <div class="dict-state-actions" style="display:flex;gap:6px;">
                             <button class="dict-btn-install" id="btn-dict-install-action" style="padding:4px 10px;font-size:12px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;">下载安装词库</button>
                         </div>
@@ -5019,24 +5021,32 @@ class UniversalReaderApp {
                     </div>
                 `).join('')
             } else {
-                this.dom.dictCardBody.innerHTML = `<div class="dict-not-found" style="font-size:12px;color:var(--text-secondary,#6b7280);">ECDICT 词库（77万词条）未收录此词条，可使用下方 AI 或搜索深入查询。</div>`
+                this.dom.dictCardBody.innerHTML = `<div class="dict-not-found" style="font-size:12px;color:var(--text-secondary,#6b7280);">ECDICT 词库未收录此词条，可使用下方 AI 或搜索深入查询。</div>`
             }
         }
 
-        // Position card near selection or center
+        // Position card near selection or center with collision flip
         const rect = selectionInfo.rect
         card.style.display = 'flex'
         if (rect && rect.top != null && rect.left != null) {
             const cardWidth = 290
-            let left = rect.left + window.scrollX
-            let top = rect.bottom + window.scrollY + 8
-            if (left + cardWidth > window.innerWidth - 20) {
-                left = window.innerWidth - cardWidth - 20
+            const cardHeight = card.offsetHeight || 190
+            const rectHeight = rect.height || 24
+            const rectBottom = (rect.bottom != null && !isNaN(rect.bottom)) ? rect.bottom : (rect.top + rectHeight)
+            const spaceAbove = rect.top
+
+            let top
+            // If there is enough room above the word, place card above; otherwise flip below
+            if (spaceAbove >= cardHeight + 14) {
+                top = rect.top - cardHeight - 10
+            } else {
+                top = rectBottom + 10
             }
-            if (left < 10) left = 10
-            if (top + 200 > window.innerHeight) {
-                top = Math.max(10, rect.top + window.scrollY - 210)
-            }
+            top = Math.max(10, Math.min(window.innerHeight - cardHeight - 10, top))
+
+            let left = rect.left + ((rect.width || 0) / 2) - (cardWidth / 2)
+            left = Math.max(12, Math.min(window.innerWidth - cardWidth - 12, left))
+
             card.style.transform = 'none'
             card.style.left = `${left}px`
             card.style.top = `${top}px`
@@ -5070,12 +5080,18 @@ class UniversalReaderApp {
         const rect = selectionInfo.rect
         if (rect && rect.top != null && rect.left != null) {
             const cardWidth = 380
-            let left = rect.left + window.scrollX
-            let top = rect.bottom + window.scrollY + 8
+            const cardHeight = card.offsetHeight || 160
+            const rectHeight = rect.height || 24
+            const rectBottom = (rect.bottom != null && !isNaN(rect.bottom)) ? rect.bottom : (rect.top + rectHeight)
+            let left = rect.left + ((rect.width || 0) / 2) - (cardWidth / 2)
             if (left + cardWidth > window.innerWidth - 20) {
                 left = window.innerWidth - cardWidth - 20
             }
             if (left < 10) left = 10
+            let top = rectBottom + 8
+            if (top + cardHeight > window.innerHeight - 10) {
+                top = Math.max(10, rect.top - cardHeight - 8)
+            }
             card.style.transform = 'none'
             card.style.left = `${left}px`
             card.style.top = `${top}px`
@@ -9788,17 +9804,42 @@ class UniversalReaderApp {
             }
         }, { passive: true })
 
-        // Chinese Quotes Transformation
+        // Chinese Quotes Transformation (Only applies to Chinese/CJK content; never mutates English text or apostrophes)
         if (this.settings.chineseQuotes && doc.body) {
-            const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
-            let n = walker.nextNode()
-            while (n) {
-                if (n.nodeValue && /["'“”‘’]/.test(n.nodeValue)) {
-                    n.nodeValue = n.nodeValue
-                        .replace(/“/g, '「').replace(/”/g, '」')
-                        .replace(/‘/g, '『').replace(/’/g, '』')
+            const bookLang = (this.book?.metadata?.language || this.currentBook?.language || '').toLowerCase()
+            const isEnglishBook = bookLang.startsWith('en')
+            const sampleText = (doc.body.innerText || doc.body.textContent || '').slice(0, 3000)
+            const cjkCount = (sampleText.match(/[\u4e00-\u9fa5\u3040-\u30ff]/g) || []).length
+            const latinCount = (sampleText.match(/[a-zA-Z]/g) || []).length
+            // Only apply if section is genuinely CJK content, and not an English book
+            const isPredominantlyCJK = !isEnglishBook && (
+                (cjkCount > 0 && latinCount === 0) ||
+                (cjkCount >= 10 && cjkCount >= latinCount * 0.2)
+            )
+
+            if (isPredominantlyCJK) {
+                const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+                let n = walker.nextNode()
+                while (n) {
+                    if (n.nodeValue && /["'“”‘’]/.test(n.nodeValue)) {
+                        let text = n.nodeValue
+                        // 1. Replace Chinese double quotes “ and ” with 「 and 」
+                        text = text.replace(/“/g, '「').replace(/”/g, '」')
+                        // 2. Replace Chinese single opening quote ‘ with 『
+                        text = text.replace(/‘/g, '『')
+                        // 3. Replace ’ with 』 ONLY when it's NOT an English apostrophe!
+                        // In English, ’ between Latin letters (haven’t, I’ve, Gatsby’s) or plural possessives (workers') is an apostrophe, NOT a quote!
+                        text = text.replace(/(?<![a-zA-Z0-9])’|’(?![a-zA-Z0-9])/g, (match, offset, fullStr) => {
+                            const before = fullStr.slice(Math.max(0, offset - 10), offset)
+                            if (/[a-zA-Z]+s$/i.test(before)) {
+                                return '’'
+                            }
+                            return '』'
+                        })
+                        n.nodeValue = text
+                    }
+                    n = walker.nextNode()
                 }
-                n = walker.nextNode()
             }
         }
 
@@ -9879,11 +9920,18 @@ class UniversalReaderApp {
                 const scaleX = iframe.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
                 const scaleY = iframe.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
                 
+                const absTop = iframeRect.top + ((rect?.top || 0) * scaleY)
+                const absLeft = iframeRect.left + ((rect?.left || 0) * scaleX)
+                const absWidth = (rect?.width || (clientRects.length > 0 ? clientRects[0].width : 100)) * scaleX
+                const absHeight = (rect?.height || (clientRects.length > 0 ? clientRects[0].height : 24)) * scaleY
+
                 const absRect = {
-                    top: iframeRect.top + ((rect?.top || 0) * scaleY),
-                    left: iframeRect.left + ((rect?.left || 0) * scaleX),
-                    width: (rect?.width || (clientRects.length > 0 ? clientRects[0].width : 100)) * scaleX,
-                    height: (rect?.height || (clientRects.length > 0 ? clientRects[0].height : 24)) * scaleY
+                    top: absTop,
+                    left: absLeft,
+                    width: absWidth,
+                    height: absHeight,
+                    bottom: absTop + absHeight,
+                    right: absLeft + absWidth
                 }
 
                 let cfi = null

@@ -379,7 +379,7 @@ export class DictionaryService {
                     normalizedWord: finalNormalized,
                     phonetic,
                     entries,
-                    source: 'ECDICT 离线词库 (77万词条)'
+                    source: 'ECDICT 离线词库'
                 }
                 this.cache.set(cacheKey, result)
                 if (this.saveHistory) this.recordHistory(result)
@@ -392,7 +392,7 @@ export class DictionaryService {
                     normalizedWord: norm || trimmed,
                     phonetic: '',
                     entries: [],
-                    source: 'ECDICT 离线词库 (77万词条)'
+                    source: 'ECDICT 离线词库'
                 }
                 this.cache.set(cacheKey, notFoundResult)
                 return notFoundResult
