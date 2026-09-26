@@ -249,7 +249,7 @@ export const makeBook = async file => {
         if (book && loader) book.loader = loader
     }
     else {
-        const { isTXT, makeTXT } = await import('./txt.js?v=20260826_20')
+        const { isTXT, makeTXT } = await import('./txt.js?v=20260926_gatsby_toc')
         const { isMOBI, MOBI } = await import('./mobi.js')
         if (isTXT(file)) {
             book = await makeTXT(file)

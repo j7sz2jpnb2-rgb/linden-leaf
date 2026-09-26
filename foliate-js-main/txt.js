@@ -14,7 +14,9 @@ const escapeHTML = str => (str != null ? String(str) : '')
 
 // Detect text encoding from Uint8Array
 const detectAndDecode = buffer => {
-    const arr = new Uint8Array(buffer)
+    const arr = buffer instanceof Uint8Array ? buffer :
+                ArrayBuffer.isView(buffer) ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength) :
+                new Uint8Array(buffer)
     
     // Check BOMs
     if (arr[0] === 0xEF && arr[1] === 0xBB && arr[2] === 0xBF) {
@@ -100,21 +102,40 @@ const isChapterHeading = line => {
     return CHAPTER_PATTERNS.some(re => re.test(trimmed))
 }
 
-// Render content lines with Poetry / Prose intelligence
-const renderContentToHTML = (lines, isPoetryMode = false) => {
+const isTOCMarker = line => {
+    const trimmed = (line || '').trim()
+    if (!trimmed || trimmed.length > 25) return false
+    return /^(?:目\s*录|目\s*次|Contents|Table\s+of\s+Contents|Index)\b/i.test(trimmed) ||
+           /^[【\[（(]\s*(?:目\s*录|目\s*次|Contents)\s*[】\]）)]$/i.test(trimmed)
+}
+
+const extractChapterKey = title => {
+    const trimmed = (title || '').trim().replace(/[\s\t\u3000\u00A0]+/g, ' ')
+    const engMatch = trimmed.match(/^(?:Chapter|Section|Book|Part|Act|Scene|Canto|Sonnet|Elegie|Elegy)\s+[0-9IVXLCDMivxlcdm]+/i)
+    if (engMatch) return engMatch[0].toLowerCase()
+    const zhMatch = trimmed.match(/^第\s*[0-9一二三四五六七八九十百千万零两]+\s*[首章节回卷集部篇幕话诗歌曲折出段讲场辑案]/)
+    if (zhMatch) return zhMatch[0].replace(/\s+/g, '')
+    const numMatch = trimmed.match(/^(?:[一二三四五六七八九十]{1,3}|[0-9]{1,3})[、.．]/)
+    if (numMatch) return numMatch[0]
+    return trimmed.toLowerCase().replace(/^[【\[（(]+|[】\]）)]+$/g, '')
+}
+
+// Render content lines with Poetry / Prose / TOC intelligence
+const renderContentToHTML = (linesWithMeta, isPoetryMode = false, tocLinkMap = null) => {
     // Group into stanzas / paragraphs by blank lines
     const blocks = []
     let curBlock = []
 
-    for (const line of lines) {
-        const trimmed = line.trim()
+    for (const item of linesWithMeta) {
+        const text = typeof item === 'string' ? item : (item?.text ?? '')
+        const trimmed = text.trim()
         if (trimmed.length === 0) {
             if (curBlock.length > 0) {
                 blocks.push(curBlock)
                 curBlock = []
             }
         } else {
-            curBlock.push(line)
+            curBlock.push(typeof item === 'string' ? { text: item, lineIndex: -1, isTOC: false } : item)
         }
     }
     if (curBlock.length > 0) blocks.push(curBlock)
@@ -123,8 +144,8 @@ const renderContentToHTML = (lines, isPoetryMode = false) => {
     let totalLen = 0
     let lineCount = 0
     for (const blk of blocks) {
-        for (const l of blk) {
-            totalLen += l.trim().length
+        for (const item of blk) {
+            totalLen += item.text.trim().length
             lineCount++
         }
     }
@@ -133,17 +154,51 @@ const renderContentToHTML = (lines, isPoetryMode = false) => {
     const isPoetry = isPoetryMode || (avgLen < 26 && lineCount >= 4 && blocks.length >= 2)
 
     const htmlParts = []
+    let inTOCBlock = false
+
+    const closeTOCBlock = () => {
+        if (inTOCBlock) {
+            htmlParts.push('</div>')
+            inTOCBlock = false
+        }
+    }
 
     for (const blk of blocks) {
+        // If explicit TOC title marker (e.g. "目录" or "Contents")
+        if (blk.length === 1 && isTOCMarker(blk[0].text)) {
+            closeTOCBlock()
+            htmlParts.push(`<h2 class="toc-marker">${escapeHTML(blk[0].text.trim())}</h2>`)
+            continue
+        }
+
+        // If block is a TOC entry
+        if (blk.length === 1 && blk[0].isTOC) {
+            if (!inTOCBlock) {
+                htmlParts.push('<div class="book-toc-block">')
+                inTOCBlock = true
+            }
+            const linkInfo = tocLinkMap?.get(blk[0].lineIndex)
+            const itemText = escapeHTML(blk[0].text.trim())
+            if (linkInfo?.href) {
+                htmlParts.push(`<p class="toc-line"><a href="${escapeHTML(linkInfo.href)}">${itemText}</a></p>`)
+            } else {
+                htmlParts.push(`<p class="toc-line">${itemText}</p>`)
+            }
+            continue
+        }
+
+        // Normal content block: ensure TOC block is closed
+        closeTOCBlock()
+
         if (isPoetry) {
-            // Render as poetic stanza with natural line breaks (text-only rects, perfectly hugs glyph boundaries)
-            const verseText = blk.map(l => escapeHTML(l.trim())).join('<br/>\n')
+            // Render as poetic stanza with natural line breaks
+            const verseText = blk.map(item => escapeHTML(item.text.trim())).join('<br/>\n')
             htmlParts.push(`<p class="verse-stanza">\n${verseText}\n</p>`)
         } else {
             // Render as prose paragraph with smart spacing for English/Latin words
             let paraText = ''
             for (let i = 0; i < blk.length; i++) {
-                const line = blk[i].trim()
+                const line = blk[i].text.trim()
                 if (!line) continue
                 if (!paraText) {
                     paraText = line
@@ -157,6 +212,7 @@ const renderContentToHTML = (lines, isPoetryMode = false) => {
             htmlParts.push(`<p class="prose-p">${escapeHTML(paraText)}</p>`)
         }
     }
+    closeTOCBlock()
 
     return htmlParts.join('\n')
 }
@@ -167,7 +223,7 @@ const normalizeChapterTitle = str => (str || '')
     .replace(/^[【\[（(]+|[】\]）)]+$/g, '')
 
 const isDecorativeDividerOnly = line => {
-    const trimmed = line.trim()
+    const trimmed = (typeof line === 'string' ? line : (line?.text ?? '')).trim()
     return trimmed.length > 0 && /^[-=_*#~`^/\\+|—\s]+$/.test(trimmed)
 }
 
@@ -200,32 +256,125 @@ export const makeTXT = async file => {
     // Detect if the whole book is poetry (e.g. 哀歌, 诗集)
     const isBookPoetry = /哀歌|诗选|诗集|诗篇|诗歌|十四行诗|商籁|sonnet|elegy|poem/i.test(title) || /哀歌|诗选|诗集/i.test(rawText.slice(0, 200))
     
-    // Parse chapters with precise identical heading deduplication
+    // Pre-pass: scan all heading candidates and analyze chapter/TOC structure
+    const candidates = []
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+        if (isChapterHeading(line)) {
+            candidates.push({
+                lineIndex: i,
+                text: line.trim(),
+                key: extractChapterKey(line)
+            })
+        }
+    }
+
+    // Compute body size and line counts between consecutive heading candidates
+    for (let i = 0; i < candidates.length; i++) {
+        const cur = candidates[i]
+        const next = candidates[i + 1]
+        const endLine = next ? next.lineIndex : lines.length
+        let charCount = 0
+        let nonBlankLines = 0
+        for (let l = cur.lineIndex + 1; l < endLine; l++) {
+            const text = lines[l].trim()
+            if (text.length > 0) {
+                charCount += text.length
+                nonBlankLines++
+            }
+        }
+        cur.bodyCharCount = charCount
+        cur.bodyLineCount = nonBlankLines
+    }
+
+    // Detect explicit TOC marker near the start of the book (within first 300 lines)
+    let explicitTOCLine = -1
+    for (let i = 0; i < Math.min(lines.length, 300); i++) {
+        if (isTOCMarker(lines[i])) {
+            explicitTOCLine = i
+            break
+        }
+    }
+
+    // Group candidates into clusters where distance between consecutive headings is small (< 120 chars)
+    const clusters = []
+    let curCluster = []
+    const clusterKeys = new Set()
+
+    for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i]
+        const isRepeatedInCluster = clusterKeys.has(c.key)
+        const isMainBodyMarker = /^正文$/i.test(c.text.trim())
+
+        if (curCluster.length === 0) {
+            if (!isMainBodyMarker) {
+                curCluster.push(c)
+                clusterKeys.add(c.key)
+            }
+        } else {
+            const prev = curCluster[curCluster.length - 1]
+            if (!isRepeatedInCluster && !isMainBodyMarker && prev.bodyCharCount < 120 && prev.bodyLineCount <= 3) {
+                curCluster.push(c)
+                clusterKeys.add(c.key)
+            } else {
+                if (curCluster.length > 0) clusters.push(curCluster)
+                curCluster = isMainBodyMarker ? [] : [c]
+                clusterKeys.clear()
+                if (!isMainBodyMarker) clusterKeys.add(c.key)
+            }
+        }
+    }
+    if (curCluster.length > 0) clusters.push(curCluster)
+
+    // Identify TOC candidates
+    const tocCandidateIndices = new Set()
+    for (const cluster of clusters) {
+        if (cluster.length >= 1 && cluster[0].lineIndex < 800) {
+            const isAfterExplicitTOC = explicitTOCLine >= 0 && cluster[0].lineIndex > explicitTOCLine && cluster[0].lineIndex < explicitTOCLine + 50
+            let repeatCount = 0
+            for (const c of cluster) {
+                const laterMatch = candidates.find(other => other.lineIndex > c.lineIndex && other.key === c.key && other.bodyCharCount >= 150 && other.bodyCharCount > c.bodyCharCount * 1.5)
+                if (laterMatch) repeatCount++
+            }
+            if (isAfterExplicitTOC || (cluster.length >= 2 && repeatCount >= 1) || repeatCount >= 2) {
+                for (const c of cluster) {
+                    tocCandidateIndices.add(c.lineIndex)
+                }
+            }
+        }
+    }
+
+    // Parse chapters with precise TOC preservation and heading deduplication
     const chapters = []
     let currentChapter = {
         title: '',
         isHeaderExplicit: false,
-        lines: []
+        lines: [],
+        startLine: 0
     }
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
-        if (isChapterHeading(line)) {
-            const rawTitle = line.trim().replace(/[\s\t\u3000\u00A0]+/g, ' ')
-            const normNew = normalizeChapterTitle(rawTitle)
-            const normCur = normalizeChapterTitle(currentChapter.title)
+        const isTOC = tocCandidateIndices.has(i)
 
-            // ONLY skip if the EXACT SAME chapter heading is repeated with 0 intervening story text
-            if (normCur && normNew === normCur) {
-                const hasStoryText = currentChapter.lines.some(l => l.trim().length > 0 && !isDecorativeDividerOnly(l))
-                if (!hasStoryText) {
-                    continue // Skip redundant duplicate title line
-                }
+        if (isChapterHeading(line) && !isTOC) {
+            const rawTitle = line.trim().replace(/[\s\t\u3000\u00A0]+/g, ' ')
+            const hasStory = currentChapter.lines.some(l => {
+                const t = (typeof l === 'string' ? l : l.text).trim()
+                return t.length > 0 && !isDecorativeDividerOnly(t)
+            })
+
+            // If current chapter has no story text and was already an explicit header (e.g. "卷一" directly above "第一章"),
+            // merge the titles to avoid creating an empty blank section.
+            if (!hasStory && currentChapter.isHeaderExplicit) {
+                currentChapter.title = currentChapter.title ? `${currentChapter.title} ${rawTitle}` : rawTitle
+                continue
             }
 
-            if (currentChapter.lines.some(l => l.trim().length > 0) || currentChapter.isHeaderExplicit) {
+            if (hasStory || currentChapter.isHeaderExplicit) {
                 if (!currentChapter.title) {
-                    currentChapter.title = title || '扉页 / 题记'
+                    const containsTOC = currentChapter.lines.some(l => typeof l === 'object' && l.isTOC)
+                    currentChapter.title = containsTOC ? '扉页 / 目录' : (title || '扉页 / 题记')
                 }
                 chapters.push(currentChapter)
             }
@@ -233,15 +382,25 @@ export const makeTXT = async file => {
             currentChapter = {
                 title: rawTitle,
                 isHeaderExplicit: true,
-                lines: []
+                lines: [],
+                startLine: i
             }
         } else {
-            currentChapter.lines.push(line)
+            currentChapter.lines.push({
+                text: line,
+                lineIndex: i,
+                isTOC: isTOC
+            })
         }
     }
-    if (currentChapter.lines.some(l => l.trim().length > 0) || currentChapter.isHeaderExplicit) {
+
+    if (currentChapter.lines.some(l => {
+        const t = (typeof l === 'string' ? l : l.text).trim()
+        return t.length > 0
+    }) || currentChapter.isHeaderExplicit) {
         if (!currentChapter.title) {
-            currentChapter.title = chapters.length === 0 ? title : '终章'
+            const containsTOC = currentChapter.lines.some(l => typeof l === 'object' && l.isTOC)
+            currentChapter.title = chapters.length === 0 ? (containsTOC ? '扉页 / 目录' : title) : '终章'
         }
         chapters.push(currentChapter)
     }
@@ -257,15 +416,28 @@ export const makeTXT = async file => {
                 chapters.push({
                     title: chunkNum === 1 ? title : `（续 ${chunkNum}）`,
                     isHeaderExplicit: false,
-                    lines: lines.slice(i, i + chunkSize)
+                    lines: lines.slice(i, i + chunkSize).map((l, offset) => ({ text: l, lineIndex: i + offset, isTOC: false })),
+                    startLine: i
                 })
             }
         } else {
             chapters.push({
                 title: title,
                 isHeaderExplicit: false,
-                lines: lines
+                lines: lines.map((l, idx) => ({ text: l, lineIndex: idx, isTOC: false })),
+                startLine: 0
             })
+        }
+    }
+
+    // Build TOC link map for in-text TOC navigation
+    const tocLinkMap = new Map()
+    for (const lineIdx of tocCandidateIndices) {
+        const rawLine = lines[lineIdx].trim()
+        const key = extractChapterKey(rawLine)
+        const targetIdx = chapters.findIndex((ch, idx) => idx > 0 && extractChapterKey(ch.title) === key)
+        if (targetIdx > 0) {
+            tocLinkMap.set(lineIdx, { targetIdx, href: `${targetIdx}#heading`, title: rawLine })
         }
     }
 
@@ -294,6 +466,36 @@ export const makeTXT = async file => {
       line-height: 1.35;
       letter-spacing: 0.05em;
     }
+    .book-toc-block {
+      margin: 1.5em auto;
+      max-width: 90%;
+      padding: 0.8em 1.2em;
+      border-top: 1px dashed rgba(128, 128, 128, 0.25);
+      border-bottom: 1px dashed rgba(128, 128, 128, 0.25);
+    }
+    .toc-marker {
+      font-size: 1.25em;
+      font-weight: 700;
+      margin: 1.2em 0 0.6em 0;
+      text-align: center;
+      letter-spacing: 0.05em;
+    }
+    .toc-line {
+      text-indent: 0 !important;
+      margin: 0.45em 0;
+      line-height: 1.6;
+      font-size: 1.05em;
+    }
+    .toc-line a {
+      color: inherit;
+      text-decoration: none;
+      border-bottom: 1px dashed rgba(128, 128, 128, 0.35);
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+    .toc-line a:hover {
+      color: #6366f1;
+      border-bottom-color: #6366f1;
+    }
     .prose-p {
       text-indent: 2em;
       margin: 0.85em 0;
@@ -311,7 +513,7 @@ export const makeTXT = async file => {
 </head>
 <body>
   <div class="chapter-content">
-    ${isHeaderExplicit ? `<h1 class="chapter-heading" id="heading">${escapeHTML(chapterTitle)}</h1>` : ''}
+    ${isHeaderExplicit ? `<h1 class="chapter-heading" id="heading">${escapeHTML(chapterTitle)}</h1>` : '<div id="heading"></div>'}
     ${contentHtml}
   </div>
 </body>
@@ -319,7 +521,7 @@ export const makeTXT = async file => {
 
     const urls = []
     const sectionData = chapters.map((chapter, index) => {
-        const htmlBody = renderContentToHTML(chapter.lines, isBookPoetry)
+        const htmlBody = renderContentToHTML(chapter.lines, isBookPoetry, tocLinkMap)
         const htmlStr = template(chapter.title, chapter.isHeaderExplicit, htmlBody)
         const blob = new Blob([htmlStr], { type: MIME.XHTML })
         const url = URL.createObjectURL(blob)
@@ -359,7 +561,7 @@ export const makeTXT = async file => {
             const [sectionIdx, anchorId] = href.split('#')
             return {
                 index: parseInt(sectionIdx, 10) || 0,
-                anchor: doc => anchorId ? doc.getElementById(anchorId) : null
+                anchor: doc => (anchorId ? doc.getElementById(anchorId) : null) || doc.body
             }
         },
         splitTOCHref: href => {
@@ -377,3 +579,6 @@ export const makeTXT = async file => {
 
     return book
 }
+
+export const makeBook = makeTXT
+
