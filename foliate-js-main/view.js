@@ -1,6 +1,6 @@
 import * as CFI from './epubcfi.js'
 import { TOCProgress, SectionProgress } from './progress.js'
-import { Overlayer } from './overlayer.js?v=20260826_60'
+import { Overlayer } from './overlayer.js?v=20260914_rel_v1'
 import { textWalker } from './text-walker.js'
 
 const SEARCH_PREFIX = 'foliate-search:'
@@ -19,6 +19,16 @@ const isPDF = async file => {
         let str = ''
         for (let i = 0; i < arr.length; i++) str += String.fromCharCode(arr[i])
         return str.includes('%PDF-')
+    } catch {
+        return false
+    }
+}
+
+const isDjVu = async file => {
+    if (file?.name?.toLowerCase().endsWith('.djvu') || file?.type?.toLowerCase().includes('djvu') || file?.format === 'djvu') return true
+    try {
+        const arr = new Uint8Array(await file.slice(0, 4).arrayBuffer())
+        return arr[0] === 0x41 && arr[1] === 0x54 && arr[2] === 0x26 && arr[3] === 0x54
     } catch {
         return false
     }
@@ -69,32 +79,97 @@ export const makeZipLoader = async file => {
     configure({ useWebWorkers: false })
     const reader = new ZipReader(new BlobReader(file))
     const entries = await reader.getEntries()
-    const map = new Map(entries.map(entry => [entry.filename, entry]))
+
+    // Multi-key indexed map for O(1) resilient lookup
+    const map = new Map()
+    const lowerMap = new Map()
+
+    const registerKey = (k, entry) => {
+        if (!k) return
+        if (!map.has(k)) map.set(k, entry)
+        const lk = k.toLowerCase()
+        if (!lowerMap.has(lk)) lowerMap.set(lk, entry)
+    }
+
+    for (const entry of entries) {
+        const raw = entry.filename
+        registerKey(raw, entry)
+        const norm = raw.replace(/\\/g, '/')
+        registerKey(norm, entry)
+        const noLeading = norm.replace(/^\/+/, '')
+        registerKey(noLeading, entry)
+        try {
+            const dec = decodeURIComponent(norm)
+            registerKey(dec, entry)
+            registerKey(dec.replace(/^\/+/, ''), entry)
+        } catch {}
+        try {
+            const decURI = decodeURI(norm)
+            registerKey(decURI, entry)
+            registerKey(decURI.replace(/^\/+/, ''), entry)
+        } catch {}
+    }
+
+    const findEntry = name => {
+        if (!name) return null
+        if (map.has(name)) return map.get(name)
+        const noLeading = name.replace(/^\/+/, '')
+        if (map.has(noLeading)) return map.get(noLeading)
+        const norm = name.replace(/\\/g, '/')
+        if (map.has(norm)) return map.get(norm)
+        if (map.has(norm.replace(/^\/+/, ''))) return map.get(norm.replace(/^\/+/, ''))
+        try {
+            const dec = decodeURIComponent(name)
+            if (map.has(dec)) return map.get(dec)
+            if (map.has(dec.replace(/^\/+/, ''))) return map.get(dec.replace(/^\/+/, ''))
+        } catch {}
+        try {
+            const decURI = decodeURI(name)
+            if (map.has(decURI)) return map.get(decURI)
+            if (map.has(decURI.replace(/^\/+/, ''))) return map.get(decURI.replace(/^\/+/, ''))
+        } catch {}
+        try {
+            const enc = encodeURI(name)
+            if (map.has(enc)) return map.get(enc)
+        } catch {}
+        // Case-insensitive fallback
+        const lower = name.toLowerCase().replace(/\\/g, '/').replace(/^\/+/, '')
+        if (lowerMap.has(lower)) return lowerMap.get(lower)
+        try {
+            const decLower = decodeURIComponent(name).toLowerCase().replace(/\\/g, '/').replace(/^\/+/, '')
+            if (lowerMap.has(decLower)) return lowerMap.get(decLower)
+        } catch {}
+        return null
+    }
 
     // In-memory Section & Asset LRU caches for instant rendering & zero-CPU flip-backs
     const textCache = new SimpleLRU(64)
     const blobCache = new SimpleLRU(32)
 
     const loadText = async name => {
-        if (!map.has(name)) return null
-        const cached = textCache.get(name)
+        const entry = findEntry(name)
+        if (!entry) return null
+        const cached = textCache.get(entry.filename)
         if (cached !== undefined) return cached
-        const entry = map.get(name)
-        const text = await entry.getData(new TextWriter())
-        textCache.set(name, text)
+        let text = await entry.getData(new TextWriter())
+        // Strip UTF-8 BOM if present
+        if (typeof text === 'string' && text.charCodeAt(0) === 0xFEFF) {
+            text = text.slice(1)
+        }
+        textCache.set(entry.filename, text)
         return text
     }
     const loadBlob = async (name, type) => {
-        if (!map.has(name)) return null
-        const cacheKey = `${name}::${type || ''}`
+        const entry = findEntry(name)
+        if (!entry) return null
+        const cacheKey = `${entry.filename}::${type || ''}`
         const cached = blobCache.get(cacheKey)
         if (cached !== undefined) return cached
-        const entry = map.get(name)
         const blob = await entry.getData(new BlobWriter(type))
         blobCache.set(cacheKey, blob)
         return blob
     }
-    const getSize = name => map.get(name)?.uncompressedSize ?? 0
+    const getSize = name => findEntry(name)?.uncompressedSize ?? 0
     const destroy = () => {
         textCache.clear()
         blobCache.clear()
@@ -146,9 +221,9 @@ export const makeBook = async file => {
         book = await new EPUB(loader).init()
     }
     else if (!file.size) throw new NotFoundError('File not found')
-    else if (await isPDF(file)) {
-        const { makePDF } = await import('./pdf.js?v=20260826_wps2')
-        book = await makePDF(file)
+    else if (await isPDF(file) || await isDjVu(file)) {
+        const { makeUniversalPDF } = await import('./mupdf-adapter.js?v=20260909_v1')
+        book = await makeUniversalPDF(file)
     }
     else if (await isZip(file)) {
         const loader = await makeZipLoader(file)
@@ -171,9 +246,10 @@ export const makeBook = async file => {
             const { EPUB } = await import('./epub.js')
             book = await new EPUB(loader).init()
         }
+        if (book && loader) book.loader = loader
     }
     else {
-        const { isTXT, makeTXT } = await import('./txt.js?v=20260826_20')
+        const { isTXT, makeTXT } = await import('./txt.js?v=20260926_gatsby_toc')
         const { isMOBI, MOBI } = await import('./mobi.js')
         if (isTXT(file)) {
             book = await makeTXT(file)
@@ -322,10 +398,10 @@ export class View extends HTMLElement {
 
         this.isFixedLayout = this.book.rendition?.layout === 'pre-paginated'
         if (this.isFixedLayout) {
-            await import('./fixed-layout.js?v=20260826_wps2')
+            await import('./fixed-layout.js?v=20260914_rel_v1')
             this.renderer = document.createElement('foliate-fxl')
         } else {
-            await import('./paginator.js?v=20260826_18')
+            await import('./paginator.js?v=20260914_rel_v1')
             this.renderer = document.createElement('foliate-paginator')
         }
         this.renderer.setAttribute('exportparts', 'head,foot,filter')
@@ -369,11 +445,16 @@ export class View extends HTMLElement {
         try {
             this.renderer?.settle?.()
         } catch (e) {}
-        this.#searchHighlights.clear()
+        this.clearSearch()
         try {
             this.book?.destroy?.()
         } catch (e) {
             console.warn('Error destroying book instance:', e)
+        }
+        try {
+            this.book?.loader?.destroy?.() ?? this.book?.loader?.close?.()
+        } catch (e) {
+            console.warn('Error destroying book loader:', e)
         }
         this.renderer?.destroy()
         this.renderer?.remove()
@@ -539,6 +620,12 @@ export class View extends HTMLElement {
             }
             return
         }
+        if (remove && (!value || typeof value !== 'string') && annotation.id) {
+            for (const item of this.renderer?.getContents?.() || []) {
+                item.overlayer?.remove?.(annotation.id)
+            }
+            return
+        }
         const rawCFI = value.includes('::') ? value.split('::')[0] : value
         const annotKey = annotation.id || value
         const resolved = await this.resolveNavigation(rawCFI)
@@ -577,6 +664,9 @@ export class View extends HTMLElement {
         if (list) for (const item of list) this.addAnnotation(item)
 
         this.#emit('create-overlay', { index })
+        if (this._pendingActiveSearchCfi) {
+            setTimeout(() => this.setActiveSearchMatch(this._pendingActiveSearchCfi), 10)
+        }
         return overlayer
     }
     async showAnnotation(annotation) {
@@ -611,7 +701,10 @@ export class View extends HTMLElement {
                 if (target > 0 && target < 1) return this.resolveNavigation({ fraction: target })
                 return { index: Math.max(0, Math.min(this.book.sections.length - 1, Math.floor(target))) }
             }
-            if (typeof target?.index === 'number') return { index: Math.max(0, Math.min(this.book.sections.length - 1, Math.floor(target.index))) }
+            if (typeof target?.index === 'number') {
+                const index = Math.max(0, Math.min(this.book.sections.length - 1, Math.floor(target.index)))
+                return target.anchor ? { index, anchor: target.anchor } : { index }
+            }
             if (typeof target.fraction === 'number') {
                 if (this.#sectionProgress) {
                     const [index, anchor] = this.#sectionProgress.getSection(target.fraction)
@@ -630,12 +723,16 @@ export class View extends HTMLElement {
     async goTo(target) {
         const resolved = this.resolveNavigation(target)
         try {
-            await this.renderer.goTo(resolved)
-            this.history.pushState(target)
-            return resolved
+            const success = await this.renderer.goTo(resolved)
+            if (success !== false && success != null) {
+                this.history.pushState(target)
+                return resolved
+            }
+            return null
         } catch(e) {
             console.error(e)
             console.error(`Could not go to ${target}`)
+            throw e
         }
     }
     async goToFraction(frac) {
@@ -682,10 +779,23 @@ export class View extends HTMLElement {
             const { index, anchor } = resolved
             const doc = await this.book.sections[index]?.createDocument?.()
             if (!doc) return null
-            const frag = anchor(doc)
-            const isRange = frag instanceof Range
-            const range = isRange ? frag : doc.createRange()
-            if (!isRange) range.selectNodeContents(frag)
+            const frag = typeof anchor === 'function' ? anchor(doc) : null
+            let range
+            if (frag instanceof Range) {
+                range = frag
+            } else {
+                range = doc.createRange()
+                const isNode = frag && typeof frag === 'object' && ('nodeType' in frag)
+                if (isNode) {
+                    range.selectNodeContents(frag)
+                } else if (doc.body) {
+                    range.selectNodeContents(doc.body)
+                    range.collapse(true)
+                } else if (doc.documentElement) {
+                    range.selectNodeContents(doc.documentElement)
+                    range.collapse(true)
+                }
+            }
             return this.#tocProgress?.getProgress(index, range) || null
         } catch(e) {
             console.error(e)
@@ -706,11 +816,26 @@ export class View extends HTMLElement {
     }
     async * #searchSection(matcher, query, index, signal) {
         if (signal?.aborted) return
-        const doc = await this.book.sections[index].createDocument()
-        if (signal?.aborted) return
-        for (const { range, excerpt } of matcher(doc, query)) {
-            if (signal?.aborted) return
-            yield { cfi: this.getCFI(index, range), excerpt }
+        let doc
+        try {
+            doc = await this.book.sections[index]?.createDocument?.()
+        } catch (e) {
+            console.warn(`Failed to createDocument for section ${index}:`, e)
+            return
+        }
+        if (signal?.aborted || !doc) return
+        try {
+            for (const { range, excerpt } of matcher(doc, query)) {
+                if (signal?.aborted) return
+                try {
+                    const cfi = this.getCFI(index, range)
+                    if (cfi) yield { cfi, excerpt }
+                } catch (cfiErr) {
+                    console.warn('Failed to calculate CFI for match:', cfiErr)
+                }
+            }
+        } catch (e) {
+            console.warn(`Search matcher error in section ${index}:`, e)
         }
     }
     async * #searchBook(matcher, query, signal) {
@@ -718,13 +843,25 @@ export class View extends HTMLElement {
         for (const [index, { createDocument }] of sections.entries()) {
             if (signal?.aborted) break
             if (!createDocument) continue
-            const doc = await createDocument()
-            if (signal?.aborted) break
-            const subitems = Array.from(matcher(doc, query), ({ range, excerpt }) =>
-                ({ cfi: this.getCFI(index, range), excerpt }))
-            const progress = (index + 1) / sections.length
-            yield { progress }
-            if (subitems.length) yield { index, subitems }
+            try {
+                const doc = await createDocument()
+                if (signal?.aborted || !doc) continue
+                const subitems = []
+                for (const { range, excerpt } of matcher(doc, query)) {
+                    if (signal?.aborted) break
+                    try {
+                        const cfi = this.getCFI(index, range)
+                        if (cfi) subitems.push({ cfi, excerpt })
+                    } catch (cfiErr) {
+                        console.warn('Failed to calculate CFI for match:', cfiErr)
+                    }
+                }
+                const progress = (index + 1) / sections.length
+                yield { progress }
+                if (subitems.length) yield { index, subitems }
+            } catch (secErr) {
+                console.warn(`Search error in section ${index}:`, secErr)
+            }
             // Cooperative multitasking: yield to browser event loop so UI and animations remain 60fps smooth
             await new Promise(r => setTimeout(r, 0))
         }
@@ -750,7 +887,9 @@ export class View extends HTMLElement {
                 const list = result.subitems
                     .map(({ cfi }) => ({ value: SEARCH_PREFIX + cfi }))
                 this.#searchResults.set(result.index, list)
-                for (const item of list) this.addAnnotation(item)
+                for (const item of list) {
+                    try { this.addAnnotation(item) } catch (e) {}
+                }
                 yield {
                     index: result.index,
                     label: this.#tocProgress?.getProgress(result.index)?.label || `第 ${result.index + 1} 页`,
@@ -761,14 +900,51 @@ export class View extends HTMLElement {
                 if (result.cfi) {
                     const item = { value: SEARCH_PREFIX + result.cfi }
                     list.push(item)
-                    this.addAnnotation(item)
+                    try { this.addAnnotation(item) } catch (e) {}
                 }
                 yield result
             }
         }
         if (!signal?.aborted) yield 'done'
     }
+    setActiveSearchMatch(cfi) {
+        if (!cfi) return
+        this._pendingActiveSearchCfi = cfi
+        const contents = this.renderer?.getContents?.() || []
+        for (const { doc } of contents) {
+            if (doc?.defaultView?.CSS?.highlights) {
+                let activeHl = doc.defaultView.CSS.highlights.get('foliate-search-active')
+                if (!activeHl) {
+                    activeHl = new doc.defaultView.Highlight()
+                    doc.defaultView.CSS.highlights.set('foliate-search-active', activeHl)
+                }
+                activeHl.clear()
+            }
+        }
+        const resolved = this.resolveNavigation(cfi)
+        if (!resolved) return
+        const { index, anchor } = resolved
+        const obj = this.#getOverlayer(index)
+        if (obj?.doc) {
+            try {
+                const range = typeof anchor === 'function' ? anchor(obj.doc) : anchor
+                if (obj.doc.defaultView?.CSS?.highlights && range) {
+                    this.#ensureSearchHighlightStyle(obj.doc)
+                    let activeHl = obj.doc.defaultView.CSS.highlights.get('foliate-search-active')
+                    if (!activeHl) {
+                        activeHl = new obj.doc.defaultView.Highlight()
+                        obj.doc.defaultView.CSS.highlights.set('foliate-search-active', activeHl)
+                    }
+                    activeHl.clear()
+                    activeHl.add(range)
+                }
+            } catch (e) {
+                console.warn('Failed to set active search highlight:', e)
+            }
+        }
+    }
     clearSearch() {
+        this._pendingActiveSearchCfi = null
         this.#searchHighlights.clear()
         for (const list of this.#searchResults.values())
             for (const item of list) this.deleteAnnotation(item)
@@ -777,21 +953,25 @@ export class View extends HTMLElement {
         const contents = this.renderer?.getContents?.() || []
         for (const { doc } of contents) {
             if (doc?.defaultView?.CSS?.highlights) {
+                doc.defaultView.CSS.highlights.get('foliate-search')?.clear?.()
+                doc.defaultView.CSS.highlights.get('foliate-search-active')?.clear?.()
                 doc.defaultView.CSS.highlights.delete('foliate-search')
                 doc.defaultView.CSS.highlights.delete('foliate-search-active')
             }
         }
     }
     async initTTS(granularity = 'word', highlight) {
-        const doc = this.renderer.getContents()[0].doc
+        const doc = this.renderer?.getContents?.()?.[0]?.doc
+        if (!doc) return
         if (this.tts && this.tts.doc === doc) return
         const { TTS } = await import('./tts.js')
         this.tts = new TTS(doc, textWalker, highlight || (range =>
             this.renderer.scrollToAnchor(range, true)), granularity)
     }
     startMediaOverlay() {
-        const { index } = this.renderer.getContents()[0]
-        return this.mediaOverlay.start(index)
+        const item = this.renderer?.getContents?.()?.[0]
+        if (!item) return
+        return this.mediaOverlay?.start?.(item.index)
     }
 }
 

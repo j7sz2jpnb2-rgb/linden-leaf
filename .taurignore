@@ -1,0 +1,7 @@
+src-tauri
+target
+node_modules
+.git
+.gemini
+scripts
+*.log

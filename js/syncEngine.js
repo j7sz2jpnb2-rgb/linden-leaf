@@ -1,10 +1,28 @@
 // js/syncEngine.js - Multi-device WebDAV & Nutstore Sync and Conflict Resolution Engine
 import * as db from './db.js'
+import { checkTranslationCompatibility, buildTranslationRevisionArchive } from './translation-job-core.js'
 
 let _activeSyncPromise = null
 
 // Book Cloud Sync Safety Rules (Format & Size Defense)
 export const MAX_AUTO_SYNC_BYTES = 15 * 1024 * 1024 // 15MB safe threshold for auto download/upload
+
+export const ALLOWED_BOOK_FORMATS = new Set(['epub', 'pdf', 'mobi', 'azw', 'azw3', 'txt', 'cbz', 'docx', 'fb2', 'djvu', 'md'])
+
+export const sanitizeSyncFormat = (raw) => {
+    if (typeof raw !== 'string') return 'epub'
+    const clean = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+    return ALLOWED_BOOK_FORMATS.has(clean) ? clean : 'epub'
+}
+
+export const sanitizeCloudFileName = (raw) => {
+    if (typeof raw !== 'string') return null
+    const trimmed = raw.trim()
+    if (!trimmed || trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('..') || trimmed.includes('%') || trimmed.startsWith('.')) {
+        return null
+    }
+    return trimmed
+}
 
 export const isAutoDownloadEligible = (bookMeta) => {
     if (!bookMeta) return false
@@ -29,8 +47,169 @@ export const isAutoUploadEligible = (bookMeta) => {
 }
 
 /**
+ * Pure deterministic reconciliation function for book sync metadata
+ * Handles tags, readingStatus, completedAt (with explicit null preservation),
+ * lists, favorites, progress, and cloud backup.
+ * Both mergeSyncData and applyMergedPayloadToLocal MUST use this exact function.
+ */
+export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localClientId = '', incomingClientId = '') => {
+    const isIncomingNewer = (inTime, locTime) => {
+        const iT = inTime || 0
+        const lT = locTime || 0
+        if (iT !== lT) return iT > lT
+        return (incomingClientId || '') > (localClientId || '')
+    }
+
+    // 1. Tags: LWW based on explicit tagsUpdatedAt. Missing incoming tags never deletes local tags.
+    let tags = localBook.tags || []
+    let tagsUpdatedAt = localBook.tagsUpdatedAt || 0
+    if (Array.isArray(incomingMeta.tags)) {
+        if (isIncomingNewer(incomingMeta.tagsUpdatedAt, localBook.tagsUpdatedAt)) {
+            tags = incomingMeta.tags
+            tagsUpdatedAt = incomingMeta.tagsUpdatedAt || 0
+        }
+    }
+
+    // 2. Reading Status & completedAt: LWW based on statusUpdatedAt
+    let readingStatus = localBook.readingStatus || 'unread'
+    let statusUpdatedAt = localBook.statusUpdatedAt || 0
+    let completedAt = localBook.completedAt !== undefined ? localBook.completedAt : null
+
+    if (incomingMeta.readingStatus && isIncomingNewer(incomingMeta.statusUpdatedAt, localBook.statusUpdatedAt)) {
+        readingStatus = incomingMeta.readingStatus
+        statusUpdatedAt = incomingMeta.statusUpdatedAt || 0
+        // Explicitly preserve null when un-marking finished!
+        if (incomingMeta.completedAt !== undefined) {
+            completedAt = incomingMeta.completedAt
+        } else {
+            completedAt = (incomingMeta.readingStatus === 'finished') ? (incomingMeta.statusUpdatedAt || Date.now()) : null
+        }
+    }
+
+    // 3. Custom Lists: LWW based on listsUpdatedAt
+    let customListIds = localBook.customListIds || []
+    let listsUpdatedAt = localBook.listsUpdatedAt || 0
+    if (Array.isArray(incomingMeta.customListIds)) {
+        if (isIncomingNewer(incomingMeta.listsUpdatedAt, localBook.listsUpdatedAt)) {
+            customListIds = incomingMeta.customListIds
+            listsUpdatedAt = incomingMeta.listsUpdatedAt || 0
+        }
+    }
+
+    // 4. Favorite: LWW based on favoriteUpdatedAt (with updatedAt fallback)
+    let isFavorite = Boolean(localBook.isFavorite)
+    let favoriteUpdatedAt = localBook.favoriteUpdatedAt || localBook.updatedAt || 0
+    if (incomingMeta.favoriteUpdatedAt || incomingMeta.isFavorite !== undefined) {
+        const inFavTime = incomingMeta.favoriteUpdatedAt || incomingMeta.updatedAt || 0
+        if (isIncomingNewer(inFavTime, favoriteUpdatedAt)) {
+            isFavorite = Boolean(incomingMeta.isFavorite)
+            favoriteUpdatedAt = inFavTime
+        }
+    }
+
+    // 5. Reading Progress & Last Read (strictly compare progress timestamps; do NOT fall back to lastReadAt which changes during listening / browsing)
+    const localProgressTime = localBook.progress?.updatedAt || localBook.progress?.timestamp || 0
+    const inProgressTime = incomingMeta.progress?.updatedAt || incomingMeta.progress?.timestamp || 0
+    let isIncomingReadNewer = false
+    if (inProgressTime !== localProgressTime) {
+        isIncomingReadNewer = inProgressTime > localProgressTime
+    } else {
+        const inFrac = incomingMeta.progress?.fraction || 0
+        const locFrac = localBook.progress?.fraction || 0
+        if (inFrac !== locFrac) {
+            isIncomingReadNewer = inFrac > locFrac
+        } else {
+            isIncomingReadNewer = String(incomingClientId || '') > String(localClientId || '')
+        }
+    }
+
+    const progress = isIncomingReadNewer ? (incomingMeta.progress || localBook.progress) : (localBook.progress || incomingMeta.progress)
+    const lastReadAt = Math.max(localBook.lastReadAt || 0, incomingMeta.lastReadAt || 0, localProgressTime, inProgressTime)
+    const totalReadingSeconds = Math.max(localBook.totalReadingSeconds || 0, incomingMeta.totalReadingSeconds || 0)
+    const totalListeningSeconds = Math.max(localBook.totalListeningSeconds || 0, incomingMeta.totalListeningSeconds || 0)
+
+    // 6. Cloud Backup: newer uploadedAt wins
+    let cloudBackup = localBook.cloudBackup || null
+    if (incomingMeta.cloudBackup) {
+        const inUp = incomingMeta.cloudBackup.uploadedAt || 0
+        const locUp = localBook.cloudBackup?.uploadedAt || 0
+        if (inUp >= locUp || !localBook.cloudBackup?.hasBackup) {
+            cloudBackup = incomingMeta.cloudBackup
+        }
+    }
+
+    // 7. Rating: LWW based on ratingUpdatedAt. Explicit null propagates to cancel/clear rating across devices.
+    let rating = localBook.rating !== undefined ? localBook.rating : null
+    let ratingUpdatedAt = localBook.ratingUpdatedAt || 0
+    if (incomingMeta.ratingUpdatedAt !== undefined && isIncomingNewer(incomingMeta.ratingUpdatedAt, localBook.ratingUpdatedAt)) {
+        rating = incomingMeta.rating !== undefined ? incomingMeta.rating : null
+        ratingUpdatedAt = incomingMeta.ratingUpdatedAt || 0
+    }
+
+    return {
+        tags,
+        tagsUpdatedAt,
+        readingStatus,
+        statusUpdatedAt,
+        completedAt,
+        customListIds,
+        listsUpdatedAt,
+        isFavorite,
+        favoriteUpdatedAt,
+        rating,
+        ratingUpdatedAt,
+        progress,
+        lastReadAt,
+        totalReadingSeconds,
+        totalListeningSeconds,
+        cloudBackup
+    }
+}
+
+/**
  * 1. Export local sync payload from IndexedDB
  */
+export const buildBookSyncMeta = (b) => {
+    const rawIdent = b.identifier
+    const isEphemeral = typeof rawIdent === 'string' && /^(txt|docx|pdf)-\d{10,}$/.test(rawIdent)
+    const validIdent = isEphemeral ? null : rawIdent
+    const stableKey = b.stableKey || validIdent || `${b.title || ''}_${b.size || 0}_${b.format || ''}`.replace(/\s+/g, '').toLowerCase()
+    return {
+        id: b.id,
+        stableKey,
+        identifier: validIdent,
+        title: b.title,
+        author: b.author,
+        format: b.format,
+        size: b.size,
+        cover: b.cover || null,
+        isFavorite: !!b.isFavorite,
+        favoriteUpdatedAt: b.favoriteUpdatedAt || b.updatedAt || 0,
+        customListIds: b.customListIds || [],
+        listsUpdatedAt: b.listsUpdatedAt || b.updatedAt || 0,
+        progress: b.progress || { fraction: 0 },
+        tags: Array.isArray(b.tags) ? b.tags : [],
+        tagsUpdatedAt: b.tagsUpdatedAt || 0,
+        readingStatus: b.readingStatus || (b.lastReadAt > 0 ? 'reading' : 'unread'),
+        statusUpdatedAt: b.statusUpdatedAt || 0,
+        completedAt: b.completedAt || null,
+        rating: b.rating !== undefined ? b.rating : null,
+        ratingUpdatedAt: b.ratingUpdatedAt || 0,
+        lastReadAt: b.lastReadAt || 0,
+        totalReadingSeconds: b.totalReadingSeconds || 0,
+        totalListeningSeconds: b.totalListeningSeconds || 0,
+        addedAt: b.addedAt || Date.now(),
+        updatedAt: b.updatedAt || b.lastReadAt || b.addedAt || Date.now(),
+        cloudBackup: b.cloudBackup || (b.cloudBackupState === 'synced' ? {
+            hasBackup: true,
+            fileName: b.cloudBackupFileName || `${b.stableKey || b.id}.${b.format}`,
+            size: b.size,
+            format: b.format,
+            uploadedAt: b.cloudBackupUploadedAt || Date.now()
+        } : null)
+    }
+}
+
 export const exportSyncPayload = async () => {
     const allBooks = await db.getAllBooks()
     const allLists = await db.getAllCustomLists()
@@ -41,38 +220,13 @@ export const exportSyncPayload = async () => {
     const allPdfDrawings = (typeof db.getAllPdfDrawings === 'function') ? (await db.getAllPdfDrawings()) : []
     const settings = (await db.getSetting('readerSettings')) || (await db.getSetting('reader_settings')) || {}
 
-    const booksMeta = allBooks.map(b => {
-        const rawIdent = b.identifier
-        const isEphemeral = typeof rawIdent === 'string' && /^(txt|docx|pdf)-\d{10,}$/.test(rawIdent)
-        const validIdent = isEphemeral ? null : rawIdent
-        const stableKey = b.stableKey || validIdent || `${b.title || ''}_${b.size || 0}_${b.format || ''}`.replace(/\s+/g, '').toLowerCase()
-        return {
-            id: b.id,
-            stableKey,
-            identifier: validIdent,
-            title: b.title,
-        author: b.author,
-        format: b.format,
-        size: b.size,
-        cover: b.cover || null,
-        isFavorite: !!b.isFavorite,
-        favoriteUpdatedAt: b.favoriteUpdatedAt || b.updatedAt || 0,
-        customListIds: b.customListIds || [],
-        listsUpdatedAt: b.listsUpdatedAt || b.updatedAt || 0,
-        progress: b.progress || { fraction: 0 },
-        lastReadAt: b.lastReadAt || 0,
-        totalReadingSeconds: b.totalReadingSeconds || 0,
-        addedAt: b.addedAt || Date.now(),
-        updatedAt: b.updatedAt || b.lastReadAt || b.addedAt || Date.now(),
-        cloudBackup: b.cloudBackup || (b.cloudBackupState === 'synced' ? {
-            hasBackup: true,
-            fileName: b.cloudBackupFileName || `${b.stableKey || b.id}.${b.format}`,
-            size: b.size,
-            format: b.format,
-            uploadedAt: b.cloudBackupUploadedAt || Date.now()
-        } : null)
-    } })
+    const booksMeta = allBooks.map(buildBookSyncMeta)
 
+    let chapterTranslations = []
+    const syncChapterTrans = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_chapter_translations') : 'false') === 'true'
+    if (syncChapterTrans && typeof db.getAllChapterTranslations === 'function') {
+        chapterTranslations = await db.getAllChapterTranslations()
+    }
 
     return {
         version: 1,
@@ -86,17 +240,61 @@ export const exportSyncPayload = async () => {
         bookmarks: allBookmarks,
         readingSessions: allSessions,
         pdfDrawings: allPdfDrawings,
+        chapterTranslations,
         deletedRecords: deletedRecords || []
     }
+}
+
+export const mergeDrawingStrokes = (strokesA = [], strokesB = []) => {
+    const strokeMap = new Map()
+    const formatPt = (pt) => {
+        if (!pt) return ''
+        const x = Array.isArray(pt) ? pt[0] : pt.x
+        const y = Array.isArray(pt) ? pt[1] : pt.y
+        const fx = typeof x === 'number' ? x.toFixed(2) : String(x ?? '')
+        const fy = typeof y === 'number' ? y.toFixed(2) : String(y ?? '')
+        return `${fx},${fy}`
+    }
+    const getStrokeKey = (s) => {
+        if (!s) return null
+        if (s.id) return String(s.id)
+        const pts = Array.isArray(s.points) ? s.points : []
+        const p0 = formatPt(pts[0])
+        const pN = pts.length > 1 ? formatPt(pts[pts.length - 1]) : ''
+        return `${s.color || ''}_${s.width || ''}_${s.tool || ''}_${pts.length}_${p0}_${pN}`
+    }
+
+    for (const s of strokesA) {
+        if (!s) continue
+        const key = getStrokeKey(s)
+        if (key) strokeMap.set(key, s)
+    }
+
+    for (const s of strokesB) {
+        if (!s) continue
+        const key = getStrokeKey(s)
+        if (!key) continue
+        if (!strokeMap.has(key)) {
+            strokeMap.set(key, s)
+        } else {
+            const existing = strokeMap.get(key)
+            const sTime = s.updatedAt || s.timestamp || 0
+            const exTime = existing.updatedAt || existing.timestamp || 0
+            if (sTime > exTime) {
+                strokeMap.set(key, s)
+            }
+        }
+    }
+    return Array.from(strokeMap.values())
 }
 
 /**
  * 2. Deterministic LWW Merge Algorithm
  */
-export const mergeSyncData = (localPayload, remotePayload) => {
-    if (!remotePayload || !remotePayload.booksMeta) {
+export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
+    if (!remotePayload || typeof remotePayload !== 'object') {
         return {
-            merged: localPayload,
+            merged: localPayload || {},
             stats: { booksUpdated: 0, highlightsAdded: 0, sessionsAdded: 0, listsAdded: 0 }
         }
     }
@@ -121,26 +319,33 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         if (t === 'highlights') return 'highlight'
         if (t === 'books') return 'book'
         if (t === 'pdf_drawings' || t === 'pdfDrawing') return 'pdfDrawing'
+        if (t === 'chapter_translations' || t === 'chapterTranslation') return 'chapter_translation'
         return t
     }
     const tombstoneMap = new Map()
     const registerTomb = (t, delTime) => {
-        if (!t || !t.id) return
-        const normType = normalizeTombType(t.type)
-        const key = `${normType}:${t.id}`
+        if (!t) return
+        const tId = t.id || t.recordId
+        const tType = t.type || t.recordType
+        if (!tId) return
+        const normType = normalizeTombType(tType)
+        const key = `${normType}:${tId}`
         if (!tombstoneMap.has(key) || delTime >= (tombstoneMap.get(key).deletedAt || 0)) {
-            tombstoneMap.set(key, { ...t, type: normType, deletedAt: delTime })
+            tombstoneMap.set(key, { ...t, id: tId, type: normType, deletedAt: delTime })
+        }
+        if (!tombstoneMap.has(tId) || delTime >= (tombstoneMap.get(tId).deletedAt || 0)) {
+            tombstoneMap.set(tId, { ...t, id: tId, type: normType, deletedAt: delTime })
         }
         if (normType === 'book' && t.stableKey) {
             const keyByStable = `book:${t.stableKey}`
             if (!tombstoneMap.has(keyByStable) || delTime >= (tombstoneMap.get(keyByStable).deletedAt || 0)) {
-                tombstoneMap.set(keyByStable, { ...t, type: 'book', deletedAt: delTime })
+                tombstoneMap.set(keyByStable, { ...t, id: tId, type: 'book', deletedAt: delTime })
             }
         }
     }
 
     ;(remotePayload.deletedRecords || []).forEach(t => {
-        if (t && t.id) {
+        if (t && (t.id || t.recordId)) {
             const delTime = clampTime(t.deletedAt)
             if (delTime >= minTombstoneTime) {
                 registerTomb(t, delTime)
@@ -148,7 +353,7 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         }
     })
     ;(localPayload.deletedRecords || []).forEach(t => {
-        if (!t || !t.id) return
+        if (!t || !(t.id || t.recordId)) return
         const localDel = clampTime(t.deletedAt)
         if (localDel < minTombstoneTime) return
         registerTomb(t, localDel)
@@ -191,6 +396,10 @@ export const mergeSyncData = (localPayload, remotePayload) => {
                 lastReadAt: clampTime(b.lastReadAt),
                 favoriteUpdatedAt: clampTime(b.favoriteUpdatedAt),
                 listsUpdatedAt: clampTime(b.listsUpdatedAt),
+                tagsUpdatedAt: clampTime(b.tagsUpdatedAt),
+                statusUpdatedAt: clampTime(b.statusUpdatedAt),
+                rating: b.rating !== undefined ? b.rating : null,
+                ratingUpdatedAt: clampTime(b.ratingUpdatedAt),
                 updatedAt: clampTime(b.updatedAt),
                 isLocal: true
             })
@@ -203,15 +412,37 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         const rUpdated = clampTime(remoteBook.updatedAt)
         const rFavUpdated = clampTime(remoteBook.favoriteUpdatedAt)
         const rListsUpdated = clampTime(remoteBook.listsUpdatedAt)
+        const rTagsUpdated = clampTime(remoteBook.tagsUpdatedAt)
+        const rStatusUpdated = clampTime(remoteBook.statusUpdatedAt)
+        const rRatingUpdated = clampTime(remoteBook.ratingUpdatedAt)
 
-        let localBook = bookMap.get(remoteBook.id)
-        if (!localBook && remoteBook.stableKey) {
-            localBook = Array.from(bookMap.values()).find(b => b.isLocal && b.stableKey && b.stableKey === remoteBook.stableKey)
+        const safeFormat = sanitizeSyncFormat(remoteBook.format)
+        let safeCloud = remoteBook.cloudBackup
+        if (safeCloud) {
+            const safeName = sanitizeCloudFileName(safeCloud.fileName)
+            safeCloud = safeName ? { ...safeCloud, fileName: safeName } : { ...safeCloud, hasBackup: false, fileName: null }
+        }
+        const cleanRemoteBook = {
+            ...remoteBook,
+            format: safeFormat,
+            cloudBackup: safeCloud
+        }
+
+        let localBook = bookMap.get(cleanRemoteBook.id)
+        if (!localBook && cleanRemoteBook.stableKey) {
+            localBook = Array.from(bookMap.values()).find(b => b.isLocal && b.stableKey && b.stableKey === cleanRemoteBook.stableKey)
         }
 
         if (!localBook) {
-            bookMap.set(remoteBook.id, {
-                ...remoteBook,
+            bookMap.set(cleanRemoteBook.id, {
+                ...cleanRemoteBook,
+                tags: Array.isArray(cleanRemoteBook.tags) ? cleanRemoteBook.tags : [],
+                tagsUpdatedAt: rTagsUpdated,
+                readingStatus: cleanRemoteBook.readingStatus || 'unread',
+                statusUpdatedAt: rStatusUpdated,
+                completedAt: cleanRemoteBook.completedAt || null,
+                rating: cleanRemoteBook.rating !== undefined ? cleanRemoteBook.rating : null,
+                ratingUpdatedAt: rRatingUpdated,
                 lastReadAt: rLastRead,
                 updatedAt: rUpdated,
                 favoriteUpdatedAt: rFavUpdated,
@@ -222,60 +453,32 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         } else {
             const localReadTime = localBook.lastReadAt || 0
             const remoteReadTime = rLastRead || 0
-            let isRemoteReadNewer = false
+            const reconciled = reconcileBookSyncMeta(localBook, cleanRemoteBook, localPayload.clientId, remotePayload.clientId)
 
-            // Strict read time comparison: only devices that actually opened/read the book (> 0) compete on read time
-            if (remoteReadTime !== localReadTime) {
-                isRemoteReadNewer = remoteReadTime > localReadTime
-            } else {
-                // If read timestamps tie (e.g. both 0 or same timestamp), higher reading fraction wins
-                isRemoteReadNewer = (remoteBook.progress?.fraction || 0) > (localBook.progress?.fraction || 0)
-            }
-
-            const newestProgress = isRemoteReadNewer ? (remoteBook.progress || localBook.progress) : (localBook.progress || remoteBook.progress)
-            const newestLastReadAt = Math.max(localReadTime, remoteReadTime)
-
-            // Total Reading Seconds: max
-            const mergedTotalSeconds = Math.max(localBook.totalReadingSeconds || 0, remoteBook.totalReadingSeconds || 0)
-
-            // Custom lists & Favorites: LWW based on explicit timestamp
-            const localMetaTime = Math.max(localBook.updatedAt || 0, localBook.lastReadAt || 0)
-            const remoteMetaTime = Math.max(rUpdated || 0, rLastRead || 0)
-            const isRemoteMetaNewer = remoteMetaTime > localMetaTime
-
-            const isFav = (rFavUpdated || localBook.favoriteUpdatedAt)
-                ? (rFavUpdated >= (localBook.favoriteUpdatedAt || 0) ? remoteBook.isFavorite : localBook.isFavorite)
-                : (isRemoteMetaNewer ? remoteBook.isFavorite : localBook.isFavorite)
-
-            const mergedLists = (rListsUpdated || localBook.listsUpdatedAt)
-                ? (rListsUpdated >= (localBook.listsUpdatedAt || 0) ? (remoteBook.customListIds || []) : (localBook.customListIds || []))
-                : (isRemoteMetaNewer ? (remoteBook.customListIds || []) : (localBook.customListIds || []))
-
-            // Cloud Backup: select by uploadedAt timestamp rather than blind fallback
-            const rCloud = remoteBook.cloudBackup
-            const lCloud = localBook.cloudBackup
-            let mergedCloud = null
-            if (rCloud && lCloud) {
-                mergedCloud = (rCloud.uploadedAt || 0) >= (lCloud.uploadedAt || 0) ? rCloud : lCloud
-            } else {
-                mergedCloud = rCloud || lCloud || null
-            }
-
-            if (remoteReadTime > localReadTime || remoteBook.totalReadingSeconds !== localBook.totalReadingSeconds) {
+            if (remoteReadTime > localReadTime || cleanRemoteBook.totalReadingSeconds !== localBook.totalReadingSeconds || cleanRemoteBook.totalListeningSeconds !== localBook.totalListeningSeconds) {
                 stats.booksUpdated++
             }
 
             bookMap.set(localBook.id, {
                 ...localBook,
-                stableKey: localBook.stableKey || remoteBook.stableKey,
-                cloudBackup: mergedCloud,
-                progress: newestProgress,
-                lastReadAt: newestLastReadAt,
-                totalReadingSeconds: mergedTotalSeconds,
-                customListIds: mergedLists,
-                isFavorite: !!isFav,
-                favoriteUpdatedAt: Math.max(localBook.favoriteUpdatedAt || 0, rFavUpdated),
-                listsUpdatedAt: Math.max(localBook.listsUpdatedAt || 0, rListsUpdated),
+                format: sanitizeSyncFormat(localBook.format || cleanRemoteBook.format),
+                stableKey: localBook.stableKey || cleanRemoteBook.stableKey,
+                cloudBackup: reconciled.cloudBackup,
+                progress: reconciled.progress,
+                lastReadAt: reconciled.lastReadAt,
+                totalReadingSeconds: reconciled.totalReadingSeconds,
+                totalListeningSeconds: reconciled.totalListeningSeconds,
+                customListIds: reconciled.customListIds,
+                tags: reconciled.tags,
+                tagsUpdatedAt: reconciled.tagsUpdatedAt,
+                readingStatus: reconciled.readingStatus,
+                statusUpdatedAt: reconciled.statusUpdatedAt,
+                completedAt: reconciled.completedAt,
+                rating: reconciled.rating,
+                ratingUpdatedAt: reconciled.ratingUpdatedAt,
+                isFavorite: reconciled.isFavorite,
+                favoriteUpdatedAt: reconciled.favoriteUpdatedAt,
+                listsUpdatedAt: reconciled.listsUpdatedAt,
                 updatedAt: Math.max(localBook.updatedAt || 0, rUpdated)
             })
         }
@@ -404,32 +607,36 @@ export const mergeSyncData = (localPayload, remotePayload) => {
     const remoteSetTime = remotePayload.settings?.updatedAt || 0
     const mergedSettings = remoteSetTime > localSetTime ? remotePayload.settings : localPayload.settings
 
-    // H. Merge PDF Drawings (LWW by id and updatedAt, filtered by book tombstones and BookId Remapping)
+    // H. Merge PDF Drawings (Stroke-level merge by identity, filtered by book tombstones and BookId Remapping)
     const drawingMap = new Map()
+
     ;(remotePayload.pdfDrawings || []).forEach(d => {
         if (d && d.id) {
-            let targetId = d.id
             let targetBookId = d.bookId
             if (d.bookId && bookIdRemap.has(d.bookId)) {
                 targetBookId = bookIdRemap.get(d.bookId)
-                if (d.id.includes('_page_')) {
-                    const parts = d.id.split('_page_')
-                    targetId = `${targetBookId}_page_${parts[1]}`
-                }
             }
+            const targetId = db.remapPdfDrawingId ? db.remapPdfDrawingId(d, targetBookId) : d.id
             drawingMap.set(targetId, { ...d, id: targetId, bookId: targetBookId, updatedAt: clampTime(d.updatedAt) })
         }
     })
     ;(localPayload.pdfDrawings || []).forEach(d => {
         if (!d || !d.id) return
         const localUpdated = clampTime(d.updatedAt)
-        if (!drawingMap.has(d.id)) {
-            drawingMap.set(d.id, { ...d, updatedAt: localUpdated })
+        const localId = db.remapPdfDrawingId ? db.remapPdfDrawingId(d, d.bookId) : d.id
+        const localRecord = { ...d, id: localId, updatedAt: localUpdated }
+        if (!drawingMap.has(localId)) {
+            drawingMap.set(localId, localRecord)
         } else {
-            const remoteD = drawingMap.get(d.id)
-            if (localUpdated >= (remoteD.updatedAt || 0)) {
-                drawingMap.set(d.id, { ...d, updatedAt: localUpdated })
-            }
+            const remoteD = drawingMap.get(localId)
+            const mergedStrokes = mergeDrawingStrokes(remoteD.strokes || [], localRecord.strokes || [])
+            const isLocalNewer = localUpdated >= (remoteD.updatedAt || 0)
+            const baseRecord = isLocalNewer ? localRecord : remoteD
+            drawingMap.set(localId, {
+                ...baseRecord,
+                strokes: mergedStrokes,
+                updatedAt: Math.max(localUpdated, remoteD.updatedAt || 0)
+            })
         }
     })
     const mergedPdfDrawings = Array.from(drawingMap.values()).filter(d => {
@@ -444,8 +651,143 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         return true
     })
 
+    // H. Merge Chapter Translations (Stable Identity Normalization, Revision Deduplication, Version-Compatible)
+    const ctMap = new Map()
+    const getCtStableKey = (ct) => {
+        if (!ct) return ''
+        const bookKey = ct.bookStableKey || ct.contentHash || ct.bookId || ''
+        const chapKey = ct.chapterSourceKey || ct.chapterKey || ''
+        return `${bookKey}::${chapKey}` || ct.id || ''
+    }
+
+    ;(remotePayload.chapterTranslations || []).forEach(ct => {
+        if (!ct) return
+        const key = getCtStableKey(ct)
+        if (key) ctMap.set(key, structuredClone(ct))
+    })
+    ;(localPayload.chapterTranslations || []).forEach(ct => {
+        if (!ct) return
+        const key = getCtStableKey(ct)
+        if (!key) return
+        if (!ctMap.has(key)) {
+            ctMap.set(key, structuredClone(ct))
+        } else {
+            const remoteCt = ctMap.get(key)
+            // Strict version compatibility: sourceHash, parserVersion, targetLanguage, promptVersion
+            const isCompatible = typeof db.checkTranslationCompatibility === 'function'
+                ? db.checkTranslationCompatibility(ct, remoteCt)
+                : checkTranslationCompatibility(ct, remoteCt)
+
+            if (!isCompatible) {
+                // Incompatible versions MUST NOT be mixed. Retain both as conflict revisions.
+                const primary = (ct.updatedAt || 0) >= (remoteCt.updatedAt || 0) ? structuredClone(ct) : structuredClone(remoteCt)
+                const secondary = (ct.updatedAt || 0) >= (remoteCt.updatedAt || 0) ? structuredClone(remoteCt) : structuredClone(ct)
+                if (!Array.isArray(primary.conflictRevisions)) primary.conflictRevisions = []
+                const existingRevIds = new Set(primary.conflictRevisions.map(r => r.revisionId).filter(Boolean))
+                const secRevId = secondary.revisionId || `conflict_${secondary.updatedAt || Date.now()}`
+                if (!existingRevIds.has(secRevId)) {
+                    primary.conflictRevisions.push({
+                        revisionId: secRevId,
+                        sourceHash: secondary.sourceHash,
+                        parserVersion: secondary.parserVersion,
+                        targetLanguage: secondary.targetLanguage,
+                        promptVersion: secondary.promptVersion,
+                        updatedAt: secondary.updatedAt,
+                        status: secondary.status,
+                        paragraphs: secondary.paragraphs,
+                        reason: 'incompatible_version_conflict'
+                    })
+                    existingRevIds.add(secRevId)
+                }
+                if (Array.isArray(secondary.conflictRevisions)) {
+                    for (const cr of secondary.conflictRevisions) {
+                        if (cr && cr.revisionId && !existingRevIds.has(cr.revisionId)) {
+                            primary.conflictRevisions.push(cr)
+                            existingRevIds.add(cr.revisionId)
+                        }
+                    }
+                }
+                ctMap.set(key, primary)
+            } else if (Array.isArray(ct.paragraphs) && Array.isArray(remoteCt.paragraphs)) {
+                const paraMap = new Map()
+                remoteCt.paragraphs.forEach(p => { if (p && p.id) paraMap.set(p.id, structuredClone(p)) })
+                ct.paragraphs.forEach(p => {
+                    if (!p || !p.id) return
+                    if (!paraMap.has(p.id)) {
+                        paraMap.set(p.id, structuredClone(p))
+                    } else {
+                        const remP = paraMap.get(p.id)
+                        const pCompleted = p.status === 'completed' && typeof p.translation === 'string' && p.translation.trim().length > 0
+                        const remPCompleted = remP.status === 'completed' && typeof remP.translation === 'string' && remP.translation.trim().length > 0
+
+                        if (pCompleted && !remPCompleted) {
+                            paraMap.set(p.id, structuredClone(p))
+                        } else if (!pCompleted && remPCompleted) {
+                            // keep remote completed paragraph
+                        } else if ((ct.updatedAt || 0) >= (remoteCt.updatedAt || 0)) {
+                            paraMap.set(p.id, structuredClone(p))
+                        }
+                    }
+                })
+                const mergedParas = Array.from(paraMap.values())
+                const maxUpdated = Math.max(ct.updatedAt || 0, remoteCt.updatedAt || 0)
+                const expectedTotal = Math.max(Number(ct.totalParagraphs) || 0, Number(remoteCt.totalParagraphs) || 0)
+
+                // Strict completion condition: ALL expected paragraphs must be verified completed with non-empty translation
+                const hasIncomplete = mergedParas.some(p => p.status !== 'completed' || !p.translation || !String(p.translation).trim())
+                const meetsTotalCount = expectedTotal > 0
+                    ? mergedParas.length >= expectedTotal
+                    : (ct.status === 'completed' || remoteCt.status === 'completed')
+                const allCompleted = mergedParas.length > 0 && !hasIncomplete && meetsTotalCount
+
+                ctMap.set(ct.id, {
+                    ...remoteCt,
+                    ...ct,
+                    status: allCompleted ? 'completed' : 'partial',
+                    paragraphs: mergedParas,
+                    totalParagraphs: expectedTotal > 0 ? expectedTotal : mergedParas.length,
+                    updatedAt: maxUpdated
+                })
+            } else if ((ct.updatedAt || 0) >= (remoteCt.updatedAt || 0)) {
+                ctMap.set(ct.id, structuredClone(ct))
+            }
+        }
+    })
+    const mergedChapterTranslations = Array.from(ctMap.values()).filter(ct => {
+        if (!ct || !ct.bookId) return false
+        const bookTombKey = `book:${ct.bookId}`
+        if (tombstoneMap.has(bookTombKey)) return false
+        const ctTombKey = ct.id ? `chapter_translation:${ct.id}` : null
+        if (ctTombKey && tombstoneMap.has(ctTombKey)) {
+            const tomb = tombstoneMap.get(ctTombKey)
+            if ((tomb.deletedAt || 0) >= (ct.updatedAt || 0)) return false
+        }
+        if (ct.id && tombstoneMap.has(ct.id)) {
+            const tomb = tombstoneMap.get(ct.id)
+            if ((tomb.deletedAt || 0) >= (ct.updatedAt || 0)) return false
+        }
+        return true
+    })
+
+    // Retain unknown top-level schema properties from remotePayload to prevent clobbering future schema extensions
+    const unknownRemoteFields = {}
+    if (remotePayload && typeof remotePayload === 'object') {
+        const knownKeys = new Set([
+            'version', 'clientId', 'deviceName', 'updatedAt', 'settings',
+            'customLists', 'booksMeta', 'highlights', 'bookmarks',
+            'readingSessions', 'pdfDrawings', 'chapterTranslations', 'deletedRecords'
+        ])
+        for (const [k, v] of Object.entries(remotePayload)) {
+            if (!knownKeys.has(k)) {
+                unknownRemoteFields[k] = structuredClone(v)
+            }
+        }
+    }
+
     const merged = {
-        version: 1,
+        ...unknownRemoteFields,
+        version: Math.max(localPayload.version || 1, remotePayload.version || 1),
+        clientId: localPayload.clientId || (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || '',
         updatedAt: Date.now(),
         settings: mergedSettings,
         customLists: mergedCustomLists,
@@ -454,6 +796,7 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         bookmarks: mergedBookmarks,
         readingSessions: mergedSessions,
         pdfDrawings: mergedPdfDrawings,
+        chapterTranslations: mergedChapterTranslations,
         deletedRecords: Array.from(tombstoneMap.values())
     }
 
@@ -465,7 +808,9 @@ export const mergeSyncData = (localPayload, remotePayload) => {
 export const applyMergedPayload = async mergedPayload => {
     const allLocalBooks = await db.getAllBooks()
 
-    // A. Apply Deletion Tombstones
+    // A. Apply Deletion Tombstones (with protection for re-imported / surviving books)
+    const survivingBookIds = new Set((mergedPayload.booksMeta || []).map(b => b.id))
+    const survivingStableKeys = new Set((mergedPayload.booksMeta || []).filter(b => b.stableKey).map(b => b.stableKey))
     const deletedBookIds = []
     const deletedStableKeys = new Set()
     if (Array.isArray(mergedPayload.deletedRecords)) {
@@ -473,12 +818,21 @@ export const applyMergedPayload = async mergedPayload => {
             if (tomb && tomb.id) {
                 const delTime = tomb.deletedAt || Date.now()
                 if (tomb.type === 'book' || tomb.type === 'books') {
+                    // Never delete a book if it survived in mergedPayload.booksMeta or if local book was added/updated after tombstone
+                    if (survivingBookIds.has(tomb.id) || (tomb.stableKey && survivingStableKeys.has(tomb.stableKey))) {
+                        continue
+                    }
+                    const localByStable = tomb.stableKey ? allLocalBooks.find(b => b.stableKey === tomb.stableKey) : null
+                    const localBook = allLocalBooks.find(b => b.id === tomb.id) || localByStable
+                    if (localBook && (localBook.updatedAt || localBook.addedAt || 0) > delTime) {
+                        continue
+                    }
+
                     await db.deleteBook(tomb.id, false, delTime)
                     deletedBookIds.push(tomb.id)
                     // Also cross-delete local book matching stableKey if ID differed across devices
                     if (tomb.stableKey) {
                         deletedStableKeys.add(tomb.stableKey)
-                        const localByStable = allLocalBooks.find(b => b.stableKey === tomb.stableKey)
                         if (localByStable && localByStable.id !== tomb.id) {
                             await db.deleteBook(localByStable.id, false, delTime)
                             deletedBookIds.push(localByStable.id)
@@ -496,6 +850,14 @@ export const applyMergedPayload = async mergedPayload => {
                     if (!localDrawing || delTime >= (localDrawing.updatedAt || 0)) {
                         await db.clearPdfDrawingById(tomb.id)
                     }
+                } else if (tomb.type === 'chapter_translation' || tomb.type === 'chapter_translations' || tomb.type === 'chapterTranslation') {
+                    const parts = tomb.id.split('::')
+                    if (parts.length === 2) {
+                        const localCt = await db.getChapterTranslation(parts[0], parts[1])
+                        if (localCt && delTime >= (localCt.updatedAt || 0)) {
+                            await db.deleteChapterTranslation(parts[0], parts[1])
+                        }
+                    }
                 }
             }
         }
@@ -504,7 +866,11 @@ export const applyMergedPayload = async mergedPayload => {
     // B. Apply custom lists
     if (Array.isArray(mergedPayload.customLists)) {
         for (const list of mergedPayload.customLists) {
-            await db.saveCustomList(list)
+            if (typeof db.applySyncedCustomList === 'function') {
+                await db.applySyncedCustomList(list)
+            } else {
+                await db.saveCustomList(list)
+            }
         }
     }
 
@@ -512,14 +878,22 @@ export const applyMergedPayload = async mergedPayload => {
     const bookIdRemap = new Map()
     const pendingAutoDownloads = []
     if (Array.isArray(mergedPayload.booksMeta)) {
+        const localClientId = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || ''
+        const incomingClientId = mergedPayload.clientId || ''
         for (const meta of mergedPayload.booksMeta) {
             if (!meta || !meta.id) continue
-            if (deletedBookIds.includes(meta.id) || (meta.stableKey && deletedStableKeys.has(meta.stableKey))) {
+            // Re-check tombstones with fresh DB query to avoid race with concurrent local delete
+            const allDeleted = typeof db.getAllDeletedRecords === 'function' ? await db.getAllDeletedRecords() : []
+            const tombstone = allDeleted.find(t => (t.id === meta.id || (meta.stableKey && t.stableKey === meta.stableKey)))
+            if (tombstone && (tombstone.deletedAt || 0) >= (meta.updatedAt || meta.addedAt || 0)) {
                 continue
             }
-            let localBook = allLocalBooks.find(b => b.id === meta.id)
+
+            // Fresh read directly from DB rather than stale snapshot to avoid clobbering concurrent user edits
+            let localBook = await db.getBook(meta.id)
             if (!localBook && meta.stableKey) {
-                localBook = allLocalBooks.find(b => (b.stableKey && b.stableKey === meta.stableKey) || 
+                const currentBooks = typeof db.getAllBooks === 'function' ? await db.getAllBooks() : allLocalBooks
+                localBook = currentBooks.find(b => (b.stableKey && b.stableKey === meta.stableKey) || 
                     (meta.title && meta.size > 0 && b.title === meta.title && b.size === meta.size))
             }
             if (localBook && localBook.id !== meta.id) {
@@ -527,43 +901,66 @@ export const applyMergedPayload = async mergedPayload => {
             }
             if (localBook) {
                 let changed = false
-                const isRemoteReadNewer = (meta.lastReadAt || 0) > (localBook.lastReadAt || 0) ||
-                    (meta.lastReadAt === localBook.lastReadAt && (meta.progress?.fraction || 0) > (localBook.progress?.fraction || 0))
-                
-                if (meta.progress && isRemoteReadNewer) {
-                    localBook.progress = meta.progress
-                    localBook.lastReadAt = meta.lastReadAt || localBook.lastReadAt
+                const reconciled = reconcileBookSyncMeta(localBook, meta, localClientId, incomingClientId)
+
+                if (JSON.stringify(localBook.tags || []) !== JSON.stringify(reconciled.tags || []) || (reconciled.tagsUpdatedAt || 0) > (localBook.tagsUpdatedAt || 0)) {
+                    localBook.tags = reconciled.tags
+                    localBook.tagsUpdatedAt = reconciled.tagsUpdatedAt
                     changed = true
                 }
-                if (meta.totalReadingSeconds != null && meta.totalReadingSeconds > (localBook.totalReadingSeconds || 0)) {
-                    localBook.totalReadingSeconds = meta.totalReadingSeconds
+                if (localBook.readingStatus !== reconciled.readingStatus || localBook.completedAt !== reconciled.completedAt || (reconciled.statusUpdatedAt || 0) > (localBook.statusUpdatedAt || 0)) {
+                    localBook.readingStatus = reconciled.readingStatus
+                    localBook.statusUpdatedAt = reconciled.statusUpdatedAt
+                    localBook.completedAt = reconciled.completedAt
                     changed = true
                 }
-                if (meta.isFavorite !== localBook.isFavorite) {
-                    localBook.isFavorite = meta.isFavorite
-                    localBook.favoriteUpdatedAt = meta.favoriteUpdatedAt || localBook.favoriteUpdatedAt || Date.now()
+                if (JSON.stringify(localBook.customListIds || []) !== JSON.stringify(reconciled.customListIds || []) || (reconciled.listsUpdatedAt || 0) > (localBook.listsUpdatedAt || 0)) {
+                    localBook.customListIds = reconciled.customListIds
+                    localBook.listsUpdatedAt = reconciled.listsUpdatedAt
                     changed = true
                 }
-                if (Array.isArray(meta.customListIds)) {
-                    const isRemoteListNewer = (meta.listsUpdatedAt || 0) >= (localBook.listsUpdatedAt || 0)
-                    if (isRemoteListNewer) {
-                        localBook.customListIds = meta.customListIds
-                        localBook.listsUpdatedAt = meta.listsUpdatedAt || Date.now()
-                        changed = true
-                    }
+                if (localBook.isFavorite !== reconciled.isFavorite || (reconciled.favoriteUpdatedAt || 0) > (localBook.favoriteUpdatedAt || 0)) {
+                    localBook.isFavorite = reconciled.isFavorite
+                    localBook.favoriteUpdatedAt = reconciled.favoriteUpdatedAt
+                    changed = true
                 }
-                if (meta.cloudBackup && meta.cloudBackup.hasBackup) {
-                    const rUp = meta.cloudBackup.uploadedAt || 0
-                    const lUp = localBook.cloudBackup?.uploadedAt || 0
-                    if (rUp >= lUp || !localBook.cloudBackup?.hasBackup) {
-                        localBook.cloudBackup = meta.cloudBackup
-                        changed = true
-                    }
+                if (localBook.rating !== reconciled.rating || (reconciled.ratingUpdatedAt || 0) > (localBook.ratingUpdatedAt || 0)) {
+                    localBook.rating = reconciled.rating
+                    localBook.ratingUpdatedAt = reconciled.ratingUpdatedAt
+                    changed = true
+                }
+                const progressChanged = JSON.stringify(localBook.progress || null) !== JSON.stringify(reconciled.progress || null)
+                const lastReadChanged = (reconciled.lastReadAt || 0) !== (localBook.lastReadAt || 0)
+                if (progressChanged || lastReadChanged || (reconciled.progress && !localBook.progress)) {
+                    localBook.progress = reconciled.progress
+                    localBook.lastReadAt = reconciled.lastReadAt
+                    changed = true
+                }
+                if (reconciled.totalReadingSeconds > (localBook.totalReadingSeconds || 0)) {
+                    localBook.totalReadingSeconds = reconciled.totalReadingSeconds
+                    changed = true
+                }
+                if (reconciled.totalListeningSeconds > (localBook.totalListeningSeconds || 0)) {
+                    localBook.totalListeningSeconds = reconciled.totalListeningSeconds
+                    changed = true
+                }
+                if (reconciled.cloudBackup && (!localBook.cloudBackup || (reconciled.cloudBackup.uploadedAt || 0) >= (localBook.cloudBackup?.uploadedAt || 0))) {
+                    localBook.cloudBackup = reconciled.cloudBackup
+                    changed = true
                 }
                 if (changed) {
-                    localBook.updatedAt = meta.updatedAt || localBook.updatedAt || Date.now()
-                    localBook._preserveUpdatedAt = true
-                    await db.saveBook(localBook)
+                    // Check if book was deleted right before saving
+                    const liveCheck = await db.getBook(localBook.id)
+                    if (liveCheck) {
+                        // Preserve any higher timestamps that occurred locally between read and write
+                        if ((liveCheck.tagsUpdatedAt || 0) > (localBook.tagsUpdatedAt || 0)) {
+                            localBook.tags = liveCheck.tags
+                            localBook.tagsUpdatedAt = liveCheck.tagsUpdatedAt
+                        }
+                        localBook.updatedAt = meta.updatedAt || localBook.updatedAt || Date.now()
+                        localBook._preserveUpdatedAt = true
+                        await db.saveBook(localBook)
+                    }
                 }
                 if (localBook.isCloudOnly && isAutoDownloadEligible(meta)) {
                     localBook.cloudBackupState = 'pending_auto_download'
@@ -575,8 +972,16 @@ export const applyMergedPayload = async mergedPayload => {
                 const isAutoEligible = isAutoDownloadEligible(meta)
                 const cloudBookRecord = {
                     ...meta,
+                    format: sanitizeSyncFormat(meta.format),
                     isCloudOnly: true,
                     hasLocalFile: false,
+                    tags: Array.isArray(meta.tags) ? meta.tags : [],
+                    tagsUpdatedAt: meta.tagsUpdatedAt || 0,
+                    readingStatus: meta.readingStatus || 'unread',
+                    statusUpdatedAt: meta.statusUpdatedAt || 0,
+                    completedAt: meta.completedAt || null,
+                    rating: meta.rating !== undefined ? meta.rating : null,
+                    ratingUpdatedAt: meta.ratingUpdatedAt || 0,
                     cloudBackup: meta.cloudBackup,
                     cloudBackupState: isAutoEligible ? 'pending_auto_download' : 'cloud_only',
                     addedAt: meta.addedAt || Date.now(),
@@ -592,7 +997,7 @@ export const applyMergedPayload = async mergedPayload => {
     }
 
 
-    // D. Apply Highlights (with BookId Remapping)
+    // D. Apply Highlights (with BookId Remapping and Local Tombstone / Edit Protection)
     if (Array.isArray(mergedPayload.highlights)) {
         for (const hl of mergedPayload.highlights) {
             if (!hl) continue
@@ -602,11 +1007,15 @@ export const applyMergedPayload = async mergedPayload => {
             if (hl.bookId && deletedBookIds.includes(hl.bookId)) {
                 continue
             }
-            await db.saveHighlight(hl)
+            if (typeof db.applySyncedHighlight === 'function') {
+                await db.applySyncedHighlight(hl)
+            } else {
+                await db.saveHighlight(hl)
+            }
         }
     }
 
-    // E. Apply Bookmarks (with BookId Remapping)
+    // E. Apply Bookmarks (with BookId Remapping and Local Tombstone Protection)
     if (Array.isArray(mergedPayload.bookmarks)) {
         for (const bm of mergedPayload.bookmarks) {
             if (!bm) continue
@@ -616,7 +1025,11 @@ export const applyMergedPayload = async mergedPayload => {
             if (bm.bookId && deletedBookIds.includes(bm.bookId)) {
                 continue
             }
-            await db.saveBookmark(bm)
+            if (typeof db.applySyncedBookmark === 'function') {
+                await db.applySyncedBookmark(bm)
+            } else {
+                await db.saveBookmark(bm)
+            }
         }
     }
 
@@ -641,31 +1054,78 @@ export const applyMergedPayload = async mergedPayload => {
         await db.setSetting('readerSettings', mergedSettings)
     }
 
-    // H. Apply PDF Drawings (with BookId Remapping)
+    // H. Apply PDF Drawings (with BookId Remapping and Local Tombstone / Edit Protection)
     if (Array.isArray(mergedPayload.pdfDrawings) && mergedPayload.pdfDrawings.length > 0) {
         const dbInstance = await db.openDB()
         if (dbInstance.objectStoreNames.contains('pdf_drawings')) {
-            const tx = dbInstance.transaction('pdf_drawings', 'readwrite')
+            const hasDeleted = dbInstance.objectStoreNames.contains('deleted_records')
+            const storeNames = hasDeleted ? ['pdf_drawings', 'deleted_records'] : ['pdf_drawings']
+            const tx = dbInstance.transaction(storeNames, 'readwrite')
             const store = tx.objectStore('pdf_drawings')
+            const delStore = hasDeleted ? tx.objectStore('deleted_records') : null
+
             mergedPayload.pdfDrawings.forEach(d => {
                 if (!d) return
+                let targetBookId = d.bookId
                 if (d.bookId && bookIdRemap.has(d.bookId)) {
-                    const targetBookId = bookIdRemap.get(d.bookId)
-                    d.bookId = targetBookId
-                    if (d.id && d.id.includes('_page_')) {
-                        const parts = d.id.split('_page_')
-                        d.id = `${targetBookId}_page_${parts[1]}`
-                    }
+                    targetBookId = bookIdRemap.get(d.bookId)
                 }
+                d.bookId = targetBookId
+                d.id = db.remapPdfDrawingId ? db.remapPdfDrawingId(d, targetBookId) : d.id
                 if (d.bookId && deletedBookIds.includes(d.bookId)) {
                     return
                 }
-                store.put(d)
+                const incomingTime = d.updatedAt || 0
+                if (delStore) {
+                    const tombReq = delStore.get(d.id)
+                    tombReq.onsuccess = () => {
+                        const tomb = tombReq.result
+                        if (tomb && (tomb.deletedAt || 0) >= incomingTime) {
+                            return
+                        }
+                        const exReq = store.get(d.id)
+                        exReq.onsuccess = () => {
+                            const ex = exReq.result
+                            if (ex && (ex.updatedAt || 0) > incomingTime) {
+                                return
+                            }
+                            store.put(d)
+                        }
+                    }
+                } else {
+                    const exReq = store.get(d.id)
+                    exReq.onsuccess = () => {
+                        const ex = exReq.result
+                        if (ex && (ex.updatedAt || 0) > incomingTime) {
+                            return
+                        }
+                        store.put(d)
+                    }
+                }
             })
             await new Promise((res, rej) => {
                 tx.oncomplete = () => res()
                 tx.onerror = () => rej(tx.error || new Error('Failed to save pdf drawings transaction'))
+                tx.onabort = () => rej(tx.error || new Error('PDF drawings transaction aborted'))
             })
+        }
+    }
+
+    // I. Apply Chapter Translations (with BookId Remapping)
+    const syncChapterTrans = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_chapter_translations') : 'false') === 'true'
+    if (syncChapterTrans && Array.isArray(mergedPayload.chapterTranslations) && mergedPayload.chapterTranslations.length > 0 && typeof db.saveChapterTranslation === 'function') {
+        for (const ct of mergedPayload.chapterTranslations) {
+            if (!ct || !ct.bookId || !ct.chapterKey) continue
+            let targetBookId = ct.bookId
+            if (bookIdRemap.has(targetBookId)) {
+                targetBookId = bookIdRemap.get(targetBookId)
+            }
+            if (deletedBookIds.includes(targetBookId)) continue
+            const record = { ...ct, bookId: targetBookId, id: `${targetBookId}::${ct.chapterKey}` }
+            const localCt = await db.getChapterTranslation(targetBookId, ct.chapterKey)
+            if (!localCt || (record.updatedAt || 0) >= (localCt.updatedAt || 0)) {
+                await db.saveChapterTranslation(record)
+            }
         }
     }
 

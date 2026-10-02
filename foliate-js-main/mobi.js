@@ -1263,9 +1263,9 @@ class KF8 {
         const index = this.getIndexByFID(pos.fid)
         return [index, pos]
     }
-    getTOCFragment(doc, { fid, off }) {
+    getTOCFragment(doc, { fid, off } = {}) {
         const selector = this.#fragmentSelectors.get(fid)?.get(off)
-        return doc.querySelector(selector)
+        return selector ? doc?.querySelector?.(selector) : (doc?.body ?? null)
     }
     isExternal(uri) {
         return /^(?!blob|kindle)\w+:/i.test(uri)

@@ -22,7 +22,7 @@ const getViewport = (doc, viewport) => {
 
     // if no viewport (possibly with image directly in spine), get image size
     const img = doc.querySelector('img')
-    if (img) return { width: img.naturalWidth, height: img.naturalHeight }
+    if (img && img.naturalWidth && img.naturalHeight) return { width: img.naturalWidth, height: img.naturalHeight }
 
     // just show *something*, i guess...
     console.warn(new Error('Missing viewport properties'))
@@ -44,6 +44,8 @@ export class FixedLayout extends HTMLElement {
     #side
     #zoom
     #themeObserver
+    #navigationGeneration = 0
+    #styles = null
     constructor() {
         super()
 
@@ -89,6 +91,22 @@ export class FixedLayout extends HTMLElement {
         const theme = document.documentElement.getAttribute('data-theme') || 'light'
         this.setAttribute('data-theme', theme)
     }
+    #applyStylesToDoc(doc) {
+        if (!doc?.head) return
+        let style = doc.head.querySelector('style[data-linden-reader-style]')
+        if (!style) {
+            style = doc.createElement('style')
+            style.dataset.lindenReaderStyle = '1'
+            doc.head.append(style)
+        }
+        style.textContent = Array.isArray(this.#styles) ? this.#styles.join('\n') : (this.#styles || '')
+    }
+    setStyles(styles) {
+        this.#styles = styles
+        for (const frame of [this.#center, this.#left, this.#right]) {
+            if (frame?.doc) this.#applyStylesToDoc(frame.doc)
+        }
+    }
     attributeChangedCallback(name, _, value) {
         switch (name) {
             case 'zoom':
@@ -98,103 +116,143 @@ export class FixedLayout extends HTMLElement {
                 break
         }
     }
-    async #createFrame({ index, src: srcOption }) {
+    async #createFrame({ index, src: srcOption }, pending = false) {
         const srcOptionIsString = typeof srcOption === 'string'
         const src = srcOptionIsString ? srcOption : srcOption?.src
         const onZoom = srcOptionIsString ? null : srcOption?.onZoom
         const element = document.createElement('div')
         element.setAttribute('dir', 'ltr')
         Object.assign(element.style, {
-            position: 'relative',
+            position: pending ? 'absolute' : 'relative',
+            inset: pending ? '0' : '',
+            visibility: pending ? 'hidden' : '',
+            pointerEvents: pending ? 'none' : '',
         })
         const iframe = document.createElement('iframe')
         element.append(iframe)
-        Object.assign(iframe.style, {
-            border: '0',
-            overflow: 'hidden',
-        })
-        // In Electron/Chromium, allow-same-origin is sufficient and allow-scripts is removed for security
+        Object.assign(iframe.style, { border: '0', overflow: 'hidden' })
         iframe.setAttribute('sandbox', 'allow-same-origin')
         iframe.setAttribute('scrolling', 'no')
         iframe.setAttribute('part', 'filter')
-        this.#root.append(element)
-        if (!src) return { blank: true, element, iframe, index }
-        return new Promise(resolve => {
-            iframe.addEventListener('load', () => {
-                const doc = iframe.contentDocument
-                this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
-                const { width, height } = getViewport(doc, this.defaultViewport)
-                const frameObj = {
-                    element, iframe, index, doc,
-                    width: parseFloat(width) || 800,
-                    height: parseFloat(height) || 1100,
-                    onZoom,
-                    overlayer: null
-                }
-                this.dispatchEvent(new CustomEvent('create-overlayer', {
-                    detail: {
-                        doc, index,
-                        attach: overlayer => {
-                            frameObj.overlayer = overlayer
-                            Object.assign(overlayer.element.style, {
-                                position: 'absolute',
-                                top: '0',
-                                left: '0',
-                                width: '100%',
-                                height: '100%',
-                                pointerEvents: 'none',
-                                zIndex: '20',
-                            })
-                            const pageContainer = doc.getElementById('page-container') || doc.body || doc.documentElement || element
-                            pageContainer.append(overlayer.element)
+
+        if (!src) {
+            this.#root.append(element)
+            return { blank: true, element, iframe, index }
+        }
+
+        // Register the target navigation before insertion. Appending an iframe
+        // without src can otherwise race its initial about:blank load against
+        // the real section load in Chromium/WebView2.
+        return new Promise((resolve, reject) => {
+            let settled = false
+            const cleanup = () => {
+                clearTimeout(timer)
+                iframe.removeEventListener('load', onLoad)
+                iframe.removeEventListener('error', onError)
+            }
+            const fail = error => {
+                if (settled) return
+                settled = true
+                cleanup()
+                element.remove()
+                reject(error instanceof Error ? error : new Error(String(error)))
+            }
+            const onError = () => fail(new Error(`Fixed-layout iframe failed to load section ${index}`))
+            const onLoad = async () => {
+                if (settled) return
+                try {
+                    const doc = iframe.contentDocument
+                    if (!doc?.documentElement) throw new Error(`Fixed-layout section ${index} loaded without a document`)
+                    const img = doc.querySelector('img')
+                    if (img) {
+                        if (!img.complete) {
+                            await Promise.race([
+                                new Promise(res => {
+                                    img.addEventListener('load', res, { once: true })
+                                    img.addEventListener('error', res, { once: true })
+                                }),
+                                new Promise(res => setTimeout(res, 5000)),
+                            ])
+                        }
+                        if (img.decode) {
+                            try { await img.decode() } catch {}
                         }
                     }
-                }))
-                resolve(frameObj)
-            }, { once: true })
+                    this.#applyStylesToDoc(doc)
+                    const { width, height } = getViewport(doc, this.defaultViewport)
+                    const frameObj = {
+                        element, iframe, index, doc,
+                        width: parseFloat(width) || 800,
+                        height: parseFloat(height) || 1100,
+                        onZoom, overlayer: null,
+                    }
+                    if (settled) return
+                    settled = true
+                    cleanup()
+                    this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
+                    this.dispatchEvent(new CustomEvent('create-overlayer', {
+                        detail: {
+                            doc, index,
+                            attach: overlayer => {
+                                frameObj.overlayer = overlayer
+                                Object.assign(overlayer.element.style, {
+                                    position: 'absolute', top: '0', left: '0',
+                                    width: '100%', height: '100%', pointerEvents: 'none', zIndex: '20',
+                                })
+                                const pageContainer = doc.getElementById('page-container') || doc.body || doc.documentElement || element
+                                pageContainer.append(overlayer.element)
+                            },
+                        },
+                    }))
+                    resolve(frameObj)
+                } catch (error) {
+                    fail(error)
+                }
+            }
+            const timer = setTimeout(() => fail(new Error(`Fixed-layout section ${index} timed out`)), 15000)
+            iframe.addEventListener('load', onLoad)
+            iframe.addEventListener('error', onError)
             iframe.src = src
+            this.#root.append(element)
         })
     }
-    async #render(side = this.#side) {
-        if (this.#center) {
-            side = 'center'
-        }
+    async #renderState({ left = this.#left, right = this.#right, center = this.#center, side = this.#side } = {}, pending = false) {
+        if (center) side = 'center'
         if (!side) return
-        const left = this.#left ?? {}
-        const right = this.#center ?? this.#right ?? {}
-        const target = this.#center ? this.#center : (side === 'left' ? left : right)
+        const leftFrame = left ?? {}
+        const rightFrame = center ?? right ?? {}
+        const target = center ? center : (side === 'left' ? leftFrame : rightFrame)
         const rect = this.getBoundingClientRect()
-        let width = rect.width || this.parentElement?.clientWidth || window.innerWidth || 800
-        let height = rect.height || this.parentElement?.clientHeight || window.innerHeight || 1000
-        if (width <= 50) width = window.innerWidth || 800
-        if (height <= 50) height = window.innerHeight || 1000
+        let hostWidth = rect.width || this.parentElement?.clientWidth || window.innerWidth || 800
+        let hostHeight = rect.height || this.parentElement?.clientHeight || window.innerHeight || 1000
+        if (hostWidth <= 50) hostWidth = window.innerWidth || 800
+        if (hostHeight <= 50) hostHeight = window.innerHeight || 1000
 
         const portrait = this.spread !== 'both' && this.spread !== 'portrait'
-            && height > width
-        this.#portrait = portrait
-        const blankWidth = left.width ?? right.width ?? 612
-        const blankHeight = left.height ?? right.height ?? 792
+            && hostHeight > hostWidth
+        const blankWidth = leftFrame.width ?? rightFrame.width ?? 612
+        const blankHeight = leftFrame.height ?? rightFrame.height ?? 792
         const targetW = (target.width ?? blankWidth) || 612
         const targetH = (target.height ?? blankHeight) || 792
 
         let calculatedScale = typeof this.#zoom === 'number' && !isNaN(this.#zoom)
             ? this.#zoom
             : (this.#zoom === 'fit-width'
-                ? (portrait || this.#center
-                    ? width / targetW
-                    : width / ((left.width ?? blankWidth) + (right.width ?? blankWidth)))
-                : (portrait || this.#center
-                    ? Math.min(width / targetW, height / targetH)
+                ? (portrait || center
+                    ? hostWidth / targetW
+                    : hostWidth / ((leftFrame.width ?? blankWidth) + (rightFrame.width ?? blankWidth)))
+                : (portrait || center
+                    ? Math.min(hostWidth / targetW, hostHeight / targetH)
                     : Math.min(
-                        width / ((left.width ?? blankWidth) + (right.width ?? blankWidth)),
-                        height / Math.max(left.height ?? blankHeight, right.height ?? blankHeight)))
+                        hostWidth / ((leftFrame.width ?? blankWidth) + (rightFrame.width ?? blankWidth)),
+                        hostHeight / Math.max(leftFrame.height ?? blankHeight, rightFrame.height ?? blankHeight)))
             )
 
         const scale = (!calculatedScale || isNaN(calculatedScale) || calculatedScale <= 0.05) ? 1 : calculatedScale
 
         const transform = async frame => {
-            let { element, iframe, width, height, blank, overlayer, onZoom, doc } = frame
-            if (!iframe) return
+            if (!frame?.iframe) return
+            const { element, iframe, width, height, blank, overlayer, onZoom, doc } = frame
             Object.assign(iframe.style, {
                 width: `${width}px`,
                 height: `${height}px`,
@@ -209,12 +267,13 @@ export class FixedLayout extends HTMLElement {
                 display: 'block',
                 flexShrink: '0',
                 marginBlock: 'auto',
-                position: 'relative',
+                position: pending ? 'absolute' : 'relative',
+                inset: pending ? '0' : '',
+                visibility: pending ? 'hidden' : '',
+                pointerEvents: pending ? 'none' : '',
             })
-            if (portrait && !this.#center && frame !== target && this.spread !== 'both') {
+            if (portrait && !center && frame !== target && this.spread !== 'both') {
                 element.style.display = 'none'
-            } else {
-                element.style.display = 'block'
             }
             if (overlayer) {
                 overlayer.element.style.width = `${width}px`
@@ -224,37 +283,74 @@ export class FixedLayout extends HTMLElement {
                 overlayer.redraw()
             }
             if (onZoom && doc) {
-                try {
-                    onZoom(scale, doc)
-                } catch (e) {
-                    console.warn('onZoom error:', e)
-                }
+                try { onZoom(scale, doc) }
+                catch (e) { console.warn('onZoom error:', e) }
             }
         }
-        if (this.#center) {
-            await transform(this.#center)
-        } else {
-            await transform(left)
-            await transform(right)
+        if (center) await transform(center)
+        else {
+            await transform(leftFrame)
+            await transform(rightFrame)
+        }
+        return { portrait, side, scale }
+    }
+    async #render(side = this.#side) {
+        const result = await this.#renderState({ side }, false)
+        if (result) {
+            this.#portrait = result.portrait
+            if (!this.#center) this.#side = result.side
         }
     }
-    async #showSpread({ left, right, center, side }) {
-        this.#root.replaceChildren()
-        this.#left = null
-        this.#right = null
-        this.#center = null
-        if (center) {
-            this.#center = await this.#createFrame(center)
-            this.#side = 'center'
-            await this.#render()
-            requestAnimationFrame(() => this.#render())
-        } else {
-            this.#left = await this.#createFrame(left)
-            this.#right = await this.#createFrame(right)
-            this.#side = this.#left.blank ? 'right'
-                : this.#right.blank ? 'left' : side
-            await this.#render()
-            requestAnimationFrame(() => this.#render())
+    #discardFrames(...frames) {
+        for (const frame of frames) frame?.element?.remove?.()
+    }
+    async #showSpread({ left, right, center, side }, generation) {
+        const candidate = { left: null, right: null, center: null, side }
+        try {
+            if (center) {
+                candidate.center = await this.#createFrame(center, true)
+                candidate.side = 'center'
+            } else {
+                ;[candidate.left, candidate.right] = await Promise.all([
+                    this.#createFrame(left, true),
+                    this.#createFrame(right, true),
+                ])
+                candidate.side = candidate.left.blank ? 'right'
+                    : candidate.right.blank ? 'left' : side
+            }
+
+            if (generation !== this.#navigationGeneration) {
+                this.#discardFrames(candidate.left, candidate.right, candidate.center)
+                return false
+            }
+
+            const rendered = await this.#renderState(candidate, true)
+            if (generation !== this.#navigationGeneration) {
+                this.#discardFrames(candidate.left, candidate.right, candidate.center)
+                return false
+            }
+
+            const old = [this.#left, this.#right, this.#center]
+            this.#left = candidate.left
+            this.#right = candidate.right
+            this.#center = candidate.center
+            this.#side = candidate.side
+            this.#portrait = rendered?.portrait ?? this.#portrait
+
+            for (const frame of [this.#left, this.#right, this.#center]) {
+                if (!frame?.element) continue
+                Object.assign(frame.element.style, {
+                    position: 'relative', inset: '', visibility: '', pointerEvents: '',
+                })
+            }
+            this.#discardFrames(...old)
+            requestAnimationFrame(() => {
+                if (generation === this.#navigationGeneration) this.#render()
+            })
+            return true
+        } catch (error) {
+            this.#discardFrames(candidate.left, candidate.right, candidate.center)
+            throw error
         }
     }
     #goLeft() {
@@ -350,38 +446,64 @@ export class FixedLayout extends HTMLElement {
             await this.#render(side)
             return
         }
-        this.#index = index
+        const generation = ++this.#navigationGeneration
+        const oldIndex = this.#index
         const spread = this.#spreads[index]
         if (!spread) return
-        if (spread.center) {
-            const idx = this.book.sections.indexOf(spread.center)
-            const src = await spread.center?.load?.()
-            await this.#showSpread({ center: { index: idx, src } })
-        } else {
-            const indexL = this.book.sections.indexOf(spread.left)
-            const indexR = spread.right ? this.book.sections.indexOf(spread.right) : -1
-            const srcL = await spread.left?.load?.()
-            const srcR = spread.right ? await spread.right?.load?.() : null
-            const left = { index: indexL, src: srcL }
-            const right = { index: indexR, src: srcR }
-            await this.#showSpread({ left, right, side })
+
+        try {
+            let committed = false
+            if (spread.center) {
+                const idx = this.book.sections.indexOf(spread.center)
+                const src = await spread.center?.load?.()
+                if (generation !== this.#navigationGeneration) return
+                committed = await this.#showSpread({ center: { index: idx, src } }, generation)
+            } else {
+                const indexL = this.book.sections.indexOf(spread.left)
+                const indexR = spread.right ? this.book.sections.indexOf(spread.right) : -1
+                const [srcL, srcR] = await Promise.all([
+                    spread.left?.load?.(),
+                    spread.right ? spread.right.load?.() : Promise.resolve(null),
+                ])
+                if (generation !== this.#navigationGeneration) return
+                const left = { index: indexL, src: srcL }
+                const right = { index: indexR, src: srcR }
+                committed = await this.#showSpread({ left, right, side }, generation)
+            }
+            if (!committed || generation !== this.#navigationGeneration) return
+
+            this.#index = index
+            if (oldIndex >= 0 && oldIndex !== index && this.#spreads[oldIndex]) {
+                const oldSpread = this.#spreads[oldIndex]
+                if (oldSpread.center && oldSpread.center !== spread.center) oldSpread.center?.unload?.()
+                if (oldSpread.left && oldSpread.left !== spread.left && oldSpread.left !== spread.right) oldSpread.left?.unload?.()
+                if (oldSpread.right && oldSpread.right !== spread.left && oldSpread.right !== spread.right) oldSpread.right?.unload?.()
+            }
+            this.#reportLocation(reason)
+        } catch (error) {
+            if (generation === this.#navigationGeneration) {
+                this.dispatchEvent(new CustomEvent('section-load-error', {
+                    detail: { error, index },
+                }))
+                console.warn(`Fixed-layout section ${index} failed to load:`, error)
+            }
         }
-        this.#reportLocation(reason)
     }
     async select(target) {
         await this.goTo(target)
     }
     async goTo(target) {
         const { book } = this
-        if (!book?.sections) return
+        if (!book?.sections) return false
         const resolved = await target
         const secIndex = typeof resolved === 'number' ? resolved : (resolved?.index ?? 0)
         const section = book.sections[secIndex]
-        if (!section) return
+        if (!section) return false
         const spreadObj = this.getSpreadOf(section)
-        if (!spreadObj) return
+        if (!spreadObj) return false
         const { index, side } = spreadObj
         await this.goToSpread(index, side)
+        return true
     }
     async next() {
         const s = this.rtl ? this.#goLeft() : this.#goRight()
@@ -400,7 +522,16 @@ export class FixedLayout extends HTMLElement {
         }))
     }
     destroy() {
-        this.#observer.unobserve(this)
+        ++this.#navigationGeneration
+        this.#observer?.disconnect?.()
+        this.#themeObserver?.disconnect?.()
+        if (this.#index >= 0 && this.#spreads?.[this.#index]) {
+            const spread = this.#spreads[this.#index]
+            spread.center?.unload?.()
+            spread.left?.unload?.()
+            spread.right?.unload?.()
+        }
+        this.#root.replaceChildren()
     }
 }
 

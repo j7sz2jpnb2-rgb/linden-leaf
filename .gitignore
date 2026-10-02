@@ -1,13 +1,40 @@
+# Dependencies and package manager caches
 node_modules/
+.pnpm-store/
+
+# Build outputs
 dist/
-.git/
-.pup_*
+dist-tauri/
+src-tauri/target/
+.gradle/
+**/build/
+**/.cxx/
+**/local.properties
+**/keystore.properties
+**/key.properties
+
+# Logs and runtime caches
 *.log
-scratch_*
-generate_*.py
-scripts/
-*.test.*
-test_*
-verify_*
-debug_*
-*.cjs
+.pup_*
+.cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+mupdf-*-evidence-*/
+
+# User credentials, databases and secrets
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+secrets.*
+*.key
+*.pem
+credentials.json
+
+# System files
+.DS_Store
+Thumbs.db

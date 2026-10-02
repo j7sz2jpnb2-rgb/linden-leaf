@@ -162,7 +162,7 @@ const parseXML = async blob => {
     const encoding = doc.xmlEncoding
         // `Document.xmlEncoding` is deprecated, and already removed in Firefox
         // so parse the XML declaration manually
-        || str.match(/^<\?xml\s+version\s*=\s*["']1.\d+"\s+encoding\s*=\s*["']([A-Za-z0-9._-]*)["']/)?.[1]
+        || str.match(/^<\?xml\s+version\s*=\s*(["'])1\.\d+\1\s+encoding\s*=\s*(["'])([A-Za-z0-9._-]+)\2/)?.[3]
     if (encoding && encoding.toLowerCase() !== 'utf-8') {
         const str = new TextDecoder(encoding).decode(buffer)
         return parser.parseFromString(str, MIME.XML)
@@ -342,15 +342,26 @@ export const makeFB2 = async blob => {
     }).filter(item => item)
 
     book.resolveHref = href => {
-        const [a, b] = href.split('#')
-        return a
-            // the link is from the TOC
-            ? { index: Number(a), anchor: doc => doc.querySelector(`[${dataID}="${b}"]`) }
-            // link from within the page
-            : { index: idMap.get(b), anchor: doc => doc.getElementById(b) }
+        if (!href && href !== 0) return { index: 0, anchor: null }
+        const [a, b] = String(href).split('#')
+        if (a) {
+            const index = Number(a)
+            const safeIndex = isNaN(index) ? 0 : index
+            const anchor = b != null ? doc => doc.querySelector(`[${dataID}="${b}"]`) : null
+            return { index: safeIndex, anchor }
+        }
+        // link from within the page
+        const mappedIndex = idMap.get(b)
+        if (mappedIndex != null) {
+            return { index: mappedIndex, anchor: doc => doc.getElementById(b) }
+        }
+        return { index: 0, anchor: null }
     }
     book.splitTOCHref = href => href?.split('#')?.map(x => Number(x)) ?? []
-    book.getTOCFragment = (doc, id) => doc.querySelector(`[${dataID}="${id}"]`)
+    book.getTOCFragment = (doc, id) => {
+        if (!id || id === 'undefined') return doc?.body ?? doc?.documentElement
+        return doc?.querySelector?.(`[${dataID}="${id}"]`) ?? doc?.body ?? doc?.documentElement
+    }
     book.isExternal = uri => /^\w+:/i.test(uri)
 
     book.destroy = () => {

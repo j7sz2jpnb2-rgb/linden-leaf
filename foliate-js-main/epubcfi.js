@@ -232,9 +232,10 @@ const indexChildNodes = (node, filter) => {
 }
 
 const partsToNode = (node, parts, filter) => {
-    const { id } = parts[parts.length - 1]
+    if (!parts?.length) return { node, offset: 0 }
+    const { id } = parts[parts.length - 1] ?? {}
     if (id) {
-        const el = node.ownerDocument.getElementById(id)
+        const el = node.ownerDocument?.getElementById?.(id) ?? node.getElementById?.(id)
         if (el) return { node: el, offset: 0 }
     }
     for (const { index } of parts) {
@@ -246,15 +247,25 @@ const partsToNode = (node, parts, filter) => {
         if (newNode === 'after') return { node, after: true }
         node = newNode
     }
-    const { offset } = parts[parts.length - 1]
-    if (!Array.isArray(node)) return { node, offset }
+    const { offset = 0 } = parts[parts.length - 1] ?? {}
+    if (!Array.isArray(node)) {
+        const safeOffset = (node && node.nodeType === 1)
+            ? Math.min(offset, node.childNodes.length)
+            : (node && (node.nodeType === 3 || node.nodeType === 4))
+                ? Math.min(offset, node.nodeValue?.length ?? 0)
+                : offset
+        return { node, offset: safeOffset }
+    }
+    if (!node.length) return { node: null, offset: 0 }
     // get underlying text node and offset from the chunk
     let sum = 0
     for (const n of node) {
         const { length } = n.nodeValue
-        if (sum + length >= offset) return { node: n, offset: offset - sum }
+        if (sum + length >= offset) return { node: n, offset: Math.max(0, offset - sum) }
         sum += length
     }
+    const last = node[node.length - 1]
+    return { node: last, offset: last?.nodeValue?.length ?? 0 }
 }
 
 const nodeToParts = (node, offset, filter) => {
@@ -298,8 +309,8 @@ export const toRange = (doc, parts, filter) => {
     const endParts = collapse(parts, true)
 
     const root = doc.documentElement
-    const start = partsToNode(root, startParts[0], filter)
-    const end = partsToNode(root, endParts[0], filter)
+    const start = partsToNode(root, startParts.at(-1), filter)
+    const end = partsToNode(root, endParts.at(-1), filter)
 
     const range = doc.createRange()
 
@@ -315,8 +326,10 @@ export const toRange = (doc, parts, filter) => {
 
 // faster way of getting CFIs for sorted elements in a single parent
 export const fromElements = elements => {
+    if (!elements?.length) return []
     const results = []
     const { parentNode } = elements[0]
+    if (!parentNode) return []
     const parts = nodeToParts(parentNode)
     for (const [index, node] of indexChildNodes(parentNode).entries()) {
         const el = elements[results.length]
@@ -327,7 +340,7 @@ export const fromElements = elements => {
 }
 
 export const toElement = (doc, parts) =>
-    partsToNode(doc.documentElement, collapse(parts)).node
+    partsToNode(doc.documentElement, collapse(parts))?.node
 
 // turn indices into standard CFIs when you don't have an actual package document
 export const fake = {

@@ -4,16 +4,22 @@
 
 export class AppUpdater {
     constructor() {
-        this.currentVersion = '1.2.3'
+        this.currentVersion = '2.0.0'
         this.defaultRepo = 'j7sz2jpnb2-rgb/linden-leaf'
         this.lastCheckTime = 0
         this.latestRelease = null
     }
 
     async init() {
+        if (typeof platformBridge !== 'undefined' && platformBridge.getAppVersion) {
+            try {
+                this.currentVersion = await platformBridge.getAppVersion() || '2.0.0'
+                return
+            } catch (e) {}
+        }
         if (window.electronAPI?.getVersion) {
             try {
-                this.currentVersion = await window.electronAPI.getVersion() || '1.2.3'
+                this.currentVersion = await window.electronAPI.getVersion() || '2.0.0'
             } catch (e) {
                 console.warn('Failed to get app version from electron:', e)
             }
@@ -62,7 +68,16 @@ export class AppUpdater {
 
         try {
             let data = null
-            if (window.electronAPI?.checkGitHubRelease) {
+            if (typeof platformBridge !== 'undefined' && platformBridge.checkGitHubRelease) {
+                const ipcRes = await platformBridge.checkGitHubRelease(repo)
+                if (!ipcRes.success) {
+                    return {
+                        success: false,
+                        error: ipcRes.error || '检查更新失败'
+                    }
+                }
+                data = ipcRes.data || ipcRes
+            } else if (window.electronAPI?.checkGitHubRelease) {
                 const ipcRes = await window.electronAPI.checkGitHubRelease(repo)
                 if (!ipcRes.success) {
                     return {
@@ -70,7 +85,7 @@ export class AppUpdater {
                         error: ipcRes.error || '检查更新失败'
                     }
                 }
-                data = ipcRes.data
+                data = ipcRes.data || ipcRes
             } else {
                 const url = `https://api.github.com/repos/${repo}/releases/latest`
                 const res = await fetch(url, {
@@ -116,15 +131,15 @@ export class AppUpdater {
 
             if (!data) throw new Error('未获取到有效的 Release 数据')
 
-            const latestTag = data.tag_name || data.name || '0.0.0'
+            const latestTag = data.tag_name || data.tagName || data.name || '0.0.0'
             const hasUpdate = this.compareVersions(latestTag, this.currentVersion) > 0
 
             // Find windows setup or portable asset if present
-            let downloadUrl = data.html_url
+            let downloadUrl = data.html_url || data.htmlUrl
             if (Array.isArray(data.assets) && data.assets.length > 0) {
                 const exeAsset = data.assets.find(a => a.name.endsWith('.exe')) || data.assets[0]
-                if (exeAsset && exeAsset.browser_download_url) {
-                    downloadUrl = exeAsset.browser_download_url
+                if (exeAsset && (exeAsset.browser_download_url || exeAsset.browserDownloadUrl)) {
+                    downloadUrl = exeAsset.browser_download_url || exeAsset.browserDownloadUrl
                 }
             }
 
@@ -134,9 +149,9 @@ export class AppUpdater {
                 latestVersion: latestTag,
                 releaseTitle: data.name || latestTag,
                 releaseNotes: data.body || '暂无更新日志描述。',
-                releaseUrl: data.html_url,
+                releaseUrl: data.html_url || data.htmlUrl,
                 downloadUrl,
-                publishedAt: data.published_at ? new Date(data.published_at).toLocaleDateString() : ''
+                publishedAt: (data.published_at || data.publishedAt) ? new Date(data.published_at || data.publishedAt).toLocaleDateString() : ''
             }
             this.lastCheckTime = Date.now()
 
@@ -154,4 +169,5 @@ export class AppUpdater {
     }
 }
 
-export const updater = new AppUpdater()
+export const updater = new AppUpdater();
+export default updater;

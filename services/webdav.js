@@ -1,6 +1,6 @@
-// services/webdav.js - Native Node.js WebDAV Client for Electron Main Process
+// services/webdav.js - Native Node.js & Browser WebDAV Client
 // Supports Jianguoyun (坚果云), Nextcloud, ownCloud, NAS, and standard WebDAV servers.
-const path = require('path')
+const path = typeof require !== 'undefined' ? require('path') : null
 
 class WebDAVService {
     /**
@@ -9,9 +9,9 @@ class WebDAVService {
      */
     static sanitizeFileName(rawName) {
         if (!rawName) return 'unnamed_book'
-        // Replace directory separators with underscores first so sub-volume titles like "红楼梦/第一卷" are never truncated by path.basename
-        const flattened = String(rawName).replace(/[\\/]/g, '_')
-        const noDots = flattened.replace(/^\.+/, '')
+        // Strip directory traversal dots and normalize separators
+        const flattened = String(rawName).replace(/[\\/]+/g, '_').replace(/\.{2,}/g, '')
+        const noDots = flattened.replace(/^[_.\s]+/, '')
         // Strictly remove illegal filesystem/URI characters: : * ? " < > | # % & + and control characters
         // Explicitly PRESERVE all Unicode characters (Chinese, Japanese, etc.)
         let safe = noDots.replace(/[:*?"<>|#%&+\x00-\x1f\x7f]/gu, '_').replace(/\s+/g, '_')
@@ -63,7 +63,12 @@ class WebDAVService {
     static getAuthHeader(username, password) {
         const u = (username || '').trim().replace(/[\r\n]/g, '')
         const p = (password || '').replace(/[\r\n]/g, '')
-        const credentials = Buffer.from(`${u}:${p}`, 'utf8').toString('base64')
+        let credentials
+        if (typeof Buffer !== 'undefined') {
+            credentials = Buffer.from(`${u}:${p}`, 'utf8').toString('base64')
+        } else {
+            credentials = btoa(unescape(encodeURIComponent(`${u}:${p}`)))
+        }
         return `Basic ${credentials}`
     }
 
@@ -250,9 +255,17 @@ class WebDAVService {
                 return { exists: false, error: `拉取云端数据失败 (HTTP ${res.status}): ${res.statusText}`, etag: null }
             }
 
+            const contentLength = parseInt(res.headers.get('content-length') || '0', 10)
+            if (contentLength > 20 * 1024 * 1024) {
+                return { exists: false, error: '云端同步文件大小超过 20MB 安全上限', etag: null }
+            }
+
             const text = await res.text()
             if (!text || !text.trim()) {
                 return { exists: false, data: null, etag }
+            }
+            if (text.length > 20 * 1024 * 1024) {
+                return { exists: false, error: '云端同步文件大小超过 20MB 安全上限', etag: null }
             }
 
             const data = JSON.parse(text)
@@ -271,7 +284,14 @@ class WebDAVService {
 
         const fileUrl = this.normalizeUrl(serverUrl, `${remoteDir}/${fileName}`)
         const auth = this.getAuthHeader(username, password)
-        const jsonString = JSON.stringify(data, null, 2)
+        const jsonString = JSON.stringify(data)
+        const payloadBytes = (new TextEncoder().encode(jsonString)).length
+        if (payloadBytes > 20 * 1024 * 1024) {
+            return {
+                success: false,
+                error: `同步数据过大 (${(payloadBytes / 1024 / 1024).toFixed(1)} MiB)，超过 20 MiB 限制`
+            }
+        }
 
         const headers = {
             'Authorization': auth,
@@ -280,6 +300,8 @@ class WebDAVService {
         // RFC 7232: Weak ETags (starting with W/) must NOT be sent in If-Match header
         if (etag && typeof etag === 'string' && !etag.startsWith('W/')) {
             headers['If-Match'] = etag
+        } else if (!etag) {
+            headers['If-None-Match'] = '*'
         }
 
         try {
@@ -336,18 +358,31 @@ class WebDAVService {
         }
 
         try {
-            const bodyBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer)
+            let bodyData = buffer
+            let byteLength = 0
+            if (typeof Buffer !== 'undefined') {
+                bodyData = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer)
+                byteLength = bodyData.length
+            } else if (buffer instanceof ArrayBuffer) {
+                bodyData = new Uint8Array(buffer)
+                byteLength = bodyData.byteLength
+            } else if (buffer && buffer.buffer instanceof ArrayBuffer) {
+                byteLength = buffer.byteLength
+            } else {
+                bodyData = buffer
+                byteLength = buffer ? (buffer.byteLength || buffer.length || 0) : 0
+            }
             // Adaptive timeout: base 60s + 2s per MB, capped between 60s and 10 minutes
-            const timeoutMs = Math.min(600000, Math.max(60000, 60000 + Math.ceil(bodyBuffer.length / (1024 * 1024)) * 2000))
+            const timeoutMs = Math.min(600000, Math.max(60000, 60000 + Math.ceil(byteLength / (1024 * 1024)) * 2000))
             const res = await this.fetchWithRetry(fileUrl, {
                 method: 'PUT',
                 headers,
-                body: bodyBuffer,
+                body: bodyData,
                 signal: AbortSignal.timeout(timeoutMs)
             })
 
             if (res.status === 200 || res.status === 201 || res.status === 204) {
-                return { success: true, fileName: safeFileName, size: bodyBuffer.length, uploadedAt: Date.now() }
+                return { success: true, fileName: safeFileName, size: byteLength, uploadedAt: Date.now() }
             }
 
             if (res.status === 404) {
@@ -411,15 +446,31 @@ class WebDAVService {
                         await reader.cancel('Download limit exceeded')
                         return { success: false, error: '文件传输超出安全限制 (最大 250MB)，已主动熔断终止' }
                     }
-                    chunks.push(Buffer.from(value))
+                    chunks.push(value)
                 }
 
-                const totalBuffer = Buffer.concat(chunks)
-                return {
-                    success: true,
-                    fileName: safeFileName,
-                    size: totalBuffer.length,
-                    buffer: totalBuffer.buffer.slice(totalBuffer.byteOffset, totalBuffer.byteOffset + totalBuffer.byteLength)
+                if (typeof Buffer !== 'undefined') {
+                    const nodeChunks = chunks.map(c => Buffer.isBuffer(c) ? c : Buffer.from(c))
+                    const totalBuffer = Buffer.concat(nodeChunks)
+                    return {
+                        success: true,
+                        fileName: safeFileName,
+                        size: totalBuffer.length,
+                        buffer: totalBuffer.buffer.slice(totalBuffer.byteOffset, totalBuffer.byteOffset + totalBuffer.byteLength)
+                    }
+                } else {
+                    const totalBytes = new Uint8Array(receivedBytes)
+                    let offset = 0
+                    for (const chunk of chunks) {
+                        totalBytes.set(chunk, offset)
+                        offset += chunk.byteLength
+                    }
+                    return {
+                        success: true,
+                        fileName: safeFileName,
+                        size: totalBytes.byteLength,
+                        buffer: totalBytes.buffer
+                    }
                 }
             }
 
@@ -466,5 +517,10 @@ class WebDAVService {
     }
 }
 
-module.exports = WebDAVService
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = WebDAVService;
+}
+if (typeof window !== 'undefined') {
+    window.WebDAVService = WebDAVService;
+}
 

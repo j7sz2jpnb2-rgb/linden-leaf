@@ -92,17 +92,38 @@ const childGetter = (doc, ns) => {
     }
 }
 
+const safeDecodeURI = str => {
+    if (!str) return str
+    try {
+        return decodeURIComponent(str)
+    } catch {
+        try {
+            return decodeURI(str)
+        } catch {
+            return str
+        }
+    }
+}
+
 const resolveURL = (url, relativeTo) => {
     try {
-        if (relativeTo.includes(':')) return new URL(url, relativeTo)
+        if (!url) return url
+        if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) || url.startsWith('data:') || url.startsWith('blob:')) {
+            return url
+        }
+        if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(relativeTo)) {
+            return new URL(url, relativeTo).href
+        }
         // the base needs to be a valid URL, so set a base URL and then remove it
         const root = 'https://invalid.invalid/'
-        const obj = new URL(url, root + relativeTo)
+        const cleanRel = relativeTo ? (relativeTo.startsWith('/') ? relativeTo.slice(1) : relativeTo) : ''
+        const obj = new URL(url, root + cleanRel)
         obj.search = ''
-        return decodeURI(obj.href.replace(root, ''))
+        const resolvedPath = obj.href.replace(root, '')
+        return safeDecodeURI(resolvedPath)
     } catch(e) {
         console.warn(e)
-        return url
+        return safeDecodeURI(url)
     }
 }
 
@@ -276,10 +297,10 @@ const getMetadata = opf => {
         belongsTo: {
             collection: belongsTo.collection?.map(makeCollection),
             series: belongsTo.series?.map(makeCollection)
-            ?? legacyMeta?.['calibre:series'] ? {
-                name: legacyMeta?.['calibre:series'],
-                position: parseFloat(legacyMeta?.['calibre:series_index']),
-            } : null,
+                ?? (legacyMeta?.['calibre:series'] ? {
+                    name: legacyMeta?.['calibre:series'],
+                    position: parseFloat(legacyMeta?.['calibre:series_index']),
+                } : null),
         },
         altIdentifier: dc.identifier?.map(makeAltIdentifier),
         source: dc.source?.map(makeAltIdentifier), // NOTE: not in webpub schema
@@ -314,7 +335,7 @@ const getMetadata = opf => {
 
 const parseNav = (doc, resolve = f => f) => {
     const { $, $$, $$$ } = childGetter(doc, NS.XHTML)
-    const resolveHref = href => href ? decodeURI(resolve(href)) : null
+    const resolveHref = href => href ? safeDecodeURI(resolve(href)) : null
     const parseLI = getType => $li => {
         const $a = $($li, 'a') ?? $($li, 'span')
         const $ol = $($li, 'ol')
@@ -345,7 +366,7 @@ const parseNav = (doc, resolve = f => f) => {
 
 const parseNCX = (doc, resolve = f => f) => {
     const { $, $$ } = childGetter(doc, NS.NCX)
-    const resolveHref = href => href ? decodeURI(resolve(href)) : null
+    const resolveHref = href => href ? safeDecodeURI(resolve(href)) : null
     const parseItem = el => {
         const $label = $(el, 'navLabel')
         const $content = $(el, 'content')
@@ -674,13 +695,13 @@ class Resources {
             ?? this.getItemByHref(this.guide
                 ?.find(ref => ref.type.includes('cover'))?.href)
 
-        // 1. Detect Calibre duplicate cover in spine (e.g. titlepage.xhtml followed by index_split_000.html)
+        // 1. Detect Calibre duplicate cover in spine (e.g. titlepage.xhtml followed by cover.xhtml)
         if (this.spine.length > 1) {
             const firstItem = this.manifestById.get(this.spine[0].idref)
             const secondItem = this.manifestById.get(this.spine[1].idref)
             if (firstItem && secondItem) {
                 const isFirstTitlepage = /titlepage|calibre/i.test(firstItem.href) || firstItem.id === 'titlepage'
-                const isSecondCover = /split_000|cover/i.test(secondItem.href) || secondItem.id === 'cover'
+                const isSecondCover = /cover/i.test(secondItem.href) || secondItem.id === 'cover'
                 if (isFirstTitlepage && isSecondCover) {
                     this.spine[1].linear = 'no'
                 }
@@ -689,9 +710,15 @@ class Resources {
 
         // 2. Detect missing cover in spine (manifest has cover image, but spine omitted it)
         if (this.cover && this.cover.href) {
+            const guideCoverHref = this.guide?.find(ref => ref.type?.some?.(t => t.includes('cover')) || ref.type?.includes?.('cover'))?.href
             const hasCoverInSpine = this.spine.some(item => {
                 const manifestItem = this.manifestById.get(item.idref)
-                return manifestItem && (manifestItem.href === this.cover.href || /cover|titlepage/i.test(manifestItem.href))
+                if (!manifestItem) return false
+                if (guideCoverHref && (manifestItem.href === guideCoverHref || manifestItem.href.endsWith(guideCoverHref))) return true
+                if (this.cover?.href && manifestItem.href === this.cover.href) return true
+                if (/cover|titlepage/i.test(manifestItem.href) || /cover|titlepage/i.test(manifestItem.id)) return true
+                if (item.properties?.some?.(p => /fullscreen|cover/i.test(p))) return true
+                return false
             })
             if (!hasCoverInSpine) {
                 const syntheticId = '__linden_synthetic_cover__'
@@ -714,24 +741,45 @@ class Resources {
         }
 
         this.cfis = CFI.fromElements($$itemref)
+        if (this.spine[0]?.idref === '__linden_synthetic_cover__') {
+            this.cfis.unshift(null)
+        }
     }
     getItemByID(id) {
         return this.manifestById.get(id)
     }
     getItemByHref(href) {
         if (!href) return null
-        const decoded = decodeURI(href)
-        return this.manifest.find(item => {
-            if (item.href === href || item.href === decoded) return true
+        const decoded = safeDecodeURI(href)
+        const encoded = encodeURI(decoded)
+        const hrefClean = decoded.replace(/^(\.\/|\/)/, '')
+
+        // Priority 1: Exact matches (exact, decoded, encoded, or stripped leading slash)
+        let found = this.manifest.find(item => {
+            if (item.href === href || item.href === decoded || item.href === encoded) return true
             const itemClean = item.href.replace(/^(\.\/|\/)/, '')
-            const hrefClean = decoded.replace(/^(\.\/|\/)/, '')
-            if (itemClean === hrefClean) return true
-            if (hrefClean.endsWith('/' + itemClean) || itemClean.endsWith('/' + hrefClean)) return true
-            const itemBase = itemClean.split('/').pop()
-            const hrefBase = hrefClean.split('/').pop()
-            if (itemBase && itemBase === hrefBase) return true
-            return false
+            return itemClean === hrefClean
         })
+        if (found) return found
+
+        // Priority 2: Relative path suffix match (e.g. OEBPS/Text/ch1.xhtml vs Text/ch1.xhtml)
+        found = this.manifest.find(item => {
+            const itemClean = item.href.replace(/^(\.\/|\/)/, '')
+            return hrefClean.endsWith('/' + itemClean) || itemClean.endsWith('/' + hrefClean)
+        })
+        if (found) return found
+
+        // Priority 3: Basename fallback only when full paths failed completely
+        const hrefBase = hrefClean.split('/').pop()
+        if (hrefBase) {
+            const decodedHrefBase = safeDecodeURI(hrefBase)
+            found = this.manifest.find(item => {
+                const itemClean = item.href.replace(/^(\.\/|\/)/, '')
+                const itemBase = itemClean.split('/').pop()
+                return itemBase === hrefBase || itemBase === decodedHrefBase
+            })
+        }
+        return found ?? null
     }
     getItemByProperty(prop) {
         return this.manifest.find(item => item.properties?.includes(prop))
@@ -748,7 +796,11 @@ class Resources {
             $itemref = CFI.toElement(this.opf, top)
         }
         const idref = $itemref?.getAttribute('idref')
-        const index = this.spine.findIndex(item => item.idref === idref)
+        let index = idref ? this.spine.findIndex(item => item.idref === idref) : -1
+        if (index < 0) {
+            const fakeIdx = CFI.fake.toIndex(top)
+            index = (fakeIdx >= 0 && fakeIdx < this.spine.length) ? fakeIdx : 0
+        }
         const anchor = doc => CFI.toRange(doc, parts)
         return { index, anchor }
     }
@@ -758,6 +810,8 @@ class Loader {
     #cache = new Map()
     #children = new Map()
     #refCount = new Map()
+    #inflight = new Map()
+    #inflightURLs = new Map()
     eventTarget = new EventTarget()
     constructor({ loadText, loadBlob, resources }) {
         this.loadText = loadText
@@ -769,21 +823,35 @@ class Loader {
     }
     async createURL(href, data, type, parent) {
         if (!data) return ''
-        const detail = { data, type }
-        Object.defineProperty(detail, 'name', { value: href }) // readonly
-        const event = new CustomEvent('data', { detail })
-        this.eventTarget.dispatchEvent(event)
-        const newData = await event.detail.data
-        const newType = await event.detail.type
-        const url = URL.createObjectURL(new Blob([newData], { type: newType }))
-        this.#cache.set(href, url)
-        this.#refCount.set(href, 1)
-        if (parent) {
-            const childList = this.#children.get(parent)
-            if (childList) childList.push(href)
-            else this.#children.set(parent, [href])
+        if (this.#cache.has(href)) return this.ref(href, parent)
+        if (this.#inflightURLs.has(href)) {
+            await this.#inflightURLs.get(href)
+            return this.ref(href, parent)
         }
-        return url
+        const promise = (async () => {
+            const detail = { data, type }
+            Object.defineProperty(detail, 'name', { value: href }) // readonly
+            const event = new CustomEvent('data', { detail })
+            this.eventTarget.dispatchEvent(event)
+            const newData = await event.detail.data
+            const newType = await event.detail.type
+            const url = URL.createObjectURL(new Blob([newData], { type: newType }))
+            this.#cache.set(href, url)
+            this.#refCount.set(href, 1)
+            return url
+        })()
+        this.#inflightURLs.set(href, promise)
+        try {
+            const url = await promise
+            if (parent) {
+                const childList = this.#children.get(parent)
+                if (childList) childList.push(href)
+                else this.#children.set(parent, [href])
+            }
+            return url
+        } finally {
+            this.#inflightURLs.delete(href)
+        }
     }
     ref(href, parent) {
         const childList = this.#children.get(parent)
@@ -825,22 +893,58 @@ class Loader {
 
         const parent = parents.at(-1)
         if (this.#cache.has(href)) return this.ref(href, parent)
+        if (this.#inflight.has(href)) {
+            await this.#inflight.get(href)
+            return this.ref(href, parent)
+        }
 
         const shouldReplace =
             (isScript || [MIME.XHTML, MIME.HTML, MIME.CSS, MIME.SVG].includes(mediaType))
             // prevent circular references
             && parents.every(p => p !== href)
-        if (shouldReplace) return this.loadReplaced(item, parents)
-        // NOTE: this can be replaced with `Promise.try()`
-        const tryLoadBlob = Promise.resolve().then(() => this.loadBlob(href))
-        return this.createURL(href, tryLoadBlob, mediaType, parent)
+
+        const load = async () => {
+            if (shouldReplace) return this.loadReplaced(item, parents)
+            // NOTE: this can be replaced with `Promise.try()`
+            const tryLoadBlob = Promise.resolve().then(() => this.loadBlob(href))
+            return this.createURL(href, tryLoadBlob, mediaType, parent)
+        }
+
+        const promise = load()
+        this.#inflight.set(href, promise)
+        try {
+            return await promise
+        } finally {
+            this.#inflight.delete(href)
+        }
     }
     async loadHref(href, base, parents = []) {
         if (isExternal(href)) return href
         const path = resolveURL(href, base)
-        const item = this.manifest.find(item => item.href === path)
-        if (!item) return href
-        return this.loadItem(item, parents.concat(base))
+        const decodedPath = safeDecodeURI(path)
+        const item = this.manifest.find(item => item.href === path || item.href === decodedPath)
+        if (item) return this.loadItem(item, parents.concat(base))
+        // Fallback for unmanifested assets (e.g. CSS, fonts, images missing from OPF manifest)
+        try {
+            const ext = path.split('.').pop()?.toLowerCase()
+            const mime = ext === 'css' ? MIME.CSS
+                : ext === 'png' ? 'image/png'
+                : ext === 'webp' ? 'image/webp'
+                : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
+                : ext === 'svg' ? MIME.SVG
+                : ext === 'woff2' ? 'font/woff2'
+                : ext === 'woff' ? 'font/woff'
+                : ext === 'ttf' ? 'font/ttf'
+                : ext === 'otf' ? 'font/otf'
+                : null
+            if (mime) {
+                const syntheticItem = { href: path, mediaType: mime }
+                return this.loadItem(syntheticItem, parents.concat(base))
+            }
+        } catch (e) {
+            console.warn('Unmanifested asset fallback failed:', e)
+        }
+        return href
     }
     async loadReplaced(item, parents = []) {
         const { href, mediaType } = item
@@ -852,6 +956,9 @@ class Loader {
             return this.createURL(href, Promise.reject(e), mediaType, parent)
         }
         if (!str) return null
+        if (typeof str === 'string' && str.charCodeAt(0) === 0xFEFF) {
+            str = str.slice(1)
+        }
 
         // note that one can also just use `replaceString` for everything:
         // ```
@@ -895,9 +1002,25 @@ class Loader {
             for (const el of doc.querySelectorAll('[src]')) await replace(el, 'src')
             for (const el of doc.querySelectorAll('[poster]')) await replace(el, 'poster')
             for (const el of doc.querySelectorAll('object[data]')) await replace(el, 'data')
-            for (const el of doc.querySelectorAll('[*|href]:not([href])'))
-                el.setAttributeNS(NS.XLINK, 'href', await this.loadHref(
-                    el.getAttributeNS(NS.XLINK, 'href'), href, parents))
+            try {
+                for (const el of doc.querySelectorAll('[*|href]:not([href])')) {
+                    const rawVal = el.getAttributeNS(NS.XLINK, 'href') || el.getAttribute('xlink:href') || el.getAttribute('href')
+                    if (rawVal) {
+                        const replaced = await this.loadHref(rawVal, href, parents)
+                        el.setAttributeNS(NS.XLINK, 'href', replaced)
+                        el.setAttribute('href', replaced)
+                    }
+                }
+            } catch (selErr) {}
+            // Also explicitly process any SVG image, use, and a elements to guarantee dual-attribute compatibility
+            for (const el of doc.querySelectorAll('image, use, svg a')) {
+                const rawVal = el.getAttribute('href') || el.getAttributeNS?.(NS.XLINK, 'href') || el.getAttribute('xlink:href')
+                if (rawVal && !rawVal.startsWith('blob:') && !rawVal.startsWith('data:') && !rawVal.startsWith('#')) {
+                    const replaced = await this.loadHref(rawVal, href, parents)
+                    el.setAttributeNS(NS.XLINK, 'href', replaced)
+                    el.setAttribute('href', replaced)
+                }
+            }
             for (const el of doc.querySelectorAll('[srcset]'))
                 el.setAttribute('srcset', await replaceSeries(el.getAttribute('srcset'),
                     /(\s*)(.+?)\s*((?:\s[\d.]+[wx])+\s*(?:,|$)|,\s+|$)/g,
@@ -966,7 +1089,12 @@ class Loader {
         this.unref(item?.href)
     }
     destroy() {
+        this.#inflight.clear()
+        this.#inflightURLs.clear()
         for (const url of this.#cache.values()) URL.revokeObjectURL(url)
+        this.#cache.clear()
+        this.#refCount.clear()
+        this.#children.clear()
     }
 }
 
@@ -993,34 +1121,61 @@ const getDisplayOptions = doc => {
 
 export class EPUB {
     parser = new DOMParser()
+    loader
     #loader
     #encryption
-    constructor({ loadText, loadBlob, getSize, sha1 }) {
+    #documentURLs = new Map()
+    constructor(loader) {
+        const { loadText, loadBlob, getSize, sha1 } = loader
+        this.loader = loader
         this.loadText = loadText
         this.loadBlob = loadBlob
         this.getSize = getSize
         this.#encryption = new Encryption(deobfuscators(sha1))
     }
     async #loadXML(uri) {
-        const str = await this.loadText(uri)
+        let str = await this.loadText(uri)
         if (!str) return null
+        if (typeof str === 'string' && str.charCodeAt(0) === 0xFEFF) {
+            str = str.slice(1)
+        }
         const doc = this.parser.parseFromString(str, MIME.XML)
-        if (doc.querySelector('parsererror'))
+        if (doc.querySelector('parsererror')) {
+            // Clean malformed comments if initial XML parse fails
+            const cleaned = str.replace(/<!--[\s\S]*?-->/g, '<!-- -->')
+            const retryDoc = this.parser.parseFromString(cleaned, MIME.XML)
+            if (!retryDoc.querySelector('parsererror')) {
+                return retryDoc
+            }
+            // Fallback to text/html parsing for non-standard XML
+            const htmlDoc = this.parser.parseFromString(str, 'text/html')
+            if (htmlDoc && !htmlDoc.querySelector('parsererror')) {
+                return htmlDoc
+            }
             throw new Error(`XML parsing error: ${uri}
 ${doc.querySelector('parsererror').innerText}`)
+        }
         return doc
     }
     async init() {
         const $container = await this.#loadXML('META-INF/container.xml')
         if (!$container) throw new Error('Failed to load container file')
 
-        const opfs = Array.from(
-            $container.getElementsByTagNameNS(NS.CONTAINER, 'rootfile'),
-            getAttributes('full-path', 'media-type'))
-            .filter(file => file.mediaType === 'application/oebps-package+xml')
+        let rootfiles = Array.from(
+            $container.getElementsByTagNameNS(NS.CONTAINER, 'rootfile')
+        )
+        if (!rootfiles.length) {
+            rootfiles = Array.from($container.getElementsByTagName('rootfile'))
+        }
+        const opfs = rootfiles
+            .map(el => ({
+                fullPath: el.getAttribute('full-path'),
+                mediaType: el.getAttribute('media-type')
+            }))
+            .filter(file => !file.mediaType || file.mediaType === 'application/oebps-package+xml')
 
         if (!opfs.length) throw new Error('No package document defined in container')
-        const opfPath = opfs[0].fullPath
+        const opfPath = safeDecodeURI(opfs[0].fullPath)
         const opf = await this.#loadXML(opfPath)
         if (!opf) throw new Error('Failed to load package document')
 
@@ -1048,9 +1203,12 @@ ${doc.querySelector('parsererror').innerText}`)
             return {
                 id: item.href,
                 load: () => this.#loader.loadItem(item),
-                unload: () => this.#loader.unloadItem(item),
+                unload: () => {
+                    this.#loader.unloadItem(item)
+                    this.unloadDocument(item)
+                },
                 createDocument: () => this.loadDocument(item),
-                size: this.getSize(item.href),
+                size: item.id === '__linden_synthetic_cover__' ? 0 : this.getSize(item.href),
                 cfi: this.resources.cfis[index],
                 linear,
                 pageSpread: getPageSpread(properties),
@@ -1097,11 +1255,25 @@ ${doc.querySelector('parsererror').innerText}`)
         }
         return this
     }
+    unloadDocument(item) {
+        const href = typeof item === 'string' ? item : item?.href
+        if (!href) return
+        const set = this.#documentURLs.get(href)
+        if (set) {
+            for (const url of set) URL.revokeObjectURL(url)
+            this.#documentURLs.delete(href)
+        }
+    }
     async loadDocument(item) {
         if (item.mediaType?.startsWith('image/')) {
-            const blob = await this.getCover()
+            const blob = (item.id === '__linden_synthetic_cover__' ? await this.getCover() : await this.loadBlob(item.href)) || (await this.getCover())
             const url = blob ? URL.createObjectURL(blob) : ''
-            const doc = document.implementation.createHTMLDocument('Cover')
+            if (url) {
+                const set = this.#documentURLs.get(item.href) || new Set()
+                set.add(url)
+                this.#documentURLs.set(item.href, set)
+            }
+            const doc = document.implementation.createHTMLDocument(item.id || 'Image')
             doc.body.style.cssText = 'margin: 0; padding: 0; height: 100vh; display: flex; align-items: center; justify-content: center; background-color: transparent;'
             const img = doc.createElement('img')
             img.src = url
@@ -1109,8 +1281,11 @@ ${doc.querySelector('parsererror').innerText}`)
             doc.body.appendChild(img)
             return doc
         }
-        const str = await this.loadText(item.href)
+        let str = await this.loadText(item.href)
         if (!str) return null
+        if (typeof str === 'string' && str.charCodeAt(0) === 0xFEFF) {
+            str = str.slice(1)
+        }
         let doc = this.parser.parseFromString(str, item.mediaType || 'application/xhtml+xml')
         if (doc.querySelector('parsererror')) {
             doc = this.parser.parseFromString(str, 'text/html')
@@ -1131,14 +1306,17 @@ ${doc.querySelector('parsererror').innerText}`)
     }
     resolveHref(href) {
         const [path, hash] = href.split('#')
-        const item = this.resources.getItemByHref(decodeURI(path))
+        const item = this.resources.getItemByHref(safeDecodeURI(path))
         if (!item) return null
         const index = this.resources.spine.findIndex(({ idref }) => idref === item.id)
+        if (index < 0) return null
         const anchor = hash ? doc => getHTMLFragment(doc, hash) : () => 0
         return { index, anchor }
     }
     splitTOCHref(href) {
-        return href?.split('#') ?? []
+        if (!href) return []
+        const [path, hash] = href.split('#')
+        return [safeDecodeURI(path), hash ? safeDecodeURI(hash) : hash]
     }
     getTOCFragment(doc, id) {
         return doc.getElementById(id)
@@ -1149,9 +1327,32 @@ ${doc.querySelector('parsererror').innerText}`)
     }
     async getCover() {
         const cover = this.resources?.cover
-        return cover?.href
-            ? new Blob([await this.loadBlob(cover.href)], { type: cover.mediaType })
-            : null
+        if (!cover?.href) return null
+        if (cover.mediaType?.startsWith('image/')) {
+            const blob = await this.loadBlob(cover.href)
+            return blob ? new Blob([blob], { type: cover.mediaType }) : null
+        }
+        // If cover in manifest/guide is an XHTML wrapper page, extract underlying image
+        if (cover.mediaType?.includes('html') || cover.mediaType?.includes('xml') || cover.href?.endsWith('.xhtml') || cover.href?.endsWith('.html')) {
+            try {
+                const str = await this.loadText(cover.href)
+                if (str) {
+                    const doc = this.parser.parseFromString(str, 'text/html')
+                    const img = doc.querySelector('image[*|href], img[src]')
+                    const src = img?.getAttribute('xlink:href') || img?.getAttribute('src') || img?.getAttribute('href')
+                    if (src) {
+                        const resolved = resolveURL(src, cover.href)
+                        const item = this.resources.getItemByHref(resolved)
+                        const mime = item?.mediaType || (resolved.endsWith('.png') ? 'image/png' : resolved.endsWith('.webp') ? 'image/webp' : 'image/jpeg')
+                        const blob = await this.loadBlob(resolved)
+                        if (blob) return new Blob([blob], { type: mime })
+                    }
+                }
+            } catch (e) {
+                console.warn('Cover extraction from XHTML wrapper failed:', e)
+            }
+        }
+        return null
     }
     async getCalibreBookmarks() {
         const txt = await this.loadText('META-INF/calibre_bookmarks.txt')
@@ -1163,5 +1364,10 @@ ${doc.querySelector('parsererror').innerText}`)
     }
     destroy() {
         this.#loader?.destroy()
+        for (const set of this.#documentURLs.values()) {
+            for (const url of set) URL.revokeObjectURL(url)
+        }
+        this.#documentURLs.clear()
+        this.loader?.destroy?.() ?? this.loader?.close?.()
     }
 }

@@ -240,6 +240,17 @@ export const makeDOCX = async (loader, file) => {
         }
     }
 
+    // Build cross-section anchor index for resolving internal links/TOC
+    const idMap = new Map()
+    finalChapters.forEach((chapter, index) => {
+        const chDoc = parser.parseFromString(`<div id="root">${chapter.elementsHtml.join('\n')}</div>`, 'text/html')
+        chDoc.querySelectorAll('[id], a[name]').forEach(el => {
+            if (el.id && !idMap.has(el.id)) idMap.set(el.id, index)
+            const name = el.getAttribute('name')
+            if (name && !idMap.has(name)) idMap.set(name, index)
+        })
+    })
+
     // Comprehensive HTML to strict XHTML entity sanitizer
     const sanitizeHtmlForXhtml = html => {
         if (!html) return ''
@@ -444,9 +455,13 @@ export const makeDOCX = async (loader, file) => {
         resolveHref: href => {
             if (!href) return { index: 0 }
             const [sectionIdx, anchorId] = href.split('#')
+            let index = sectionIdx !== '' ? parseInt(sectionIdx, 10) : NaN
+            if (isNaN(index) && anchorId) {
+                index = idMap.get(anchorId) ?? 0
+            }
             return {
-                index: parseInt(sectionIdx, 10) || 0,
-                anchor: doc => anchorId ? doc.getElementById(anchorId) : null
+                index: index || 0,
+                anchor: doc => anchorId ? (doc.getElementById(anchorId) || doc.querySelector(`[name="${anchorId}"]`)) : null
             }
         },
         splitTOCHref: href => {
