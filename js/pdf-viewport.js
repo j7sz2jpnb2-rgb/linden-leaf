@@ -663,21 +663,50 @@ export class PdfViewport {
         if (!canvas || !canvas.width || !canvas.height) return
         const bytes = canvas.width * canvas.height * 4
         if (bytes > 16 * 1024 * 1024) return
+
+        let cachedCanvas = null
+        try {
+            cachedCanvas = document.createElement('canvas')
+            cachedCanvas.width = canvas.width
+            cachedCanvas.height = canvas.height
+            cachedCanvas.offsetX = canvas.offsetX || 0
+            cachedCanvas.offsetY = canvas.offsetY || 0
+            const ctx = cachedCanvas.getContext ? cachedCanvas.getContext('2d', { alpha: false }) : null
+            if (ctx && ctx.drawImage) {
+                ctx.drawImage(canvas, 0, 0)
+            }
+        } catch (_) {
+            return
+        }
+
         const key = this._cacheKey(page, scale, clip)
         if (this._bitmapCache.has(key)) {
-            this._bitmapCacheBytes -= this._bitmapCache.get(key).bytes
+            const old = this._bitmapCache.get(key)
+            this._bitmapCacheBytes = Math.max(0, this._bitmapCacheBytes - (old.bytes || 0))
+            if (old?.canvas) {
+                try { old.canvas.width = 0; old.canvas.height = 0 } catch (e) {}
+            }
             this._bitmapCache.delete(key)
         }
         while (this._bitmapCacheBytes + bytes > this._bitmapCacheLimitBytes && this._bitmapCache.size > 0) {
             let victimKey = null
+            // Priority 1: Evict pages that are not current and not currently mounted in DOM
             for (const [k, entry] of this._bitmapCache) {
-                if (entry.page === this.currentPage) continue
+                if (entry.page === this.currentPage || this.activeSlots.has(entry.page)) continue
                 victimKey = k
                 break
             }
+            // Priority 2: Evict mounted pages other than currentPage if needed
+            if (!victimKey) {
+                for (const [k, entry] of this._bitmapCache) {
+                    if (entry.page === this.currentPage) continue
+                    victimKey = k
+                    break
+                }
+            }
             if (!victimKey) victimKey = this._bitmapCache.keys().next().value
             const victim = this._bitmapCache.get(victimKey)
-            this._bitmapCacheBytes -= victim.bytes
+            this._bitmapCacheBytes = Math.max(0, this._bitmapCacheBytes - (victim.bytes || 0))
             if (victim?.canvas) {
                 try {
                     victim.canvas.width = 0
@@ -686,7 +715,7 @@ export class PdfViewport {
             }
             this._bitmapCache.delete(victimKey)
         }
-        this._bitmapCache.set(key, { canvas, bytes, page, scale, clip, time: performance.now() })
+        this._bitmapCache.set(key, { canvas: cachedCanvas, bytes, page, scale, clip, time: performance.now() })
         this._bitmapCacheBytes += bytes
     }
 
@@ -695,13 +724,20 @@ export class PdfViewport {
         while (this._bitmapCacheBytes > target && this._bitmapCache.size > 0) {
             let victimKey = null
             for (const [k, entry] of this._bitmapCache) {
-                if (entry.page === this.currentPage) continue
+                if (entry.page === this.currentPage || this.activeSlots.has(entry.page)) continue
                 victimKey = k
                 break
             }
+            if (!victimKey) {
+                for (const [k, entry] of this._bitmapCache) {
+                    if (entry.page === this.currentPage) continue
+                    victimKey = k
+                    break
+                }
+            }
             if (!victimKey) victimKey = this._bitmapCache.keys().next().value
             const victim = this._bitmapCache.get(victimKey)
-            this._bitmapCacheBytes -= victim.bytes
+            this._bitmapCacheBytes = Math.max(0, this._bitmapCacheBytes - (victim.bytes || 0))
             if (victim?.canvas) {
                 try {
                     victim.canvas.width = 0
@@ -813,7 +849,7 @@ export class PdfViewport {
             let canvas = null
             const cacheKey = this._cacheKey(page, scale, clip)
             const cached = this._bitmapCache.get(cacheKey)
-            if (cached && cached.canvas && !clip) {
+            if (cached && cached.canvas && cached.canvas.width > 0 && cached.canvas.height > 0 && !clip) {
                 canvas = document.createElement('canvas')
                 canvas.width = cached.canvas.width
                 canvas.height = cached.canvas.height
@@ -829,6 +865,10 @@ export class PdfViewport {
                 this._bitmapCache.delete(cacheKey)
                 this._bitmapCache.set(cacheKey, cached)
             } else {
+                if (cached) {
+                    this._bitmapCache.delete(cacheKey)
+                    this._bitmapCacheBytes = Math.max(0, this._bitmapCacheBytes - (cached.bytes || 0))
+                }
                 try {
                     canvas = await this.driver.renderPage(page, scale, signal, clip, priority, generation)
                 } catch (err) {
@@ -1418,9 +1458,16 @@ export class PdfViewport {
         this._inFlightRenders.clear()
         this._activeDriverTasks.clear()
         this._activeRenders = 0
-        for (const slot of this.activeSlots.values()) slot.renderAbort?.abort()
+        for (const [page, slot] of Array.from(this.activeSlots.entries())) {
+            this._unmountSlot(page, slot)
+        }
         this.activeSlots.clear()
         this.highlightsByPage.clear()
+        for (const entry of this._bitmapCache.values()) {
+            if (entry?.canvas) {
+                try { entry.canvas.width = 0; entry.canvas.height = 0 } catch (_) {}
+            }
+        }
         this._bitmapCache.clear()
         this._bitmapCacheBytes = 0
         this._nativeGeometry.clear()

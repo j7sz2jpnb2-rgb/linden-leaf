@@ -410,6 +410,12 @@ export async function requestAiCompletion({
     onChunk,
     signal
 }) {
+    if (signal?.aborted) {
+        const abortErr = new Error('AI request was aborted before start')
+        abortErr.name = 'AbortError'
+        throw abortErr
+    }
+
     const cfg = getAiConfig()
     const targetEndpoint = (endpoint || cfg.endpoint || DEFAULT_AI_CONFIG.endpoint).replace(/\/+$/, '')
     const targetModel = model || cfg.model || DEFAULT_AI_CONFIG.model
@@ -451,8 +457,14 @@ export async function requestAiCompletion({
         }
 
         if (signal) {
+            if (signal.aborted) {
+                abortAiRequest(reqId).catch(() => {})
+                const abortErr = new Error('AI request was aborted')
+                abortErr.name = 'AbortError'
+                return Promise.reject(abortErr)
+            }
             signal.addEventListener('abort', () => {
-                abortAiRequest(reqId)
+                abortAiRequest(reqId).catch(() => {})
             }, { once: true })
         }
 
@@ -482,6 +494,12 @@ export async function requestAiCompletion({
                 unlistenDone = d
                 unlistenStopped = s
                 unlistenError = e
+
+                if (signal?.aborted) {
+                    cleanupListeners()
+                    reject(new DOMException('AI request aborted', 'AbortError'))
+                    return
+                }
 
                 return globalThis.__TAURI__.core.invoke('ai_request_chat_completion', {
                     payload: {

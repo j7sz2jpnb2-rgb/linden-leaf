@@ -1,11 +1,21 @@
 // db.js - IndexedDB storage wrapper for Universal E-Book Reader
 import { buildTranslationRevisionArchive, checkTranslationCompatibility } from './translation-job-core.js'
+import { resolveReadingState } from './tags-manager.js'
 
 const DB_NAME = 'UniversalReaderDB'
 const DB_VERSION = 10
 
 let dbInstance = null
 let _openPromise = null
+
+// Helper: Normalize any timestamp format (epoch ms number, Date object, ISO string) to numerical epoch ms (LL-29)
+export const normalizeTimestampMs = (t) => {
+    if (!t) return 0
+    if (typeof t === 'number') return isNaN(t) ? 0 : t
+    if (t instanceof Date) return t.getTime()
+    const ms = new Date(t).getTime()
+    return isNaN(ms) ? 0 : ms
+}
 
 // Helper: Format Date to local 'YYYY-MM-DD'
 export const toLocalDateKey = (dateInput = new Date()) => {
@@ -220,11 +230,13 @@ export const generateRevision = () => {
     return `rev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 }
 
-export const isContentIdentityMatching = (item, currentSnapshot) => {
+export const isContentIdentityMatching = (item, currentSnapshot, options = {}) => {
     if (!item || !currentSnapshot) return { matches: false, status: 'unconfirmed', pendingConfirmation: true }
 
-    // Different bookId -> never matches
-    if (item.bookId && currentSnapshot.bookId && item.bookId !== currentSnapshot.bookId) {
+    const allowCrossBook = Boolean(options.allowCrossBook || currentSnapshot.allowCrossBook)
+
+    // Different bookId -> if not allowCrossBook, never matches
+    if (!allowCrossBook && item.bookId && currentSnapshot.bookId && item.bookId !== currentSnapshot.bookId) {
         return { matches: false, status: 'different_book', pendingConfirmation: false }
     }
 
@@ -1016,6 +1028,66 @@ export const toggleBookFavorite = async id => {
     })
 }
 
+export const relinkBookFile = async (bookId, fileData = {}) => {
+    if (!bookId) return false
+    const db = await openDB()
+    const origin = await getRevisionOrigin()
+    const { blob = null, nativePath = null, nativeSnapshotPath = null, documentHash = null } = fileData
+
+    return new Promise((resolve, reject) => {
+        const storeNames = ['books', 'book_files'].filter(s => db.objectStoreNames.contains(s))
+        const tx = db.transaction(storeNames, 'readwrite')
+        const bookStore = tx.objectStore('books')
+        const fileStore = db.objectStoreNames.contains('book_files') ? tx.objectStore('book_files') : null
+
+        const bookReq = bookStore.get(bookId)
+        bookReq.onsuccess = () => {
+            const book = bookReq.result
+            if (book) {
+                if (blob) {
+                    book.isCloudOnly = false
+                    book.hasLocalFile = true
+                    book.size = blob.size
+                }
+                if (nativePath !== undefined && nativePath !== null) {
+                    book.nativePath = nativePath
+                    book.filePath = nativePath
+                }
+                book.updatedAt = Date.now()
+                bookStore.put(book)
+            }
+        }
+
+        if (fileStore) {
+            const fileReq = fileStore.get(bookId)
+            fileReq.onsuccess = () => {
+                const local = fileReq.result || { id: bookId }
+                if (blob) {
+                    local.blob = blob
+                    local.blobRevision = generateRevision()
+                    local.revisionOrigin = origin
+                    local.documentHash = documentHash || null
+                    local.nativeSnapshotPath = nativeSnapshotPath || null
+                    local.nativeSnapshotRevision = nativeSnapshotPath ? local.blobRevision : null
+                    local.nativeSnapshotOrigin = nativeSnapshotPath ? origin : null
+                    local.nativeSnapshotSize = nativeSnapshotPath ? blob.size : null
+                } else if (documentHash) {
+                    local.documentHash = documentHash
+                }
+                if (nativePath !== undefined && nativePath !== null) {
+                    local.nativePath = nativePath
+                }
+                local.updatedAt = Date.now()
+                fileStore.put(local)
+            }
+        }
+
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error || new Error(`Failed to relink file for book ${bookId}`))
+        tx.onabort = () => reject(tx.error || new Error(`Transaction aborted relinking book ${bookId}`))
+    })
+}
+
 export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Date.now()) => {
     if (!id) return false
     const db = await openDB()
@@ -1125,6 +1197,52 @@ export const saveHighlight = async highlight => {
     })
 }
 
+export const applySyncedHighlight = async highlight => {
+    if (!highlight || !highlight.id) return null
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const hasDeleted = db.objectStoreNames.contains('deleted_records')
+        const storeNames = hasDeleted ? ['highlights', 'deleted_records'] : ['highlights']
+        const tx = db.transaction(storeNames, 'readwrite')
+        const store = tx.objectStore('highlights')
+        const delStore = hasDeleted ? tx.objectStore('deleted_records') : null
+
+        const incomingTime = highlight.updatedAt || highlight.createdAt || 0
+
+        const checkExistingAndPut = () => {
+            const exReq = store.get(highlight.id)
+            exReq.onsuccess = () => {
+                const ex = exReq.result
+                const exTime = ex ? (ex.updatedAt || ex.createdAt || 0) : 0
+                if (ex && exTime > incomingTime) {
+                    return resolve(false)
+                }
+                store.put(highlight)
+                resolve(true)
+            }
+            exReq.onerror = () => reject(exReq.error || new Error('Failed to get highlight'))
+        }
+
+        if (delStore) {
+            const tombReq = delStore.get(highlight.id)
+            tombReq.onsuccess = () => {
+                const tomb = tombReq.result
+                if (tomb && (tomb.deletedAt || 0) >= incomingTime) {
+                    return resolve(false)
+                }
+                checkExistingAndPut()
+            }
+            tombReq.onerror = () => reject(tombReq.error || new Error('Failed to check deleted_records'))
+        } else {
+            checkExistingAndPut()
+        }
+
+        tx.oncomplete = () => {}
+        tx.onerror = () => reject(tx.error || new Error('Transaction error saving synced highlight'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving synced highlight'))
+    })
+}
+
 export const getHighlightsByBook = async bookId => {
     if (!bookId) return []
     const db = await openDB()
@@ -1180,6 +1298,52 @@ export const saveBookmark = async bookmark => {
         tx.oncomplete = () => resolve(bookmark.id)
         tx.onerror = () => reject(tx.error || new Error('Failed to save bookmark'))
         tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving bookmark'))
+    })
+}
+
+export const applySyncedBookmark = async bookmark => {
+    if (!bookmark || !bookmark.id) return null
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const hasDeleted = db.objectStoreNames.contains('deleted_records')
+        const storeNames = hasDeleted ? ['bookmarks', 'deleted_records'] : ['bookmarks']
+        const tx = db.transaction(storeNames, 'readwrite')
+        const store = tx.objectStore('bookmarks')
+        const delStore = hasDeleted ? tx.objectStore('deleted_records') : null
+
+        const incomingTime = bookmark.updatedAt || bookmark.createdAt || 0
+
+        const checkExistingAndPut = () => {
+            const exReq = store.get(bookmark.id)
+            exReq.onsuccess = () => {
+                const ex = exReq.result
+                const exTime = ex ? (ex.updatedAt || ex.createdAt || 0) : 0
+                if (ex && exTime > incomingTime) {
+                    return resolve(false)
+                }
+                store.put(bookmark)
+                resolve(true)
+            }
+            exReq.onerror = () => reject(exReq.error || new Error('Failed to get bookmark'))
+        }
+
+        if (delStore) {
+            const tombReq = delStore.get(bookmark.id)
+            tombReq.onsuccess = () => {
+                const tomb = tombReq.result
+                if (tomb && (tomb.deletedAt || 0) >= incomingTime) {
+                    return resolve(false)
+                }
+                checkExistingAndPut()
+            }
+            tombReq.onerror = () => reject(tombReq.error || new Error('Failed to check deleted_records'))
+        } else {
+            checkExistingAndPut()
+        }
+
+        tx.oncomplete = () => {}
+        tx.onerror = () => reject(tx.error || new Error('Transaction error saving synced bookmark'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving synced bookmark'))
     })
 }
 
@@ -1315,23 +1479,63 @@ export const getAllReadingSessions = async () => {
         const req = store.getAll()
         req.onsuccess = () => {
             const list = req.result || []
-            list.sort((a, b) => (b.startTime || 0) - (a.startTime || 0))
+            list.sort((a, b) => normalizeTimestampMs(b.startTime) - normalizeTimestampMs(a.startTime))
             resolve(list)
         }
         req.onerror = () => reject(req.error || new Error('Failed to get sessions'))
     })
 }
 
+export const getSessionDur = s => {
+    if (!s) return 0
+    const v = s.durationSeconds != null ? s.durationSeconds
+        : s.readingSeconds != null ? s.readingSeconds
+        : s.seconds != null ? s.seconds : 0
+    return typeof v === 'number' && !isNaN(v) && v > 0 ? Math.round(v) : 0
+}
+
+export const computeActiveSessionSeconds = (sessList) => {
+    if (!sessList) return 0
+    const rawIntervals = []
+    let unintervaledSeconds = 0
+    for (const s of sessList) {
+        const dur = getSessionDur(s)
+        if (dur <= 0) continue
+        // Only construct intervals if activeIntervals was explicitly recorded (LL-28)
+        if (Array.isArray(s.activeIntervals) && s.activeIntervals.length > 0) {
+            for (const iv of s.activeIntervals) {
+                if (Array.isArray(iv) && iv.length >= 2) {
+                    const st = normalizeTimestampMs(iv[0])
+                    const et = normalizeTimestampMs(iv[1])
+                    if (et > st) {
+                        rawIntervals.push([st, et])
+                    }
+                }
+            }
+        } else {
+            unintervaledSeconds += dur
+        }
+    }
+    if (rawIntervals.length === 0) return unintervaledSeconds
+    rawIntervals.sort((a, b) => a[0] - b[0])
+    let unionSecs = 0
+    let cur = [rawIntervals[0][0], rawIntervals[0][1]]
+    for (let i = 1; i < rawIntervals.length; i++) {
+        const next = rawIntervals[i]
+        if (next[0] <= cur[1]) {
+            cur[1] = Math.max(cur[1], next[1])
+        } else {
+            unionSecs += Math.round((cur[1] - cur[0]) / 1000)
+            cur = [next[0], next[1]]
+        }
+    }
+    unionSecs += Math.round((cur[1] - cur[0]) / 1000)
+    return unionSecs + unintervaledSeconds
+}
+
 // Calculate Reading Full Statistics (Supports Week, Month, Year, Total views)
 export const getReadingStats = async (viewMode = 'month', targetYear = new Date().getFullYear(), targetMonth = new Date().getMonth() + 1, weekOffset = 0) => {
     const allRawSessions = await getAllReadingSessions()
-    const getSessionDur = s => {
-        if (!s) return 0
-        const v = s.durationSeconds != null ? s.durationSeconds
-            : s.readingSeconds != null ? s.readingSeconds
-            : s.seconds != null ? s.seconds : 0
-        return typeof v === 'number' && !isNaN(v) && v > 0 ? Math.round(v) : 0
-    }
     const sessions = allRawSessions.filter(s => s && getSessionDur(s) > 0)
     const books = await getAllBooks()
     const highlights = await getAllHighlights()
@@ -1345,49 +1549,15 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
     const activeDates = new Set()
     let earliestTime = now.getTime()
 
-    const computeActiveSessionSeconds = (sessList) => {
-        const rawIntervals = []
-        let unintervaledSeconds = 0
-        for (const s of sessList) {
-            const dur = getSessionDur(s)
-            if (dur <= 0) continue
-            if (s.startTime) {
-                const startMs = s.startTime
-                const endMs = s.endTime || (startMs + dur * 1000)
-                if (endMs > startMs) {
-                    rawIntervals.push([startMs, endMs])
-                } else {
-                    unintervaledSeconds += dur
-                }
-            } else {
-                unintervaledSeconds += dur
-            }
-        }
-        if (rawIntervals.length === 0) return unintervaledSeconds
-        rawIntervals.sort((a, b) => a[0] - b[0])
-        let unionSecs = 0
-        let cur = [rawIntervals[0][0], rawIntervals[0][1]]
-        for (let i = 1; i < rawIntervals.length; i++) {
-            const next = rawIntervals[i]
-            if (next[0] <= cur[1]) {
-                cur[1] = Math.max(cur[1], next[1])
-            } else {
-                unionSecs += Math.round((cur[1] - cur[0]) / 1000)
-                cur = [next[0], next[1]]
-            }
-        }
-        unionSecs += Math.round((cur[1] - cur[0]) / 1000)
-        return unionSecs + unintervaledSeconds
-    }
-
     const dayGroupMap = new Map()
     for (const sess of sessions) {
         const d = sess.date || toLocalDateKey(sess.startTime || now)
         if (!dayGroupMap.has(d)) dayGroupMap.set(d, [])
         dayGroupMap.get(d).push(sess)
 
-        if (sess.startTime && sess.startTime < earliestTime) {
-            earliestTime = sess.startTime
+        const sStart = normalizeTimestampMs(sess.startTime)
+        if (sStart && sStart < earliestTime) {
+            earliestTime = sStart
         }
     }
 
@@ -1408,35 +1578,25 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         }
     }
 
-    // Include book totalReadingSeconds fallback if sessions store is empty
-    if (sessions.length === 0) {
-        for (const b of books) {
-            if (b.totalReadingSeconds && b.totalReadingSeconds > 0) {
-                const bTime = b.lastReadAt || b.addedAt || now.getTime()
-                const d = toLocalDateKey(bTime)
-                dailyMap[d] = (dailyMap[d] || 0) + b.totalReadingSeconds
-                const ym = d.slice(0, 7)
-                monthlyMap[ym] = (monthlyMap[ym] || 0) + b.totalReadingSeconds
-                const y = d.slice(0, 4)
-                yearlyMap[y] = (yearlyMap[y] || 0) + b.totalReadingSeconds
-                if (bTime < earliestTime) earliestTime = bTime
-                totalSeconds += b.totalReadingSeconds
-            }
-        }
-        for (const [d, daySecs] of Object.entries(dailyMap)) {
-            if (daySecs >= 60) {
-                activeDates.add(d)
-            }
+    // Isolate books with total reading time but no session records into unallocatedHistoricalSeconds
+    // rather than fabricating daily reading time, streaks, or active dates (LL-43)
+    let unallocatedHistoricalSeconds = 0
+    for (const b of books) {
+        if (b.totalReadingSeconds && b.totalReadingSeconds > 0) {
+            const bTime = b.lastReadAt || b.addedAt || now.getTime()
+            if (bTime < earliestTime) earliestTime = bTime
         }
     }
-
     let totalBookFallback = 0
     for (const b of books) {
         if (b.totalReadingSeconds && b.totalReadingSeconds > 0) {
             totalBookFallback += b.totalReadingSeconds
         }
     }
-    const finalTotalSeconds = Math.max(totalSeconds, totalBookFallback)
+    if (totalBookFallback > totalSeconds) {
+        unallocatedHistoricalSeconds = totalBookFallback - totalSeconds
+    }
+    const finalTotalSeconds = totalSeconds + unallocatedHistoricalSeconds
 
     // Calculate true consecutive reading streak days
     let streakDays = 0
@@ -1467,7 +1627,7 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
 
     // 1. Overall Stats
     const todaySeconds = dailyMap[todayStr] || 0
-    const finishedCount = books.filter(b => b.readingStatus === 'finished' || Boolean(b.completedAt)).length
+    const finishedCount = books.filter(b => resolveReadingState(b) === 'finished').length
     const companionDays = Math.max(1, Math.floor((now.getTime() - earliestTime) / (86400 * 1000)) + 1)
 
     // 2. View Specific Distribution Charts
@@ -1701,7 +1861,27 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
             .sort((a, b) => b.periodReadingSeconds - a.periodReadingSeconds)
     }
 
-    const periodFinishedBooks = periodBooks.filter(b => (b.progress?.fraction || 0) >= 0.99 || b.isFinished)
+    const isCompletedInPeriod = (b) => {
+        if (!b) return false
+        const isFinished = resolveReadingState(b) === 'finished'
+        if (!isFinished) return false
+        if (viewMode === 'total') return true
+        if (b.completedAt) {
+            const d = toLocalDateKey(b.completedAt)
+            if (viewMode === 'week') {
+                return d >= mondayKey && d <= sundayKey
+            }
+            if (viewMode === 'month') {
+                return d.startsWith(monthPrefix)
+            }
+            if (viewMode === 'year') {
+                return d.startsWith(yearPrefix)
+            }
+            return true
+        }
+        return false
+    }
+    const periodFinishedBooks = books.filter(isCompletedInPeriod)
 
     const periodHighlights = highlights.filter(h => {
         if (!h) return false
@@ -1738,6 +1918,7 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         viewReadDays,
         totalSeconds: finalTotalSeconds,
         totalHours: parseFloat((finalTotalSeconds / 3600).toFixed(1)),
+        unallocatedHistoricalSeconds,
         streakDays,
         activeDaysCount: activeDates.size,
         companionDays,
@@ -1779,6 +1960,52 @@ export const saveCustomList = async listData => {
         }
         tx.oncomplete = () => resolve(listData)
         tx.onerror = () => reject(tx.error || new Error('Failed to save custom list'))
+    })
+}
+
+export const applySyncedCustomList = async listData => {
+    if (!listData || !listData.id) return null
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const hasDeleted = db.objectStoreNames.contains('deleted_records')
+        const storeNames = hasDeleted ? ['custom_lists', 'deleted_records'] : ['custom_lists']
+        const tx = db.transaction(storeNames, 'readwrite')
+        const store = tx.objectStore('custom_lists')
+        const delStore = hasDeleted ? tx.objectStore('deleted_records') : null
+
+        const incomingTime = listData.updatedAt || listData.createdAt || 0
+
+        const checkExistingAndPut = () => {
+            const exReq = store.get(listData.id)
+            exReq.onsuccess = () => {
+                const ex = exReq.result
+                const exTime = ex ? (ex.updatedAt || ex.createdAt || 0) : 0
+                if (ex && exTime > incomingTime) {
+                    return resolve(false)
+                }
+                store.put(listData)
+                resolve(true)
+            }
+            exReq.onerror = () => reject(exReq.error || new Error('Failed to get custom list'))
+        }
+
+        if (delStore) {
+            const tombReq = delStore.get(listData.id)
+            tombReq.onsuccess = () => {
+                const tomb = tombReq.result
+                if (tomb && (tomb.deletedAt || 0) >= incomingTime) {
+                    return resolve(false)
+                }
+                checkExistingAndPut()
+            }
+            tombReq.onerror = () => reject(tombReq.error || new Error('Failed to check deleted_records'))
+        } else {
+            checkExistingAndPut()
+        }
+
+        tx.oncomplete = () => {}
+        tx.onerror = () => reject(tx.error || new Error('Transaction error saving synced custom list'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving synced custom list'))
     })
 }
 
@@ -2011,73 +2238,69 @@ export const getPdfPageDrawing = async (bookId, pageIndex, versionMeta = {}) => 
         const tx = db.transaction('pdf_drawings', 'readonly')
         const store = tx.objectStore('pdf_drawings')
 
-        const verifyAndResolve = (record) => {
+        const verifyAndResolve = (record, allowCross = false) => {
             if (!record) return null
-            const match = isContentIdentityMatching(record, { bookId, blobRevision, revisionOrigin, documentHash })
+            const match = isContentIdentityMatching(record, { bookId, blobRevision, revisionOrigin, documentHash }, { allowCrossBook: allowCross })
             return match.matches ? record : null
         }
 
+        const candidates = []
         if (blobRevision) {
-            const candidates = []
             if (revisionOrigin) {
                 candidates.push(`${bookId}_orig_${revisionOrigin}_rev_${blobRevision}_page_${pageIndex}`)
             }
             candidates.push(`${bookId}_rev_${blobRevision}_page_${pageIndex}`)
-            candidates.push(`${bookId}_page_${pageIndex}`)
+        }
+        candidates.push(`${bookId}_page_${pageIndex}`)
 
-            const checkNextCandidate = () => {
-                if (candidates.length === 0) return resolve(null)
-                const candidateKey = candidates.shift()
-                const req = store.get(candidateKey)
-                req.onsuccess = () => {
-                    const record = req.result
-                    if (record) {
-                        const verified = verifyAndResolve(record)
-                        if (verified) {
-                            return resolve(verified)
-                        }
-                        // If record fails identity check due to hash conflict or different revision/book, reject immediately!
-                        const match = isContentIdentityMatching(record, { bookId, blobRevision, revisionOrigin, documentHash })
-                        if (match.status === 'hash_conflict' || match.status === 'different_book') {
-                            return resolve(null)
-                        }
+        const checkCrossDeviceHashFallback = () => {
+            if (!documentHash || typeof store.openCursor !== 'function') return resolve(null)
+            const req = store.openCursor()
+            req.onsuccess = (e) => {
+                const cursor = e.target.result
+                if (cursor) {
+                    const record = cursor.value
+                    if (record && record.pageIndex === pageIndex && record.documentHash === documentHash) {
+                        const verified = verifyAndResolve(record, true)
+                        if (verified) return resolve(verified)
                     }
-                    checkNextCandidate()
+                    cursor.continue()
+                } else {
+                    resolve(null)
                 }
-                req.onerror = () => resolve(null)
             }
+            req.onerror = () => resolve(null)
+        }
 
-            checkNextCandidate()
-        } else {
-            const req = store.get(`${bookId}_page_${pageIndex}`)
+        const checkNextCandidate = () => {
+            if (candidates.length === 0) return checkCrossDeviceHashFallback()
+            const candidateKey = candidates.shift()
+            const req = store.get(candidateKey)
             req.onsuccess = () => {
                 const record = req.result
-                if (!record) return resolve(null)
-                if (documentHash || revisionOrigin) {
+                if (record) {
+                    const verified = verifyAndResolve(record)
+                    if (verified) {
+                        return resolve(verified)
+                    }
                     const match = isContentIdentityMatching(record, { bookId, blobRevision, revisionOrigin, documentHash })
-                    if (!match.matches) return resolve(null)
+                    if (match.status === 'hash_conflict') {
+                        return resolve(null)
+                    }
                 }
-                resolve(record)
+                checkNextCandidate()
             }
-            req.onerror = () => reject(req.error || new Error('Failed to get PDF drawing'))
+            req.onerror = () => checkNextCandidate()
         }
+
+        checkNextCandidate()
     })
 }
 
 export const clearPdfPageDrawing = async (bookId, pageIndex, recordTombstone = true, tombstoneTime = Date.now(), versionMeta = {}) => {
     if (!bookId || pageIndex == null) return false
     const db = await openDB()
-    const { blobRevision = null, revisionOrigin = null } = versionMeta
-    const keysToDelete = []
-    if (blobRevision) {
-        if (revisionOrigin) {
-            keysToDelete.push(`${bookId}_orig_${revisionOrigin}_rev_${blobRevision}_page_${pageIndex}`)
-        } else {
-            keysToDelete.push(`${bookId}_rev_${blobRevision}_page_${pageIndex}`)
-        }
-    } else {
-        keysToDelete.push(`${bookId}_page_${pageIndex}`)
-    }
+    const { blobRevision = null, revisionOrigin = null, documentHash = null } = versionMeta
 
     return new Promise((resolve, reject) => {
         const storeNames = recordTombstone && db.objectStoreNames.contains('deleted_records')
@@ -2085,17 +2308,72 @@ export const clearPdfPageDrawing = async (bookId, pageIndex, recordTombstone = t
             : ['pdf_drawings']
         const tx = db.transaction(storeNames, 'readwrite')
         const drawStore = tx.objectStore('pdf_drawings')
-        for (const k of keysToDelete) {
-            drawStore.delete(k)
+        const delStore = (recordTombstone && storeNames.includes('deleted_records'))
+            ? tx.objectStore('deleted_records')
+            : null
+
+        const candidateKeys = new Set()
+        if (blobRevision) {
+            if (revisionOrigin) {
+                candidateKeys.add(`${bookId}_orig_${revisionOrigin}_rev_${blobRevision}_page_${pageIndex}`)
+            }
+            candidateKeys.add(`${bookId}_rev_${blobRevision}_page_${pageIndex}`)
         }
-        if (recordTombstone && storeNames.includes('deleted_records')) {
-            const delStore = tx.objectStore('deleted_records')
+        candidateKeys.add(`${bookId}_page_${pageIndex}`)
+
+        if (typeof drawStore.openCursor === 'function') {
+            const req = drawStore.openCursor()
+            req.onsuccess = (e) => {
+                const cursor = e.target.result
+                if (cursor) {
+                    const key = String(cursor.key)
+                    const record = cursor.value
+                    const keyMatches = (key.startsWith(`${bookId}_`) && key.endsWith(`_page_${pageIndex}`)) || candidateKeys.has(key)
+                    const recordMatches = (record?.bookId === bookId && record?.pageIndex === pageIndex)
+
+                    if (keyMatches || recordMatches) {
+                        let shouldDelete = true
+                        if (documentHash || revisionOrigin || blobRevision) {
+                            const match = isContentIdentityMatching(record, { bookId, blobRevision, revisionOrigin, documentHash })
+                            if (!match.matches && match.status !== 'legacy_migrated') {
+                                shouldDelete = false
+                            }
+                        }
+                        if (shouldDelete) {
+                            cursor.delete()
+                            if (delStore) {
+                                delStore.put({
+                                    id: key,
+                                    type: 'pdfDrawing',
+                                    deletedAt: tombstoneTime
+                                })
+                            }
+                        }
+                    }
+                    cursor.continue()
+                }
+            }
+            req.onerror = () => reject(req.error || new Error('Failed to cursor scan PDF drawings'))
+        } else {
+            const keysToDelete = []
+            if (blobRevision) {
+                if (revisionOrigin) {
+                    keysToDelete.push(`${bookId}_orig_${revisionOrigin}_rev_${blobRevision}_page_${pageIndex}`)
+                } else {
+                    keysToDelete.push(`${bookId}_rev_${blobRevision}_page_${pageIndex}`)
+                }
+            } else {
+                keysToDelete.push(`${bookId}_page_${pageIndex}`)
+            }
             for (const k of keysToDelete) {
-                delStore.put({
-                    id: k,
-                    type: 'pdfDrawing',
-                    deletedAt: tombstoneTime
-                })
+                drawStore.delete(k)
+                if (delStore) {
+                    delStore.put({
+                        id: k,
+                        type: 'pdfDrawing',
+                        deletedAt: tombstoneTime
+                    })
+                }
             }
         }
         tx.oncomplete = () => resolve(true)

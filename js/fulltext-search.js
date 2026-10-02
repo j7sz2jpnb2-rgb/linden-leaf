@@ -125,9 +125,22 @@ export function extractCleanTextFromHtml(html) {
         .replace(/&hellip;/g, '…')
         .replace(/&copy;/g, '©')
         .replace(/&reg;/g, '®')
-        .replace(/&trade;/g, '™')
-        .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(dec))
-        .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+        .replace(/&#(\d+);/g, (_, dec) => {
+            try {
+                const code = parseInt(dec, 10)
+                return (code >= 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)) ? String.fromCodePoint(code) : ''
+            } catch (_) {
+                return ''
+            }
+        })
+        .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+            try {
+                const code = parseInt(hex, 16)
+                return (code >= 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)) ? String.fromCodePoint(code) : ''
+            } catch (_) {
+                return ''
+            }
+        })
     return cleaned.replace(/\r\n|\r/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n\n').trim()
 }
 
@@ -171,7 +184,10 @@ export class FullTextSearchEngine {
     async indexBook(bookId, signal) {
         if (!bookId) return false
         const book = await this.db.getBook(bookId)
-        if (!book) return false
+        if (!book) {
+            await this.removeBookIndex(bookId)
+            return false
+        }
         const format = (book.format || '').toLowerCase()
         if (!this.isFormatSupported(format)) return false
 

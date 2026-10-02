@@ -255,9 +255,17 @@ class WebDAVService {
                 return { exists: false, error: `拉取云端数据失败 (HTTP ${res.status}): ${res.statusText}`, etag: null }
             }
 
+            const contentLength = parseInt(res.headers.get('content-length') || '0', 10)
+            if (contentLength > 20 * 1024 * 1024) {
+                return { exists: false, error: '云端同步文件大小超过 20MB 安全上限', etag: null }
+            }
+
             const text = await res.text()
             if (!text || !text.trim()) {
                 return { exists: false, data: null, etag }
+            }
+            if (text.length > 20 * 1024 * 1024) {
+                return { exists: false, error: '云端同步文件大小超过 20MB 安全上限', etag: null }
             }
 
             const data = JSON.parse(text)
@@ -276,7 +284,14 @@ class WebDAVService {
 
         const fileUrl = this.normalizeUrl(serverUrl, `${remoteDir}/${fileName}`)
         const auth = this.getAuthHeader(username, password)
-        const jsonString = JSON.stringify(data, null, 2)
+        const jsonString = JSON.stringify(data)
+        const payloadBytes = (new TextEncoder().encode(jsonString)).length
+        if (payloadBytes > 20 * 1024 * 1024) {
+            return {
+                success: false,
+                error: `同步数据过大 (${(payloadBytes / 1024 / 1024).toFixed(1)} MiB)，超过 20 MiB 限制`
+            }
+        }
 
         const headers = {
             'Authorization': auth,
@@ -285,6 +300,8 @@ class WebDAVService {
         // RFC 7232: Weak ETags (starting with W/) must NOT be sent in If-Match header
         if (etag && typeof etag === 'string' && !etag.startsWith('W/')) {
             headers['If-Match'] = etag
+        } else if (!etag) {
+            headers['If-None-Match'] = '*'
         }
 
         try {

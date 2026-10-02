@@ -229,7 +229,7 @@ export class ChapterTranslationManager {
     }
 
     handleToolbarClick() {
-        if (!FEATURE_CHAPTER_TRANSLATION_ENABLED) return
+        if (!FEATURE_CHAPTER_TRANSLATION_ENABLED && this.app && !this.enabled) return
         if (this.isTranslating) {
             this.showBilingualBar()
             return

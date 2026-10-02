@@ -15,7 +15,7 @@ pub struct AiState {
     pub last_dispatched_at: Mutex<Option<Instant>>,
     pub cooldown_seconds: AtomicU64,
     pub active_request_id: Mutex<Option<String>>,
-    pub abort_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    pub abort_tx: Mutex<Option<(String, tokio::sync::oneshot::Sender<()>)>>,
     pub daily_limit: AtomicU32,
     pub seen_requests: Mutex<HashMap<String, (Instant, String)>>,
     pub recent_payload_hashes: Mutex<HashMap<u64, (String, Instant)>>,
@@ -238,7 +238,11 @@ impl<'a> Drop for RequestLockGuard<'a> {
             *active = None;
         }
         let mut tx_guard = self.state.abort_tx.lock().unwrap();
-        *tx_guard = None;
+        if let Some((ref req, _)) = *tx_guard {
+            if req == &self.request_id {
+                *tx_guard = None;
+            }
+        }
 
         let status = self.final_status.lock().unwrap().clone();
         let mut seen = self.state.seen_requests.lock().unwrap();
@@ -298,8 +302,15 @@ pub fn ai_abort_request(state: tauri::State<'_, AiState>, request_id: Option<Str
 
     if should_abort {
         let mut tx_guard = state.abort_tx.lock().unwrap();
-        if let Some(tx) = tx_guard.take() {
-            let _ = tx.send(());
+        let matches_req = match (tx_guard.as_ref(), request_id.as_deref()) {
+            (Some((cur_req, _)), Some(req)) => cur_req == req,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if matches_req {
+            if let Some((_, tx)) = tx_guard.take() {
+                let _ = tx.send(());
+            }
         }
         if let Some(ref req) = request_id {
             if active.as_deref() == Some(req) {
@@ -471,7 +482,10 @@ pub async fn ai_request_chat_completion(
         }
     }
 
-    // Atomically claim lock, update dispatch time, and increment daily count ONLY AFTER pre-flight validation passes!
+    // Setup abort channel before claiming lock so both active_request_id and abort_tx are registered atomically
+    let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Atomically claim lock, register abort channel, update dispatch time, and increment daily count
     {
         let mut active = state.active_request_id.lock().unwrap();
         if let Some(ref cur) = *active {
@@ -481,6 +495,9 @@ pub async fn ai_request_chat_completion(
             ));
         }
         *active = Some(req_id.clone());
+        let mut tx_guard = state.abort_tx.lock().unwrap();
+        *tx_guard = Some((req_id.clone(), abort_tx));
+
         let mut last_disp = state.last_dispatched_at.lock().unwrap();
         *last_disp = Some(Instant::now());
         let mut seen = state.seen_requests.lock().unwrap();
@@ -488,13 +505,6 @@ pub async fn ai_request_chat_completion(
         let mut hashes = state.recent_payload_hashes.lock().unwrap();
         hashes.insert(payload_hash, (req_id.clone(), Instant::now()));
         increment_today_count();
-    }
-
-    // Setup abort channel and RAII lock release
-    let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<()>();
-    {
-        let mut tx_guard = state.abort_tx.lock().unwrap();
-        *tx_guard = Some(abort_tx);
     }
     let _guard = RequestLockGuard {
         state: &state,

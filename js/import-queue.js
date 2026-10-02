@@ -13,9 +13,26 @@ export const findDuplicateBook = (existingBooks, { format, fileName = '', fileOb
     const rawBase = fileName.replace(/\.[^/.]+$/, '').trim().toLowerCase()
     const isGenericTitle = !rawTitle || GENERIC_TITLES.includes(rawTitle) || GENERIC_TITLES.includes(rawBase)
 
+    const metaAuthor = (metadata.author || '').trim().toLowerCase()
+    const isKnownAuthor = metaAuthor && !metaAuthor.includes('未知') && !metaAuthor.includes('unknown')
+
     return existingBooks.find(b => {
         if (b.format !== format) return false
-        // Strict stableKey / identifier match always proves duplicate identity even for generic title
+
+        const bAuthor = (b.author || '').trim().toLowerCase()
+        const isKnownBAuthor = bAuthor && !bAuthor.includes('未知') && !bAuthor.includes('unknown')
+
+        // If both books have distinct, known authors, they are definitely different books!
+        if (isKnownAuthor && isKnownBAuthor && bAuthor !== metaAuthor) {
+            return false
+        }
+
+        // Different bytes: must NOT silently replace even if same identifier or title (LL-01)
+        if (b.size && fileObj.size && b.size !== fileObj.size) {
+            return false
+        }
+
+        // Strict stableKey / identifier match proves duplicate identity when authors and bytes are compatible
         if (b.stableKey && computedStableKey && b.stableKey === computedStableKey) return true
         if (metadata.identifier && b.identifier && metadata.identifier === b.identifier) return true
 
@@ -28,16 +45,6 @@ export const findDuplicateBook = (existingBooks, { format, fileName = '', fileOb
         const bTitle = (b.title || '').trim().toLowerCase()
         const titleMatches = bTitle === rawTitle || bTitle === rawBase
         if (!titleMatches) return false
-
-        const bAuthor = (b.author || '').trim().toLowerCase()
-        const metaAuthor = (metadata.author || '').trim().toLowerCase()
-        const isKnownAuthor = metaAuthor && !metaAuthor.includes('未知') && !metaAuthor.includes('unknown')
-        const isKnownBAuthor = bAuthor && !bAuthor.includes('未知') && !bAuthor.includes('unknown')
-
-        // If both books have distinct, known authors, they are definitely different books!
-        if (isKnownAuthor && isKnownBAuthor && bAuthor !== metaAuthor) {
-            return false
-        }
 
         if (b.size && fileObj.size && b.size === fileObj.size) return true
         if (isKnownAuthor && bAuthor && bAuthor === metaAuthor) return true

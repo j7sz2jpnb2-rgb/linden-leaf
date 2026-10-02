@@ -107,12 +107,12 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
         }
     }
 
-    // 5. Reading Progress & Last Read
-    const localReadTime = localBook.lastReadAt || 0
-    const inReadTime = incomingMeta.lastReadAt || 0
+    // 5. Reading Progress & Last Read (strictly compare progress timestamps; do NOT fall back to lastReadAt which changes during listening / browsing)
+    const localProgressTime = localBook.progress?.updatedAt || localBook.progress?.timestamp || 0
+    const inProgressTime = incomingMeta.progress?.updatedAt || incomingMeta.progress?.timestamp || 0
     let isIncomingReadNewer = false
-    if (inReadTime !== localReadTime) {
-        isIncomingReadNewer = inReadTime > localReadTime
+    if (inProgressTime !== localProgressTime) {
+        isIncomingReadNewer = inProgressTime > localProgressTime
     } else {
         const inFrac = incomingMeta.progress?.fraction || 0
         const locFrac = localBook.progress?.fraction || 0
@@ -124,8 +124,9 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
     }
 
     const progress = isIncomingReadNewer ? (incomingMeta.progress || localBook.progress) : (localBook.progress || incomingMeta.progress)
-    const lastReadAt = Math.max(localReadTime, inReadTime)
+    const lastReadAt = Math.max(localBook.lastReadAt || 0, incomingMeta.lastReadAt || 0, localProgressTime, inProgressTime)
     const totalReadingSeconds = Math.max(localBook.totalReadingSeconds || 0, incomingMeta.totalReadingSeconds || 0)
+    const totalListeningSeconds = Math.max(localBook.totalListeningSeconds || 0, incomingMeta.totalListeningSeconds || 0)
 
     // 6. Cloud Backup: newer uploadedAt wins
     let cloudBackup = localBook.cloudBackup || null
@@ -160,6 +161,7 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
         progress,
         lastReadAt,
         totalReadingSeconds,
+        totalListeningSeconds,
         cloudBackup
     }
 }
@@ -195,6 +197,7 @@ export const buildBookSyncMeta = (b) => {
         ratingUpdatedAt: b.ratingUpdatedAt || 0,
         lastReadAt: b.lastReadAt || 0,
         totalReadingSeconds: b.totalReadingSeconds || 0,
+        totalListeningSeconds: b.totalListeningSeconds || 0,
         addedAt: b.addedAt || Date.now(),
         updatedAt: b.updatedAt || b.lastReadAt || b.addedAt || Date.now(),
         cloudBackup: b.cloudBackup || (b.cloudBackupState === 'synced' ? {
@@ -240,6 +243,49 @@ export const exportSyncPayload = async () => {
         chapterTranslations,
         deletedRecords: deletedRecords || []
     }
+}
+
+export const mergeDrawingStrokes = (strokesA = [], strokesB = []) => {
+    const strokeMap = new Map()
+    const formatPt = (pt) => {
+        if (!pt) return ''
+        const x = Array.isArray(pt) ? pt[0] : pt.x
+        const y = Array.isArray(pt) ? pt[1] : pt.y
+        const fx = typeof x === 'number' ? x.toFixed(2) : String(x ?? '')
+        const fy = typeof y === 'number' ? y.toFixed(2) : String(y ?? '')
+        return `${fx},${fy}`
+    }
+    const getStrokeKey = (s) => {
+        if (!s) return null
+        if (s.id) return String(s.id)
+        const pts = Array.isArray(s.points) ? s.points : []
+        const p0 = formatPt(pts[0])
+        const pN = pts.length > 1 ? formatPt(pts[pts.length - 1]) : ''
+        return `${s.color || ''}_${s.width || ''}_${s.tool || ''}_${pts.length}_${p0}_${pN}`
+    }
+
+    for (const s of strokesA) {
+        if (!s) continue
+        const key = getStrokeKey(s)
+        if (key) strokeMap.set(key, s)
+    }
+
+    for (const s of strokesB) {
+        if (!s) continue
+        const key = getStrokeKey(s)
+        if (!key) continue
+        if (!strokeMap.has(key)) {
+            strokeMap.set(key, s)
+        } else {
+            const existing = strokeMap.get(key)
+            const sTime = s.updatedAt || s.timestamp || 0
+            const exTime = existing.updatedAt || existing.timestamp || 0
+            if (sTime > exTime) {
+                strokeMap.set(key, s)
+            }
+        }
+    }
+    return Array.from(strokeMap.values())
 }
 
 /**
@@ -409,7 +455,7 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
             const remoteReadTime = rLastRead || 0
             const reconciled = reconcileBookSyncMeta(localBook, cleanRemoteBook, localPayload.clientId, remotePayload.clientId)
 
-            if (remoteReadTime > localReadTime || cleanRemoteBook.totalReadingSeconds !== localBook.totalReadingSeconds) {
+            if (remoteReadTime > localReadTime || cleanRemoteBook.totalReadingSeconds !== localBook.totalReadingSeconds || cleanRemoteBook.totalListeningSeconds !== localBook.totalListeningSeconds) {
                 stats.booksUpdated++
             }
 
@@ -421,6 +467,7 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
                 progress: reconciled.progress,
                 lastReadAt: reconciled.lastReadAt,
                 totalReadingSeconds: reconciled.totalReadingSeconds,
+                totalListeningSeconds: reconciled.totalListeningSeconds,
                 customListIds: reconciled.customListIds,
                 tags: reconciled.tags,
                 tagsUpdatedAt: reconciled.tagsUpdatedAt,
@@ -560,8 +607,9 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
     const remoteSetTime = remotePayload.settings?.updatedAt || 0
     const mergedSettings = remoteSetTime > localSetTime ? remotePayload.settings : localPayload.settings
 
-    // H. Merge PDF Drawings (LWW by id and updatedAt, filtered by book tombstones and BookId Remapping)
+    // H. Merge PDF Drawings (Stroke-level merge by identity, filtered by book tombstones and BookId Remapping)
     const drawingMap = new Map()
+
     ;(remotePayload.pdfDrawings || []).forEach(d => {
         if (d && d.id) {
             let targetBookId = d.bookId
@@ -581,9 +629,14 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
             drawingMap.set(localId, localRecord)
         } else {
             const remoteD = drawingMap.get(localId)
-            if (localUpdated >= (remoteD.updatedAt || 0)) {
-                drawingMap.set(localId, localRecord)
-            }
+            const mergedStrokes = mergeDrawingStrokes(remoteD.strokes || [], localRecord.strokes || [])
+            const isLocalNewer = localUpdated >= (remoteD.updatedAt || 0)
+            const baseRecord = isLocalNewer ? localRecord : remoteD
+            drawingMap.set(localId, {
+                ...baseRecord,
+                strokes: mergedStrokes,
+                updatedAt: Math.max(localUpdated, remoteD.updatedAt || 0)
+            })
         }
     })
     const mergedPdfDrawings = Array.from(drawingMap.values()).filter(d => {
@@ -813,7 +866,11 @@ export const applyMergedPayload = async mergedPayload => {
     // B. Apply custom lists
     if (Array.isArray(mergedPayload.customLists)) {
         for (const list of mergedPayload.customLists) {
-            await db.saveCustomList(list)
+            if (typeof db.applySyncedCustomList === 'function') {
+                await db.applySyncedCustomList(list)
+            } else {
+                await db.saveCustomList(list)
+            }
         }
     }
 
@@ -883,6 +940,10 @@ export const applyMergedPayload = async mergedPayload => {
                     localBook.totalReadingSeconds = reconciled.totalReadingSeconds
                     changed = true
                 }
+                if (reconciled.totalListeningSeconds > (localBook.totalListeningSeconds || 0)) {
+                    localBook.totalListeningSeconds = reconciled.totalListeningSeconds
+                    changed = true
+                }
                 if (reconciled.cloudBackup && (!localBook.cloudBackup || (reconciled.cloudBackup.uploadedAt || 0) >= (localBook.cloudBackup?.uploadedAt || 0))) {
                     localBook.cloudBackup = reconciled.cloudBackup
                     changed = true
@@ -936,7 +997,7 @@ export const applyMergedPayload = async mergedPayload => {
     }
 
 
-    // D. Apply Highlights (with BookId Remapping)
+    // D. Apply Highlights (with BookId Remapping and Local Tombstone / Edit Protection)
     if (Array.isArray(mergedPayload.highlights)) {
         for (const hl of mergedPayload.highlights) {
             if (!hl) continue
@@ -946,11 +1007,15 @@ export const applyMergedPayload = async mergedPayload => {
             if (hl.bookId && deletedBookIds.includes(hl.bookId)) {
                 continue
             }
-            await db.saveHighlight(hl)
+            if (typeof db.applySyncedHighlight === 'function') {
+                await db.applySyncedHighlight(hl)
+            } else {
+                await db.saveHighlight(hl)
+            }
         }
     }
 
-    // E. Apply Bookmarks (with BookId Remapping)
+    // E. Apply Bookmarks (with BookId Remapping and Local Tombstone Protection)
     if (Array.isArray(mergedPayload.bookmarks)) {
         for (const bm of mergedPayload.bookmarks) {
             if (!bm) continue
@@ -960,7 +1025,11 @@ export const applyMergedPayload = async mergedPayload => {
             if (bm.bookId && deletedBookIds.includes(bm.bookId)) {
                 continue
             }
-            await db.saveBookmark(bm)
+            if (typeof db.applySyncedBookmark === 'function') {
+                await db.applySyncedBookmark(bm)
+            } else {
+                await db.saveBookmark(bm)
+            }
         }
     }
 
@@ -985,12 +1054,16 @@ export const applyMergedPayload = async mergedPayload => {
         await db.setSetting('readerSettings', mergedSettings)
     }
 
-    // H. Apply PDF Drawings (with BookId Remapping)
+    // H. Apply PDF Drawings (with BookId Remapping and Local Tombstone / Edit Protection)
     if (Array.isArray(mergedPayload.pdfDrawings) && mergedPayload.pdfDrawings.length > 0) {
         const dbInstance = await db.openDB()
         if (dbInstance.objectStoreNames.contains('pdf_drawings')) {
-            const tx = dbInstance.transaction('pdf_drawings', 'readwrite')
+            const hasDeleted = dbInstance.objectStoreNames.contains('deleted_records')
+            const storeNames = hasDeleted ? ['pdf_drawings', 'deleted_records'] : ['pdf_drawings']
+            const tx = dbInstance.transaction(storeNames, 'readwrite')
             const store = tx.objectStore('pdf_drawings')
+            const delStore = hasDeleted ? tx.objectStore('deleted_records') : null
+
             mergedPayload.pdfDrawings.forEach(d => {
                 if (!d) return
                 let targetBookId = d.bookId
@@ -1002,11 +1075,38 @@ export const applyMergedPayload = async mergedPayload => {
                 if (d.bookId && deletedBookIds.includes(d.bookId)) {
                     return
                 }
-                store.put(d)
+                const incomingTime = d.updatedAt || 0
+                if (delStore) {
+                    const tombReq = delStore.get(d.id)
+                    tombReq.onsuccess = () => {
+                        const tomb = tombReq.result
+                        if (tomb && (tomb.deletedAt || 0) >= incomingTime) {
+                            return
+                        }
+                        const exReq = store.get(d.id)
+                        exReq.onsuccess = () => {
+                            const ex = exReq.result
+                            if (ex && (ex.updatedAt || 0) > incomingTime) {
+                                return
+                            }
+                            store.put(d)
+                        }
+                    }
+                } else {
+                    const exReq = store.get(d.id)
+                    exReq.onsuccess = () => {
+                        const ex = exReq.result
+                        if (ex && (ex.updatedAt || 0) > incomingTime) {
+                            return
+                        }
+                        store.put(d)
+                    }
+                }
             })
             await new Promise((res, rej) => {
                 tx.oncomplete = () => res()
                 tx.onerror = () => rej(tx.error || new Error('Failed to save pdf drawings transaction'))
+                tx.onabort = () => rej(tx.error || new Error('PDF drawings transaction aborted'))
             })
         }
     }

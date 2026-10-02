@@ -188,6 +188,7 @@ export class AdvancedSettingsManager {
             // 4. Annotations CSS variables
             if (this.config.highlighterOpacity != null) {
                 document.documentElement.style.setProperty('--annotation-highlighter-opacity', String(this.config.highlighterOpacity))
+                document.documentElement.style.setProperty('--overlayer-highlight-opacity', String(this.config.highlighterOpacity))
             }
             if (this.config.underlineWidth != null) {
                 document.documentElement.style.setProperty('--annotation-underline-width', `${this.config.underlineWidth}px`)
@@ -776,6 +777,25 @@ export class AdvancedSettingsManager {
             this.exportFullDataBackup()
         })
 
+        const restoreFileInput = document.getElementById('input-restore-full-data-file')
+        document.getElementById('btn-restore-full-data-backup')?.addEventListener('click', () => {
+            if (restoreFileInput) {
+                restoreFileInput.value = ''
+                restoreFileInput.click()
+            }
+        })
+        restoreFileInput?.addEventListener('change', async (e) => {
+            const file = e.target.files?.[0]
+            if (!file) return
+            try {
+                const text = await file.text()
+                const data = JSON.parse(text)
+                await this.restoreFullDataBackup(data)
+            } catch (err) {
+                this.app?.showToast?.(`恢复失败: ${err.message}`, 'warning')
+            }
+        })
+
         document.getElementById('btn-relink-missing-book')?.addEventListener('click', () => {
             this.relinkMissingBook()
         })
@@ -820,10 +840,13 @@ export class AdvancedSettingsManager {
 
     async exportFullDataBackup() {
         try {
-            const [sessions, highlights, books] = await Promise.all([
-                db.getAllReadingSessions?.().catch(() => []) || [],
-                db.getAllHighlights?.().catch(() => []) || [],
-                db.getAllBooks?.().catch(() => []) || []
+            const [sessions, highlights, books, bookmarks, drawings, customLists] = await Promise.all([
+                db.getAllReadingSessions ? db.getAllReadingSessions() : Promise.resolve([]),
+                db.getAllHighlights ? db.getAllHighlights() : Promise.resolve([]),
+                db.getAllBooks ? db.getAllBooks() : Promise.resolve([]),
+                db.getAllBookmarks ? db.getAllBookmarks() : Promise.resolve([]),
+                db.getAllPdfDrawings ? db.getAllPdfDrawings() : Promise.resolve([]),
+                db.getAllCustomLists ? db.getAllCustomLists() : Promise.resolve([])
             ])
 
             const safeConfig = { ...this.config }
@@ -834,20 +857,30 @@ export class AdvancedSettingsManager {
 
             const payload = {
                 format: 'linden-leaf-full-backup',
-                schemaVersion: 2,
+                schemaVersion: 3,
                 exportedAt: new Date().toISOString(),
                 config: safeConfig,
                 sessions,
                 highlights,
+                bookmarks,
+                drawings,
+                customLists,
+                readingLists: customLists,
                 books: books.map(b => ({
                     id: b.id,
                     title: b.title,
                     author: b.author,
                     format: b.format,
+                    readingStatus: b.readingStatus,
+                    completedAt: b.completedAt,
+                    rating: b.rating,
+                    tags: b.tags,
+                    customListIds: b.customListIds,
                     totalReadingSeconds: b.totalReadingSeconds,
                     totalListeningSeconds: b.totalListeningSeconds,
                     lastReadAt: b.lastReadAt,
-                    currentLocation: b.currentLocation
+                    currentLocation: b.currentLocation,
+                    progress: b.progress
                 }))
             }
 
@@ -864,6 +897,96 @@ export class AdvancedSettingsManager {
         } catch (e) {
             this.app?.showToast?.(`备份导出失败: ${e.message}`, 'warning')
         }
+    }
+
+    async restoreFullDataBackup(backupData) {
+        if (!backupData || typeof backupData !== 'object') {
+            throw new Error('无效的备份数据格式')
+        }
+        if (backupData.format !== 'linden-leaf-full-backup' && !backupData.schemaVersion) {
+            throw new Error('不支持的备份文件格式')
+        }
+
+        let restoredBooks = 0
+        let restoredSessions = 0
+        let restoredHighlights = 0
+        let restoredBookmarks = 0
+        let restoredDrawings = 0
+        let restoredLists = 0
+
+        // 1. Books: merge or restore
+        if (Array.isArray(backupData.books)) {
+            for (const b of backupData.books) {
+                if (!b || !b.id) continue
+                const existing = await (db.getBook ? db.getBook(b.id) : null)
+                if (existing) {
+                    const merged = { ...existing, ...b }
+                    await db.saveBook(merged)
+                } else if (db.saveBook) {
+                    await db.saveBook(b)
+                }
+                restoredBooks++
+            }
+        }
+
+        // 2. Reading Sessions
+        if (Array.isArray(backupData.sessions) && db.saveReadingSession) {
+            for (const s of backupData.sessions) {
+                if (!s || !s.id) continue
+                await db.saveReadingSession(s)
+                restoredSessions++
+            }
+        }
+
+        // 3. Highlights
+        if (Array.isArray(backupData.highlights) && db.saveHighlight) {
+            for (const h of backupData.highlights) {
+                if (!h || !h.id) continue
+                await db.saveHighlight(h)
+                restoredHighlights++
+            }
+        }
+
+        // 4. Bookmarks
+        if (Array.isArray(backupData.bookmarks) && db.saveBookmark) {
+            for (const bm of backupData.bookmarks) {
+                if (!bm || !bm.id) continue
+                await db.saveBookmark(bm)
+                restoredBookmarks++
+            }
+        }
+
+        // 5. PDF Drawings
+        if (Array.isArray(backupData.drawings) && db.savePdfPageDrawing) {
+            for (const d of backupData.drawings) {
+                if (!d || !d.bookId || d.pageIndex == null) continue
+                await db.savePdfPageDrawing(d.bookId, d.pageIndex, d.strokes || [], d)
+                restoredDrawings++
+            }
+        }
+
+        // 6. Custom Lists
+        const lists = backupData.customLists || backupData.readingLists
+        if (Array.isArray(lists) && db.saveCustomList) {
+            for (const l of lists) {
+                if (!l || !l.id) continue
+                await db.saveCustomList(l)
+                restoredLists++
+            }
+        }
+
+        // 7. Advanced Config
+        if (backupData.config && typeof backupData.config === 'object') {
+            Object.assign(this.config, backupData.config)
+            this.applyRuntimeConfig()
+            this.save()
+        }
+
+        this.app?.showToast?.(`备份恢复完成：${restoredBooks} 本书，${restoredHighlights} 条划线，${restoredSessions} 条记录`, 'success')
+        if (this.app?.renderShelf) {
+            this.app.renderShelf()
+        }
+        return { restoredBooks, restoredSessions, restoredHighlights, restoredBookmarks, restoredDrawings, restoredLists }
     }
 
     async relinkMissingBook() {
@@ -887,9 +1010,14 @@ export class AdvancedSettingsManager {
                 const picked = await invoke('dialog_open_file')
                 const newPath = picked?.[0]?.filePath
                 if (newPath) {
-                    targetBook.filePath = newPath
-                    targetBook.updatedAt = Date.now()
-                    await db.updateBook?.(targetBook)
+                    if (db.relinkBookFile) {
+                        await db.relinkBookFile(targetBook.id, { nativePath: newPath })
+                    } else {
+                        targetBook.nativePath = newPath
+                        targetBook.filePath = newPath
+                        targetBook.updatedAt = Date.now()
+                        await db.updateBook?.(targetBook)
+                    }
                     this.app?.showToast?.(`已成功将《${targetBook.title}》重新关联至: ${newPath}`, 'success')
                     if (this.app?.loadBookshelf) this.app.loadBookshelf()
                     return

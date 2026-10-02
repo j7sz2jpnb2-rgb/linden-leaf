@@ -7240,11 +7240,6 @@ input[type="range"].control-input::-moz-range-thumb,
   .tts-select-voice {
     max-width: 90px;
   }
-  .reader-dictionary-card {
-    width: calc(100vw - 32px) !important;
-    left: 16px !important;
-    right: 16px !important;
-  }
 }
 
 /* ==========================================================================
@@ -7402,6 +7397,14 @@ input[type="range"].control-input::-moz-range-thumb,
 
 .btn-dict-action.btn-dict-ai:hover {
   background: rgba(139, 92, 246, 0.15);
+}
+
+@media (max-width: 768px) {
+  .reader-dictionary-card {
+    width: calc(100vw - 32px) !important;
+    left: 16px !important;
+    right: 16px !important;
+  }
 }
 
 /* ==========================================================================

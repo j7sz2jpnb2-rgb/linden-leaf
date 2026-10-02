@@ -939,48 +939,126 @@ export class TtsPlayer {
             this.sessionBookOwner = null
         }
 
-        if (intervals.length === 0) return
+        if (!this._pendingListeningBatches) {
+            this._pendingListeningBatches = []
+        }
 
-        // Compute union of intervals to strictly exclude pauses and prevent double-counting
-        intervals.sort((a, b) => a[0] - b[0])
-        let unionSecs = 0
-        let cur = null
-        for (const [s, e] of intervals) {
-            if (!cur) {
-                cur = [s, e]
-            } else if (s <= cur[1]) {
-                cur[1] = Math.max(cur[1], e)
-            } else {
-                unionSecs += (cur[1] - cur[0]) / 1000
-                cur = [s, e]
+        if (intervals.length > 0) {
+            // Compute union of active intervals to strictly exclude pauses and prevent double-counting
+            intervals.sort((a, b) => a[0] - b[0])
+            const mergedIntervals = []
+            let cur = null
+            for (const [s, e] of intervals) {
+                if (!cur) {
+                    cur = [s, e]
+                } else if (s <= cur[1]) {
+                    cur[1] = Math.max(cur[1], e)
+                } else {
+                    mergedIntervals.push(cur)
+                    cur = [s, e]
+                }
+            }
+            if (cur) {
+                mergedIntervals.push(cur)
+            }
+
+            const bookId = owner?.bookId
+            if (bookId && mergedIntervals.length > 0) {
+                const bookTitle = owner?.bookTitle || '未知书籍'
+                const firstStart = mergedIntervals[0][0]
+                const baseId = `tts_${firstStart}_${Math.random().toString(36).slice(2, 6)}`
+
+                // Split each active interval by local calendar midnight (LL-30)
+                const splitSlices = []
+                for (const [intStart, intEnd] of mergedIntervals) {
+                    let curStart = intStart
+                    while (curStart < intEnd) {
+                        const curDate = new Date(curStart)
+                        const nextMidnight = new Date(curDate.getFullYear(), curDate.getMonth(), curDate.getDate() + 1, 0, 0, 0, 0)
+                        const nextMidnightMs = nextMidnight.getTime()
+                        const curEnd = Math.min(intEnd, nextMidnightMs)
+                        const localDateKey = (typeof db.toLocalDateKey === 'function')
+                            ? db.toLocalDateKey(new Date(curStart))
+                            : new Date(curStart).toLocaleDateString('en-CA')
+                        splitSlices.push({
+                            startMs: curStart,
+                            endMs: curEnd,
+                            durationSeconds: (curEnd - curStart) / 1000,
+                            date: localDateKey
+                        })
+                        curStart = curEnd
+                    }
+                }
+
+                // Group slices by calendar date to create consolidated records per day
+                const dayGroups = new Map()
+                for (const sl of splitSlices) {
+                    if (!dayGroups.has(sl.date)) {
+                        dayGroups.set(sl.date, { date: sl.date, startMs: sl.startMs, endMs: sl.endMs, durationSeconds: 0 })
+                    }
+                    const grp = dayGroups.get(sl.date)
+                    grp.durationSeconds += sl.durationSeconds
+                    grp.startMs = Math.min(grp.startMs, sl.startMs)
+                    grp.endMs = Math.max(grp.endMs, sl.endMs)
+                }
+
+                const records = []
+                let sliceIdx = 0
+                for (const grp of dayGroups.values()) {
+                    const dur = Math.round(grp.durationSeconds)
+                    if (dur > 0) {
+                        records.push({
+                            id: sliceIdx === 0 ? baseId : `${baseId}_slice_${sliceIdx}`,
+                            parentSessionId: baseId,
+                            sliceIndex: sliceIdx,
+                            bookId,
+                            bookTitle,
+                            startTime: grp.startMs, // Numerical epoch ms (LL-29)
+                            endTime: grp.endMs,     // Numerical epoch ms (LL-29)
+                            durationSeconds: dur,
+                            isListening: true,
+                            kind: 'listen',
+                            date: grp.date
+                        })
+                        sliceIdx++
+                    }
+                }
+
+                if (records.length > 0) {
+                    this._pendingListeningBatches.push({
+                        id: baseId,
+                        bookId,
+                        records
+                    })
+                }
             }
         }
-        if (cur) {
-            unionSecs += (cur[1] - cur[0]) / 1000
+
+        // Process pending batches (LL-31)
+        if (this._pendingListeningBatches.length === 0) return Promise.resolve()
+
+        const processBatches = async () => {
+            const batches = [...this._pendingListeningBatches]
+            for (const batch of batches) {
+                try {
+                    for (const record of batch.records) {
+                        await db.recordReadingSession(record)
+                    }
+                    const idx = this._pendingListeningBatches.indexOf(batch)
+                    if (idx !== -1) {
+                        this._pendingListeningBatches.splice(idx, 1)
+                    }
+                } catch (e) {
+                    console.debug('Failed to record TTS session batch, will retry:', e)
+                    throw e
+                }
+            }
         }
 
-        const bookId = owner?.bookId
-        if (unionSecs >= 2 && bookId) {
-            const bookTitle = owner?.bookTitle || '未知书籍'
-            const dur = Math.round(unionSecs)
-            const firstStart = intervals[0][0]
-            const lastEnd = intervals[intervals.length - 1][1]
-            const todayStr = (typeof db.toLocalDateKey === 'function')
-                ? db.toLocalDateKey(new Date(firstStart))
-                : new Date(firstStart).toLocaleDateString('en-CA')
-
-            db.recordReadingSession({
-                id: `tts_${firstStart}_${Math.random().toString(36).slice(2, 6)}`,
-                bookId,
-                bookTitle,
-                startTime: new Date(firstStart).toISOString(),
-                endTime: new Date(lastEnd).toISOString(),
-                durationSeconds: dur,
-                isListening: true,
-                kind: 'listen',
-                date: todayStr
-            }).catch(e => console.debug('Failed to record TTS session:', e))
-        }
+        return processBatches().catch(e => {
+            // Keep error logged but handled; batches remain in _pendingListeningBatches for subsequent flush retry
+            console.debug('TTS session flush deferred for retry:', e)
+        })
     }
 
     pause(notifyProvider = true) {

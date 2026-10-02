@@ -317,6 +317,17 @@ const buildContentCSS = (settings) => {
             padding: 1em 0 !important;
             background: transparent !important;
         }
+        /* Decorative chapter title boxes (e.g. Shibusawa .k, .k1, .k2, .k3, .k4, .k5) */
+        .k, .k1, .k2, .k3, .k4, .k5 {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+            -webkit-column-break-inside: avoid !important;
+            box-sizing: border-box !important;
+        }
+        .k2, .k4, .k5 {
+            padding-top: clamp(1em, 6vh, 2.5em) !important;
+            padding-bottom: clamp(1em, 6vh, 2.5em) !important;
+        }
         /* Decorative chapter title card: .k > .k1 > .k2 (e.g. Shibusawa part0004.html) */
         html:has(body > .k:only-child) body,
         body:has(> .k:only-child) {
@@ -789,14 +800,30 @@ class PdfDrawingMutationQueue {
     enqueue(bookId, pageIndex, task) {
         const key = `${bookId}:${pageIndex}`
         const prev = this._queues.get(key) || Promise.resolve()
-        const next = prev.then(task, task)
+        const next = prev.then(() => task(), () => task())
         this._queues.set(key, next)
-        next.finally(() => {
+        const cleanup = () => {
             if (this._queues.get(key) === next) {
                 this._queues.delete(key)
             }
-        })
+        }
+        next.then(cleanup, cleanup)
         return next
+    }
+    async drainAll(timeoutMs = 5000) {
+        const promises = Array.from(this._queues.values())
+        if (promises.length === 0) return
+        const drainPromise = Promise.allSettled(promises)
+        if (!timeoutMs || timeoutMs <= 0) {
+            await drainPromise
+            return
+        }
+        let timer = null
+        const timeoutPromise = new Promise(resolve => {
+            timer = setTimeout(resolve, timeoutMs)
+        })
+        await Promise.race([drainPromise, timeoutPromise])
+        if (timer) clearTimeout(timer)
     }
 }
 
@@ -947,6 +974,8 @@ class UniversalReaderApp {
         this.pdfOverlayCanvas = null
         this._pdfMutationQueue = new PdfDrawingMutationQueue()
         this._pdfPageStrokesCache = new Map()
+        this._inFlightDrawingLoads = new Map()
+        this._drawingPageGenerations = new Map()
         this._pdfOcrTaskId = 0
         this._pdfOcrAbortController = null
 
@@ -4335,7 +4364,7 @@ class UniversalReaderApp {
                     if (this.currentBookId === bookId && this.currentPdfPageIndex === pIdx) {
                         this._currentPdfPageStrokes = []
                     }
-                })
+                }).catch(err => console.warn('[PdfDrawing] Clear mutation error:', err))
             }
             if (activeSession && !activeSession.isCurrent()) return
             this.showToast(isTwoPage ? '已清空当前双页手绘批注' : '已清空当前页手绘批注', 'delete')
@@ -5586,9 +5615,16 @@ class UniversalReaderApp {
         return list[0] || null
     }
 
-    _getOrInitPageStrokes(bookId, pageIdx) {
+    _getPdfDrawingCacheKey(bookId, pageIdx, snapshot = null) {
+        const snap = snapshot || this._currentSnapshot || {}
+        const rev = snap.blobRevision || ''
+        const origin = snap.revisionOrigin || ''
+        return `${bookId}:${pageIdx}:${rev}:${origin}`
+    }
+
+    _getOrInitPageStrokes(bookId, pageIdx, snapshot = null) {
         if (!bookId || pageIdx == null) return []
-        const key = `${bookId}:${pageIdx}`
+        const key = this._getPdfDrawingCacheKey(bookId, pageIdx, snapshot)
         if (!this._pdfPageStrokesCache.has(key)) {
             this._pdfPageStrokesCache.set(key, [])
         }
@@ -5597,7 +5633,15 @@ class UniversalReaderApp {
 
     _clearPdfPageStrokesCache(bookId, pageIdx) {
         if (!bookId || pageIdx == null) return
-        this._pdfPageStrokesCache.delete(`${bookId}:${pageIdx}`)
+        const prefix = `${bookId}:${pageIdx}`
+        if (this._drawingPageGenerations) {
+            this._drawingPageGenerations.set(prefix, (this._drawingPageGenerations.get(prefix) || 0) + 1)
+        }
+        for (const k of Array.from(this._pdfPageStrokesCache.keys())) {
+            if (k === prefix || k.startsWith(`${prefix}:`)) {
+                this._pdfPageStrokesCache.delete(k)
+            }
+        }
     }
 
     _enqueuePdfDrawingMutation(bookId, pageIdx, snapshot, task) {
@@ -5671,17 +5715,46 @@ class UniversalReaderApp {
         const bookId = this.currentBookId
         const snapshot = this._currentSnapshot || {}
         const session = readerSession || this._activeSession
-        const key = `${bookId}:${pageIdx}`
+        const key = this._getPdfDrawingCacheKey(bookId, pageIdx, snapshot)
+        const prefix = `${bookId}:${pageIdx}`
+        const startGen = this._drawingPageGenerations?.get(prefix) || 0
 
         let strokes
         if (this._pdfPageStrokesCache.has(key)) {
             strokes = this._pdfPageStrokesCache.get(key)
         } else {
-            const drawingRecord = await db.getPdfPageDrawing(bookId, pageIdx, snapshot)
+            if (!this._inFlightDrawingLoads) this._inFlightDrawingLoads = new Map()
+            let loadPromise = this._inFlightDrawingLoads.get(key)
+            if (!loadPromise) {
+                loadPromise = db.getPdfPageDrawing(bookId, pageIdx, snapshot).finally(() => {
+                    this._inFlightDrawingLoads.delete(key)
+                })
+                this._inFlightDrawingLoads.set(key, loadPromise)
+            }
+            const drawingRecord = await loadPromise
             if (session && !session.isCurrent()) return
             if (this.currentBookId !== bookId) return
-            strokes = drawingRecord?.strokes || []
-            this._pdfPageStrokesCache.set(key, strokes)
+
+            const curGen = this._drawingPageGenerations?.get(prefix) || 0
+            if (curGen !== startGen) {
+                return
+            }
+
+            if (this._pdfPageStrokesCache.has(key)) {
+                const currentCache = this._pdfPageStrokesCache.get(key) || []
+                const diskStrokes = drawingRecord?.strokes || []
+                const existingKeys = new Set(currentCache.map(s => s.id || JSON.stringify(s.points?.[0])))
+                for (const ds of diskStrokes) {
+                    const dKey = ds.id || JSON.stringify(ds.points?.[0])
+                    if (!existingKeys.has(dKey)) {
+                        currentCache.unshift(ds)
+                    }
+                }
+                strokes = currentCache
+            } else {
+                strokes = drawingRecord?.strokes || []
+                this._pdfPageStrokesCache.set(key, strokes)
+            }
         }
 
         if (this.currentBookId !== bookId) return
@@ -5786,8 +5859,20 @@ class UniversalReaderApp {
         const cssW = p?.width || slot.offsetWidth || 800
         const cssH = p?.height || slot.offsetHeight || 1100
         const dpr = Math.min(window.devicePixelRatio || 1, 2)
-        const backingW = Math.min(4096, Math.max(1, Math.round(cssW * dpr)))
-        const backingH = Math.min(4096, Math.max(1, Math.round(cssH * dpr)))
+        let backingW = Math.max(1, Math.round(cssW * dpr))
+        let backingH = Math.max(1, Math.round(cssH * dpr))
+
+        const MAX_DIM = 4096
+        const MAX_PIXELS = 16 * 1024 * 1024
+        if (backingW > MAX_DIM || backingH > MAX_DIM || (backingW * backingH) > MAX_PIXELS) {
+            const scale = Math.min(
+                MAX_DIM / backingW,
+                MAX_DIM / backingH,
+                Math.sqrt(MAX_PIXELS / (backingW * backingH))
+            )
+            backingW = Math.max(1, Math.round(backingW * scale))
+            backingH = Math.max(1, Math.round(backingH * scale))
+        }
 
         let resized = false
         if (baseCanvas.width !== backingW || baseCanvas.height !== backingH) {
@@ -5935,7 +6020,9 @@ class UniversalReaderApp {
         const p0 = stroke.points[0]
         ctx.moveTo(p0[0] * w, p0[1] * h)
 
-        const useSmoothing = this.advancedSettings?.config?.pdfSmoothing !== false
+        const useSmoothing = stroke.smoothingMode
+            ? (stroke.smoothingMode !== 'none')
+            : (this.advancedSettings?.config?.pdfSmoothing !== false)
         if (stroke.points.length === 1) {
             ctx.lineTo(p0[0] * w + 0.5, p0[1] * h + 0.5)
         } else if (!useSmoothing || stroke.points.length < 3) {
@@ -5987,6 +6074,7 @@ class UniversalReaderApp {
         let isDrawing = false
         let currentStroke = null
         let rafId = null
+        let lastDrawnPointIndex = 0
 
         const getCoords = e => {
             const rect = activeCanvas.getBoundingClientRect()
@@ -6009,6 +6097,7 @@ class UniversalReaderApp {
             if (!isDrawing) return
             isDrawing = false
             cancelPendingRaf()
+            lastDrawnPointIndex = 0
 
             if (activePointerId != null) {
                 try {
@@ -6024,7 +6113,7 @@ class UniversalReaderApp {
             const snapshot = this._currentSnapshot || {}
 
             if (commit && strokeToSave && strokeToSave.points.length > 0 && bookId) {
-                const strokes = this._getOrInitPageStrokes(bookId, pageIdx)
+                const strokes = this._getOrInitPageStrokes(bookId, pageIdx, snapshot)
                 strokes.push(strokeToSave)
 
                 const baseCtx = baseCanvas.getContext('2d')
@@ -6039,9 +6128,7 @@ class UniversalReaderApp {
                 }
 
                 this._enqueuePdfDrawingMutation(bookId, pageIdx, snapshot, async () => {
-                    if (session && !session.isCurrent()) return
                     const drawingRecord = await db.getPdfPageDrawing(bookId, pageIdx, snapshot)
-                    if (session && !session.isCurrent()) return
                     const existingStrokes = drawingRecord?.strokes || []
                     existingStrokes.push(strokeToSave)
                     await db.savePdfPageDrawing(bookId, pageIdx, existingStrokes, snapshot)
@@ -6049,13 +6136,13 @@ class UniversalReaderApp {
                     if (this.currentBookId === bookId && this.currentPdfPageIndex === pageIdx) {
                         this._currentPdfPageStrokes = existingStrokes
                     }
-                })
+                }).catch(err => console.warn('[PdfDrawing] Save mutation error:', err))
             } else {
                 if (activeCanvas !== baseCanvas) {
                     const activeCtx = activeCanvas.getContext('2d')
                     activeCtx.clearRect(0, 0, activeCanvas.width, activeCanvas.height)
                 }
-                const strokes = this._getOrInitPageStrokes(bookId, pageIdx)
+                const strokes = this._getOrInitPageStrokes(bookId, pageIdx, snapshot)
                 const baseCtx = baseCanvas.getContext('2d')
                 baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
                 strokes.forEach(s => {
@@ -6077,12 +6164,15 @@ class UniversalReaderApp {
                 activeCanvas.setPointerCapture?.(e.pointerId)
             } catch (_) {}
 
+            lastDrawnPointIndex = 0
             isDrawing = true
             const [nx, ny] = getCoords(e)
             currentStroke = {
+                id: `stroke_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
                 tool: this.pdfDrawTool,
                 color: this.pdfDrawColor,
                 width: this.pdfDrawWidth,
+                smoothingMode: (this.advancedSettings?.config?.pdfSmoothing === false) ? 'none' : 'bezier',
                 points: [[nx, ny]]
             }
 
@@ -6123,7 +6213,7 @@ class UniversalReaderApp {
                     if (currentStroke.tool === 'eraser') {
                         const baseCtx = baseCanvas.getContext('2d')
                         baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
-                        const strokes = this._getOrInitPageStrokes(this.currentBookId, pageIdx)
+                        const strokes = this._getOrInitPageStrokes(this.currentBookId, pageIdx, this._currentSnapshot)
                         strokes.forEach(s => {
                             this.drawSingleStrokeOnCanvas(baseCtx, s, baseCanvas.width, baseCanvas.height)
                         })
@@ -6133,10 +6223,13 @@ class UniversalReaderApp {
                         activeCtx.clearRect(0, 0, activeCanvas.width, activeCanvas.height)
                         this.drawSingleStrokeOnCanvas(activeCtx, currentStroke, activeCanvas.width, activeCanvas.height)
                     } else {
-                        const prevPt = currentStroke.points[currentStroke.points.length - 2]
-                        if (prevPt) {
-                            const ctx = baseCanvas.getContext('2d')
-                            this.drawStrokeSegment(ctx, currentStroke, prevPt, [nx, ny], baseCanvas.width, baseCanvas.height)
+                        const ctx = baseCanvas.getContext('2d')
+                        const pts = currentStroke.points
+                        while (lastDrawnPointIndex < pts.length - 1) {
+                            const p1 = pts[lastDrawnPointIndex]
+                            const p2 = pts[lastDrawnPointIndex + 1]
+                            this.drawStrokeSegment(ctx, currentStroke, p1, p2, baseCanvas.width, baseCanvas.height)
+                            lastDrawnPointIndex++
                         }
                     }
                 })
@@ -6145,6 +6238,14 @@ class UniversalReaderApp {
 
         const onPointerUp = e => {
             if (e.pointerId !== activePointerId) return
+            if (isDrawing && currentStroke) {
+                const [nx, ny] = getCoords(e)
+                const pts = currentStroke.points
+                const last = pts[pts.length - 1]
+                if (!last || Math.abs(nx - last[0]) > 0.0003 || Math.abs(ny - last[1]) > 0.0003) {
+                    pts.push([nx, ny])
+                }
+            }
             finishGesture(true)
         }
 
@@ -6398,9 +6499,14 @@ class UniversalReaderApp {
         if (status) status.innerText = '正在索引与检索相关书籍...'
 
         const books = (await db.getAllBooks()) || []
-        for (const b of books) {
+        const validBookIds = books.map(b => b.id)
+        await fullTextSearchEngine.pruneStaleIndexes(validBookIds)
+
+        const concurrency = Math.max(1, Math.min(6, Number(this.advancedSettings?.config?.bgIndexConcurrency) || 2))
+        for (let i = 0; i < books.length; i += concurrency) {
             if (signal.aborted || this._searchQueryGeneration !== currentGen) return
-            await fullTextSearchEngine.indexBook(b.id, signal)
+            const chunk = books.slice(i, i + concurrency)
+            await Promise.all(chunk.map(b => fullTextSearchEngine.indexBook(b.id, signal)))
         }
 
         if (signal.aborted || this._searchQueryGeneration !== currentGen) return
@@ -10471,8 +10577,10 @@ ${originalText}`
                 const { draw, annotation } = e.detail
                 const { color = '#facc15', style = 'highlight' } = annotation
                 const writingMode = this.settings.writingMode || 'horizontal'
-                const underlineWidth = Number(this.advancedSettings?.config?.underlineWidth) || 1.5
-                const highlighterOpacity = Number(this.advancedSettings?.config?.highlighterOpacity) || 0.35
+                const rawUnderlineWidth = Number(this.advancedSettings?.config?.underlineWidth)
+                const underlineWidth = Number.isFinite(rawUnderlineWidth) ? rawUnderlineWidth : 1.5
+                const rawHlOpacity = Number(this.advancedSettings?.config?.highlighterOpacity)
+                const highlighterOpacity = Number.isFinite(rawHlOpacity) ? rawHlOpacity : 0.35
                 if (style === 'underline') {
                     draw(Overlayer.underline, { color, width: underlineWidth, writingMode })
                 } else if (style === 'dashed') {
@@ -10482,7 +10590,14 @@ ${originalText}`
                 } else if (style === 'strikethrough') {
                     draw(Overlayer.strikethrough, { color, width: underlineWidth, writingMode })
                 } else {
-                    draw(Overlayer.highlight, { color, opacity: highlighterOpacity, realisticPen: this.settings.realisticPen !== false, writingMode })
+                    draw(Overlayer.highlight, {
+                        color,
+                        opacity: highlighterOpacity,
+                        realisticPen: this.settings.realisticPen !== false,
+                        writingMode,
+                        annotationId: annotation.id,
+                        id: annotation.id
+                    })
                 }
             })
 
@@ -10763,7 +10878,8 @@ ${originalText}`
                 }, TIMEOUT_MS))
             ])
 
-            const [pRes, tRes] = await Promise.all([boundedProgressPromise, boundedTrackerPromise])
+            const drawingDrainPromise = this._pdfMutationQueue ? this._pdfMutationQueue.drainAll(TIMEOUT_MS).catch(() => {}) : Promise.resolve()
+            const [pRes, tRes] = await Promise.all([boundedProgressPromise, boundedTrackerPromise, drawingDrainPromise])
 
             // 3. Status determination & synthesis
             let status = 'database_success'
@@ -10917,6 +11033,7 @@ ${originalText}`
             this.pdfDrawTool = null
             this.pdfOverlayCanvas = null
             this.currentPdfPageIndex = 0
+            this._pdfMutationQueue?.drainAll?.(3000)?.catch?.(() => {})
             this._pdfPageStrokesCache?.clear?.()
             this.dom.btnPdfMarkerYellow?.classList?.remove('active')
             this.dom.btnPdfMarkerGreen?.classList?.remove('active')

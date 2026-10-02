@@ -1899,6 +1899,8 @@
                 </div>
                 <div style="display: flex; gap: 6px; margin-top: 6px;">
                   <button type="button" id="btn-export-full-data-backup" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.72rem;" title="导出包含阅读进度、划线高光与历史会话的完整恢复包">📦 完整数据导出</button>
+                  <button type="button" id="btn-restore-full-data-backup" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.72rem;" title="从完整备份 JSON 文件恢复阅读进度、笔记和会话">📥 完整数据导入</button>
+                  <input type="file" id="input-restore-full-data-file" accept=".json" style="display: none;" />
                   <button type="button" id="btn-relink-missing-book" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.72rem;" title="原文件移动或改名后重新绑定本地文件，保留所有笔记和进度">🔗 重新关联书籍</button>
                 </div>
               </div>

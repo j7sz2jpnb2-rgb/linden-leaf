@@ -575,6 +575,7 @@ export class PageTurnController {
         this.state = 'idle'
         this.touchStart = null
         this.currentDrag = null
+        this._peakDisplacement = 0
         this.isGestureActive = false
 
         if (this._overlayEl) {
@@ -780,6 +781,7 @@ export class PageTurnController {
             y: touch.clientY,
             time: now
         }
+        this._peakDisplacement = 0
         this._recentTouches = [{ x: touch.clientX, y: touch.clientY, time: now }]
         this.state = 'preparing'
         this.isGestureActive = false
@@ -801,6 +803,10 @@ export class PageTurnController {
 
         const deltaX = touch.clientX - this.touchStart.x
         const deltaY = touch.clientY - this.touchStart.y
+
+        if (Math.abs(deltaX) > Math.abs(this._peakDisplacement || 0)) {
+            this._peakDisplacement = deltaX
+        }
 
         // Check if horizontal swipe dominates vertical scroll
         if (this.state === 'preparing') {
@@ -899,33 +905,31 @@ export class PageTurnController {
         const width = this.container?.clientWidth || 800
         const height = this.container?.clientHeight || 600
 
-        // Compute signed velocity across recent ~60-100ms window
+        // Compute signed velocity across recent ~60-100ms window (last 2-3 touches)
         let recentVelocityX = 0
         if (this._recentTouches && this._recentTouches.length >= 2) {
-            const oldest = this._recentTouches[0]
-            const dt = Math.max(16, now - oldest.time)
-            const dx = (this._recentTouches[this._recentTouches.length - 1].x - oldest.x)
+            const sample = this._recentTouches.slice(-3)
+            const oldest = sample[0]
+            const newest = sample[sample.length - 1]
+            const dt = Math.max(16, newest.time - oldest.time)
+            const dx = (newest.x - oldest.x)
             recentVelocityX = dx / dt // signed px/ms
         }
 
         const direction = deltaX < 0 ? 'next' : 'prev'
+        const peak = this._peakDisplacement !== undefined ? this._peakDisplacement : deltaX
+        const isPullingBack = direction === 'next'
+            ? ((deltaX - peak) > 25 || recentVelocityX > 0.15)
+            : ((peak - deltaX) > 25 || recentVelocityX < -0.15)
+
         let shouldTurn = false
 
-        if (direction === 'next') {
-            // Dragging forward to next page (negative deltaX)
-            // If user pulled back to right with velocity > 0.15, honor cancellation intent!
-            if (recentVelocityX > 0.15) {
-                shouldTurn = false
-            } else {
-                shouldTurn = Math.abs(deltaX) > width * 0.32 || (recentVelocityX < -0.32 && Math.abs(deltaX) > 40)
-            }
+        if (isPullingBack) {
+            shouldTurn = false
+        } else if (direction === 'next') {
+            shouldTurn = Math.abs(deltaX) > width * 0.18 || (recentVelocityX < -0.32 && Math.abs(deltaX) > 40)
         } else {
-            // Dragging backward to prev page (positive deltaX)
-            if (recentVelocityX < -0.15) {
-                shouldTurn = false
-            } else {
-                shouldTurn = Math.abs(deltaX) > width * 0.32 || (recentVelocityX > 0.32 && Math.abs(deltaX) > 40)
-            }
+            shouldTurn = Math.abs(deltaX) > width * 0.18 || (recentVelocityX > 0.32 && Math.abs(deltaX) > 40)
         }
 
         const mode = this.getEffectiveMode()

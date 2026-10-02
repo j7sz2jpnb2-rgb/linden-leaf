@@ -337,6 +337,7 @@ export class ReadingTracker {
         this.sessionCumulativeSeconds = 0
         this.sessionSlices = []
         this._committedHistoricalSeconds = 0
+        this._activeFlushPromise = null
         this.lastFlushTime = now
         this.lastFlushAttemptTime = now
         this.lastActivityTime = now
@@ -494,6 +495,7 @@ export class ReadingTracker {
         const targetSlices = sessionSnapshot?.slices || (this.sessionSlices ? [...this.sessionSlices] : [])
         const historicalCommitted = sessionSnapshot?._committedHistoricalSeconds != null ? sessionSnapshot._committedHistoricalSeconds : (this._committedHistoricalSeconds || 0)
 
+        const targetToken = sessionSnapshot?.token != null ? sessionSnapshot.token : this.sessionToken
         const totalSessionDuration = targetDuration + targetSlices.reduce((sum, s) => sum + (s.durationSeconds || 0), 0) + historicalCommitted
 
         // Rule 1 & 5: Discard sessions under 1 minute (< 60 seconds) from formal statistics
@@ -537,12 +539,14 @@ export class ReadingTracker {
                 }
 
                 // Advance schedule on success and record committed version
-                this.lastFlushTime = now
-                this.lastCommittedTime = now
-                this.lastCommittedVersion = sessionSnapshot?.version || this._backupVersion
+                if (this.sessionToken === targetToken && (!targetSessionId || this.currentSessionId === targetSessionId)) {
+                    this.lastFlushTime = now
+                    this.lastCommittedTime = now
+                    this.lastCommittedVersion = sessionSnapshot?.version || this._backupVersion
+                }
 
                 // Clean up / aggregate committed slices to prevent unbounded linear growth
-                if (!sessionSnapshot && this.sessionSlices) {
+                if (!sessionSnapshot && this.sessionSlices && this.sessionToken === targetToken) {
                     const uncommitted = []
                     for (const s of this.sessionSlices) {
                         if (s.committed) {
@@ -566,13 +570,15 @@ export class ReadingTracker {
             }
         })()
 
-        this._activeFlushPromise = flushOp.finally(() => {
-            if (this._activeFlushPromise === flushOp) {
+        let tracked = null
+        tracked = flushOp.finally(() => {
+            if (this._activeFlushPromise === tracked) {
                 this._activeFlushPromise = null
             }
         })
+        this._activeFlushPromise = tracked
 
-        return this._activeFlushPromise
+        return tracked
     }
 
     async endSession(finalFraction = null, targetBookId = null) {

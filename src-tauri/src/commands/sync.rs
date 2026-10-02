@@ -769,7 +769,7 @@ pub async fn sync_save_remote(
 
     ensure_remote_dir(&client, &dir_url, &user, &pass).await;
 
-    let body = match serde_json::to_string_pretty(&data) {
+    let body = match serde_json::to_string(&data) {
         Ok(b) => b,
         Err(e) => return Ok(SaveRemoteResponse {
             success: false,
@@ -779,11 +779,23 @@ pub async fn sync_save_remote(
         }),
     };
 
+    const MAX_SYNC_PAYLOAD_BYTES: usize = 20 * 1024 * 1024;
+    if body.len() > MAX_SYNC_PAYLOAD_BYTES {
+        return Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: None,
+            error: Some(format!("PAYLOAD_TOO_LARGE: 同步数据大小 ({} 字节) 超出 20MiB 上限", body.len())),
+        });
+    }
+
     let mut req = client.put(url.as_str()).basic_auth(user, Some(pass)).header("Content-Type", "application/json");
     if let Some(ref tag) = etag {
-        if !tag.is_empty() {
+        if !tag.is_empty() && !tag.starts_with("W/") {
             req = req.header("If-Match", tag.as_str());
         }
+    } else {
+        req = req.header("If-None-Match", "*");
     }
 
     match req.body(body).send().await {

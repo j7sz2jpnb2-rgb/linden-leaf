@@ -127,10 +127,16 @@ export class BookDetailsModal {
      */
     async render(container, bookId, callbacks = {}) {
         if (!container || !bookId) return
+        this._renderGeneration = (this._renderGeneration || 0) + 1
+        const gen = this._renderGeneration
         this.currentBookId = bookId
+        this.currentContainer = container
         container.innerHTML = '<div class="book-details-loading">正在载入书籍信息...</div>'
 
         const stats = await this.getBookStats(bookId)
+        if (this._renderGeneration !== gen || this.currentBookId !== bookId || this.currentContainer !== container) {
+            return
+        }
         if (!stats || !stats.book) {
             container.innerHTML = '<div class="book-details-error">书籍不存在或已被移除</div>'
             return
@@ -241,7 +247,9 @@ export class BookDetailsModal {
             btn.addEventListener('click', async () => {
                 const newStatus = btn.dataset.status
                 await setReadingStatus(bookId, newStatus)
-                await this.render(container, bookId, callbacks)
+                if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                    await this.render(container, bookId, callbacks)
+                }
                 callbacks.onShelfRefresh?.()
             })
         })
@@ -283,7 +291,9 @@ export class BookDetailsModal {
                 const newRating = isLeft ? starIndex - 0.5 : starIndex
                 try {
                     await db.saveBookRating(bookId, newRating)
-                    await this.render(container, bookId, callbacks)
+                    if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                        await this.render(container, bookId, callbacks)
+                    }
                     callbacks.onShelfRefresh?.()
                 } catch (err) {
                     if (scoreLabel) {
@@ -312,7 +322,9 @@ export class BookDetailsModal {
                 if (nextRating !== undefined) {
                     try {
                         await db.saveBookRating(bookId, nextRating)
-                        await this.render(container, bookId, callbacks)
+                        if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                            await this.render(container, bookId, callbacks)
+                        }
                         callbacks.onShelfRefresh?.()
                     } catch (err) {
                         if (scoreLabel) {
@@ -328,7 +340,9 @@ export class BookDetailsModal {
             e.stopPropagation()
             try {
                 await db.saveBookRating(bookId, null)
-                await this.render(container, bookId, callbacks)
+                if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                    await this.render(container, bookId, callbacks)
+                }
                 callbacks.onShelfRefresh?.()
             } catch (err) {
                 if (scoreLabel) {
@@ -344,7 +358,9 @@ export class BookDetailsModal {
             if (raw) {
                 const nextTags = [...tags, raw]
                 await updateBookTags(bookId, nextTags)
-                await this.render(container, bookId, callbacks)
+                if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                    await this.render(container, bookId, callbacks)
+                }
                 callbacks.onShelfRefresh?.()
             }
         })
@@ -365,7 +381,9 @@ export class BookDetailsModal {
                 const target = bTag.dataset.tag
                 const nextTags = tags.filter(t => t !== target)
                 await updateBookTags(bookId, nextTags)
-                await this.render(container, bookId, callbacks)
+                if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                    await this.render(container, bookId, callbacks)
+                }
                 callbacks.onShelfRefresh?.()
             })
         })
@@ -385,10 +403,23 @@ export class BookDetailsModal {
         container.querySelector('#btn-details-regen-cover')?.addEventListener('click', async () => {
             const res = await regenerateBookCover(bookId)
             if (res.success && res.hasCover) {
-                await this.render(container, bookId, callbacks)
+                if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                    await this.render(container, bookId, callbacks)
+                }
                 callbacks.onShelfRefresh?.()
             }
         })
+    }
+
+    cleanup() {
+        this._renderGeneration = (this._renderGeneration || 0) + 1
+        this.currentBookId = null
+        this.currentContainer = null
+        this._revokeCoverUrl()
+    }
+
+    close() {
+        this.cleanup()
     }
 }
 
