@@ -416,10 +416,11 @@ class PlatformBridge {
         if (this.isTauri) {
             try {
                 const items = await this._invokeTauri('dialog_open_file');
-                return items || null;
+                if (items && items.length > 0) return items;
+                if (!this.isAndroid) return null;
             } catch (err) {
                 console.error('[PlatformBridge] Tauri dialog_open_file failed:', err);
-                return null;
+                if (!this.isAndroid) return null;
             }
         }
 
@@ -865,10 +866,10 @@ class PlatformBridge {
                 }
                 return await this._invokeTauri('app_get_version');
             } catch (e) {
-                return '1.2.3';
+                return '2.0.0';
             }
         }
-        return '1.2.3';
+        return '2.0.0';
     }
 
     /**
@@ -1128,6 +1129,88 @@ class PlatformBridge {
     }
 
     /**
+     * Start background TTS playback using Android Foreground Media Service
+     * @param {string} bookTitle
+     * @param {string} text
+     * @param {number} rate
+     * @returns {Promise<boolean>}
+     */
+    async startBackgroundTts(bookTitle, text, rate = 1.0) {
+        if (this.isAndroid && this.isTauri) {
+            try {
+                return await this._invokeTauri('android_start_background_tts', { bookTitle, text, rate });
+            } catch (e) {
+                console.warn('[PlatformBridge] startBackgroundTts error:', e);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Pause background TTS playback
+     * @returns {Promise<boolean>}
+     */
+    async pauseBackgroundTts() {
+        if (this.isAndroid && this.isTauri) {
+            try {
+                return await this._invokeTauri('android_pause_background_tts');
+            } catch (e) {
+                console.warn('[PlatformBridge] pauseBackgroundTts error:', e);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Resume background TTS playback
+     * @returns {Promise<boolean>}
+     */
+    async resumeBackgroundTts() {
+        if (this.isAndroid && this.isTauri) {
+            try {
+                return await this._invokeTauri('android_resume_background_tts');
+            } catch (e) {
+                console.warn('[PlatformBridge] resumeBackgroundTts error:', e);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Stop background TTS playback
+     * @returns {Promise<boolean>}
+     */
+    async stopBackgroundTts() {
+        if (this.isAndroid && this.isTauri) {
+            try {
+                return await this._invokeTauri('android_stop_background_tts');
+            } catch (e) {
+                console.warn('[PlatformBridge] stopBackgroundTts error:', e);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Get background playback state from Android Media Service
+     * @returns {Promise<{ isPlaying: boolean, bookTitle: string, text: string }>}
+     */
+    async getBackgroundPlaybackState() {
+        if (this.isAndroid && this.isTauri) {
+            try {
+                return await this._invokeTauri('android_get_playback_state');
+            } catch (e) {
+                console.warn('[PlatformBridge] getBackgroundPlaybackState error:', e);
+            }
+        }
+        return { isPlaying: false, bookTitle: '', text: '' };
+    }
+
+    /**
      * Test connection to WebDAV server
      * @param {object} config
      * @returns {Promise<{ success: boolean, message?: string, error?: string }>}
@@ -1308,6 +1391,230 @@ class PlatformBridge {
         }
 
         return { success: false, error: '云同步不可用' };
+    }
+
+    // ==========================================
+    // Android Foundations: SAF, Keystore & Media
+    // ==========================================
+
+    get isAndroid() {
+        return typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent);
+    }
+
+    /**
+     * Resolve Android SAF content:// URI or stream to private cache
+     * @param {string} contentUri
+     * @returns {Promise<{ success: boolean, cachePath?: string, buffer?: ArrayBuffer, filename?: string, error?: string }>}
+     */
+    async resolveSafContentUri(contentUri) {
+        if (!contentUri) return { success: false, error: 'Empty content URI' };
+        
+        // 1. If running under Tauri Android layer
+        if (this.isTauri) {
+            try {
+                const res = await this._invokeTauri('android_resolve_content_uri', { contentUri });
+                if (res && res.success) return res;
+            } catch (err) {
+                console.warn('[PlatformBridge] Tauri android_resolve_content_uri failed:', err);
+            }
+        }
+
+        // 2. Browser / WebView fetch streaming fallback
+        try {
+            const resp = await fetch(contentUri);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status} resolving content URI`);
+            const buffer = await resp.arrayBuffer();
+            const filename = contentUri.split('/').pop() || 'book';
+            return {
+                success: true,
+                buffer,
+                filename
+            };
+        } catch (e) {
+            return {
+                success: false,
+                error: e.message || 'Failed to resolve content URI'
+            };
+        }
+    }
+
+    /**
+     * Request persistent URI permission for Android SAF
+     */
+    async takePersistableUriPermission(contentUri) {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_take_persistable_uri_permission', { contentUri });
+            } catch (e) {
+                console.warn('[PlatformBridge] takePersistableUriPermission warning:', e);
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Android Keystore / Hardware-backed Credential Storage
+     */
+    async androidStoreCredential(key, secret) {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_keystore_store', { key, secret });
+            } catch (e) {}
+        }
+        return await this.secureStoreCredential(key, secret);
+    }
+
+    get isAndroid() {
+        if (typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent)) return true;
+        if (typeof window !== 'undefined' && (window.__TAURI_PLATFORM__ === 'android' || window.__TAURI_INTERNALS__?.plugins?.linden)) return true;
+        return false;
+    }
+
+    /**
+     * Android Background Media / TTS Commands
+     */
+    async startBackgroundTts(bookTitle, text, rate = 1.0, options = {}) {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_start_background_tts', {
+                    bookTitle,
+                    text,
+                    rate: Number(rate) || 1.0,
+                    jobId: options.jobId || null,
+                    utteranceId: options.utteranceId || null,
+                    generation: options.generation != null ? Number(options.generation) : null
+                });
+            } catch (e) {
+                console.warn('[PlatformBridge] startBackgroundTts failed:', e);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    async pauseBackgroundTts() {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_pause_background_tts');
+            } catch (e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    async resumeBackgroundTts() {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_resume_background_tts');
+            } catch (e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    async stopBackgroundTts() {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_stop_background_tts');
+            } catch (e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    async getBackgroundPlaybackState() {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_get_playback_state');
+            } catch (e) {
+                return { isPlaying: false, state: 'idle', bookTitle: '', text: '' };
+            }
+        }
+        return { isPlaying: false, state: 'idle', bookTitle: '', text: '' };
+    }
+
+    /**
+     * Staged External Pending Imports (ACTION_VIEW / ACTION_SEND)
+     */
+    async getPendingImports() {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_get_pending_imports');
+            } catch (e) {
+                return [];
+            }
+        }
+        return [];
+    }
+
+    async consumePendingImport(importId) {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_consume_pending_import', { importId });
+            } catch (e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Android Gallery & Sharing Support for Annual Report / Quote Card
+     */
+    async saveImageToGallery(base64Data, filename) {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_save_image_to_gallery', {
+                    base64: base64Data,
+                    filename: filename || `linden_${Date.now()}.png`
+                });
+            } catch (e) {
+                return { success: false, error: e.message || String(e) };
+            }
+        }
+        // Fallback for desktop browser: trigger download
+        try {
+            const link = document.createElement('a');
+            link.href = base64Data;
+            link.download = filename || `linden_${Date.now()}.png`;
+            link.click();
+            return { success: true, path: filename };
+        } catch (e) {
+            return { success: false, error: e.message || String(e) };
+        }
+    }
+
+    async shareImage(base64Data, filename, title = '分享图片') {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_share_image', {
+                    base64: base64Data,
+                    filename: filename || `linden_share_${Date.now()}.png`,
+                    title
+                });
+            } catch (e) {
+                return { success: false, error: e.message || String(e) };
+            }
+        }
+        // Fallback for Web Share API
+        if (typeof navigator !== 'undefined' && navigator.share) {
+            try {
+                const res = await fetch(base64Data);
+                const blob = await res.blob();
+                const file = new File([blob], filename || 'share.png', { type: 'image/png' });
+                await navigator.share({
+                    title,
+                    files: [file]
+                });
+                return { success: true };
+            } catch (e) {
+                return { success: false, error: e.message || String(e) };
+            }
+        }
+        return { success: false, error: '当前环境不支持分享对话框' };
     }
 
     // ==========================================

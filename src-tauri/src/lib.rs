@@ -10,9 +10,23 @@ fn app_write_debug_log(message: String) {
     eprintln!("[renderer] {message}");
 }
 
+#[cfg(target_os = "android")]
+pub struct LindenMobileBridge(pub tauri::plugin::PluginHandle<tauri::Wry>);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
+
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(
+        tauri::plugin::Builder::<tauri::Wry>::new("linden")
+            .setup(|app, api| {
+                let handle = api.register_android_plugin("com.lindenleaf.reader", "LindenPlugin")?;
+                app.manage(LindenMobileBridge(handle));
+                Ok(())
+            })
+            .build(),
+    );
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -141,6 +155,8 @@ pub fn run() {
             app_write_debug_log,
             // Dialog & FS
             dialog_open_file,
+            dialog_open_dict_file,
+            dialog_pick_folder,
             fs_read_buffer,
             // Window & App
             window_minimize,
@@ -175,11 +191,17 @@ pub fn run() {
             ai_clear_audit_log,
             ai_set_cooldown_and_limit,
             ai_bind_credential,
-            // Offline ECDICT SQLite Dictionary
+            // Offline ECDICT SQLite Dictionary & Resource Management
             dict_get_status,
             dict_lookup,
             dict_install_from_file,
+            dict_download_and_install,
+            dict_cancel_download,
+            dict_get_download_progress,
             dict_uninstall,
+            dict_get_resource_locations,
+            dict_migrate_storage,
+            resource_clear_audio_cache,
             // MuPDF Native Reader
             mupdf_is_available,
             mupdf_stage_pdf,
@@ -196,6 +218,21 @@ pub fn run() {
             mupdf_get_render_diagnostics,
             mupdf_close_document,
             mupdf_reclaim_snapshot,
+            // Android SAF & Keystore & Media Background Playback
+            android_resolve_content_uri,
+            android_take_persistable_uri_permission,
+            android_keystore_store,
+            android_keystore_load,
+            android_keystore_delete,
+            android_start_background_tts,
+            android_pause_background_tts,
+            android_resume_background_tts,
+            android_stop_background_tts,
+            android_get_playback_state,
+            android_get_pending_imports,
+            android_consume_pending_import,
+            android_save_image_to_gallery,
+            android_share_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Linden Leaf Tauri application");

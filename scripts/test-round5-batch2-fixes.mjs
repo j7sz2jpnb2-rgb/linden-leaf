@@ -34,7 +34,7 @@ console.log('  ✓ Test 2 Passed: Tags dropdown popover markup and event control
 console.log('\nTest 3: Rating slider popover and fine-grained range filter...')
 assert(indexHtml.includes('id="btn-overview-rating-trigger"'), 'index.html must have rating trigger button')
 assert(indexHtml.includes('id="overview-rating-popover"'), 'index.html must have overview-rating-popover')
-assert(indexHtml.includes('id="overview-rating-slider"'), 'index.html must have range slider')
+assert(indexHtml.includes('id="overview-rating-slider"') || indexHtml.includes('id="overview-rating-slider-min"'), 'index.html must have range slider')
 assert(indexHtml.includes('id="overview-unrated-checkbox"'), 'index.html must have unrated checkbox')
 assert(indexHtml.includes('id="btn-reset-rating"'), 'index.html must have reset rating button')
 assert(appJs.includes('syncRatingPopoverUI'), 'app.js must implement syncRatingPopoverUI')

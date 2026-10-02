@@ -3,7 +3,7 @@
  * Uses genuine Skywind3000 ECDICT dataset (770,000+ entries, MIT License).
  * Provides fast indexed SQLite queries in both Tauri native layer and Node environments.
  * Decoupled from AI: NO 10-second cooldown, NO token budget, NO model API calls.
- * Part of Linden Leaf (2026-09-26)
+ * Offline dictionary lookup.
  */
 
 import { platformBridge } from './platformBridge.js'
@@ -205,7 +205,6 @@ export class DictionaryService {
                     const candidatePaths = [
                         this.options?.dbPath,
                         'resources/dictionary/ecdict.db',
-                        'D:/LindenLeaf-Dev/astra-mupdf-core/resources/dictionary/ecdict.db',
                         process.env.APPDATA ? `${process.env.APPDATA}/com.lindenleaf.reader/dictionary/ecdict.db` : null
                     ].filter(Boolean)
 
@@ -280,6 +279,21 @@ export class DictionaryService {
     }
 
     /**
+     * Pick local .db file via native dialog and install
+     */
+    async pickAndInstallFromFile() {
+        const invoke = globalThis.__TAURI__?.core?.invoke || globalThis.window?.__TAURI__?.core?.invoke
+        if (invoke) {
+            const filePath = await invoke('dialog_open_dict_file')
+            if (filePath) {
+                return await this.installFromFile(filePath)
+            }
+            return null
+        }
+        throw new Error('当前环境不支持文件选择器')
+    }
+
+    /**
      * Uninstalls dictionary
      */
     async uninstall() {
@@ -306,12 +320,134 @@ export class DictionaryService {
             try {
                 return await invoke('dict_install_from_file', { sourcePath: bundledPath })
             } catch (err) {
-                // If local bundled file not accessible via relative path, try absolute workspace path
-                const absPath = 'D:/LindenLeaf-Dev/astra-mupdf-core/resources/dictionary/ecdict.db'
-                return await invoke('dict_install_from_file', { sourcePath: absPath })
+                throw new Error('未找到随包附带的词库文件，请使用本地文件导入词典 (.db)')
             }
         }
         return this.getStatus()
+    }
+
+    /**
+     * Get resource directory locations
+     * @returns {Promise<{ dictionaryDir: string, audioCacheDir: string, appDataDir: string }>}
+     */
+    async getResourceLocations() {
+        const invoke = globalThis.__TAURI__?.core?.invoke || globalThis.window?.__TAURI__?.core?.invoke
+        if (invoke) {
+            try {
+                return await invoke('dict_get_resource_locations')
+            } catch (e) {
+                console.warn('[DictionaryService] getResourceLocations failed:', e)
+            }
+        }
+        return {
+            dictionaryDir: 'resources/dictionary',
+            audioCacheDir: 'cache/audio',
+            appDataDir: 'AppData/com.lindenleaf.reader'
+        }
+    }
+
+    /**
+     * Pick a target folder via native dialog
+     */
+    async pickFolder() {
+        const invoke = globalThis.__TAURI__?.core?.invoke || globalThis.window?.__TAURI__?.core?.invoke
+        if (invoke) {
+            return await invoke('dialog_pick_folder')
+        }
+        return null
+    }
+
+    /**
+     * Migrate dictionary storage directory
+     * @param {string} newDictDir
+     */
+    async migrateStorage(newDictDir) {
+        const invoke = globalThis.__TAURI__?.core?.invoke || globalThis.window?.__TAURI__?.core?.invoke
+        if (invoke) {
+            const res = await invoke('dict_migrate_storage', { targetDir: newDictDir, newDictDir })
+            this.cache.clear()
+            return res
+        }
+        throw new Error('当前环境不支持动态存储迁移')
+    }
+
+    /**
+     * Clear cached TTS audio files
+     */
+    async clearAudioCache() {
+        const invoke = globalThis.__TAURI__?.core?.invoke || globalThis.window?.__TAURI__?.core?.invoke
+        if (invoke) {
+            return await invoke('resource_clear_audio_cache')
+        }
+        return 0
+    }
+
+    /**
+     * Download and install ECDICT dictionary with progress tracking
+     */
+    async downloadAndInstall(options = {}) {
+        const { onProgress, signal, sourceUrl } = options
+        const invoke = globalThis.__TAURI__?.core?.invoke || globalThis.window?.__TAURI__?.core?.invoke
+
+        if (invoke) {
+            let progressTimer = null
+            const abortHandler = () => {
+                invoke('dict_cancel_download').catch(() => {})
+            }
+
+            if (signal) {
+                if (signal.aborted) throw new Error('下载已由用户取消')
+                signal.addEventListener('abort', abortHandler, { once: true })
+            }
+
+            // Poll download progress every 250ms
+            if (typeof onProgress === 'function') {
+                progressTimer = setInterval(async () => {
+                    try {
+                        const p = await invoke('dict_get_download_progress')
+                        if (p && onProgress) {
+                            onProgress({
+                                phase: p.phase || 'downloading',
+                                loaded: p.loadedBytes || 0,
+                                total: p.totalBytes || 0,
+                                percent: p.percent || 0,
+                                entries: p.entriesProcessed || 0,
+                                message: p.message || '正在处理词库...'
+                            })
+                        }
+                    } catch (_) {}
+                }, 250)
+            }
+
+            try {
+                const res = await invoke('dict_download_and_install', { sourceUrl: sourceUrl || null })
+                this.cache.clear()
+                if (onProgress) {
+                    onProgress({ phase: 'completed', percent: 100, message: '词库安装成功！' })
+                }
+                return res
+            } catch (err) {
+                if (signal?.aborted) {
+                    throw new Error('下载已由用户取消')
+                }
+                throw err
+            } finally {
+                if (progressTimer) clearInterval(progressTimer)
+                if (signal) signal.removeEventListener('abort', abortHandler)
+            }
+        }
+
+        // Only allow simulated progress in explicit test environments
+        if (globalThis.__LINDEN_TEST_MOCK__) {
+            if (typeof onProgress === 'function') {
+                onProgress({ phase: 'connecting', loaded: 0, total: 1000, percent: 10, message: '测试环境模拟下载...' })
+                onProgress({ phase: 'downloading', loaded: 500, total: 1000, percent: 50, message: '正在接收数据...' })
+                onProgress({ phase: 'completed', loaded: 1000, total: 1000, percent: 100, message: '安装完成' })
+            }
+            return await this.getStatus()
+        }
+
+        throw new Error('当前环境缺少原生运行库支持，无法直接下载词库。请在桌面或移动应用中使用。')
     }
 
     /**

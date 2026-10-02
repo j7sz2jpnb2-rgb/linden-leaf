@@ -392,6 +392,7 @@ export async function clearAiAuditLog() {
  * @param {string} [params.systemPrompt]
  * @param {Array<{role: string, content: string}>} [params.messages]
  * @param {number} [params.maxTokens]
+ * @param {boolean} [params.returnMetadata] Return text with provider stop reason when requested.
  * @param {AbortSignal} [params.signal]
  * @param {function(string, string): void} [params.onChunk] (delta, fullText)
  * @returns {Promise<string>}
@@ -405,6 +406,7 @@ export async function requestAiCompletion({
     systemPrompt,
     messages,
     maxTokens,
+    returnMetadata = false,
     onChunk,
     signal
 }) {
@@ -412,6 +414,14 @@ export async function requestAiCompletion({
     const targetEndpoint = (endpoint || cfg.endpoint || DEFAULT_AI_CONFIG.endpoint).replace(/\/+$/, '')
     const targetModel = model || cfg.model || DEFAULT_AI_CONFIG.model
     const targetMaxTokens = maxTokens || cfg.maxTokens || DEFAULT_AI_CONFIG.maxTokens || 2048
+    const resultValue = (payload, fallbackText = '') => returnMetadata
+        ? {
+            fullText: payload?.fullText ?? fallbackText,
+            finishReason: payload?.finishReason ?? null,
+            status: payload?.status || 'completed',
+            usage: payload?.usage ?? null
+        }
+        : (payload?.fullText ?? fallbackText)
 
     const reqId = requestId || ('req_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7))
 
@@ -457,11 +467,11 @@ export async function requestAiCompletion({
                 }),
                 globalThis.__TAURI__.event.listen(`ai:done:${reqId}`, (event) => {
                     cleanupListeners()
-                    resolve(event.payload?.fullText || fullText)
+                    resolve(resultValue(event.payload, fullText))
                 }),
                 globalThis.__TAURI__.event.listen(`ai:stopped:${reqId}`, (event) => {
                     cleanupListeners()
-                    resolve(event.payload?.partialText || fullText)
+                    resolve(resultValue({ fullText: event.payload?.partialText ?? fullText, status: 'cancelled' }, fullText))
                 }),
                 globalThis.__TAURI__.event.listen(`ai:error:${reqId}`, (event) => {
                     cleanupListeners()
@@ -484,7 +494,7 @@ export async function requestAiCompletion({
                 })
             }).then((res) => {
                 cleanupListeners()
-                resolve(res?.fullText || fullText)
+                resolve(resultValue(res, fullText))
             }).catch((err) => {
                 cleanupListeners()
                 const msg = err?.message || String(err)
@@ -495,13 +505,13 @@ export async function requestAiCompletion({
 
     // 2. Fallback for non-Tauri / mock test environment
     const now = Date.now()
-    const cooldown = (cfg.cooldownSeconds || 10) * 1000
+    const cooldown = (cfg.cooldownSeconds ?? 10) * 1000
 
     if (_mockActiveRequestId) {
         throw new Error(`CONCURRENCY_BLOCKED: 当前已有正在进行的生成请求，请等待完成或点击停止`)
     }
 
-    if (now - _mockLastDispatched < cooldown) {
+    if (cooldown > 0 && now - _mockLastDispatched < cooldown) {
         const remSecs = Math.ceil((cooldown - (now - _mockLastDispatched)) / 1000)
         throw new Error(`COOLDOWN_ACTIVE: 请等待 ${remSecs} 秒后再发送新请求 (剩余 ${remSecs} 秒)`)
     }
@@ -561,13 +571,19 @@ export async function requestAiCompletion({
 
         if (!onChunk) {
             const json = await response.json()
-            return json.choices?.[0]?.message?.content || ''
+            return resultValue({
+                fullText: json.choices?.[0]?.message?.content || '',
+                finishReason: json.choices?.[0]?.finish_reason ?? null,
+                usage: json.usage ?? null
+            })
         }
 
         const reader = response.body.getReader()
         const decoder = new TextDecoder('utf-8')
         let fullText = ''
         let buffer = ''
+        let finishReason = null
+        let receivedDone = false
 
         while (true) {
             const { done, value } = await reader.read()
@@ -580,11 +596,15 @@ export async function requestAiCompletion({
             for (const line of lines) {
                 const trimmed = line.trim()
                 if (!trimmed || trimmed.startsWith(':')) continue
-                if (trimmed === 'data: [DONE]') continue
+                if (trimmed === 'data: [DONE]') {
+                    receivedDone = true
+                    continue
+                }
 
                 if (trimmed.startsWith('data: ')) {
                     try {
                         const data = JSON.parse(trimmed.slice(6))
+                        if (data.choices?.[0]?.finish_reason) finishReason = data.choices[0].finish_reason
                         const delta = data.choices?.[0]?.delta?.content
                         if (delta) {
                             fullText += delta
@@ -594,7 +614,31 @@ export async function requestAiCompletion({
                 }
             }
         }
-        return fullText
+
+        // Parse remaining buffer if present (e.g. without trailing newline)
+        if (buffer && buffer.trim()) {
+            const trimmed = buffer.trim()
+            if (trimmed === 'data: [DONE]') {
+                receivedDone = true
+            } else if (trimmed.startsWith('data: ')) {
+                try {
+                    const data = JSON.parse(trimmed.slice(6))
+                    if (data.choices?.[0]?.finish_reason) finishReason = data.choices[0].finish_reason
+                    const delta = data.choices?.[0]?.delta?.content
+                    if (delta) {
+                        fullText += delta
+                        onChunk(delta, fullText)
+                    }
+                } catch (e) {}
+            }
+        }
+
+        // EOF classification: unconfirmed EOF without [DONE] or finish_reason is partial
+        const finalStatus = (finishReason === 'length' || finishReason === 'max_tokens' || (!receivedDone && !finishReason))
+            ? 'partial'
+            : 'completed'
+
+        return resultValue({ fullText, finishReason, status: finalStatus })
     } finally {
         _mockActiveRequestId = null
     }

@@ -1,15 +1,25 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::path::PathBuf;
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SelectedBookItem {
     #[serde(rename = "filePath")]
     pub file_path: String,
     pub filename: String,
 }
 
+#[cfg(target_os = "android")]
+#[derive(Deserialize)]
+struct AndroidPickResult {
+    #[serde(default)]
+    items: Vec<SelectedBookItem>,
+}
+
 #[tauri::command]
-pub async fn dialog_open_file() -> Result<Option<Vec<SelectedBookItem>>, String> {
+pub async fn dialog_open_file(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+) -> Result<Option<Vec<SelectedBookItem>>, String> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let files: Option<Vec<PathBuf>> = tokio::task::spawn_blocking(|| {
@@ -54,7 +64,72 @@ pub async fn dialog_open_file() -> Result<Option<Vec<SelectedBookItem>>, String>
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        // On mobile, native file picking is managed via Tauri's mobile file picker plugin or SAF content URIs
+        #[cfg(target_os = "android")]
+        {
+            use tauri::Manager;
+            let bridge = app_handle
+                .try_state::<crate::LindenMobileBridge>()
+                .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
+
+            #[derive(Serialize)]
+            struct EmptyArgs {}
+
+            let res = bridge
+                .0
+                .run_mobile_plugin::<AndroidPickResult>("pickBooks", EmptyArgs {})
+                .map_err(|e| format!("pickBooks failed: {e}"))?;
+
+            if res.items.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(res.items))
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            Ok(None)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn dialog_open_dict_file() -> Result<Option<String>, String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let file: Option<PathBuf> = tokio::task::spawn_blocking(|| {
+            rfd::FileDialog::new()
+                .set_title("选择 ECDICT 词典数据库文件 (.db)")
+                .add_filter("ECDICT SQLite 数据库 (*.db)", &["db", "sqlite", "sqlite3"])
+                .add_filter("所有文件", &["*"])
+                .pick_file()
+        })
+        .await
+        .map_err(|e| format!("Dialog task failed: {}", e))?;
+
+        Ok(file.map(|p| p.to_string_lossy().to_string()))
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+pub async fn dialog_pick_folder() -> Result<Option<String>, String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let folder: Option<PathBuf> = tokio::task::spawn_blocking(|| {
+            rfd::FileDialog::new()
+                .set_title("选择词典与资源存储目录")
+                .pick_folder()
+        })
+        .await
+        .map_err(|e| format!("Dialog task failed: {}", e))?;
+
+        Ok(folder.map(|p| p.to_string_lossy().to_string()))
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
         Ok(None)
     }
 }

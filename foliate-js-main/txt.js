@@ -1,4 +1,5 @@
 // txt.js - Intelligent TXT/Markdown book parser with Poetry & Chapter detection for foliate-js
+import { runTxtRulesWorker } from '../js/txt-toc-worker.js'
 
 const MIME = {
     XHTML: 'application/xhtml+xml',
@@ -92,12 +93,27 @@ const CHAPTER_PATTERNS = [
     /^[【\[（(](?:第\s*[0-9一二三四五六七八九十百千万零两]+\s*[首章节回卷集部篇幕话]|[0-9一二三四五六七八九十]{1,3}|(?:Chapter|Book|Canto)\s+[0-9IVXLCDMivxlcdm]+)[】\]）)](?:[\u4e00-\u9fa5a-zA-Z0-9\s]{0,25})?$/i
 ]
 
-const isChapterHeading = line => {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.length > 35) return false
+let customTxtPatterns = null
+
+export const setCustomTxtPatterns = (patterns) => {
+    if (!patterns || !Array.isArray(patterns) || patterns.length === 0) {
+        customTxtPatterns = null
+        return
+    }
+    customTxtPatterns = patterns
+}
+
+export const getCustomTxtPatterns = () => customTxtPatterns
+
+export const isChapterHeading = line => {
+    const trimmed = (line || '').trim()
+    if (!trimmed) return false
+
+    // Built-in heuristics with safety constraints (never run unbounded user regex on main thread)
+    if (trimmed.length > 35) return false
     // If it contains typical sentence punctuation, it's content/poem, not a chapter heading
     if (/[,，;；!！?？"“”'‘’]/.test(trimmed)) return false
-    // Pure Arabic number + space + sentence is a numbered verse line (e.g. "170 Line content..."), NOT a chapter heading!
+    // Pure Arabic number + space + sentence is a numbered verse line, NOT a chapter heading!
     if (/^\d{1,5}\s+/.test(trimmed)) return false
     return CHAPTER_PATTERNS.some(re => re.test(trimmed))
 }
@@ -264,9 +280,35 @@ export const makeTXT = async file => {
     
     // Pre-pass: scan all heading candidates and analyze chapter/TOC structure
     const candidates = []
+    const customLineMatches = new Map()
+
+    if (customTxtPatterns && customTxtPatterns.length > 0) {
+        try {
+            const workerRes = await runTxtRulesWorker({
+                lines,
+                rules: customTxtPatterns,
+                timeoutMs: 2500
+            })
+            for (const m of (workerRes.matches || [])) {
+                customLineMatches.set(m.lineIndex, m)
+            }
+        } catch (err) {
+            console.warn('[TXT] Custom TOC regex worker failed or timed out, preserving built-in heuristics:', err)
+        }
+    }
+
+    const isStrictOnly = !!customTxtPatterns?.strictOnly
+
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
-        if (isChapterHeading(line)) {
+        const customMatch = customLineMatches.get(i)
+        if (customMatch) {
+            candidates.push({
+                lineIndex: i,
+                text: customMatch.title || line.trim(),
+                key: extractChapterKey(customMatch.title || line)
+            })
+        } else if ((!isStrictOnly || customLineMatches.size === 0) && isChapterHeading(line)) {
             candidates.push({
                 lineIndex: i,
                 text: line.trim(),
@@ -362,9 +404,11 @@ export const makeTXT = async file => {
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
         const isTOC = tocCandidateIndices.has(i)
+        const customMatch = customLineMatches.get(i)
+        const isHeading = customMatch ? true : ((!isStrictOnly || customLineMatches.size === 0) && isChapterHeading(line))
 
-        if (isChapterHeading(line) && !isTOC) {
-            const rawTitle = line.trim().replace(/[\s\t\u3000\u00A0]+/g, ' ')
+        if (isHeading && !isTOC) {
+            const rawTitle = (customMatch?.title || line).trim().replace(/[\s\t\u3000\u00A0]+/g, ' ')
             const hasStory = currentChapter.lines.some(l => {
                 const t = (typeof l === 'string' ? l : l.text).trim()
                 return t.length > 0 && !isDecorativeDividerOnly(t)
@@ -552,6 +596,7 @@ export const makeTXT = async file => {
             language: detectedLanguage,
             identifier: null
         },
+        tocPreviewLines: lines.slice(0, 1000),
         sections: sectionData.map(s => ({
             id: s.id,
             load: s.load,

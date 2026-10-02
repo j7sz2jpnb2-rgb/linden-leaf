@@ -108,15 +108,31 @@ pub fn load_open_file_payload(file_path: &str) -> Result<OpenFilePayload, String
 
 #[tauri::command]
 pub fn window_minimize(window: Window) -> Result<(), String> {
-    window.minimize().map_err(|e| e.to_string())
+    #[cfg(desktop)]
+    {
+        window.minimize().map_err(|e| e.to_string())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = window;
+        Ok(())
+    }
 }
 
 #[tauri::command]
 pub fn window_maximize(window: Window) -> Result<(), String> {
-    if window.is_maximized().unwrap_or(false) {
-        window.unmaximize().map_err(|e| e.to_string())
-    } else {
-        window.maximize().map_err(|e| e.to_string())
+    #[cfg(desktop)]
+    {
+        if window.is_maximized().unwrap_or(false) {
+            window.unmaximize().map_err(|e| e.to_string())
+        } else {
+            window.maximize().map_err(|e| e.to_string())
+        }
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = window;
+        Ok(())
     }
 }
 
@@ -127,17 +143,33 @@ pub fn window_close(window: Window) -> Result<(), String> {
 
 #[tauri::command]
 pub fn window_is_maximized(window: Window) -> bool {
-    window.is_maximized().unwrap_or(false)
+    #[cfg(desktop)]
+    {
+        window.is_maximized().unwrap_or(false)
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = window;
+        true
+    }
 }
 
 #[tauri::command]
 pub fn window_toggle_fullscreen(window: Window) -> Result<(), String> {
-    use tauri::Emitter;
-    let is_fs = window.is_fullscreen().unwrap_or(false);
-    let next_fs = !is_fs;
-    window.set_fullscreen(next_fs).map_err(|e| e.to_string())?;
-    let _ = window.emit("window:fullscreen-change", next_fs);
-    Ok(())
+    #[cfg(desktop)]
+    {
+        use tauri::Emitter;
+        let is_fs = window.is_fullscreen().unwrap_or(false);
+        let next_fs = !is_fs;
+        window.set_fullscreen(next_fs).map_err(|e| e.to_string())?;
+        let _ = window.emit("window:fullscreen-change", next_fs);
+        Ok(())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = window;
+        Ok(())
+    }
 }
 
 #[tauri::command]

@@ -24,7 +24,7 @@ async function loadInjected(path, dependencies) {
   const source = read(path);
   const mod = new vm.SourceTextModule(source, { identifier: root + path });
   await mod.link(async specifier => {
-    const obj = dependencies[specifier];
+    const obj = dependencies[specifier] || (specifier.includes('translation-job-core') ? await import('file:///' + root + 'js/translation-job-core.js') : null);
     if (!obj) throw new Error('Unexpected dependency: ' + specifier);
     const names = Object.keys(obj);
     return new vm.SyntheticModule(names, function() {

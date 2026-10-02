@@ -31,8 +31,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LL_MUPDF_REQUIRED");
     println!("cargo:rerun-if-env-changed=LINDEN_NATIVE_CACHE_DIR");
 
-    let require_native = env::var("LL_REQUIRE_NATIVE_MUPDF").is_ok()
-        || env::var("LL_MUPDF_REQUIRED").is_ok();
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let _is_target_windows = target_os == "windows" || (target_os.is_empty() && cfg!(windows));
+    let is_target_android = target_os == "android";
+
+    let require_native = (env::var("LL_REQUIRE_NATIVE_MUPDF").is_ok()
+        || env::var("LL_MUPDF_REQUIRED").is_ok()) && !is_target_android;
 
     let include = env::var_os("LL_MUPDF_INCLUDE").map(PathBuf::from)
         .or_else(|| {
@@ -44,6 +48,12 @@ fn main() {
             let p = PathBuf::from("native/lib");
             p.exists().then_some(p)
         });
+
+    let lib_dir = if is_target_android {
+        env::var_os("LL_MUPDF_ANDROID_LIB_DIR").map(PathBuf::from)
+    } else {
+        lib_dir
+    };
 
     if let (Some(include), Some(lib_dir)) = (include, lib_dir) {
         println!("cargo:rerun-if-changed=native/ll_mupdf.c");

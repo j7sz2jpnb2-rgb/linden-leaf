@@ -1,6 +1,6 @@
 /**
  * ai-sidebar-controller.js - Right AI Reading Sidebar, Context & History Controller
- * Part of Linden Leaf AI Reading Assistant (Gemini 2026-09-25)
+ * AI reading assistant sidebar and conversation history.
  */
 
 import {
@@ -49,6 +49,7 @@ export class AiSidebarController {
     constructor(app) {
         this.app = app
         this.isOpen = false
+        this._layoutGeneration = 0
         this.currentConversation = null
         this.currentReference = null
         this.currentContext = null
@@ -132,6 +133,19 @@ export class AiSidebarController {
             btnHistoryDeleteConv: document.getElementById('btn-history-delete-conv'),
             btnClearAllAiHistory: document.getElementById('btn-clear-all-ai-history'),
 
+            // AI History Bookshelf Workspace View (First-Class Page)
+            aiHistoryWorkspaceView: document.getElementById('ai-history-workspace-view'),
+            inputAiHistoryPageSearch: document.getElementById('ai-history-page-search'),
+            aiHistoryPageConvList: document.getElementById('ai-history-page-conv-list'),
+            aiHistoryTotalCount: document.getElementById('ai-history-total-count'),
+            btnClearAllAiHistoryPage: document.getElementById('btn-clear-all-ai-history-page'),
+            aiHistoryPageTitle: document.getElementById('ai-history-page-title'),
+            aiHistoryPageMeta: document.getElementById('ai-history-page-meta'),
+            btnHistoryPageJumpBook: document.getElementById('btn-history-page-jump-book'),
+            btnHistoryPageExportMd: document.getElementById('btn-history-page-export-md'),
+            btnHistoryPageDeleteConv: document.getElementById('btn-history-page-delete-conv'),
+            aiHistoryPageMessagesList: document.getElementById('ai-history-page-messages-list'),
+
             // Audit Log Modal
             modalAiAudit: document.getElementById('modal-ai-audit'),
             btnCloseAiAudit: document.getElementById('btn-close-ai-audit'),
@@ -194,16 +208,27 @@ export class AiSidebarController {
         this.dom.btnCloseReplacePreset?.addEventListener('click', () => this.closeReplacePresetModal())
         this.dom.btnCancelReplacePreset?.addEventListener('click', () => this.closeReplacePresetModal())
 
-        // Left nav history button
-        this.dom.navCatAiHistory?.addEventListener('click', () => this.openHistoryModal())
+        // Left nav history button -> Switches bookshelf category to 'ai-history'
+        this.dom.navCatAiHistory?.addEventListener('click', () => {
+            if (this.app?.switchShelfCategory) {
+                this.app.switchShelfCategory('ai-history')
+            }
+        })
         this.dom.btnCloseAiHistory?.addEventListener('click', () => this.closeHistoryModal())
-        this.dom.btnClearAllAiHistory?.addEventListener('click', () => this.handleClearAllHistory())
+        this.dom.btnClearAllAiHistory?.addEventListener('click', () => this.handleClearAllHistory(false))
         this.dom.inputAiHistorySearch?.addEventListener('input', () => this.filterHistoryList())
 
         // History modal actions
         this.dom.btnHistoryJumpBook?.addEventListener('click', () => this.handleHistoryJumpToBook())
         this.dom.btnHistoryExportMd?.addEventListener('click', () => this.handleHistoryExportMarkdown())
         this.dom.btnHistoryDeleteConv?.addEventListener('click', () => this.handleHistoryDeleteActive())
+
+        // Bookshelf AI History Workspace Actions
+        this.dom.inputAiHistoryPageSearch?.addEventListener('input', () => this.filterWorkspaceHistoryList())
+        this.dom.btnClearAllAiHistoryPage?.addEventListener('click', () => this.handleClearAllHistory(true))
+        this.dom.btnHistoryPageJumpBook?.addEventListener('click', () => this.handleHistoryJumpToBook(this._selectedWorkspaceConvId))
+        this.dom.btnHistoryPageExportMd?.addEventListener('click', () => this.handleHistoryExportMarkdown(this._selectedWorkspaceConvId))
+        this.dom.btnHistoryPageDeleteConv?.addEventListener('click', () => this.handleHistoryDeleteActive(this._selectedWorkspaceConvId, true))
 
         // Audit Log Modal
         this.dom.btnCloseAiAudit?.addEventListener('click', () => this.closeAuditModal())
@@ -220,6 +245,8 @@ export class AiSidebarController {
             }, { passive: true })
         }
         stopWheelInside(this.dom.readerAiSidebar)
+        stopWheelInside(this.dom.aiHistoryPageConvList)
+        stopWheelInside(this.dom.aiHistoryPageMessagesList)
         stopWheelInside(this.dom.aiChatMessages)
         stopWheelInside(this.dom.modalAiPresets)
         stopWheelInside(this.dom.modalAiHistory)
@@ -242,18 +269,20 @@ export class AiSidebarController {
             document.documentElement.style.setProperty('--ai-sidebar-width', `${nextWidth}px`)
         }
 
-        const onMouseUp = () => {
+        let savedAnchor = null
+        const onMouseUp = async () => {
             if (this.resizing) {
                 this.resizing = false
                 resizer.classList.remove('resizing')
                 document.body.style.cursor = ''
                 window.removeEventListener('mousemove', onMouseMove)
                 window.removeEventListener('mouseup', onMouseUp)
-                this.relayoutReader()
+                await this.relayoutReader(savedAnchor)
             }
         }
 
         resizer.addEventListener('mousedown', (e) => {
+            savedAnchor = this.captureCurrentReadingAnchor()
             this.resizing = true
             startX = e.clientX
             startWidth = this.currentWidth
@@ -268,8 +297,109 @@ export class AiSidebarController {
     // Sidebar Visibility & Reader Layout
     // =========================================================================
 
-    openSidebar() {
+    invalidatePendingLayout() {
+        if (typeof this._layoutGeneration !== 'number' || isNaN(this._layoutGeneration)) {
+            this._layoutGeneration = 0
+        }
+        this._layoutGeneration++
+    }
+
+    captureCurrentReadingAnchor() {
+        try {
+            const bookId = this.app?.currentBookData?.id || this.app?.currentBook?.id || null
+            const view = this.app?.foliateView || null
+            if (typeof this._layoutGeneration !== 'number' || isNaN(this._layoutGeneration)) {
+                this._layoutGeneration = 0
+            }
+            const layoutGen = ++this._layoutGeneration
+            if (this.app?.foliateView) {
+                const fv = this.app.foliateView
+                if (typeof fv.renderer?.settle === 'function') {
+                    fv.renderer.settle()
+                }
+                const loc = fv.lastLocation
+                if (loc?.cfi) {
+                    return { bookId, view, layoutGen, cfi: loc.cfi, range: loc.range, index: loc.index }
+                }
+                if (loc?.range && loc?.index != null) {
+                    const cfi = fv.getCFI?.(loc.index, loc.range)
+                    return { bookId, view, layoutGen, cfi, range: loc.range, index: loc.index }
+                }
+            }
+            if (this.app?.pdfViewport?.currentPageIndex != null) {
+                return { bookId, view, layoutGen, pageIndex: this.app.pdfViewport.currentPageIndex }
+            }
+            if (this.app?.currentPdfPageIndex != null) {
+                return { bookId, view, layoutGen, pageIndex: this.app.currentPdfPageIndex }
+            }
+        } catch (e) {
+            console.warn('[AI Sidebar] Failed to capture reading anchor:', e)
+        }
+        return null
+    }
+
+    async restoreReadingAnchor(anchor) {
+        if (!anchor) return
+        try {
+            // Guard against stale anchor across different books or replaced view instances
+            const curBookId = this.app?.currentBookData?.id || this.app?.currentBook?.id || null
+            if (anchor.bookId && curBookId && anchor.bookId !== curBookId) {
+                console.warn('[AI Sidebar] Reading anchor book mismatch, aborting restore')
+                return
+            }
+            if (anchor.view && this.app?.foliateView && anchor.view !== this.app.foliateView) {
+                console.warn('[AI Sidebar] Reading anchor view instance mismatch, aborting restore')
+                return
+            }
+            if (typeof anchor.layoutGen === 'number' && typeof this._layoutGeneration === 'number' && anchor.layoutGen !== this._layoutGeneration) {
+                console.warn('[AI Sidebar] Stale layout generation, aborting restore')
+                return
+            }
+
+            if (anchor.cfi && this.app?.foliateView?.goTo) {
+                if (anchor.range) {
+                    if (typeof this.app.foliateView.renderer?.setLockedAnchor === 'function') {
+                        this.app.foliateView.renderer.setLockedAnchor(anchor.range)
+                    } else if (typeof this.app.foliateView.renderer?.setAnchor === 'function') {
+                        this.app.foliateView.renderer.setAnchor(anchor.range, true)
+                    }
+                }
+                await this.app.foliateView.goTo(anchor.cfi)
+                return
+            }
+            if (anchor.range && this.app?.foliateView?.renderer?.scrollToAnchor) {
+                await this.app.foliateView.renderer.scrollToAnchor(anchor.range)
+                return
+            }
+            if (anchor.pageIndex != null) {
+                if (this.app?.pdfViewport?.goToPage) {
+                    this.app.pdfViewport.goToPage(anchor.pageIndex)
+                } else if (typeof this.app?.goToPdfPage === 'function') {
+                    this.app.goToPdfPage(anchor.pageIndex)
+                }
+            }
+        } catch (e) {
+            console.warn('[AI Sidebar] Failed to restore reading anchor:', e)
+        }
+    }
+
+    async openSidebar(preferredAnchor = null) {
         if (this.isOpen) return
+
+        if (typeof this._layoutGeneration !== 'number' || isNaN(this._layoutGeneration)) {
+            this._layoutGeneration = 0
+        }
+
+        // 1. Capture anchor BEFORE changing container width
+        let anchor = preferredAnchor
+        if (anchor) {
+            anchor.layoutGen = ++this._layoutGeneration
+            if (!anchor.bookId) anchor.bookId = this.app?.currentBookData?.id || this.app?.currentBook?.id || null
+            if (!anchor.view) anchor.view = this.app?.foliateView || null
+        } else {
+            anchor = this.captureCurrentReadingAnchor()
+        }
+
         this.isOpen = true
 
         if (this.dom.readerAiSidebar) this.dom.readerAiSidebar.style.display = 'flex'
@@ -280,15 +410,19 @@ export class AiSidebarController {
         // Ensure we have an active conversation for the current book
         this.ensureActiveConversation()
 
-        // Relayout reader keeping current CFI / PDF page position
-        this.relayoutReader()
+        // Relayout reader restoring to the exact captured anchor
+        await this.relayoutReader(anchor)
 
         // Check native status & cooldown
         this.syncCooldownStatus()
     }
 
-    closeSidebar() {
+    async closeSidebar() {
         if (!this.isOpen) return
+
+        // 1. Capture anchor BEFORE restoring full width
+        const anchor = this.captureCurrentReadingAnchor()
+
         this.isOpen = false
 
         if (this.dom.readerAiSidebar) this.dom.readerAiSidebar.style.display = 'none'
@@ -296,26 +430,43 @@ export class AiSidebarController {
         if (this.dom.readerView) this.dom.readerView.classList.remove('ai-sidebar-open')
         if (this.dom.btnToggleAiSidebar) this.dom.btnToggleAiSidebar.classList.remove('active')
 
-        // Relayout reader restoring full width
-        this.relayoutReader()
+        // Relayout reader restoring to the exact captured anchor
+        await this.relayoutReader(anchor)
     }
 
-    toggleSidebar() {
+    async toggleSidebar() {
         if (this.isOpen) {
-            this.closeSidebar()
+            await this.closeSidebar()
         } else {
-            this.openSidebar()
+            await this.openSidebar()
         }
     }
 
-    relayoutReader() {
-        // Trigger smooth reflow of Foliate / PDF viewer without losing reading position
+    async relayoutReader(anchor = null) {
         try {
+            const capturedView = anchor?.view || this.app?.foliateView || null
+            const capturedBookId = anchor?.bookId || this.app?.currentBookData?.id || this.app?.currentBook?.id || null
+            // Give DOM a frame to compute new container dimensions
+            await new Promise(r => requestAnimationFrame(r))
+            if (capturedView && this.app?.foliateView && capturedView !== this.app.foliateView) {
+                console.warn('[AI Sidebar] foliateView changed during relayout frame, aborting stale relayout')
+                return
+            }
+            if (capturedBookId) {
+                const currentBookId = this.app?.currentBookData?.id || this.app?.currentBook?.id || null
+                if (currentBookId && capturedBookId !== currentBookId) {
+                    console.warn('[AI Sidebar] Book changed during relayout frame, aborting stale relayout')
+                    return
+                }
+            }
+            if (anchor) {
+                if (!anchor.view && capturedView) anchor.view = capturedView
+                if (!anchor.bookId && capturedBookId) anchor.bookId = capturedBookId
+                await this.restoreReadingAnchor(anchor)
+                return
+            }
             if (this.app?.foliateView?.renderer) {
                 const renderer = this.app.foliateView.renderer
-                if (typeof renderer.settle === 'function') {
-                    renderer.settle()
-                }
                 if (typeof renderer.render === 'function') {
                     renderer.render()
                 }
@@ -344,7 +495,7 @@ export class AiSidebarController {
      * Called when user clicks "AI" in selection bubble.
      * Takes stable snapshot BEFORE popup is closed or selection collapsed!
      */
-    openWithSelection(selectionInfo) {
+    async openWithSelection(selectionInfo) {
         if (!selectionInfo || !selectionInfo.text) return
 
         // 1. Create stable, immutable reference snapshot
@@ -355,16 +506,28 @@ export class AiSidebarController {
         // 2. Extract surrounding context within <= 1000 tokens hard budget
         this.currentContext = this.extractContextForSelection(selectionInfo)
 
-        // 3. Open sidebar (no modal, no background blur)
-        this.openSidebar()
+        // 3. Resolve selection anchor explicitly from selectionInfo
+        let anchor = null
+        if (selectionInfo.cfi) {
+            anchor = { cfi: selectionInfo.cfi, range: selectionInfo.range, index: selectionInfo.index }
+        } else if (selectionInfo.range && this.app?.foliateView) {
+            const index = selectionInfo.index ?? this.app.foliateView.lastLocation?.index ?? 0
+            const cfi = this.app.foliateView.getCFI?.(index, selectionInfo.range)
+            anchor = { cfi, range: selectionInfo.range, index }
+        } else if (selectionInfo.pageIndex != null) {
+            anchor = { pageIndex: selectionInfo.pageIndex }
+        }
 
-        // 4. Update pending quote box in sidebar
+        // 4. Open sidebar with explicit selection anchor
+        await this.openSidebar(anchor)
+
+        // 5. Update pending quote box in sidebar
         this.renderPendingReference()
 
-        // 5. Update context preview
+        // 6. Update context preview
         this.renderContextPreview()
 
-        // 6. Focus input without erasing user draft
+        // 7. Focus input without erasing user draft
         if (this.dom.aiChatInput) {
             this.dom.aiChatInput.focus()
         }
@@ -451,7 +614,8 @@ export class AiSidebarController {
         return buildSurroundingContext({
             beforeText,
             afterText,
-            maxTokens: budget
+            maxTokens: budget,
+            tokenizer: this.app?.advancedSettings?.config?.modelTokenizer || 'auto'
         })
     }
 
@@ -665,7 +829,7 @@ export class AiSidebarController {
             const allConvMsgs = await getAiMessages(this.currentConversation.id)
             if (Array.isArray(allConvMsgs)) {
                 priorMessages = allConvMsgs
-                    .filter(m => m.status === 'completed' && (m.role === 'user' || m.role === 'assistant'))
+                    .filter(m => (m.status === 'completed' || (m.status === 'partial' && m.content?.trim())) && (m.role === 'user' || m.role === 'assistant'))
                     .map(m => ({
                         role: m.role,
                         content: m.content || ''
@@ -738,10 +902,11 @@ export class AiSidebarController {
 
         try {
             const configuredMaxTokens = this.app?.advancedSettings?.aiMaxTokens || this.app?.advancedSettings?.config?.aiMaxTokens || getAiConfig().maxTokens || 2048
-            const resultText = await requestAiCompletion({
+            const response = await requestAiCompletion({
                 requestId: this.activeRequestId,
                 messages,
                 maxTokens: configuredMaxTokens,
+                returnMetadata: true,
                 onChunk: (delta, fullText) => {
                     assistantMsg.content = fullText
                     if (contentDiv) {
@@ -750,10 +915,15 @@ export class AiSidebarController {
                     this.scrollToBottom()
                 }
             })
+            const resultText = typeof response === 'string' ? response : (response?.fullText || '')
+            const finishReason = typeof response === 'string' ? null : response?.finishReason
 
             // Finalize message on success
+            const wasCutOff = finishReason === 'length' || finishReason === 'max_tokens'
             assistantMsg.content = resultText
-            assistantMsg.status = 'completed'
+            assistantMsg.status = response?.status === 'cancelled' ? 'cancelled' : (wasCutOff ? 'partial' : 'completed')
+            assistantMsg.finishReason = finishReason || null
+            assistantMsg.usage = response?.usage || null
             await saveAiMessage(assistantMsg)
 
             if (contentDiv) {
@@ -761,23 +931,32 @@ export class AiSidebarController {
             }
             if (metaDiv) {
                 const usageLabel = assistantMsg.usage?.total_tokens ? ` · ${assistantMsg.usage.total_tokens} tokens` : ' · Token: 未知'
-                metaDiv.innerHTML = `<span>生成完成${usageLabel}</span><div class="ai-msg-actions"><button type="button" class="ai-msg-action-btn btn-msg-copy" title="复制回答">复制</button><button type="button" class="ai-msg-action-btn btn-msg-save-note" title="保存为划线批注">保存为笔记</button></div>`
+                const stateText = assistantMsg.status === 'cancelled' ? '已停止' : (wasCutOff ? '回答未完：达到模型输出上限' : '生成完成')
+                const continueAction = wasCutOff ? '<button type="button" class="ai-msg-action-btn btn-msg-continue" title="先检查草稿，再手动发送继续请求">继续回答</button>' : ''
+                const saveAction = assistantMsg.status === 'completed' ? '<button type="button" class="ai-msg-action-btn btn-msg-save-note" title="保存为划线批注">保存为笔记</button>' : ''
+                metaDiv.innerHTML = `<span>${stateText}${usageLabel}</span><div class="ai-msg-actions"><button type="button" class="ai-msg-action-btn btn-msg-copy" title="复制回答">复制</button>${saveAction}${continueAction}</div>`
                 this.bindMessageActionButtons(msgElement, assistantMsg)
             }
-            if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = '生成完成'
+            if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = wasCutOff ? '回答未完，可继续' : (assistantMsg.status === 'cancelled' ? '已停止' : '生成完成')
         } catch (err) {
             const errStr = err?.message || String(err)
-            assistantMsg.status = 'failed'
+            const hasPartialAnswer = Boolean(assistantMsg.content?.trim())
+            assistantMsg.status = hasPartialAnswer ? 'partial' : 'failed'
             assistantMsg.errorMessage = errStr
             await saveAiMessage(assistantMsg)
 
             if (contentDiv) {
-                contentDiv.innerHTML = `<span style="color: #ef4444; font-weight: 500;">❌ ${escapeUntrustedHtml(errStr)}</span>`
+                contentDiv.innerHTML = hasPartialAnswer
+                    ? `${renderSafeMarkdown(assistantMsg.content)}<p style="color: var(--text-muted); font-size: 0.78rem; margin-top: 6px;">回答中断（网络或请求异常）；以上是已收到的内容，可手动继续。</p>`
+                    : `<span style="color: #ef4444; font-weight: 500;">${escapeUntrustedHtml(errStr)}</span>`
             }
             if (metaDiv) {
-                metaDiv.innerHTML = `<span>请求失败 (草稿已保留)</span>`
+                metaDiv.innerHTML = hasPartialAnswer
+                    ? '<span>回答未完（请求中断，已保留部分内容）</span><div class="ai-msg-actions"><button type="button" class="ai-msg-action-btn btn-msg-copy">复制</button><button type="button" class="ai-msg-action-btn btn-msg-continue">继续回答</button></div>'
+                    : '<span>请求失败（草稿已保留）</span>'
+                if (hasPartialAnswer) this.bindMessageActionButtons(msgElement, assistantMsg)
             }
-            if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = '请求失败'
+            if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = hasPartialAnswer ? '回答中断，已保留部分内容' : '请求失败'
         } finally {
             this.isGenerating = false
             this.activeRequestId = null
@@ -790,8 +969,8 @@ export class AiSidebarController {
             // Calculate actual remaining cooldown since dispatch time:
             // "第一条立即发送；若 3 秒就完成，还需等 7 秒才能再发。若 15 秒完成，可立即发送下一条。"
             const elapsedSecs = Math.floor((Date.now() - (this.dispatchedAt || 0)) / 1000)
-            const configuredCooldown = this.app?.advancedSettings?.aiCooldownSeconds || this.app?.advancedSettings?.config?.aiCooldownSeconds || 10
-            const remaining = Math.max(0, configuredCooldown - elapsedSecs)
+            const configuredCooldown = this.app?.advancedSettings?.config?.aiCooldownSeconds ?? this.app?.advancedSettings?.aiCooldownSeconds ?? 10
+            const remaining = configuredCooldown > 0 ? Math.max(0, configuredCooldown - elapsedSecs) : 0
 
             if (remaining > 0) {
                 this.startCooldownCountdown(remaining)
@@ -983,11 +1162,15 @@ export class AiSidebarController {
         const formattedContent = msg.content ? renderSafeMarkdown(msg.content) : (isUser ? '' : '<span style="color: var(--text-muted);">正在思考生成中...</span>')
 
         let actionsHtml = ''
-        if (!isUser && msg.status === 'completed') {
+        if (!isUser && (msg.status === 'completed' || (msg.status === 'partial' && msg.content))) {
+            const continueAction = msg.status === 'partial' || msg.finishReason === 'length' || msg.finishReason === 'max_tokens'
+                ? '<button type="button" class="ai-msg-action-btn btn-msg-continue" title="先检查草稿，再手动发送继续请求">继续回答</button>'
+                : ''
             actionsHtml = `
                 <div class="ai-msg-actions">
                     <button type="button" class="ai-msg-action-btn btn-msg-copy" title="复制回答">复制</button>
-                    <button type="button" class="ai-msg-action-btn btn-msg-save-note" title="保存为划线批注">保存为笔记</button>
+                    ${msg.status === 'completed' ? '<button type="button" class="ai-msg-action-btn btn-msg-save-note" title="保存为划线批注">保存为笔记</button>' : ''}
+                    ${continueAction}
                 </div>
             `
         }
@@ -1001,7 +1184,7 @@ export class AiSidebarController {
                 <div class="ai-msg-content">${formattedContent}</div>
             </div>
             <div class="ai-msg-meta-bar">
-                <span>${timeStr} ${usageText ? `· ${usageText}` : ''}</span>
+                <span>${timeStr} ${usageText ? `· ${usageText}` : ''}${msg.status === 'partial' || msg.finishReason === 'length' || msg.finishReason === 'max_tokens' ? ' · 回答未完' : ''}</span>
                 ${actionsHtml}
             </div>
         `
@@ -1024,6 +1207,12 @@ export class AiSidebarController {
 
     bindMessageActionButtons(msgElement, msg) {
         if (!msgElement) return
+
+        msgElement.querySelector('.btn-msg-continue')?.addEventListener('click', () => {
+            if (!this.dom.aiChatInput) return
+            this.dom.aiChatInput.value = '请从刚才未完的地方继续，不要重复前文。'
+            this.dom.aiChatInput.focus()
+        })
 
         const btnCopy = msgElement.querySelector('.btn-msg-copy')
         btnCopy?.addEventListener('click', () => {
@@ -1406,18 +1595,43 @@ export class AiSidebarController {
         })
     }
 
-    async handleHistoryJumpToBook() {
-        const conv = await getAiConversation(this._selectedHistoryConvId)
-        if (!conv || !conv.bookId) return
+    async handleHistoryJumpToBook(convId) {
+        const targetId = convId || this._selectedHistoryConvId || this._selectedWorkspaceConvId
+        const conv = await getAiConversation(targetId)
+        if (!conv || !conv.bookId || conv.bookId === 'general') {
+            this.app?.showToast?.('该对话未关联具体书籍', 'info')
+            return
+        }
 
         this.closeHistoryModal()
-        if (this.app?.openBook) {
-            this.app.openBook(conv.bookId)
+
+        // Get messages to find the first referenceSnapshot if available
+        const msgs = await getAiMessages(conv.id)
+        const refWithAnchor = msgs?.find(m => m.referenceSnapshot && (m.referenceSnapshot.cfi || m.referenceSnapshot.pageIndex != null))?.referenceSnapshot
+        const refToUse = refWithAnchor || { bookId: conv.bookId, cfi: conv.cfi }
+        refToUse.bookId = conv.bookId
+
+        if (typeof this.app?.openBook === 'function') {
+            await this.app.openBook(conv.bookId)
+            // Wait for book renderer to be mounted
+            let attempts = 0
+            while (attempts < 25 && (!this.app.foliateView && !this.app.pdfViewport)) {
+                await new Promise(r => setTimeout(r, 100))
+                attempts++
+            }
+            await new Promise(r => setTimeout(r, 200))
+
+            if (refToUse.cfi || refToUse.pageIndex != null) {
+                await this.jumpToReference(refToUse)
+            } else {
+                this.app?.showToast?.(`已打开图书《${conv.bookTitle || ''}》`, 'success')
+            }
         }
     }
 
-    async handleHistoryExportMarkdown() {
-        const conv = await getAiConversation(this._selectedHistoryConvId)
+    async handleHistoryExportMarkdown(convId) {
+        const targetId = convId || this._selectedHistoryConvId || this._selectedWorkspaceConvId
+        const conv = await getAiConversation(targetId)
         if (!conv) return
 
         const msgs = await getAiMessages(conv.id)
@@ -1447,21 +1661,250 @@ export class AiSidebarController {
         this.app?.showToast?.('已导出 Markdown 文件', 'success')
     }
 
-    async handleHistoryDeleteActive() {
-        if (!this._selectedHistoryConvId) return
-        if (confirm('确定要删除此会话记录吗？')) {
-            await deleteAiConversation(this._selectedHistoryConvId)
+    async handleHistoryDeleteActive(convId, isWorkspace = false) {
+        const targetId = convId || (isWorkspace ? this._selectedWorkspaceConvId : this._selectedHistoryConvId)
+        if (!targetId) return
+        const conv = await getAiConversation(targetId)
+        const titleStr = conv?.title ? `“${conv.title}”` : '此会话'
+        if (confirm(`确定要删除${titleStr}记录吗？删除后不可恢复。`)) {
+            await deleteAiConversation(targetId)
             this.app?.showToast?.('会话已删除', 'info')
-            await this.loadAllHistoryConversations()
+            if (isWorkspace) {
+                if (this._selectedWorkspaceConvId === targetId) {
+                    this._selectedWorkspaceConvId = null
+                }
+                await this.renderHistoryWorkspace()
+            } else {
+                await this.loadAllHistoryConversations()
+            }
         }
     }
 
-    async handleClearAllHistory() {
+    async handleClearAllHistory(isWorkspace = false) {
         if (confirm('确定要清空本机所有 AI 阅读历史记录吗？此操作无法撤销。')) {
             await clearAllAiHistory()
             this.app?.showToast?.('已清空全部 AI 阅读历史', 'info')
-            await this.loadAllHistoryConversations()
+            if (isWorkspace) {
+                await this.renderHistoryWorkspace()
+            } else {
+                await this.loadAllHistoryConversations()
+            }
         }
+    }
+
+    // =========================================================================
+    // Bookshelf AI History Workspace View (First-Class Page)
+    // =========================================================================
+
+    async renderHistoryWorkspace() {
+        try {
+            const list = await getAllAiConversations()
+            this._cachedWorkspaceList = list || []
+
+            if (this.dom.aiHistoryTotalCount) {
+                this.dom.aiHistoryTotalCount.innerText = `共 ${this._cachedWorkspaceList.length} 条对话`
+            }
+
+            this.renderWorkspaceConversationsList(this._cachedWorkspaceList)
+
+            if (this._cachedWorkspaceList.length > 0) {
+                const stillExists = this._selectedWorkspaceConvId && this._cachedWorkspaceList.some(c => c.id === this._selectedWorkspaceConvId)
+                const targetId = stillExists ? this._selectedWorkspaceConvId : this._cachedWorkspaceList[0].id
+                await this.selectWorkspaceConversation(targetId)
+            } else {
+                this._selectedWorkspaceConvId = null
+                if (this.dom.aiHistoryPageTitle) this.dom.aiHistoryPageTitle.innerText = '暂无历史问答'
+                if (this.dom.aiHistoryPageMeta) this.dom.aiHistoryPageMeta.innerText = ''
+                if (this.dom.btnHistoryPageJumpBook) this.dom.btnHistoryPageJumpBook.style.display = 'none'
+                if (this.dom.btnHistoryPageExportMd) this.dom.btnHistoryPageExportMd.style.display = 'none'
+                if (this.dom.btnHistoryPageDeleteConv) this.dom.btnHistoryPageDeleteConv.style.display = 'none'
+                if (this.dom.aiHistoryPageMessagesList) {
+                    this.dom.aiHistoryPageMessagesList.innerHTML = `
+                        <div class="ai-history-empty-placeholder">
+                            <svg class="icon icon-lg" viewBox="0 0 24 24" style="color: var(--text-muted); opacity: 0.5;"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+                            <p style="color: var(--text-muted); font-size: 0.88rem; margin-top: 10px;">在阅读时选文中开启 AI 提问与深度探讨，历史记录将自动汇总于此</p>
+                        </div>
+                    `
+                }
+            }
+        } catch (err) {
+            console.error('[AI History] Failed to load history conversations:', err)
+            this._cachedWorkspaceList = []
+            if (this.dom.aiHistoryTotalCount) {
+                this.dom.aiHistoryTotalCount.innerText = '加载历史失败'
+            }
+            if (this.dom.aiHistoryPageConvList) {
+                this.dom.aiHistoryPageConvList.innerHTML = `<div style="padding: 20px; font-size: 0.85rem; color: #ef4444; text-align: center;">加载 AI 历史记录失败：${escapeUntrustedHtml(err?.message || '未知错误')}</div>`
+            }
+            if (this.dom.aiHistoryPageMessagesList) {
+                this.dom.aiHistoryPageMessagesList.innerHTML = `<div class="ai-history-empty-placeholder"><p style="color: #ef4444; font-size: 0.88rem;">读取历史问答遇到异常，请重试或检查数据库状态</p></div>`
+            }
+        }
+    }
+
+    async filterWorkspaceHistoryList() {
+        const query = (this.dom.inputAiHistoryPageSearch?.value || '').trim().toLowerCase()
+        if (!this._cachedWorkspaceList) return
+
+        if (!query) {
+            this.renderWorkspaceConversationsList(this._cachedWorkspaceList)
+            return
+        }
+
+        const directMatches = new Set()
+        const filtered = this._cachedWorkspaceList.filter(c => {
+            const match = (c.title || '').toLowerCase().includes(query) ||
+                          (c.bookTitle || '').toLowerCase().includes(query)
+            if (match) directMatches.add(c.id)
+            return match
+        })
+
+        // Also search in message content and quote text
+        const deepSearchPromises = this._cachedWorkspaceList
+            .filter(c => !directMatches.has(c.id))
+            .map(async conv => {
+                try {
+                    const msgs = await getAiMessages(conv.id)
+                    const hasMatch = msgs.some(m =>
+                        (m.content || '').toLowerCase().includes(query) ||
+                        (m.quoteText || '').toLowerCase().includes(query)
+                    )
+                    return hasMatch ? conv : null
+                } catch {
+                    return null
+                }
+            })
+
+        const deepMatches = (await Promise.all(deepSearchPromises)).filter(Boolean)
+        const combined = [...filtered, ...deepMatches]
+        this.renderWorkspaceConversationsList(combined)
+    }
+
+    renderWorkspaceConversationsList(conversations) {
+        const container = this.dom.aiHistoryPageConvList
+        if (!container) return
+
+        container.innerHTML = ''
+        if (!conversations || conversations.length === 0) {
+            container.innerHTML = '<div style="font-size: 0.82rem; color: var(--text-muted); text-align: center; margin-top: 30px;">未找到匹配对话</div>'
+            return
+        }
+
+        conversations.forEach(conv => {
+            const card = document.createElement('div')
+            card.className = 'ai-history-conv-card'
+            if (conv.id === this._selectedWorkspaceConvId) {
+                card.classList.add('active')
+            }
+            card.dataset.convId = conv.id
+
+            const dateStr = new Date(conv.updatedAt || conv.createdAt || Date.now()).toLocaleDateString()
+            card.innerHTML = `
+                <div class="ai-history-card-title">${escapeUntrustedHtml(conv.title || '阅读对话')}</div>
+                <div class="ai-history-card-meta">
+                    <span class="ai-history-card-book">${escapeUntrustedHtml(conv.bookTitle || '未指定书籍')}</span>
+                    <span>${dateStr}</span>
+                </div>
+            `
+
+            card.addEventListener('click', () => {
+                this.selectWorkspaceConversation(conv.id)
+            })
+
+            container.appendChild(card)
+        })
+    }
+
+    async selectWorkspaceConversation(convId) {
+        this._selectWorkspaceConvGeneration = (this._selectWorkspaceConvGeneration || 0) + 1
+        const generation = this._selectWorkspaceConvGeneration
+        this._selectedWorkspaceConvId = convId
+
+        const conv = await getAiConversation(convId)
+        if (generation !== this._selectWorkspaceConvGeneration) return
+        if (!conv) return
+
+        // Update active card styling
+        const cards = this.dom.aiHistoryPageConvList?.querySelectorAll('.ai-history-conv-card')
+        cards?.forEach(c => {
+            c.classList.toggle('active', c.dataset.convId === convId)
+        })
+
+        const msgs = await getAiMessages(convId)
+        if (generation !== this._selectWorkspaceConvGeneration) return
+
+        if (this.dom.aiHistoryPageTitle) {
+            this.dom.aiHistoryPageTitle.innerText = conv.title || '阅读对话'
+        }
+        if (this.dom.aiHistoryPageMeta) {
+            const dateStr = new Date(conv.createdAt || Date.now()).toLocaleString()
+            this.dom.aiHistoryPageMeta.innerText = `${conv.bookTitle || '未关联图书'} · 共 ${msgs?.length || 0} 条消息 · 创建于 ${dateStr}`
+        }
+
+        // Show/hide buttons
+        if (this.dom.btnHistoryPageJumpBook) {
+            this.dom.btnHistoryPageJumpBook.style.display = (conv.bookId && conv.bookId !== 'general') ? 'inline-flex' : 'none'
+        }
+        if (this.dom.btnHistoryPageExportMd) {
+            this.dom.btnHistoryPageExportMd.style.display = 'inline-flex'
+        }
+        if (this.dom.btnHistoryPageDeleteConv) {
+            this.dom.btnHistoryPageDeleteConv.style.display = 'inline-flex'
+        }
+
+        this.renderWorkspaceMessages(msgs, conv)
+    }
+
+    renderWorkspaceMessages(msgs, conv) {
+        const view = this.dom.aiHistoryPageMessagesList
+        if (!view) return
+
+        view.innerHTML = ''
+        if (!msgs || msgs.length === 0) {
+            view.innerHTML = '<div style="color: var(--text-muted); font-size: 0.84rem; text-align: center; margin-top: 40px;">该会话暂无消息</div>'
+            return
+        }
+
+        msgs.forEach(msg => {
+            const isUser = msg.role === 'user'
+            const msgEl = document.createElement('div')
+            msgEl.className = `ai-message ${isUser ? 'ai-message-user' : 'ai-message-assistant'}`
+            msgEl.style.maxWidth = '88%'
+
+            let refHtml = ''
+            if (msg.referenceSnapshot?.selectedText) {
+                const text = msg.referenceSnapshot.selectedText
+                const isLong = text.length > 80
+                const chapterLabel = msg.referenceSnapshot.chapterOrPage ? ` · ${escapeUntrustedHtml(msg.referenceSnapshot.chapterOrPage)}` : ''
+                refHtml = `
+                    <div class="ai-history-quote-box ${isLong ? 'collapsed' : ''}">
+                        <div style="font-size: 0.72rem; font-weight: 600; color: var(--accent-purple, #8b5cf6); margin-bottom: 4px;">引用原文${chapterLabel}</div>
+                        <div class="ai-history-quote-text">“${escapeUntrustedHtml(text)}”</div>
+                        ${isLong ? '<button type="button" class="ai-history-quote-expand-btn">展开全文</button>' : ''}
+                    </div>
+                `
+            }
+
+            msgEl.innerHTML = `
+                ${refHtml}
+                <div class="ai-msg-bubble">
+                    <div class="ai-msg-content">${renderSafeMarkdown(msg.content)}</div>
+                </div>
+            `
+
+            // Handle collapsible quote toggle
+            const expandBtn = msgEl.querySelector('.ai-history-quote-expand-btn')
+            if (expandBtn) {
+                const quoteBox = msgEl.querySelector('.ai-history-quote-box')
+                expandBtn.addEventListener('click', (e) => {
+                    e.stopPropagation()
+                    const isCollapsed = quoteBox.classList.toggle('collapsed')
+                    expandBtn.innerText = isCollapsed ? '展开全文' : '收起'
+                })
+            }
+
+            view.appendChild(msgEl)
+        })
     }
 
     // =========================================================================

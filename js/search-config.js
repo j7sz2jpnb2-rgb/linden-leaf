@@ -10,7 +10,7 @@ export const SEARCH_ENGINES = {
         template: 'https://www.baidu.com/s?wd={query}'
     },
     bing: {
-        name: '必应 (Bing)',
+        name: '必应',
         template: 'https://www.bing.com/search?q={query}'
     },
     google: {

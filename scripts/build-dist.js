@@ -27,7 +27,8 @@ const requiredWhitelist = [
     'assets',
     'foliate-js-main',
     'vendor',
-    'services'
+    'services',
+    'resources'
 ];
 
 // 1. Validate all required whitelist items exist BEFORE cleaning distDir
@@ -71,7 +72,21 @@ fs.mkdirSync(distDir, { recursive: true });
 for (const item of requiredWhitelist) {
     const src = path.join(rootDir, item);
     const dest = path.join(distDir, item);
-    fs.cpSync(src, dest, { recursive: true, force: true });
+    fs.cpSync(src, dest, {
+        recursive: true,
+        force: true,
+        filter: (s) => {
+            const b = path.basename(s);
+            if (b.endsWith('.map')) return false;
+            if (b.toLowerCase() === 'ecdict.db') return false;
+            // PDF.js: pdf.mjs and pdf.worker.mjs are standard; omit redundant legacy copies
+            const rel = path.relative(rootDir, s).replace(/\\/g, '/');
+            if (rel.includes('foliate-js-main/vendor/pdfjs/') && (b === 'pdf.js' || b === 'pdf.worker.js')) return false;
+            // Tesseract: standard SIMD and base LSTM cover modern web and fallback; omit experimental relaxedsimd
+            if (b.startsWith('tesseract-core-relaxedsimd-lstm.')) return false;
+            return true;
+        }
+    });
     console.log(`[build-dist] Copied ${item} -> dist-tauri/${item}`);
 }
 
@@ -128,7 +143,7 @@ if (status !== null && status.length > 0) {
     }
 }
 
-let pkgVersion = '1.2.3';
+let pkgVersion = '2.0.0';
 try {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
     pkgVersion = pkg.version || pkgVersion;

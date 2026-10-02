@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::commands::sync::{is_allowed_server_url, secure_load_credential, secure_store_credential};
 
@@ -342,8 +342,7 @@ pub fn ai_set_cooldown_and_limit(
     daily_limit: Option<u32>,
 ) -> bool {
     if let Some(cd) = cooldown_seconds {
-        // Enforce minimum 5s cooldown, default 10s
-        let safe_cd = cd.clamp(5, 60);
+        let safe_cd = cd.min(3600);
         state.cooldown_seconds.store(safe_cd, Ordering::Relaxed);
     }
     if let Some(lim) = daily_limit {
@@ -353,21 +352,21 @@ pub fn ai_set_cooldown_and_limit(
 }
 
 #[tauri::command]
-pub fn ai_bind_credential(endpoint: String, api_key: String) -> Result<bool, String> {
+pub fn ai_bind_credential(app_handle: tauri::AppHandle, endpoint: String, api_key: String) -> Result<bool, String> {
     let parsed = reqwest::Url::parse(&endpoint)
         .map_err(|e| format!("接口地址无效: {}", e))?;
     is_allowed_server_url(&parsed)?;
 
     let clean_key = api_key.trim();
     if clean_key.is_empty() {
-        secure_store_credential("reading_ai_api_key".to_string(), String::new())?;
-        secure_store_credential("reading_ai_credential_origin".to_string(), String::new())?;
+        secure_store_credential(app_handle.clone(), "reading_ai_api_key".to_string(), String::new())?;
+        secure_store_credential(app_handle, "reading_ai_credential_origin".to_string(), String::new())?;
         return Ok(true);
     }
 
     let origin = parsed.origin().ascii_serialization();
-    secure_store_credential("reading_ai_api_key".to_string(), clean_key.to_string())?;
-    secure_store_credential("reading_ai_credential_origin".to_string(), origin)?;
+    secure_store_credential(app_handle.clone(), "reading_ai_api_key".to_string(), clean_key.to_string())?;
+    secure_store_credential(app_handle, "reading_ai_credential_origin".to_string(), origin)?;
     Ok(true)
 }
 
@@ -407,10 +406,10 @@ pub async fn ai_request_chat_completion(
         }
     }
 
-    // 3. Cooldown Check (Default 10s hard cooldown between dispatched model requests)
+    // 3. Cooldown Check (0 means disabled; otherwise enforce cooldown between dispatched model requests)
     let cooldown_secs = state.cooldown_seconds.load(Ordering::Relaxed);
-    {
-        let last_disp = state.last_dispatched_at.lock().unwrap();
+    if cooldown_secs > 0 {
+        let last_disp = state.last_dispatched_at.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(prev) = *last_disp {
             let elapsed = prev.elapsed().as_secs();
             if elapsed < cooldown_secs {
@@ -435,12 +434,13 @@ pub async fn ai_request_chat_completion(
         }
     }
 
-    // 5. Payload Hash Deduplication (Prevent rapid duplicate clicks of identical prompts across distinct IDs within cooldown window)
+    // 5. Payload Hash Deduplication (Independent minimum 10-second window to protect against accidental double clicks / replays)
+    let dedup_window_secs = cooldown_secs.max(10);
     let payload_hash = compute_payload_hash(&payload.endpoint, &payload.model, &payload.messages);
     {
-        let hashes = state.recent_payload_hashes.lock().unwrap();
+        let hashes = state.recent_payload_hashes.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((prev_req_id, prev_time)) = hashes.get(&payload_hash) {
-            if prev_time.elapsed().as_secs() < cooldown_secs {
+            if prev_time.elapsed().as_secs() < dedup_window_secs {
                 return Err(format!(
                     "DUPLICATE_PAYLOAD_BLOCKED: 检测到与近期请求 ({}) 相同的生成内容，短时间内不重复派发以防误扣费",
                     prev_req_id
@@ -455,13 +455,13 @@ pub async fn ai_request_chat_completion(
     is_allowed_server_url(&parsed_url)?;
 
     // 7. Credential & Origin Binding Verification (BEFORE claiming daily quota or in-flight lock!)
-    let api_key = match secure_load_credential("reading_ai_api_key".to_string())? {
+    let api_key = match secure_load_credential(window.app_handle().clone(), "reading_ai_api_key".to_string())? {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => return Err("CREDENTIAL_MISSING: 未检测到 API Key，请在设置中配置".to_string()),
     };
 
     let target_origin = parsed_url.origin().ascii_serialization();
-    if let Ok(Some(saved_origin)) = secure_load_credential("reading_ai_credential_origin".to_string()) {
+    if let Ok(Some(saved_origin)) = secure_load_credential(window.app_handle().clone(), "reading_ai_credential_origin".to_string()) {
         let clean_origin = saved_origin.trim();
         if !clean_origin.is_empty() && clean_origin != target_origin {
             return Err(format!(
@@ -627,8 +627,10 @@ pub async fn ai_request_chat_completion(
     let mut byte_buffer: Vec<u8> = Vec::new();
     let mut full_text = String::new();
     let mut usage_val: Option<serde_json::Value> = None;
+    let mut finish_reason: Option<String> = None;
     let mut was_cancelled = false;
     let mut has_stream_error = false;
+    let mut received_done = false;
 
     loop {
         tokio::select! {
@@ -656,6 +658,7 @@ pub async fn ai_request_chat_completion(
                                 continue;
                             }
                             if line == "data: [DONE]" {
+                                received_done = true;
                                 continue;
                             }
                             if let Some(json_slice) = line.strip_prefix("data: ") {
@@ -678,12 +681,44 @@ pub async fn ai_request_chat_completion(
                                     if let Some(u) = val.get("usage") {
                                         usage_val = Some(u.clone());
                                     }
+                                    if let Some(reason) = val.get("choices")
+                                        .and_then(|c| c.get(0))
+                                        .and_then(|c0| c0.get("finish_reason"))
+                                        .and_then(|r| r.as_str())
+                                    {
+                                        finish_reason = Some(reason.to_string());
+                                    }
                                 }
                             }
                         }
                     }
                     Ok(None) => {
-                        // EOF - Stream completed normally
+                        // EOF - Check remaining byte_buffer without newline
+                        if !byte_buffer.is_empty() {
+                            let trailing = String::from_utf8_lossy(&byte_buffer).trim().to_string();
+                            byte_buffer.clear();
+                            if trailing == "data: [DONE]" {
+                                received_done = true;
+                            } else if let Some(json_slice) = trailing.strip_prefix("data: ") {
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_slice) {
+                                    if let Some(delta) = val.get("choices")
+                                        .and_then(|c| c.get(0))
+                                        .and_then(|c0| c0.get("delta"))
+                                        .and_then(|d| d.get("content"))
+                                        .and_then(|t| t.as_str())
+                                    {
+                                        full_text.push_str(delta);
+                                    }
+                                    if let Some(reason) = val.get("choices")
+                                        .and_then(|c| c.get(0))
+                                        .and_then(|c0| c0.get("finish_reason"))
+                                        .and_then(|r| r.as_str())
+                                    {
+                                        finish_reason = Some(reason.to_string());
+                                    }
+                                }
+                            }
+                        }
                         break;
                     }
                     Err(e) => {
@@ -707,8 +742,15 @@ pub async fn ai_request_chat_completion(
         "cancelled"
     } else if has_stream_error {
         "failed"
+    } else if received_done || finish_reason.is_some() {
+        if finish_reason.as_deref() == Some("length") || finish_reason.as_deref() == Some("max_tokens") {
+            "partial"
+        } else {
+            "completed"
+        }
     } else {
-        "completed"
+        // EOF with no [DONE] and no finish_reason: unconfirmed termination, classify as partial
+        "partial"
     };
     {
         let mut status_guard = _guard.final_status.lock().unwrap();
@@ -729,15 +771,25 @@ pub async fn ai_request_chat_completion(
         completion_tokens: c_tok,
         total_tokens: t_tok,
         duration_ms: start_time.elapsed().as_millis(),
-        error_message: if was_cancelled { Some("用户点击停止".to_string()) } else { None },
+        error_message: if was_cancelled {
+            Some("用户点击停止".to_string())
+        } else if has_stream_error {
+            Some("数据流读取中断".to_string())
+        } else if final_status == "partial" {
+            Some("响应未收到终止事件或达到最大Token".to_string())
+        } else {
+            None
+        },
     });
 
-    if !was_cancelled {
+    if !was_cancelled && !has_stream_error {
         let _ = window.emit(
             &format!("ai:done:{}", req_id),
             serde_json::json!({
                 "fullText": full_text,
-                "usage": usage_val
+                "usage": usage_val,
+                "finishReason": finish_reason,
+                "status": final_status
             }),
         );
     }
@@ -746,7 +798,8 @@ pub async fn ai_request_chat_completion(
         "requestId": req_id,
         "status": final_status,
         "fullText": full_text,
-        "usage": usage_val
+        "usage": usage_val,
+        "finishReason": finish_reason
     }))
 }
 

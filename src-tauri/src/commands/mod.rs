@@ -5,6 +5,7 @@ pub mod sync;
 pub mod mupdf;
 pub mod ai;
 pub mod dictionary;
+pub mod android;
 
 pub use dialog::*;
 pub use fs::*;
@@ -13,4 +14,5 @@ pub use sync::*;
 pub use mupdf::*;
 pub use ai::*;
 pub use dictionary::*;
+pub use android::*;
 

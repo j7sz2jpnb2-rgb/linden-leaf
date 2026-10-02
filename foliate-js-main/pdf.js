@@ -113,8 +113,8 @@ if (typeof Object.groupBy !== 'function') {
 
 const pdfjsPath = path => new URL(`vendor/pdfjs/${path}`, import.meta.url).toString()
 
-import * as pdfjsLib from './vendor/pdfjs/pdf.js'
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsPath('pdf.worker.js')
+import * as pdfjsLib from './vendor/pdfjs/pdf.mjs'
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsPath('pdf.worker.mjs')
 
 let cachedTextLayerCSS = ''
 let cachedAnnotationLayerCSS = ''

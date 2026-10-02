@@ -105,6 +105,7 @@ fn encrypt_password(plain: &str) -> Result<String, String> {
     }
 }
 
+#[allow(dead_code)]
 #[cfg(not(target_os = "windows"))]
 fn encrypt_password(_plain: &str) -> Result<String, String> {
     // Base64 encoding is not encryption and must never be used to store credentials on disk.
@@ -190,11 +191,28 @@ pub fn sync_get_config() -> SyncConfig {
 }
 
 #[tauri::command]
-pub fn sync_reveal_password() -> String {
+pub fn sync_reveal_password(#[allow(unused)] app_handle: tauri::AppHandle) -> String {
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(Some(secret)) = crate::commands::android::android_keystore_load(app_handle.clone(), "sync_webdav_password".to_string()) {
+            if !secret.is_empty() {
+                return secret;
+            }
+        }
+    }
     let path = get_sync_config_path();
     if let Ok(content) = fs::read_to_string(&path) {
         if let Ok(cfg) = serde_json::from_str::<SyncConfig>(&content) {
             if let Some(pwd) = cfg.password {
+                if pwd.starts_with("__keystore:") {
+                    #[cfg(target_os = "android")]
+                    {
+                        if let Ok(Some(secret)) = crate::commands::android::android_keystore_load(app_handle, "sync_webdav_password".to_string()) {
+                            return secret;
+                        }
+                    }
+                    return String::new();
+                }
                 if cfg._pwd_encrypted.unwrap_or(false) {
                     return decrypt_password(&pwd).unwrap_or_default();
                 }
@@ -206,7 +224,7 @@ pub fn sync_reveal_password() -> String {
 }
 
 #[tauri::command]
-pub fn sync_save_config(mut config: SyncConfig) -> bool {
+pub fn sync_save_config(#[allow(unused)] app_handle: tauri::AppHandle, mut config: SyncConfig) -> bool {
     let path = get_sync_config_path();
     let existing_raw = fs::read_to_string(&path).ok();
     let existing_cfg: Option<SyncConfig> = existing_raw.and_then(|s| serde_json::from_str(&s).ok());
@@ -219,19 +237,36 @@ pub fn sync_save_config(mut config: SyncConfig) -> bool {
             config.credential_origin = ext.credential_origin.clone();
         }
     } else if let Some(ref plain) = config.password {
-        match encrypt_password(plain) {
-            Ok(enc) => {
-                config.password = Some(enc);
-                config._pwd_encrypted = Some(true);
-                // Bind saved credential to target server origin
-                let s_url = config.server_url.as_deref().unwrap_or("https://dav.jianguoyun.com/dav/");
-                if let Ok(parsed) = reqwest::Url::parse(s_url) {
-                    config.credential_origin = Some(parsed.origin().ascii_serialization());
+        #[cfg(target_os = "android")]
+        {
+            match crate::commands::android::android_keystore_store(app_handle, "sync_webdav_password".to_string(), plain.clone()) {
+                Ok(true) => {
+                    config.password = Some("__keystore:sync_webdav_password__".to_string());
+                    config._pwd_encrypted = Some(true);
+                    let s_url = config.server_url.as_deref().unwrap_or("https://dav.jianguoyun.com/dav/");
+                    if let Ok(parsed) = reqwest::Url::parse(s_url) {
+                        config.credential_origin = Some(parsed.origin().ascii_serialization());
+                    }
                 }
+                _ => return false,
             }
-            Err(_) => {
-                // S1: Encryption failed: fail fast and do NOT save config or write plain text
-                return false;
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            match encrypt_password(plain) {
+                Ok(enc) => {
+                    config.password = Some(enc);
+                    config._pwd_encrypted = Some(true);
+                    // Bind saved credential to target server origin
+                    let s_url = config.server_url.as_deref().unwrap_or("https://dav.jianguoyun.com/dav/");
+                    if let Ok(parsed) = reqwest::Url::parse(s_url) {
+                        config.credential_origin = Some(parsed.origin().ascii_serialization());
+                    }
+                }
+                Err(_) => {
+                    // S1: Encryption failed: fail fast and do NOT save config or write plain text
+                    return false;
+                }
             }
         }
     }
@@ -412,7 +447,7 @@ fn verify_credential_origin(config: &SyncConfig, saved_cfg: &SyncConfig) -> Resu
     Ok(())
 }
 
-fn get_credentials(config: &SyncConfig) -> Result<(String, String), String> {
+fn get_credentials(#[allow(unused)] app_handle: Option<&tauri::AppHandle>, config: &SyncConfig) -> Result<(String, String), String> {
     let saved_cfg = sync_get_config();
     let user = match config.username {
         Some(ref u) if !u.is_empty() => u.clone(),
@@ -420,15 +455,53 @@ fn get_credentials(config: &SyncConfig) -> Result<(String, String), String> {
     };
 
     let pass = if let Some(ref p) = config.password {
-        if !p.is_empty() {
+        if !p.is_empty() && !p.starts_with("__keystore:") {
             p.clone()
         } else {
             verify_credential_origin(config, &saved_cfg)?;
-            sync_reveal_password()
+            if let Some(handle) = app_handle {
+                sync_reveal_password(handle.clone())
+            } else {
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(pwd) = saved_cfg.password {
+                        if saved_cfg._pwd_encrypted.unwrap_or(false) {
+                            decrypt_password(&pwd).unwrap_or_default()
+                        } else {
+                            pwd
+                        }
+                    } else {
+                        String::new()
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    String::new()
+                }
+            }
         }
     } else {
         verify_credential_origin(config, &saved_cfg)?;
-        sync_reveal_password()
+        if let Some(handle) = app_handle {
+            sync_reveal_password(handle.clone())
+        } else {
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(pwd) = saved_cfg.password {
+                    if saved_cfg._pwd_encrypted.unwrap_or(false) {
+                        decrypt_password(&pwd).unwrap_or_default()
+                    } else {
+                        pwd
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                String::new()
+            }
+        }
     };
 
     Ok((user, pass))
@@ -498,7 +571,10 @@ async fn ensure_remote_dir(client: &reqwest::Client, dir_url: &reqwest::Url, use
 }
 
 #[tauri::command]
-pub async fn sync_test_connection(config: SyncConfig) -> Result<serde_json::Value, String> {
+pub async fn sync_test_connection(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+) -> Result<serde_json::Value, String> {
     let client = create_http_client(10)?;
 
     let target_url = if let Some(ref url) = config.server_url {
@@ -514,7 +590,7 @@ pub async fn sync_test_connection(config: SyncConfig) -> Result<serde_json::Valu
         get_sync_url(&config, "")?
     };
 
-    let (user, pass) = get_credentials(&config)?;
+    let (user, pass) = get_credentials(Some(&app_handle), &config)?;
 
     let res = client
         .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), target_url.as_str())
@@ -551,7 +627,10 @@ pub async fn sync_test_connection(config: SyncConfig) -> Result<serde_json::Valu
 }
 
 #[tauri::command]
-pub async fn sync_fetch_remote(config: SyncConfig) -> Result<RemoteSyncResponse, String> {
+pub async fn sync_fetch_remote(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+) -> Result<RemoteSyncResponse, String> {
     let client = match create_http_client(15) {
         Ok(c) => c,
         Err(e) => return Ok(RemoteSyncResponse {
@@ -574,7 +653,7 @@ pub async fn sync_fetch_remote(config: SyncConfig) -> Result<RemoteSyncResponse,
         }),
     };
 
-    let (user, pass) = match get_credentials(&config) {
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
         Ok(c) => c,
         Err(e) => return Ok(RemoteSyncResponse {
             success: false,
@@ -643,6 +722,7 @@ pub async fn sync_fetch_remote(config: SyncConfig) -> Result<RemoteSyncResponse,
 
 #[tauri::command]
 pub async fn sync_save_remote(
+    #[allow(unused)] app_handle: tauri::AppHandle,
     config: SyncConfig,
     data: serde_json::Value,
     etag: Option<String>,
@@ -677,7 +757,7 @@ pub async fn sync_save_remote(
         }),
     };
 
-    let (user, pass) = match get_credentials(&config) {
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
         Ok(c) => c,
         Err(e) => return Ok(SaveRemoteResponse {
             success: false,
@@ -739,6 +819,7 @@ pub async fn sync_save_remote(
 
 #[tauri::command]
 pub async fn sync_upload_book_binary(
+    #[allow(unused)] app_handle: tauri::AppHandle,
     config: SyncConfig,
     file_name: String,
     buffer: Vec<u8>,
@@ -798,7 +879,7 @@ pub async fn sync_upload_book_binary(
         }),
     };
 
-    let (user, pass) = match get_credentials(&config) {
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
         Ok(c) => c,
         Err(e) => return Ok(BookBinaryResponse {
             success: false,
@@ -840,6 +921,7 @@ pub async fn sync_upload_book_binary(
 
 #[tauri::command]
 pub async fn sync_download_book_binary(
+    #[allow(unused)] app_handle: tauri::AppHandle,
     config: SyncConfig,
     file_name: String,
 ) -> Result<BookBinaryResponse, String> {
@@ -876,7 +958,7 @@ pub async fn sync_download_book_binary(
         }),
     };
 
-    let (user, pass) = match get_credentials(&config) {
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
         Ok(c) => c,
         Err(e) => return Ok(BookBinaryResponse {
             success: false,
@@ -936,6 +1018,7 @@ pub async fn sync_download_book_binary(
 
 #[tauri::command]
 pub async fn sync_delete_book_binary(
+    #[allow(unused)] app_handle: tauri::AppHandle,
     config: SyncConfig,
     file_name: String,
 ) -> Result<BookBinaryResponse, String> {
@@ -972,7 +1055,7 @@ pub async fn sync_delete_book_binary(
         }),
     };
 
-    let (user, pass) = match get_credentials(&config) {
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
         Ok(c) => c,
         Err(e) => return Ok(BookBinaryResponse {
             success: false,
@@ -1008,6 +1091,7 @@ pub async fn sync_delete_book_binary(
     }
 }
 
+#[allow(dead_code)]
 fn get_credentials_dir() -> PathBuf {
     let mut dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
     dir.push("com.lindenleaf.reader");
@@ -1016,6 +1100,7 @@ fn get_credentials_dir() -> PathBuf {
     dir
 }
 
+#[allow(dead_code)]
 fn sanitize_credential_key(key: &str) -> String {
     key.chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
@@ -1023,65 +1108,109 @@ fn sanitize_credential_key(key: &str) -> String {
 }
 
 #[tauri::command]
-pub fn secure_store_credential(key: String, value: String) -> Result<bool, String> {
+pub fn secure_store_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+    value: String,
+) -> Result<bool, String> {
     if key.trim().is_empty() {
         return Err("Credential key cannot be empty".to_string());
     }
-    let sanitized = sanitize_credential_key(&key);
-    let mut file_path = get_credentials_dir();
-    file_path.push(format!("{}.enc", sanitized));
-
-    let encrypted = encrypt_password(&value)?;
-    fs::write(&file_path, encrypted).map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn secure_load_credential(key: String) -> Result<Option<String>, String> {
-    if key.trim().is_empty() {
-        return Ok(None);
+    #[cfg(target_os = "android")]
+    {
+        crate::commands::android::android_keystore_store(app_handle, key, value)
     }
-    let sanitized = sanitize_credential_key(&key);
-    let mut file_path = get_credentials_dir();
-    file_path.push(format!("{}.enc", sanitized));
+    #[cfg(not(target_os = "android"))]
+    {
+        let sanitized = sanitize_credential_key(&key);
+        let mut file_path = get_credentials_dir();
+        file_path.push(format!("{}.enc", sanitized));
 
-    if !file_path.exists() {
-        return Ok(None);
-    }
-
-    let encrypted = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
-    if encrypted.trim().is_empty() {
-        return Ok(Some(String::new()));
-    }
-    let decrypted = decrypt_password(encrypted.trim())?;
-    Ok(Some(decrypted))
-}
-
-#[tauri::command]
-pub fn secure_has_credential(key: String) -> Result<bool, String> {
-    if key.trim().is_empty() {
-        return Ok(false);
-    }
-    let sanitized = sanitize_credential_key(&key);
-    let mut file_path = get_credentials_dir();
-    file_path.push(format!("{}.enc", sanitized));
-    Ok(file_path.exists())
-}
-
-#[tauri::command]
-pub fn secure_delete_credential(key: String) -> Result<bool, String> {
-    if key.trim().is_empty() {
-        return Ok(false);
-    }
-    let sanitized = sanitize_credential_key(&key);
-    let mut file_path = get_credentials_dir();
-    file_path.push(format!("{}.enc", sanitized));
-
-    if file_path.exists() {
-        fs::remove_file(&file_path).map_err(|e| e.to_string())?;
+        let encrypted = encrypt_password(&value)?;
+        fs::write(&file_path, encrypted).map_err(|e| e.to_string())?;
         Ok(true)
-    } else {
-        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub fn secure_load_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+) -> Result<Option<String>, String> {
+    if key.trim().is_empty() {
+        return Ok(None);
+    }
+    #[cfg(target_os = "android")]
+    {
+        crate::commands::android::android_keystore_load(app_handle, key)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let sanitized = sanitize_credential_key(&key);
+        let mut file_path = get_credentials_dir();
+        file_path.push(format!("{}.enc", sanitized));
+
+        if !file_path.exists() {
+            return Ok(None);
+        }
+
+        let encrypted = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+        if encrypted.trim().is_empty() {
+            return Ok(Some(String::new()));
+        }
+        let decrypted = decrypt_password(encrypted.trim())?;
+        Ok(Some(decrypted))
+    }
+}
+
+#[tauri::command]
+pub fn secure_has_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+) -> Result<bool, String> {
+    if key.trim().is_empty() {
+        return Ok(false);
+    }
+    #[cfg(target_os = "android")]
+    {
+        match crate::commands::android::android_keystore_load(app_handle, key) {
+            Ok(Some(val)) => Ok(!val.is_empty()),
+            _ => Ok(false),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let sanitized = sanitize_credential_key(&key);
+        let mut file_path = get_credentials_dir();
+        file_path.push(format!("{}.enc", sanitized));
+        Ok(file_path.exists())
+    }
+}
+
+#[tauri::command]
+pub fn secure_delete_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+) -> Result<bool, String> {
+    if key.trim().is_empty() {
+        return Ok(false);
+    }
+    #[cfg(target_os = "android")]
+    {
+        crate::commands::android::android_keystore_delete(app_handle, key)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let sanitized = sanitize_credential_key(&key);
+        let mut file_path = get_credentials_dir();
+        file_path.push(format!("{}.enc", sanitized));
+
+        if file_path.exists() {
+            fs::remove_file(&file_path).map_err(|e| e.to_string())?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 

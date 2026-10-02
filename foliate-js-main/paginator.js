@@ -196,11 +196,23 @@ const getDirection = doc => {
 }
 
 const getBackground = doc => {
-    const bodyStyle = doc.defaultView.getComputedStyle(doc.body)
-    return bodyStyle.backgroundColor === 'rgba(0, 0, 0, 0)'
+    if (!doc || !doc.body) return ''
+    const bodyStyle = doc.defaultView?.getComputedStyle(doc.body)
+    if (!bodyStyle) return ''
+    let bg = bodyStyle.backgroundColor === 'rgba(0, 0, 0, 0)'
         && bodyStyle.backgroundImage === 'none'
-        ? doc.defaultView.getComputedStyle(doc.documentElement).background
+        ? doc.defaultView?.getComputedStyle(doc.documentElement)?.background
         : bodyStyle.background
+    if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') {
+        const theme = document.documentElement.getAttribute('data-theme')
+        if (theme === 'black') return '#000000'
+        if (theme === 'dark') return '#1f1f1d'
+        if (theme === 'sepia') return '#f5eedc'
+        if (theme === 'green') return '#e8f5e9'
+        if (theme === 'eink') return '#ffffff'
+        return '#FAF9F5'
+    }
+    return bg
 }
 
 const makeMarginals = (length, part) => Array.from({ length }, () => {
@@ -548,6 +560,7 @@ export class Paginator extends HTMLElement {
     #touchScrolled
     #lastVisibleRange
     #relocateTimeout = null
+    #lockedAnchor = null
     #isPointerSelecting = false
     #checkPointerSelection = null
     #lastResizeTime = 0
@@ -579,15 +592,15 @@ export class Paginator extends HTMLElement {
             --_max-height: var(--_max-block-size);
             display: grid;
             grid-template-columns:
-                minmax(var(--_half-gap), 1fr)
+                minmax(max(var(--_half-gap), var(--safe-left, 0px)), 1fr)
                 var(--_half-gap)
                 minmax(0, calc(var(--_max-width) - var(--_gap)))
                 var(--_half-gap)
-                minmax(var(--_half-gap), 1fr);
+                minmax(max(var(--_half-gap), var(--safe-right, 0px)), 1fr);
             grid-template-rows:
-                minmax(var(--_margin), 1fr)
+                minmax(max(var(--_margin), var(--safe-top, 0px)), 1fr)
                 minmax(0, var(--_max-height))
-                minmax(var(--_margin), 1fr);
+                minmax(max(var(--_margin), var(--safe-bottom, 0px)), 1fr);
             &.vertical {
                 --_max-column-count-spread: var(--_max-column-count-portrait);
                 --_max-width: var(--_max-block-size);
@@ -884,12 +897,33 @@ export class Paginator extends HTMLElement {
         this.#isPointerSelecting = false
         this.#checkPointerSelection?.cancel?.()
     }
-    render() {
-        this.#clearPointerSelecting()
-        this.#lastResizeTime = Date.now()
+    setAnchor(anchor, isLocked = true) {
         if (this.#relocateTimeout) {
             clearTimeout(this.#relocateTimeout)
             this.#relocateTimeout = null
+        }
+        if (anchor) {
+            this.#anchor = anchor
+            if (isLocked) this.#lockedAnchor = anchor
+        }
+    }
+    setLockedAnchor(anchor) {
+        this.setAnchor(anchor, true)
+    }
+    render() {
+        this.#clearPointerSelecting()
+        this.#lastResizeTime = Date.now()
+        if (this.#lockedAnchor) {
+            this.#anchor = this.#lockedAnchor
+            this.#lockedAnchor = null
+            if (this.#relocateTimeout) {
+                clearTimeout(this.#relocateTimeout)
+                this.#relocateTimeout = null
+            }
+        } else if (this.#relocateTimeout) {
+            clearTimeout(this.#relocateTimeout)
+            this.#relocateTimeout = null
+            // Pending fast-path flip: calculate actual visible range of the current page
             const range = this.#getVisibleRange()
             if (range) {
                 this.#lastVisibleRange = range

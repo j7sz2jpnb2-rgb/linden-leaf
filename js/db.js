@@ -1,7 +1,8 @@
-// db.js - IndexedDB storage wrapper for Universal E-Book Reader (with WeChat Read Statistics)
+// db.js - IndexedDB storage wrapper for Universal E-Book Reader
+import { buildTranslationRevisionArchive, checkTranslationCompatibility } from './translation-job-core.js'
 
 const DB_NAME = 'UniversalReaderDB'
-const DB_VERSION = 9
+const DB_VERSION = 10
 
 let dbInstance = null
 let _openPromise = null
@@ -54,7 +55,7 @@ export const openDB = () => {
                 db.createObjectStore('settings', { keyPath: 'key' })
             }
 
-            // Store for Reading Sessions (WeChat Read style logs)
+            // Store for Reading Sessions
             if (!db.objectStoreNames.contains('reading_sessions')) {
                 const sessionStore = db.createObjectStore('reading_sessions', { keyPath: 'id' })
                 sessionStore.createIndex('bookId', 'bookId', { unique: false })
@@ -101,6 +102,15 @@ export const openDB = () => {
                 const msgStore = db.createObjectStore('ai_messages', { keyPath: 'id' })
                 msgStore.createIndex('conversationId', 'conversationId', { unique: false })
                 msgStore.createIndex('createdAt', 'createdAt', { unique: false })
+            }
+
+            // Store for Chapter Bilingual Translations & Paragraph Cache (v10)
+            if (!db.objectStoreNames.contains('chapter_translations')) {
+                const transStore = db.createObjectStore('chapter_translations', { keyPath: 'id' })
+                transStore.createIndex('bookId', 'bookId', { unique: false })
+                transStore.createIndex('chapterKey', 'chapterKey', { unique: false })
+                transStore.createIndex('bookChapter', ['bookId', 'chapterKey'], { unique: false })
+                transStore.createIndex('updatedAt', 'updatedAt', { unique: false })
             }
 
             // Migrate DB_VERSION < 4 records (strip blob from books and save to book_files)
@@ -1251,7 +1261,7 @@ export const setSetting = async (key, value) => {
 }
 
 // ==========================================
-// Reading Sessions & WeChat Read Analytics
+// Reading Sessions & Reading Analytics
 // ==========================================
 export const recordReadingSession = async (session, updateBookTotal = true) => {
     if (!session || !session.id) return null
@@ -1270,13 +1280,18 @@ export const recordReadingSession = async (session, updateBookTotal = true) => {
             
             sessStore.put(session)
 
-            // Increment book totalReadingSeconds only in normal reading (not cloud sync replay)
+            // Increment book totalReadingSeconds only in normal reading, and totalListeningSeconds for listening
             if (updateBookTotal && session.bookId && delta > 0 && bookStore) {
                 const getBookReq = bookStore.get(session.bookId)
                 getBookReq.onsuccess = () => {
                     const book = getBookReq.result
                     if (book) {
-                        book.totalReadingSeconds = (book.totalReadingSeconds || 0) + delta
+                        const isListen = Boolean(session.isListening || session.kind === 'listen')
+                        if (isListen) {
+                            book.totalListeningSeconds = (book.totalListeningSeconds || 0) + delta
+                        } else {
+                            book.totalReadingSeconds = (book.totalReadingSeconds || 0) + delta
+                        }
                         book.lastReadAt = Date.now()
                         bookStore.put(book)
                     }
@@ -1307,7 +1322,7 @@ export const getAllReadingSessions = async () => {
     })
 }
 
-// Calculate WeChat Read Full Statistics (Supports Week, Month, Year, Total views)
+// Calculate Reading Full Statistics (Supports Week, Month, Year, Total views)
 export const getReadingStats = async (viewMode = 'month', targetYear = new Date().getFullYear(), targetMonth = new Date().getMonth() + 1, weekOffset = 0) => {
     const allRawSessions = await getAllReadingSessions()
     const getSessionDur = s => {
@@ -1330,19 +1345,60 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
     const activeDates = new Set()
     let earliestTime = now.getTime()
 
+    const computeActiveSessionSeconds = (sessList) => {
+        const rawIntervals = []
+        let unintervaledSeconds = 0
+        for (const s of sessList) {
+            const dur = getSessionDur(s)
+            if (dur <= 0) continue
+            if (s.startTime) {
+                const startMs = s.startTime
+                const endMs = s.endTime || (startMs + dur * 1000)
+                if (endMs > startMs) {
+                    rawIntervals.push([startMs, endMs])
+                } else {
+                    unintervaledSeconds += dur
+                }
+            } else {
+                unintervaledSeconds += dur
+            }
+        }
+        if (rawIntervals.length === 0) return unintervaledSeconds
+        rawIntervals.sort((a, b) => a[0] - b[0])
+        let unionSecs = 0
+        let cur = [rawIntervals[0][0], rawIntervals[0][1]]
+        for (let i = 1; i < rawIntervals.length; i++) {
+            const next = rawIntervals[i]
+            if (next[0] <= cur[1]) {
+                cur[1] = Math.max(cur[1], next[1])
+            } else {
+                unionSecs += Math.round((cur[1] - cur[0]) / 1000)
+                cur = [next[0], next[1]]
+            }
+        }
+        unionSecs += Math.round((cur[1] - cur[0]) / 1000)
+        return unionSecs + unintervaledSeconds
+    }
+
+    const dayGroupMap = new Map()
     for (const sess of sessions) {
-        const dur = getSessionDur(sess)
-        totalSeconds += dur
         const d = sess.date || toLocalDateKey(sess.startTime || now)
-        dailyMap[d] = (dailyMap[d] || 0) + dur
-        const ym = d.slice(0, 7)
-        monthlyMap[ym] = (monthlyMap[ym] || 0) + dur
-        const y = d.slice(0, 4)
-        yearlyMap[y] = (yearlyMap[y] || 0) + dur
+        if (!dayGroupMap.has(d)) dayGroupMap.set(d, [])
+        dayGroupMap.get(d).push(sess)
 
         if (sess.startTime && sess.startTime < earliestTime) {
             earliestTime = sess.startTime
         }
+    }
+
+    for (const [d, daySessions] of dayGroupMap.entries()) {
+        const dur = computeActiveSessionSeconds(daySessions)
+        totalSeconds += dur
+        dailyMap[d] = dur
+        const ym = d.slice(0, 7)
+        monthlyMap[ym] = (monthlyMap[ym] || 0) + dur
+        const y = d.slice(0, 4)
+        yearlyMap[y] = (yearlyMap[y] || 0) + dur
     }
 
     // Active reading days: any natural day with total reading time in dailyMap >= 60 seconds
@@ -1565,17 +1621,27 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
 
     const periodSessions = sessions.filter(isSessInPeriod)
     const periodBookDurationMap = new Map()
+    const periodBookSessions = new Map()
     periodSessions.forEach(s => {
         if (s.bookId) {
-            periodBookDurationMap.set(s.bookId, (periodBookDurationMap.get(s.bookId) || 0) + (s.durationSeconds || 0))
+            if (!periodBookSessions.has(s.bookId)) periodBookSessions.set(s.bookId, [])
+            periodBookSessions.get(s.bookId).push(s)
         }
     })
+    for (const [bId, bSessList] of periodBookSessions.entries()) {
+        periodBookDurationMap.set(bId, computeActiveSessionSeconds(bSessList))
+    }
 
     const allSessionBookMap = new Map()
+    const allBookSessions = new Map()
     for (const sess of allRawSessions) {
         if (sess && sess.bookId && (sess.durationSeconds || 0) > 0) {
-            allSessionBookMap.set(sess.bookId, (allSessionBookMap.get(sess.bookId) || 0) + sess.durationSeconds)
+            if (!allBookSessions.has(sess.bookId)) allBookSessions.set(sess.bookId, [])
+            allBookSessions.get(sess.bookId).push(sess)
         }
+    }
+    for (const [bId, bSessList] of allBookSessions.entries()) {
+        allSessionBookMap.set(bId, computeActiveSessionSeconds(bSessList))
     }
     const enrichedBooks = books.map(b => {
         const sessTotal = allSessionBookMap.get(b.id) || 0
@@ -2349,5 +2415,221 @@ export const recoverInterruptedAiMessages = async () => {
     })
 }
 
+// ==========================================
+// Chapter Bilingual Translation Storage (v10)
+// ==========================================
+export const saveChapterTranslation = async (record) => {
+    if (typeof indexedDB === 'undefined' || !record?.id) return false
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('chapter_translations')) return resolve(false)
+            const stores = ['chapter_translations']
+            if (db.objectStoreNames.contains('deleted_records')) stores.push('deleted_records')
+            const tx = db.transaction(stores, 'readwrite')
+            const store = tx.objectStore('chapter_translations')
+            const delStore = stores.includes('deleted_records') ? tx.objectStore('deleted_records') : null
 
+            const doSave = () => {
+                const archive = (typeof buildTranslationRevisionArchive === 'function')
+                    ? buildTranslationRevisionArchive(record)
+                    : record
+                store.put({
+                    ...archive,
+                    updatedAt: archive.updatedAt || Date.now()
+                })
+            }
+
+            if (delStore) {
+                const getTomb = delStore.get(record.id)
+                getTomb.onsuccess = () => {
+                    const tomb = getTomb.result
+                    if (tomb && (tomb.deletedAt || 0) >= (record.updatedAt || 0)) {
+                        // Deleted by tombstone, do not resurrect
+                        try { tx.abort() } catch (_) {}
+                        return resolve(false)
+                    }
+                    if (tomb) {
+                        delStore.delete(record.id)
+                    }
+                    doSave()
+                }
+                getTomb.onerror = () => doSave()
+            } else {
+                doSave()
+            }
+
+            tx.oncomplete = () => resolve(true)
+            tx.onerror = () => resolve(false)
+            tx.onabort = () => resolve(false)
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+export const getChapterTranslation = async (bookId, chapterKey) => {
+    if (typeof indexedDB === 'undefined' || !bookId || chapterKey == null) return null
+    const db = await openDB()
+    const id = `${bookId}::${chapterKey}`
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('chapter_translations')) return resolve(null)
+            const tx = db.transaction('chapter_translations', 'readonly')
+            const store = tx.objectStore('chapter_translations')
+            const req = store.get(id)
+            req.onsuccess = () => resolve(req.result || null)
+            req.onerror = () => resolve(null)
+        } catch (e) {
+            resolve(null)
+        }
+    })
+}
+
+export const deleteChapterTranslation = async (bookId, chapterKey) => {
+    if (typeof indexedDB === 'undefined' || !bookId || chapterKey == null) return false
+    const db = await openDB()
+    const id = `${bookId}::${chapterKey}`
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('chapter_translations')) return resolve(false)
+            const stores = ['chapter_translations']
+            if (db.objectStoreNames.contains('deleted_records')) stores.push('deleted_records')
+            const tx = db.transaction(stores, 'readwrite')
+            const store = tx.objectStore('chapter_translations')
+            store.delete(id)
+            if (stores.includes('deleted_records')) {
+                tx.objectStore('deleted_records').put({
+                    id,
+                    type: 'chapter_translation',
+                    deletedAt: Date.now()
+                })
+            }
+            tx.oncomplete = () => resolve(true)
+            tx.onerror = () => resolve(false)
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+export const listChapterTranslationsForBook = async (bookId) => {
+    if (typeof indexedDB === 'undefined' || !bookId) return []
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('chapter_translations')) return resolve([])
+            const tx = db.transaction('chapter_translations', 'readonly')
+            const store = tx.objectStore('chapter_translations')
+            const index = store.index('bookId')
+            const req = index.getAll(bookId)
+            req.onsuccess = () => resolve(req.result || [])
+            req.onerror = () => resolve([])
+        } catch (e) {
+            resolve([])
+        }
+    })
+}
+
+export const getAllChapterTranslations = async () => {
+    if (typeof indexedDB === 'undefined') return []
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('chapter_translations')) return resolve([])
+            const tx = db.transaction('chapter_translations', 'readonly')
+            const store = tx.objectStore('chapter_translations')
+            const req = store.getAll()
+            req.onsuccess = () => resolve(req.result || [])
+            req.onerror = () => resolve([])
+        } catch (e) {
+            resolve([])
+        }
+    })
+}
+
+export { buildTranslationRevisionArchive, checkTranslationCompatibility }
+
+export const clearAllChapterTranslations = async (bookId = null) => {
+    if (typeof indexedDB === 'undefined') return false
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('chapter_translations')) return resolve(true)
+            const stores = ['chapter_translations']
+            if (db.objectStoreNames.contains('deleted_records')) stores.push('deleted_records')
+            const tx = db.transaction(stores, 'readwrite')
+            const ctStore = tx.objectStore('chapter_translations')
+            const delStore = stores.includes('deleted_records') ? tx.objectStore('deleted_records') : null
+
+            if (bookId) {
+                const index = ctStore.index('bookId')
+                const req = index.getAll(bookId)
+                req.onsuccess = () => {
+                    const list = req.result || []
+                    const now = Date.now()
+                    list.forEach(item => {
+                        if (item?.id) {
+                            ctStore.delete(item.id)
+                            if (delStore) {
+                                delStore.put({ id: item.id, type: 'chapter_translation', deletedAt: now })
+                            }
+                        }
+                    })
+                }
+            } else {
+                if (delStore) {
+                    const req = ctStore.getAll()
+                    req.onsuccess = () => {
+                        const list = req.result || []
+                        const now = Date.now()
+                        list.forEach(item => {
+                            if (item?.id) {
+                                delStore.put({ id: item.id, type: 'chapter_translation', deletedAt: now })
+                            }
+                        })
+                        ctStore.clear()
+                    }
+                } else {
+                    ctStore.clear()
+                }
+            }
+            tx.oncomplete = () => resolve(true)
+            tx.onerror = () => resolve(false)
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+export const getChapterTranslationsStats = async () => {
+    if (typeof indexedDB === 'undefined') return { count: 0, estimatedBytes: 0 }
+    const db = await openDB()
+    return new Promise((resolve) => {
+        try {
+            if (!db.objectStoreNames.contains('chapter_translations')) return resolve({ count: 0, estimatedBytes: 0 })
+            const tx = db.transaction('chapter_translations', 'readonly')
+            const store = tx.objectStore('chapter_translations')
+            const req = store.openCursor()
+            let count = 0
+            let estimatedBytes = 0
+            req.onsuccess = (e) => {
+                const cursor = e.target.result
+                if (cursor) {
+                    count++
+                    try {
+                        const json = JSON.stringify(cursor.value)
+                        estimatedBytes += json.length * 2
+                    } catch (err) {}
+                    cursor.continue()
+                } else {
+                    resolve({ count, estimatedBytes })
+                }
+            }
+            req.onerror = () => resolve({ count: 0, estimatedBytes: 0 })
+        } catch (e) {
+            resolve({ count: 0, estimatedBytes: 0 })
+        }
+    })
+}
 

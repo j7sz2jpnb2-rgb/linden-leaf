@@ -4,24 +4,25 @@
  */
 
 /**
- * Honest token estimation:
- * - CJK characters: ~1.2 tokens each
- * - Latin / alphanumeric words: ~1.3 tokens each
- * - Numbers / punctuation / whitespace: ~0.5 tokens each
+ * Heuristic Token Estimation (基于词法与字符统计的启发式估算系数，非本地真实 BPE 分词器，不作硬 Token 承诺):
+ * - auto: 标准中英自适应估算系数 (CJK: ~1.25, Words: ~1.35)
+ * - cjk_heuristic: CJK 偏高估算系数 (CJK: ~1.5, Words: ~1.35)
+ * - cl100k_base: cl100k 启发式估算系数 (CJK: ~1.15, Words: ~1.25)
+ * - gpt2: gpt2 启发式估算系数 (CJK: ~2.2, Words: ~1.3)
  *
  * @param {string} text
+ * @param {'auto' | 'cjk_heuristic' | 'cl100k_base' | 'gpt2'} [tokenizer='auto']
  * @returns {number}
  */
-export function estimateTokenCount(text) {
+export function estimateTokenCount(text, tokenizer = 'auto') {
     if (!text || typeof text !== 'string') return 0
     const str = text.trim()
     if (!str) return 0
 
     let cjkCount = 0
-    let otherCharCount = 0
 
-    // Match CJK Unified Ideographs, Hiragana, Katakana, Hangul, Fullwidth punctuation
-    const cjkRegex = /[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af\uff01-\uffee]/g
+    // Match CJK Unified Ideographs, Symbols & Punctuation, Hiragana, Katakana, Hangul, Fullwidth punctuation
+    const cjkRegex = /[\u4e00-\u9fa5\u3000-\u303f\u3040-\u30ff\uac00-\ud7af\uff01-\uffee]/g
     const cjkMatches = str.match(cjkRegex)
     if (cjkMatches) {
         cjkCount = cjkMatches.length
@@ -32,7 +33,19 @@ export function estimateTokenCount(text) {
     const wordCount = words.length
 
     // Estimated token count rounded up
-    const estimate = Math.ceil(cjkCount * 1.25 + wordCount * 1.35)
+    let cjkMultiplier = 1.25
+    let wordMultiplier = 1.35
+    if (tokenizer === 'cjk_heuristic') {
+        cjkMultiplier = 1.5
+        wordMultiplier = 1.35
+    } else if (tokenizer === 'cl100k_base') {
+        cjkMultiplier = 1.15
+        wordMultiplier = 1.25
+    } else if (tokenizer === 'gpt2') {
+        cjkMultiplier = 2.2
+        wordMultiplier = 1.3
+    }
+    const estimate = Math.ceil(cjkCount * cjkMultiplier + wordCount * wordMultiplier)
     return Math.max(1, estimate)
 }
 
@@ -42,17 +55,16 @@ export function estimateTokenCount(text) {
  *
  * @param {string} text
  * @param {number} maxTokens (default 1000)
- * @param {string} text
- * @param {number} maxTokens (default 1000)
  * @param {object} [options]
  * @param {boolean} [options.fromEnd=false] If true, keep the end of the text closest to the selection
+ * @param {string} [options.tokenizer='auto']
  * @returns {{ text: string, tokenCount: number, isTruncated: boolean }}
  */
-export function truncateToTokenBudget(text, maxTokens = 1000, { fromEnd = false } = {}) {
+export function truncateToTokenBudget(text, maxTokens = 1000, { fromEnd = false, tokenizer = 'auto' } = {}) {
     if (!text) return { text: '', tokenCount: 0, isTruncated: false }
     const budget = Math.max(0, Math.min(10000, Number(maxTokens) ?? 1000))
     if (budget === 0) return { text: '', tokenCount: 0, isTruncated: false }
-    const currentTokens = estimateTokenCount(text)
+    const currentTokens = estimateTokenCount(text, tokenizer)
     if (currentTokens <= budget) {
         return { text, tokenCount: currentTokens, isTruncated: false }
     }
@@ -66,7 +78,7 @@ export function truncateToTokenBudget(text, maxTokens = 1000, { fromEnd = false 
         while (low <= high) {
             const mid = Math.floor((low + high) / 2)
             const slice = text.slice(text.length - mid)
-            const tokens = estimateTokenCount(slice)
+            const tokens = estimateTokenCount(slice, tokenizer)
             if (tokens <= budget) {
                 bestCut = mid
                 low = mid + 1
@@ -89,7 +101,7 @@ export function truncateToTokenBudget(text, maxTokens = 1000, { fromEnd = false 
 
         const finalStart = cleanCutIndex > 0 ? (startIndex + cleanCutIndex) : startIndex
         let truncatedText = '... ' + text.slice(finalStart).trim()
-        while (estimateTokenCount(truncatedText) > budget && truncatedText.length > 5) {
+        while (estimateTokenCount(truncatedText, tokenizer) > budget && truncatedText.length > 5) {
             const firstSpace = truncatedText.indexOf(' ', 4)
             if (firstSpace > 0) {
                 truncatedText = '... ' + truncatedText.slice(firstSpace + 1).trim()
@@ -99,7 +111,7 @@ export function truncateToTokenBudget(text, maxTokens = 1000, { fromEnd = false 
         }
         return {
             text: truncatedText,
-            tokenCount: estimateTokenCount(truncatedText),
+            tokenCount: estimateTokenCount(truncatedText, tokenizer),
             isTruncated: true
         }
     }
@@ -112,7 +124,7 @@ export function truncateToTokenBudget(text, maxTokens = 1000, { fromEnd = false 
     while (low <= high) {
         const mid = Math.floor((low + high) / 2)
         const slice = text.slice(0, mid)
-        const tokens = estimateTokenCount(slice)
+        const tokens = estimateTokenCount(slice, tokenizer)
         if (tokens <= budget) {
             bestCut = mid
             low = mid + 1
@@ -135,7 +147,7 @@ export function truncateToTokenBudget(text, maxTokens = 1000, { fromEnd = false 
     const finalCut = cleanCut > 0 ? cleanCut : bestCut
     let truncatedText = text.slice(0, finalCut).trim() + ' ...'
     // Ensure appending ellipsis never pushes tokenCount above budget
-    while (estimateTokenCount(truncatedText) > budget && truncatedText.length > 5) {
+    while (estimateTokenCount(truncatedText, tokenizer) > budget && truncatedText.length > 5) {
         const lastSpace = truncatedText.lastIndexOf(' ', truncatedText.length - 5)
         if (lastSpace > 0) {
             truncatedText = truncatedText.slice(0, lastSpace).trim() + ' ...'
@@ -145,7 +157,7 @@ export function truncateToTokenBudget(text, maxTokens = 1000, { fromEnd = false 
     }
     return {
         text: truncatedText,
-        tokenCount: estimateTokenCount(truncatedText),
+        tokenCount: estimateTokenCount(truncatedText, tokenizer),
         isTruncated: true
     }
 }
@@ -180,9 +192,10 @@ export function createReferenceSnapshot(book, selectionInfo) {
  * @param {string} options.beforeText
  * @param {string} options.afterText
  * @param {number} [options.maxTokens=1000]
+ * @param {string} [options.tokenizer='auto']
  * @returns {{ contextText: string, tokenCount: number, isTruncated: boolean }}
  */
-export function buildSurroundingContext({ beforeText = '', afterText = '', maxTokens = 1000 } = {}) {
+export function buildSurroundingContext({ beforeText = '', afterText = '', maxTokens = 1000, tokenizer = 'auto' } = {}) {
     const budget = Math.max(0, Math.min(10000, Number(maxTokens) ?? 1000))
     if (budget === 0) {
         return { contextText: '', tokenCount: 0, isTruncated: false, tokenBudget: 0 }
@@ -196,9 +209,9 @@ export function buildSurroundingContext({ beforeText = '', afterText = '', maxTo
     }
 
     const halfBudget = Math.floor(budget / 2)
-    const beforeBudget = truncateToTokenBudget(cleanBefore, halfBudget, { fromEnd: true })
+    const beforeBudget = truncateToTokenBudget(cleanBefore, halfBudget, { fromEnd: true, tokenizer })
     const remainingBudgetForAfter = budget - beforeBudget.tokenCount
-    const afterBudget = truncateToTokenBudget(cleanAfter, remainingBudgetForAfter, { fromEnd: false })
+    const afterBudget = truncateToTokenBudget(cleanAfter, remainingBudgetForAfter, { fromEnd: false, tokenizer })
 
     let combined = ''
     if (beforeBudget.text && afterBudget.text) {
@@ -210,7 +223,7 @@ export function buildSurroundingContext({ beforeText = '', afterText = '', maxTo
     }
 
     // Safety check final combined text to ensure it strictly respects budget
-    const finalResult = truncateToTokenBudget(combined, budget)
+    const finalResult = truncateToTokenBudget(combined, budget, { tokenizer })
     return {
         contextText: finalResult.text,
         tokenCount: finalResult.tokenCount,

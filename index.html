@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8"/>
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://fonts.googleapis.com https://fonts.gstatic.com https://fonts.font.im https://fonts.gstatic.font.im https://cdn.jsdelivr.net https://api.github.com https://github.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; frame-src 'self' blob: data:; font-src 'self' data: blob: https://fonts.googleapis.com https://fonts.gstatic.com https://fonts.font.im https://fonts.gstatic.font.im https://cdn.jsdelivr.net; img-src 'self' data: blob: https://avatars.githubusercontent.com https://github.com; media-src 'self' data: blob:; connect-src 'self' data: blob: http: https: https://fonts.googleapis.com https://fonts.gstatic.com https://fonts.font.im https://fonts.gstatic.font.im https://cdn.jsdelivr.net https://api.github.com https://github.com https://*.github.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline' blob: data: https://fonts.googleapis.com https://fonts.font.im https://cdn.jsdelivr.net; object-src 'none'; base-uri 'self';"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"/>
   <title>Linden Leaf - 现代化全格式电子书阅读器</title>
-  <!-- Critical Zero-Latency Base Styles (彻底杜绝冷启动纯白闪烁 - Codex Theme V1) -->
+  <!-- Initial background styles to prevent a white flash during startup -->
   <style id="critical-theme-style">
     :root {
       --bg-app: #FAF9F5;
@@ -28,16 +28,27 @@
       -moz-osx-font-smoothing: grayscale;
       text-rendering: optimizeLegibility;
     }
-    html[data-theme="dark"], html[data-theme="black"] {
-      --bg-app: #262624;
+    html[data-theme="dark"] {
+      --bg-app: #1f1f1d;
       --bg-sidebar: #1e1e1c;
       --text-main: #f5f4ee;
-      background-color: #262624;
+      background-color: #1f1f1d;
       color: #f5f4ee;
     }
-    html[data-theme="dark"] body, html[data-theme="black"] body {
-      background-color: #262624;
+    html[data-theme="dark"] body {
+      background-color: #1f1f1d;
       color: #f5f4ee;
+    }
+    html[data-theme="black"] {
+      --bg-app: #000000;
+      --bg-sidebar: #121212;
+      --text-main: #cccccc;
+      background-color: #000000;
+      color: #cccccc;
+    }
+    html[data-theme="black"] body {
+      background-color: #000000;
+      color: #cccccc;
     }
     html[data-theme="sepia"] {
       --bg-app: #f5eedc;
@@ -55,14 +66,25 @@
   <script>
     (function() {
       try {
-        var savedTheme = localStorage.getItem('linden_leaf_theme') || 'light';
-        document.documentElement.setAttribute('data-theme', savedTheme);
+        var themeMode = localStorage.getItem('linden_leaf_theme_mode') || 'system';
+        var savedTheme = localStorage.getItem('linden_leaf_theme');
+        var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var activeTheme = 'light';
+        if (themeMode === 'manual' && savedTheme) {
+          activeTheme = savedTheme;
+        } else {
+          activeTheme = isDark ? 'black' : 'light';
+        }
+        document.documentElement.setAttribute('data-theme', activeTheme);
         var bg = '#FAF9F5';
         var text = '#141413';
-        if (savedTheme === 'dark' || savedTheme === 'black') {
-          bg = '#262624';
+        if (activeTheme === 'black') {
+          bg = '#000000';
+          text = '#cccccc';
+        } else if (activeTheme === 'dark') {
+          bg = '#1f1f1d';
           text = '#f5f4ee';
-        } else if (savedTheme === 'sepia') {
+        } else if (activeTheme === 'sepia') {
           bg = '#f5eedc';
           text = '#3b2e1e';
         }
@@ -73,9 +95,10 @@
       } catch (e) {}
     })();
   </script>
-  <!-- Claude Code / Anthropic Humanist Typography Local Offline Bundled Fonts -->
+  <!-- Bundled offline interface fonts -->
   <link rel="stylesheet" href="./assets/fonts/fonts.css"/>
   <link rel="stylesheet" href="./css/main.css"/>
+  <link rel="stylesheet" href="./css/annual-report.css"/>
   <link rel="icon" type="image/png" href="./assets/icon.png"/>
   <script defer src="./vendor/tesseract/tesseract.min.js"></script>
   <!-- Standard ES2024 Polyfills (Response.bytes, Uint8Array toHex/toBase64, Promise.try, Promise.withResolvers, Object.groupBy) for PDF.js v5 compatibility -->
@@ -207,7 +230,7 @@
          BOOKSHELF VIEW (Linden Leaf Design)
          ========================================================== -->
     <div id="bookshelf-view" class="sidebar-collapsed notransition">
-      <!-- Left Sidebar (Claude Code & Codex Style P2/P5) -->
+      <!-- Left sidebar -->
       <aside class="jane-sidebar">
         <div class="sidebar-top">
           <!-- Brand & Controls Strip: Clean Windows native layout -->
@@ -281,7 +304,7 @@
           <div class="user-profile-badge sidebar-user-info" id="sidebar-user-info" title="点击设置个人偏好与昵称">
             <div class="user-avatar-circle sidebar-user-avatar" id="user-avatar-icon">R</div>
             <div class="user-meta-group" style="display: flex; align-items: center; min-width: 0; flex: 1;">
-              <span class="user-name-text sidebar-username" id="user-display-name">读者</span>
+              <span class="user-name-text sidebar-username" id="user-display-name">诶云朵？！</span>
             </div>
           </div>
           <button class="btn-sidebar-user btn-sidebar-settings" id="btn-sidebar-settings" title="偏好设置">
@@ -292,6 +315,7 @@
           </button>
         </div>
       </aside>
+      <div class="jane-sidebar-backdrop" id="jane-sidebar-backdrop"></div>
 
       <!-- Main Shelf Workspace -->
       <main class="jane-main-area">
@@ -468,19 +492,23 @@
                       <div id="overview-rating-popover" class="overview-popover-panel overview-rating-popover" style="display: none;">
                         <div class="overview-popover-header">
                           <span>评分区间筛选</span>
-                          <span class="overview-rating-val-display" id="overview-rating-val-display">全部评分</span>
+                          <span class="overview-rating-val-display" id="overview-rating-val-display">全部评分 (0 ~ 5.0)</span>
                         </div>
-                        <div class="overview-rating-slider-row">
-                          <span class="rating-slider-label">0</span>
-                          <input type="range" id="overview-rating-slider" min="0" max="5.0" step="0.1" value="0" class="overview-range-slider" />
-                          <span class="rating-slider-label">5.0</span>
-                        </div>
-                        <div class="overview-rating-quick-pills">
-                          <button type="button" class="rating-quick-pill active" data-val="0">全部</button>
-                          <button type="button" class="rating-quick-pill" data-val="3.0">≥ 3.0</button>
-                          <button type="button" class="rating-quick-pill" data-val="4.0">≥ 4.0</button>
-                          <button type="button" class="rating-quick-pill" data-val="4.5">≥ 4.5</button>
-                          <button type="button" class="rating-quick-pill" data-val="5.0">5.0</button>
+                        <div class="overview-rating-dual-slider-container">
+                          <div class="overview-rating-dual-slider-labels">
+                            <span class="rating-slider-label">0</span>
+                            <span class="rating-slider-label">1.0</span>
+                            <span class="rating-slider-label">2.0</span>
+                            <span class="rating-slider-label">3.0</span>
+                            <span class="rating-slider-label">4.0</span>
+                            <span class="rating-slider-label">5.0</span>
+                          </div>
+                          <div class="overview-rating-dual-slider-wrap">
+                            <div class="overview-rating-track-bg"></div>
+                            <div class="overview-rating-track-highlight" id="overview-rating-track-highlight"></div>
+                            <input type="range" id="overview-rating-slider-min" min="0" max="5.0" step="0.5" value="0" class="overview-dual-range-input input-min" title="起始最低评分" />
+                            <input type="range" id="overview-rating-slider-max" min="0" max="5.0" step="0.5" value="5.0" class="overview-dual-range-input input-max" title="结束最高评分" />
+                          </div>
                         </div>
                         <div class="overview-rating-footer">
                           <label class="overview-unrated-checkbox-label">
@@ -542,9 +570,9 @@
             </table>
           </div>
 
-          <!-- Stats View Container (Authentic WeChat Read Style Dashboard) -->
+          <!-- Stats View Container (Dashboard) -->
           <div id="stats-dashboard-container" class="stats-dashboard-layout" style="display: none;">
-            <!-- Top WeChat Read Segmented Tabs (周 / 月 / 年 / 总) -->
+            <!-- Top Segmented Tabs (周 / 月 / 年 / 总) -->
             <div class="wechat-stats-nav-bar">
               <div class="wechat-stats-segmented-tabs">
                 <button class="stats-tab-btn" data-mode="week">周</button>
@@ -552,6 +580,18 @@
                 <button class="stats-tab-btn" data-mode="year">年</button>
                 <button class="stats-tab-btn" data-mode="total">总</button>
               </div>
+            </div>
+
+            <!-- Annual Reading Report Entry Banner (Disabled for PC Candidate) -->
+            <div class="stats-annual-report-banner" id="banner-annual-report" style="display: none !important; background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #db2777 100%); color: #ffffff; border-radius: 14px; padding: 12px 18px; margin-bottom: 1rem; justify-content: space-between; align-items: center; cursor: pointer; box-shadow: 0 4px 15px rgba(124, 58, 237, 0.25); transition: transform 0.2s ease;">
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <div style="font-size: 1.6rem;">✨</div>
+                <div>
+                  <div style="font-weight: 700; font-size: 0.92rem; letter-spacing: 0.5px;" id="banner-annual-report-title">今年阅读回顾 · 截至今天</div>
+                  <div style="font-size: 0.72rem; opacity: 0.9; margin-top: 2px;">9 个篇章 · 探索你的阅读心流轨迹与灵魂画像</div>
+                </div>
+              </div>
+              <button id="btn-open-annual-report" class="btn-primary-action" style="background: rgba(255,255,255,0.22); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.4); color: #fff; font-size: 0.76rem; font-weight: 600; padding: 5px 12px; border-radius: 16px; cursor: pointer;">立即启程 ›</button>
             </div>
 
             <!-- Header KPI Banner -->
@@ -592,11 +632,6 @@
                   <span class="stats-quad-unit">条 ›</span>
                 </div>
               </div>
-            </div>
-
-            <!-- P3 Literary Comparison Insight -->
-            <div class="stats-literary-insight" id="stats-literary-container">
-              <span id="stats-literary-text">今日已翻开书页，阅读是随身携带的避难所，静享当下的安顿心流。</span>
             </div>
 
             <!-- P2 Reading Goal Rings (年度目标 / 月度进度 / 今日专注) -->
@@ -726,6 +761,57 @@
               </div>
               <div id="stats-recent-sessions" class="stats-recent-sessions"></div>
             </div>
+          </div><!-- /#stats-dashboard-container -->
+
+          <!-- AI History Workspace View Container (First-Class Bookshelf View) -->
+          <div id="ai-history-workspace-view" class="ai-history-workspace-layout" style="display: none;">
+            <div class="ai-history-split-pane">
+              <!-- Left: Conversations List -->
+              <aside class="ai-history-sidebar-pane">
+                <div class="ai-history-search-row">
+                  <svg class="icon icon-xs" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                  <input type="text" id="ai-history-page-search" placeholder="搜索历史问答与选文..." />
+                </div>
+                <div class="ai-history-convs-scroll" id="ai-history-page-conv-list">
+                  <!-- Populated dynamically -->
+                </div>
+                <div class="ai-history-sidebar-footer">
+                  <span id="ai-history-total-count" style="font-size: 0.75rem; color: var(--text-muted);">共 0 条对话</span>
+                  <button type="button" id="btn-clear-all-ai-history-page" class="btn-tool" style="font-size: 0.72rem; color: #ef4444; width: auto; height: auto; padding: 2px 8px;" title="清空全部历史记录">清空历史</button>
+                </div>
+              </aside>
+
+              <!-- Right: Active Conversation Detail -->
+              <main class="ai-history-content-pane" id="ai-history-page-detail-panel">
+                <div class="ai-history-detail-header-bar" id="ai-history-page-detail-header">
+                  <div style="min-width: 0; flex: 1;">
+                    <div id="ai-history-page-title" class="ai-history-active-title">选择左侧对话查看详情</div>
+                    <div id="ai-history-page-meta" class="ai-history-active-meta"></div>
+                  </div>
+                  <div class="ai-history-detail-actions">
+                    <button type="button" id="btn-history-page-jump-book" class="btn-primary-action" style="padding: 0.35rem 0.85rem; font-size: 0.78rem; display: none;">
+                      <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+                      <span>定位到书中</span>
+                    </button>
+                    <button type="button" id="btn-history-page-export-md" class="btn-secondary-action" style="padding: 0.35rem 0.85rem; font-size: 0.78rem; display: none;">
+                      <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                      <span>导出 Markdown</span>
+                    </button>
+                    <button type="button" id="btn-history-page-delete-conv" class="btn-secondary-action" style="padding: 0.35rem 0.85rem; font-size: 0.78rem; color: #ef4444; display: none;">
+                      <svg class="icon icon-xs" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                      <span>删除对话</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="ai-history-messages-scroll" id="ai-history-page-messages-list">
+                  <div class="ai-history-empty-placeholder">
+                    <svg class="icon icon-lg" viewBox="0 0 24 24" style="color: var(--text-muted); opacity: 0.5;"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+                    <p style="color: var(--text-muted); font-size: 0.88rem; margin-top: 10px;">从左侧选择对话查看完整的 AI 选文探讨与问答历史</p>
+                  </div>
+                </div>
+              </main>
+            </div>
           </div>
         </section>
 
@@ -793,6 +879,13 @@
           <button id="btn-toggle-ai-sidebar" class="btn-tool" title="AI 阅读助手 (快捷侧栏)">
             <svg class="icon" viewBox="0 0 24 24"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
           </button>
+          <button id="btn-chapter-translate" class="btn-tool" title="翻译当前章节" style="display: none !important;">
+            <svg class="icon" viewBox="0 0 24 24" style="width: 15px; height: 15px;"><path d="m5 8 6 6M4 14l6-6 2-3M2 5h12M7 2h1M22 22l-5-10-5 10M14 18h6"/></svg>
+            <span class="btn-label" style="font-size: 0.72rem; font-weight: 500;">翻译本章</span>
+          </button>
+          <button id="btn-toggle-tts" class="btn-tool" title="语音朗读 (TTS)" aria-label="语音朗读">
+            <svg class="icon" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+          </button>
           <button id="btn-toggle-settings" class="btn-tool" title="排版与主题设置">
             <svg class="icon" viewBox="0 0 24 24">
               <circle cx="12" cy="12" r="3"/>
@@ -806,6 +899,26 @@
           </button>
         </div>
       </header>
+
+      <!-- Chapter Bilingual Reading Control Bar -->
+      <div id="chapter-translation-bar" class="chapter-translation-bar" style="display: none;">
+        <div class="trans-bar-left">
+          <span class="trans-badge">双语阅读</span>
+          <span id="chapter-trans-status-note" class="trans-note">准备就绪</span>
+          <span id="chapter-trans-progress-label" class="trans-progress-text">0 / 0 段</span>
+          <div class="trans-progress-bar"><div id="chapter-trans-progress-fill" class="trans-progress-fill"></div></div>
+        </div>
+        <div class="trans-bar-modes">
+          <button id="btn-trans-mode-source" class="trans-mode-btn" title="仅显示原文">原文</button>
+          <button id="btn-trans-mode-bilingual" class="trans-mode-btn active" title="逐段交错双语">双语</button>
+          <button id="btn-trans-mode-target" class="trans-mode-btn" title="仅显示译文">译文</button>
+        </div>
+        <div class="trans-bar-actions">
+          <button id="btn-chapter-trans-stop" class="trans-action-btn" title="停止继续翻译">停止</button>
+          <button id="btn-chapter-trans-clear" class="trans-action-btn" title="清空本章译文缓存">清除</button>
+          <button id="btn-chapter-trans-close" class="trans-action-btn" title="收起此栏">✕</button>
+        </div>
+      </div>
 
       <!-- Reader Content Area (Safe Viewport) -->
       <div id="reader-content-area" class="reader-content-area">
@@ -932,6 +1045,49 @@
         <button id="btn-pdf-ocr-extract" class="btn-zoom-preset" title="轻量 OCR 识别提取当前页图片文字并快速复制" style="color: var(--accent-purple); font-weight: 600;">🔍 提取文字</button>
       </div>
 
+      <!-- Floating TTS Voice Player Bar -->
+      <div id="tts-player-bar" class="tts-player-bar" style="display: none;">
+        <button id="btn-tts-prev" class="btn-tts-ctrl" title="上一段">
+          <svg class="icon" viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
+        </button>
+        <button id="btn-tts-toggle-play" class="btn-tts-ctrl btn-tts-play" title="播放 / 暂停 (空格键)">
+          <svg id="icon-tts-play" class="icon" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <svg id="icon-tts-pause" class="icon" viewBox="0 0 24 24" style="display: none;"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        </button>
+        <button id="btn-tts-next" class="btn-tts-ctrl" title="下一段">
+          <svg class="icon" viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+        </button>
+
+        <div class="tts-divider"></div>
+
+        <select id="select-tts-provider" class="tts-select" title="语音引擎" style="max-width: 110px;">
+          <option value="system" selected>系统语音</option>
+          <option value="offline">离线引擎</option>
+          <option value="api">云端 API</option>
+        </select>
+
+        <select id="select-tts-rate" class="tts-select" title="朗读语速">
+          <option value="0.75">0.75x</option>
+          <option value="1" selected>1.0x</option>
+          <option value="1.25">1.25x</option>
+          <option value="1.5">1.5x</option>
+          <option value="2">2.0x</option>
+        </select>
+
+        <select id="select-tts-voice" class="tts-select tts-select-voice" title="语音声音">
+          <option value="system_default">系统原生声音</option>
+        </select>
+
+        <button id="btn-tts-timer" class="btn-tts-ctrl" title="定时关闭">
+          <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span id="label-tts-timer" class="tts-timer-text" style="font-size: 0.72rem; margin-left: 2px;">关</span>
+        </button>
+
+        <button id="btn-tts-close" class="btn-tts-ctrl" title="关闭朗读">
+          <svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
       <!-- Bottom Bar -->
       <footer id="reader-bottom-bar" class="reader-bottom-bar">
         <div class="reader-bottom-meta">
@@ -1026,25 +1182,66 @@
             </div>
           </div>
 
-          <!-- Font Choice (Open Source Fonts) -->
-          <div class="setting-section">
-            <div class="setting-title">开源中文字体族</div>
-            <div class="font-select-grid">
-              <button class="font-choice-btn active" data-val="serif" style="font-family: var(--font-serif);">思源宋体 (Adobe)</button>
-              <button class="font-choice-btn" data-val="sans" style="font-family: var(--font-sans);">思源黑体 (Adobe)</button>
+          <!-- Font Choice (Open Source Fonts & Custom Fonts) -->
+          <div class="setting-section" id="font-settings-section">
+            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>中文字体族</span>
+              <span style="font-size: 0.72rem; color: var(--text-muted);">可在高级设置中管理字体库</span>
+            </div>
+            <div class="font-select-grid" id="font-select-grid">
+              <button class="font-choice-btn active" data-val="serif" style="font-family: var(--font-serif);">思源宋体</button>
+              <button class="font-choice-btn" data-val="sans" style="font-family: var(--font-sans);">思源黑体</button>
               <button class="font-choice-btn" data-val="kaiti" style="font-family: var(--font-kaiti);">霞鹜文楷 (开源楷体)</button>
-              <button class="font-choice-btn" data-val="mono" style="font-family: var(--font-mono);">等宽代码 (Fira Code)</button>
+              <button class="font-choice-btn" data-val="mono" style="font-family: var(--font-mono);">等宽代码</button>
+            </div>
+            <div id="custom-fonts-container" style="display: none; margin-top: 6px; flex-direction: column; gap: 4px;">
+              <span style="font-size: 0.72rem; color: var(--text-muted);">自定义字体：</span>
+              <div id="custom-fonts-list" style="display: flex; flex-direction: column; gap: 4px;"></div>
+            </div>
+          </div>
+
+          <!-- Reading Presets (最多 10 套命名阅读预设) -->
+          <div class="setting-section" id="reading-presets-section">
+            <button type="button" id="btn-toggle-reading-presets" class="advanced-settings-trigger-row" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; width: 100%; background: none; border: none; padding: 0; font-family: inherit; text-align: left;">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="font-size: 0.84rem; font-weight: 600; color: var(--text-secondary);">阅读预设</span>
+                <span id="badge-active-preset" style="font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; background: var(--bg-tertiary); color: var(--accent-purple);">默认排版</span>
+              </div>
+              <span id="hint-presets-toggle" style="font-size: 0.74rem; color: var(--text-muted);">点击展开</span>
+            </button>
+            <div id="reading-presets-container" style="display: none; margin-top: 0.8rem; flex-direction: column; gap: 8px;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-size: 0.75rem; color: var(--text-muted);" id="presets-count-label">已存 0 / 10 套预设</span>
+                <button type="button" id="btn-save-current-preset" class="btn-tool btn-setting-inline" style="border: 1px solid var(--accent); border-radius: 4px; color: var(--accent); cursor: pointer; background: transparent;">+ 保存当前排版</button>
+              </div>
+              <div id="reading-presets-list" style="display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto;">
+                <!-- Dynamically rendered -->
+              </div>
             </div>
           </div>
 
           <!-- Typography Sliders -->
           <div class="setting-section">
-            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: nowrap; gap: 8px; white-space: nowrap;">
+            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
               <span>排版与间距微调</span>
               <button id="btn-reset-typography" type="button" class="btn-tool" style="font-size: 0.72rem; width: auto; padding: 2px 8px; border: 1px solid var(--border-color); border-radius: 4px; color: var(--accent-purple); cursor: pointer; background: var(--bg-card); display: inline-flex; align-items: center; gap: 4px;" title="将排版和间距一键恢复为默认推荐值">
                 <svg class="icon icon-sm" style="width: 12px; height: 12px;" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
                 <span>一键恢复默认</span>
               </button>
+            </div>
+            <div id="book-override-section" class="book-override-control">
+              <div>
+                <span class="control-label">仅对当前图书生效</span>
+                <p style="margin: 4px 0 0; font-size: 0.74rem; color: var(--text-muted); line-height: 1.4;">开启后仅对当前图书生效，只控制：字体、字号、粗细、行距、边距、正文最大宽、两栏间隙、字间距、段落缩进与段距、直角引号、排版方向、主题背景及翻页方式</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="setting-book-override" />
+                <span class="toggle-slider"></span>
+              </label>
+              <div id="book-override-hint" class="book-override-hint" style="display: none;">
+                <span>当前图书使用专属排版</span>
+                <button type="button" id="btn-reset-book-override" class="btn-tool btn-setting-inline">恢复全局排版</button>
+              </div>
             </div>
             <div class="control-row">
               <span class="control-label">字号大小</span>
@@ -1187,7 +1384,7 @@
               <span class="control-label">默认搜索引擎</span>
               <select id="setting-search-engine" class="setting-select" style="max-width: 150px;">
                 <option value="baidu" selected>百度</option>
-                <option value="bing">必应 (Bing)</option>
+                <option value="bing">必应</option>
                 <option value="google">Google</option>
                 <option value="duckduckgo">DuckDuckGo</option>
                 <option value="custom">自定义 URL</option>
@@ -1213,15 +1410,15 @@
             </p>
             <div id="ai-custom-inputs-wrap" style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.5rem; margin-top: 0.4rem; display: flex; flex-direction: column; gap: 6px;">
               <div class="control-row">
-                <span class="control-label">接口地址 (Endpoint)</span>
+                <span class="control-label">接口地址</span>
                 <input type="text" id="setting-ai-endpoint" class="jane-modal-input" placeholder="https://api.openai.com/v1" value="https://api.openai.com/v1" style="font-size: 0.78rem; padding: 4px 8px; width: 160px;" />
               </div>
               <div class="control-row">
-                <span class="control-label">模型名称 (Model)</span>
+                <span class="control-label">模型名称</span>
                 <input type="text" id="setting-ai-model" class="jane-modal-input" placeholder="gpt-4o-mini" value="gpt-4o-mini" style="font-size: 0.78rem; padding: 4px 8px; width: 160px;" />
               </div>
               <div class="control-row">
-                <span class="control-label">API 密钥 (Key)</span>
+                <span class="control-label">API 密钥</span>
                 <input type="password" id="setting-ai-key" class="jane-modal-input" placeholder="sk-..." style="font-size: 0.78rem; padding: 4px 8px; width: 160px;" />
               </div>
             </div>
@@ -1260,7 +1457,7 @@
           <div class="setting-section" id="about-settings-section">
             <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
               <span>关于与版本更新</span>
-              <span id="app-version-badge-sidebar" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple); font-weight: 600;">v1.2.3</span>
+              <span id="app-version-badge-sidebar" style="font-size: 0.72rem; padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple); font-weight: 600;">v2.0.0</span>
             </div>
             <p style="font-size: 0.76rem; color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
               Linden Leaf 现代化全格式开源电子书阅读器。
@@ -1280,7 +1477,7 @@
           <div class="setting-section" id="advanced-settings-trigger-section" style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 0.8rem;">
             <button type="button" id="row-advanced-settings-trigger" class="advanced-settings-trigger-row" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; width: 100%; background: none; border: none; padding: 0; font-family: inherit; text-align: left;">
               <div style="display: flex; align-items: center; gap: 6px;">
-                <span style="font-size: 0.84rem; font-weight: 600; color: var(--text-secondary);">⚙️ 高级设置</span>
+                <span style="font-size: 0.84rem; font-weight: 600; color: var(--text-secondary);">高级设置</span>
                 <span id="badge-advanced-status" style="font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; background: var(--bg-tertiary); color: var(--text-muted);">未解锁</span>
               </div>
               <span id="hint-advanced-trigger" style="font-size: 0.74rem; color: var(--accent-purple);">连续点击3次解锁</span>
@@ -1288,66 +1485,421 @@
 
             <!-- Advanced Settings Container (Unlocked only) -->
             <div id="advanced-settings-container" style="display: none; margin-top: 0.8rem; flex-direction: column; gap: 12px;">
-              <!-- Group 1: AI 与翻译 -->
-              <div class="advanced-group" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
-                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">AI 与翻译</div>
-                <div class="control-row" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 8px;">
-                  <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
-                    <span class="control-label" style="font-size: 0.76rem;">自动附近正文上限 (0～10000 Token)</span>
-                    <span id="label-ai-context-budget" style="font-size: 0.76rem; font-weight: 600; color: var(--accent-purple);">1000</span>
-                  </div>
-                  <input type="range" id="setting-ai-context-budget" min="0" max="10000" step="100" value="1000" style="width: 100%;" />
-                  <p style="font-size: 0.7rem; color: var(--text-muted); margin: 0; line-height: 1.3;">0 表示不提取额外正文；硬上限 10000。此预算仅限制自动补充正文，不限制显式选文。</p>
-                </div>
-                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                  <span class="control-label" style="font-size: 0.76rem;">整段就地翻译</span>
-                  <label class="toggle-switch">
-                    <input type="checkbox" id="setting-inplace-para-trans" />
-                    <span class="toggle-slider"></span>
-                  </label>
-                </div>
-                <p style="font-size: 0.7rem; color: var(--text-muted); margin: 0 0 8px 0; line-height: 1.3;">开启后选文气泡显示“译本段”，就地输出对照译文，不打乱排版或覆盖原书。</p>
 
-                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                  <span class="control-label" style="font-size: 0.76rem;">模型 Tokenizer 映射</span>
-                  <select id="setting-model-tokenizer" class="jane-modal-input" style="font-size: 0.76rem; padding: 2px 6px; width: 130px;">
-                    <option value="auto">自动识别 (默认)</option>
-                    <option value="cl100k_base">cl100k_base</option>
-                    <option value="gpt2">gpt2</option>
-                    <option value="cjk_heuristic">CJK 启发式分词</option>
-                  </select>
+              <!-- Font library -->
+              <div class="advanced-group" id="adv-group-fonts" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">字体库管理</div>
+                <p style="font-size: 0.7rem; color: var(--text-muted); margin: 0 0 6px 0; line-height: 1.3;">导入、重命名与管理本地字体文件 (.ttf / .otf / .woff2)。导入后可在普通设置中直接选用。</p>
+                <div style="display: flex; gap: 6px; margin-bottom: 6px;">
+                  <button type="button" id="btn-import-custom-font" class="btn-primary-action" style="flex: 1; padding: 4px 8px; font-size: 0.74rem;">+ 导入本地字体文件</button>
+                  <input type="file" id="input-custom-font-file" accept=".ttf,.otf,.woff,.woff2" style="display: none;" />
                 </div>
-                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center;">
-                  <span class="control-label" style="font-size: 0.76rem;">单次最大输出 (Tokens)</span>
-                  <input type="number" id="setting-ai-max-tokens" min="256" max="4096" step="128" value="2048" class="jane-modal-input" style="font-size: 0.76rem; padding: 2px 6px; width: 75px;" />
+                <div id="adv-custom-fonts-list" style="display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto;">
+                  <!-- Dynamically rendered -->
                 </div>
               </div>
 
-              <!-- Group 2: 费用与隐私 -->
-              <div class="advanced-group" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
-                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">费用与隐私安全</div>
+              <!-- Custom colors -->
+              <div class="advanced-group" id="adv-group-palette" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">自定义配色</div>
+                <p style="font-size: 0.7rem; color: var(--text-muted); margin: 0 0 6px 0; line-height: 1.3;">支持 10 项完整语义 Token，以 HEX 文本为主要入口，色块辅助微调，杜绝无效变量。</p>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">界面主背景</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-bg-primary" value="#ffffff" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-bg-primary-hex" value="#ffffff" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">卡片与浮层背景</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-bg-secondary" value="#f9fafb" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-bg-secondary-hex" value="#f9fafb" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">侧栏背景</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-bg-sidebar" value="#f3f4f6" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-bg-sidebar-hex" value="#f3f4f6" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">主要文字色</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-text-main" value="#111827" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-text-main-hex" value="#111827" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">次要文字色</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-text-secondary" value="#4b5563" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-text-secondary-hex" value="#4b5563" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">边框与滑轨</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-border-color" value="#e5e7eb" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-border-color-hex" value="#e5e7eb" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">强调与按钮色</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-accent" value="#d97706" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-accent-hex" value="#d97706" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">阅读纸张底色</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-reader-bg" value="#faf9f5" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-reader-bg-hex" value="#faf9f5" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">阅读正文字色</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-reader-text" value="#1a1815" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-reader-text-hex" value="#1a1815" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin: 0;">
+                    <span class="control-label" style="font-size: 0.74rem;">选区背景色</span>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                      <input type="color" id="palette-selection-bg" value="#fde68a" style="width: 24px; height: 22px; border: 1px solid var(--border-color); border-radius: 3px; cursor: pointer; padding: 0; background: none;" />
+                      <input type="text" id="palette-selection-bg-hex" value="#fde68a" class="jane-modal-input" maxlength="7" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 66px; padding: 2px 4px; text-transform: lowercase;" />
+                    </div>
+                  </div>
+                  <div style="display: flex; gap: 6px; margin-top: 4px;">
+                    <button type="button" id="btn-save-custom-palette" class="btn-primary-action" style="flex: 1; padding: 4px; font-size: 0.74rem;">保存语义配色</button>
+                    <button type="button" id="btn-reset-custom-palette" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.74rem;">恢复推荐默认</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- TXT chapter rules -->
+              <div class="advanced-group" id="adv-group-txt-rules" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">TXT 目录识别</div>
+                <p style="font-size: 0.7rem; color: var(--text-muted); margin: 0 0 6px 0; line-height: 1.3;">自定义正则匹配规则，解决 TXT 书籍无目录或误切章问题。自定义规则豁免 35 字符与句号限制。</p>
                 <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                  <span class="control-label" style="font-size: 0.76rem;">最短发送间隔 (硬防误触)</span>
-                  <select id="setting-ai-cooldown" class="jane-modal-input" style="font-size: 0.76rem; padding: 2px 6px; width: 100px;">
-                    <option value="10">10 秒 (推荐)</option>
-                    <option value="20">20 秒</option>
-                    <option value="30">30 秒</option>
+                  <span class="control-label" style="font-size: 0.74rem;">使用自定义目录规则</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-txt-custom-rules-enable" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">规则模板</span>
+                  <select id="setting-txt-template-select" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 140px;">
+                    <option value="zh_chapter">中文章回</option>
+                    <option value="en_chapter">英文章节</option>
+                    <option value="num_heading">数字标题</option>
+                    <option value="custom">手写规则</option>
+                  </select>
+                </div>
+                <div class="control-row" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">匹配表达式</span>
+                  <input type="text" id="setting-txt-regex-pattern" class="jane-modal-input" value="^第\s*[0-9一二三四五六七八九十百千万零两]+\s*[首章节回卷集部篇幕话诗歌曲折出段讲场辑案].*" style="font-family: var(--font-mono, monospace); font-size: 0.74rem; width: 100%; box-sizing: border-box; padding: 4px 6px;" />
+                </div>
+                <div class="txt-rules-actions">
+                  <button type="button" id="btn-test-txt-rules" class="btn-secondary-action">测试当前图书</button>
+                  <button type="button" id="btn-apply-txt-rules" class="btn-primary-action">应用并重建目录</button>
+                </div>
+                <div id="txt-rules-test-result" style="display: none;"></div>
+              </div>
+
+              <!-- Typography -->
+              <div class="advanced-group" id="adv-group-typography" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">正文整理与排版</div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <div>
+                    <span class="control-label" style="font-size: 0.74rem;">首段跟随普通段落缩进</span>
+                    <p style="font-size: 0.68rem; color: var(--text-muted); margin: 0;">开启后标题后首段正文维持 2em 缩进，副标题与作者依然居中无缩进。</p>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-first-para-indent" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">段前间距</span>
+                  <input type="range" id="setting-para-margin-top" min="0" max="2.0" step="0.1" value="0" style="width: 110px;" />
+                  <span id="value-para-margin-top" style="font-size: 0.74rem; font-weight: 600; width: 35px; text-align: right;">0.0em</span>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">段后间距</span>
+                  <input type="range" id="setting-para-margin-bottom" min="0" max="2.0" step="0.1" value="0.5" style="width: 110px;" />
+                  <span id="value-para-margin-bottom" style="font-size: 0.74rem; font-weight: 600; width: 35px; text-align: right;">0.5em</span>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">首行缩进尺度</span>
+                  <select id="setting-para-indent-size" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 100px;">
+                    <option value="0em">无缩进 (0em)</option>
+                    <option value="1em">轻微 (1em)</option>
+                    <option value="2em" selected>标准出版 (2em)</option>
+                    <option value="3em">深缩进 (3em)</option>
+                  </select>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span class="control-label" style="font-size: 0.74rem;">TXT 软换行智能合并</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-txt-merge-soft-breaks" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Interaction and motion -->
+              <div class="advanced-group" id="adv-group-interaction" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">阅读交互与动效</div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">遵循系统减少动效</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-reduced-motion" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">毛玻璃效果</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-glassmorphism-blur" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">界面动效过渡强度</span>
+                  <select id="setting-anim-intensity" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 100px;">
+                    <option value="none">关闭动效</option>
+                    <option value="soft">轻柔 (120ms)</option>
+                    <option value="normal" selected>标准 (200ms)</option>
+                  </select>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span class="control-label" style="font-size: 0.74rem;">AI 侧栏默认宽度</span>
+                  <select id="setting-sidebar-default-width" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 100px;">
+                    <option value="320">320px (紧凑)</option>
+                    <option value="380" selected>380px (标准)</option>
+                    <option value="440">440px (宽屏)</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Annotations and drawing -->
+              <div class="advanced-group" id="adv-group-strokes" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">标注与笔迹</div>
+                <div style="font-size: 0.72rem; font-weight: 600; color: var(--accent); margin-bottom: 4px;">【EPUB / 文本标注】</div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                  <span class="control-label" style="font-size: 0.74rem;">荧光笔透明度</span>
+                  <input type="range" id="setting-highlighter-opacity" min="0.15" max="0.75" step="0.05" value="0.35" style="width: 110px;" />
+                  <span id="value-highlighter-opacity" style="font-size: 0.74rem; font-weight: 600; width: 35px; text-align: right;">35%</span>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">下划线粗细与离字间隙</span>
+                  <select id="setting-underline-width" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 100px;">
+                    <option value="1">1.0px 细线</option>
+                    <option value="1.5" selected>1.5px 标准</option>
+                    <option value="2">2.0px 醒目</option>
+                  </select>
+                </div>
+                <div style="font-size: 0.72rem; font-weight: 600; color: var(--accent); margin: 6px 0 4px 0;">【PDF / 手绘批注】</div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                  <span class="control-label" style="font-size: 0.74rem;">PDF 画笔粗细</span>
+                  <input type="range" id="setting-pdf-pen-width" min="1" max="10" step="0.5" value="2.5" style="width: 110px;" />
+                  <span id="value-pdf-pen-width" style="font-size: 0.74rem; font-weight: 600; width: 35px; text-align: right;">2.5px</span>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span class="control-label" style="font-size: 0.74rem;">折线笔锋平滑化</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-pdf-smoothing" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- AI usage settings -->
+              <div class="advanced-group" id="adv-group-ai" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">AI 模型与用量</div>
+                <div class="control-row" style="flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 8px;">
+                  <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
+                    <span class="control-label" style="font-size: 0.74rem;">自动附带正文上限</span>
+                    <span id="label-ai-context-budget" style="font-size: 0.74rem; font-weight: 600; color: var(--accent-purple);">1000</span>
+                  </div>
+                  <input type="range" id="setting-ai-context-budget" min="0" max="10000" step="100" value="1000" style="width: 100%;" />
+                  <p style="font-size: 0.68rem; color: var(--text-muted); margin: 0; line-height: 1.3;">0 表示不提取额外正文；硬上限 10000。此预算仅限制自动补充正文，不限制显式选文。</p>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;" title="基于词法与字符统计的粗略估算，不等于模型实际计费词元数">上下文长度估算</span>
+                  <select id="setting-model-tokenizer" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 155px;">
+                    <option value="auto">自动估算</option>
+                    <option value="cl100k_base">较新模型估算</option>
+                    <option value="gpt2">旧式模型估算</option>
+                    <option value="cjk_heuristic">中文保守估算</option>
                   </select>
                 </div>
                 <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                  <span class="control-label" style="font-size: 0.76rem;">每日请求次数上限 (0=不限)</span>
-                  <input type="number" id="setting-ai-daily-limit" min="0" max="1000" step="5" value="0" class="jane-modal-input" style="font-size: 0.76rem; padding: 2px 6px; width: 75px;" />
+                  <span class="control-label" style="font-size: 0.74rem;">单次回答长度上限</span>
+                  <input type="number" id="setting-ai-max-tokens" min="256" max="8192" step="128" value="2048" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 75px;" />
                 </div>
-                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                  <span class="control-label" style="font-size: 0.76rem;">保存本地查词历史</span>
+                <p style="font-size: 0.68rem; color: var(--text-muted); margin: 0 0 6px 0; line-height: 1.3;">实际可用长度还受所选模型限制；回答被截断时可手动继续。</p>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">最短发送间隔 (0=无间隔)</span>
+                  <div style="display: flex; align-items: center; gap: 4px;">
+                    <input type="number" id="setting-ai-cooldown" min="0" max="3600" step="1" value="10" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 65px;" />
+                    <span style="font-size: 0.72rem; color: var(--text-muted);">秒</span>
+                  </div>
+                </div>
+                <p id="tip-ai-cooldown-warning" style="display: none; font-size: 0.68rem; color: #f59e0b; margin: 0 0 6px 0; line-height: 1.3;">间隔设为 0 后可连续提问；防误触重复发送和并发保护仍然生效。</p>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">每日请求次数上限 (0=不限)</span>
+                  <input type="number" id="setting-ai-daily-limit" min="0" max="1000" step="5" value="0" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 75px;" />
+                </div>
+                <div style="display: flex; gap: 6px; margin-top: 4px;">
+                  <button type="button" id="btn-open-audit-from-settings" class="btn-secondary-action" style="flex: 1; padding: 4px 6px; font-size: 0.74rem;">查看审计日志</button>
+                  <button type="button" id="btn-clear-ai-cache-settings" class="btn-secondary-action" style="flex: 1; padding: 4px 6px; font-size: 0.74rem;">清理日志与缓存</button>
+                </div>
+              </div>
+
+              <!-- Chapter translation -->
+              <div class="advanced-group" id="adv-group-translation" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">章节翻译与存档</div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">自动本地持久化章节译文</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-chapter-trans-auto-save" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">回章自动恢复双语视图</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-chapter-trans-auto-restore" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">翻译风格倾向</span>
+                  <select id="setting-chapter-trans-style" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 120px;">
+                    <option value="auto" selected>自动判断文体</option>
+                    <option value="literary">文学雅致润色</option>
+                    <option value="academic">学术准确易读</option>
+                    <option value="literal">严格忠实原文</option>
+                  </select>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">WebDAV 同步章节双语译文</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-webdav-sync-translations" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px; padding-top: 4px; border-top: 1px dashed var(--border-color);">
+                  <span id="label-trans-storage-size" style="font-size: 0.72rem; color: var(--text-muted);">已存译文：计算中...</span>
+                  <button type="button" id="btn-clear-trans-cache" class="btn-tool btn-setting-inline" style="border: 1px solid var(--border-color); border-radius: 4px; color: #ef4444; font-size: 0.72rem; cursor: pointer; background: transparent; padding: 2px 8px;">清空译文缓存</button>
+                </div>
+              </div>
+
+              <!-- Dictionary -->
+              <div class="advanced-group" id="adv-group-dictionary" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">词典查词与历史</div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">选词稳定延迟 (防误触)</span>
+                  <input type="range" id="setting-dict-lookup-delay" min="100" max="600" step="50" value="250" style="width: 100px;" />
+                  <span id="value-dict-lookup-delay" style="font-size: 0.74rem; font-weight: 600; width: 45px; text-align: right;">250ms</span>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">英语词形还原</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-dict-lemmatization" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">保存本地查词历史</span>
                   <label class="toggle-switch">
                     <input type="checkbox" id="setting-dict-save-history" />
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
-                <div style="display: flex; gap: 6px;">
-                  <button type="button" id="btn-open-audit-from-settings" class="btn-secondary-action" style="flex: 1; padding: 4px 6px; font-size: 0.74rem;">查看审计日志</button>
-                  <button type="button" id="btn-clear-ai-cache-settings" class="btn-secondary-action" style="flex: 1; padding: 4px 6px; font-size: 0.74rem;">清理日志与缓存</button>
+                <div style="display: flex; gap: 6px; margin-bottom: 6px;">
+                  <button type="button" id="btn-clear-dict-history" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.72rem;">清空查词历史</button>
+                  <button type="button" id="btn-clear-audio-cache" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.72rem;">清空语音缓存</button>
+                </div>
+                <div style="border-top: 1px dashed var(--border-color); padding-top: 6px; margin-top: 6px;">
+                  <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; margin-bottom: 4px;">
+                    <span style="color: var(--text-muted);">词库状态：</span>
+                    <span id="label-dict-resource-status" style="font-weight: 600; color: var(--text-primary);">检查中...</span>
+                  </div>
+                  <div style="font-size: 0.70rem; color: var(--text-muted); word-break: break-all; margin-bottom: 6px;" id="label-dict-resource-path">存储位置：--</div>
+                  <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                    <button type="button" id="btn-dict-download" class="btn-primary-action" style="flex: 1; min-width: 80px; padding: 4px; font-size: 0.72rem;">下载官方词库</button>
+                    <button type="button" id="btn-dict-install-builtin" class="btn-secondary-action" style="flex: 1; min-width: 80px; padding: 4px; font-size: 0.72rem;">导入本地文件</button>
+                    <button type="button" id="btn-dict-migrate-dir" class="btn-secondary-action" style="flex: 1; min-width: 80px; padding: 4px; font-size: 0.72rem;">迁移词库目录</button>
+                  </div>
+                </div>
+              <!-- TTS speech engine settings -->
+              <div class="advanced-group" id="adv-group-tts" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">听书与语音引擎配置</div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">默认 TTS 引擎</span>
+                  <select id="setting-tts-provider" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 140px;">
+                    <option value="system" selected>系统原生语音</option>
+                    <option value="offline">自建本地/局域网服务 (Kokoro/sherpa HTTP)</option>
+                    <option value="api">云端 API (OpenAI兼容)</option>
+                  </select>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">朗读语速</span>
+                  <input type="range" id="setting-tts-rate" min="0.5" max="2.5" step="0.1" value="1.0" style="width: 100px;" />
+                  <span id="value-tts-rate" style="font-size: 0.74rem; font-weight: 600; width: 35px; text-align: right;">1.0x</span>
+                </div>
+                <div class="control-row" style="flex-direction: column; align-items: flex-start; gap: 3px; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.72rem; color: var(--text-muted);">自建语音服务地址 (sherpa-onnx / Kokoro HTTP API)</span>
+                  <input type="text" id="setting-tts-offline-endpoint" class="jane-modal-input" placeholder="http://127.0.0.1:8880/v1/audio/speech" style="font-size: 0.72rem; padding: 3px 6px; width: 100%; box-sizing: border-box;" />
+                </div>
+                <div class="control-row" style="flex-direction: column; align-items: flex-start; gap: 3px; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.72rem; color: var(--text-muted);">云端 API 端点地址</span>
+                  <input type="text" id="setting-tts-api-endpoint" class="jane-modal-input" placeholder="https://api.openai.com/v1/audio/speech" style="font-size: 0.72rem; padding: 3px 6px; width: 100%; box-sizing: border-box;" />
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">云端模型</span>
+                  <input type="text" id="setting-tts-api-model" class="jane-modal-input" placeholder="tts-1" style="font-size: 0.74rem; padding: 2px 6px; width: 120px;" />
+                </div>
+                <div class="control-row" style="flex-direction: column; align-items: flex-start; gap: 3px; margin-bottom: 4px;">
+                  <span class="control-label" style="font-size: 0.72rem; color: var(--text-muted);">云端 API 密钥 (可选自建无Key)</span>
+                  <input type="password" id="setting-tts-api-key" class="jane-modal-input" placeholder="sk-..." style="font-size: 0.72rem; padding: 3px 6px; width: 100%; box-sizing: border-box;" />
+                </div>
+              </div>
+
+              <!-- Background indexing and backup -->
+              <div class="advanced-group" id="adv-group-backup" style="background: var(--bg-tertiary); padding: 8px 10px; border-radius: 8px;">
+                <div class="advanced-group-title" style="font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">后台索引与数据恢复向导</div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">仅在空闲时运行全文索引</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-bg-index-idle-only" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span class="control-label" style="font-size: 0.74rem;">后台索引并发限制</span>
+                  <select id="setting-bg-index-concurrency" class="jane-modal-input" style="font-size: 0.74rem; padding: 2px 6px; width: 80px;">
+                    <option value="1" selected>1 (节能)</option>
+                    <option value="2">2 (标准)</option>
+                    <option value="4">4 (极速)</option>
+                  </select>
+                </div>
+                <div style="display: flex; gap: 6px; margin-top: 6px;">
+                  <button type="button" id="btn-export-settings-json" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.72rem;">导出设置备份</button>
+                  <button type="button" id="btn-import-settings-json" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.72rem;">导入设置备份</button>
+                  <input type="file" id="input-import-settings-file" accept=".json" style="display: none;" />
+                </div>
+                <div style="display: flex; gap: 6px; margin-top: 6px;">
+                  <button type="button" id="btn-export-full-data-backup" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.72rem;" title="导出包含阅读进度、划线高光与历史会话的完整恢复包">📦 完整数据导出</button>
+                  <button type="button" id="btn-relink-missing-book" class="btn-secondary-action" style="flex: 1; padding: 4px; font-size: 0.72rem;" title="原文件移动或改名后重新绑定本地文件，保留所有笔记和进度">🔗 重新关联书籍</button>
                 </div>
               </div>
 
@@ -1477,7 +2029,7 @@
     </div>
   </div> <!-- #app-container end -->
 
-    <!-- Quote Card Modal (WeChat Read style share card generator) -->
+    <!-- Quote Card Modal (Share card generator) -->
     <div id="quote-card-backdrop" class="global-modal-backdrop" style="display: none; z-index: 99999;">
       <div id="quote-card-dialog" class="quote-modal-dialog">
         <button id="btn-quote-close" class="footnote-popup-close quote-modal-close" style="position: absolute; right: 15px; top: 15px; z-index: 10;" title="关闭">×</button>
@@ -1507,7 +2059,7 @@
           <!-- 3. Reader Nickname -->
           <div class="control-group">
             <label class="control-label">读者署名</label>
-            <input type="text" id="quote-user-name-input" class="quote-text-input" value="Linden 读者" placeholder="输入您的署名"/>
+            <input type="text" id="quote-user-name-input" class="quote-text-input" value="诶云朵？！" placeholder="输入您的署名"/>
           </div>
 
           <!-- 4. Text Editor (Optional tweak) -->
@@ -1525,9 +2077,13 @@
             <div id="quote-details-panel" class="quote-details-panel" style="display: none;">
               <!-- 5a. Card Source Text (Affects this card only) -->
               <div class="expand-input-item">
-                <label class="expand-label">章节 / 出处（仅此卡片）</label>
-                <input type="text" id="quote-chapter-title-input" class="quote-text-input" placeholder="可修改或清空出处文字" />
-                <span class="expand-hint">修改或清空仅影响本次卡片，不修改书籍目录</span>
+                <label class="expand-label">章节名（仅此卡片）</label>
+                <input type="text" id="quote-chapter-title-input" class="quote-text-input" placeholder="可修改或清空章节名" />
+              </div>
+              <div class="expand-input-item">
+                <label class="expand-label">出处 / 页码（可选）</label>
+                <input type="text" id="quote-location-input" class="quote-text-input" placeholder="例如：第 42 页（默认留空）" />
+                <span class="expand-hint">修改或清空仅影响本次卡片，不修改书籍原内容</span>
               </div>
 
               <!-- 5b. Book Metadata (Sync to Shelf) -->
@@ -1568,7 +2124,7 @@
       </div>
     </div>
 
-  <!-- Floating Footnote Popup Bubble (WeChat Read / Apple Books style) -->
+  <!-- Floating Footnote Popup Bubble -->
   <div id="footnote-popup" class="footnote-popup" style="display: none;">
     <div class="footnote-popup-header">
       <span id="footnote-popup-title" class="footnote-popup-title">注释说明</span>
@@ -1577,7 +2133,7 @@
     <div id="footnote-popup-content" class="footnote-popup-content"></div>
   </div>
 
-  <!-- Global App Toast Notification (WeChat Read style non-blocking pill) -->
+  <!-- Global App Toast Notification -->
   <div id="global-toast" class="global-toast" style="display: none;">
     <span id="global-toast-icon" class="toast-icon">ℹ️</span>
     <span id="global-toast-msg" class="toast-msg"></span>
@@ -1608,7 +2164,7 @@
       <p style="font-size: 0.88rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 1.25rem;">
         为了在生成书摘金句卡片、阅读书签分享及阅读统计时呈现您的专属印记，请设置您的读者昵称：
       </p>
-      <input type="text" id="welcome-username-input" class="global-modal-input" placeholder="例如：爱读书的李白" value="Linden 读者" style="text-align: center; font-size: 1rem; font-weight: 600; padding: 0.65rem 1rem; margin-bottom: 1.25rem; width: 100%; border-radius: 8px;" />
+      <input type="text" id="welcome-username-input" class="global-modal-input" placeholder="诶云朵？！" value="" style="text-align: center; font-size: 1rem; font-weight: 600; padding: 0.65rem 1rem; margin-bottom: 1.25rem; width: 100%; border-radius: 8px;" />
       <div style="display: flex; gap: 0.75rem; justify-content: center;">
         <button id="btn-welcome-skip" class="btn-secondary" style="flex: 1; justify-content: center; padding: 0.65rem 1rem; font-size: 0.92rem; border-radius: 8px;">稍后设置</button>
         <button id="btn-welcome-confirm" class="btn-primary-action" style="flex: 2; justify-content: center; padding: 0.65rem 1.25rem; font-size: 0.95rem; border-radius: 8px;">开启阅读之旅</button>
@@ -1733,17 +2289,17 @@
 
         <!-- Form fields -->
         <div class="sync-field-group">
-          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">服务器地址 (Server URL)</label>
+          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">服务器地址</label>
           <input type="text" id="sync-input-server" class="jane-modal-input sync-input" placeholder="https://dav.jianguoyun.com/dav/" value="https://dav.jianguoyun.com/dav/" style="width: 100%; box-sizing: border-box;" />
         </div>
 
         <div class="sync-field-group" style="margin-top: 0.65rem;">
-          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">坚果云账号 / 邮箱 (Email)</label>
+          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">坚果云账号 / 邮箱</label>
           <input type="email" id="sync-input-username" class="jane-modal-input sync-input" placeholder="例如: your_name@example.com" style="width: 100%; box-sizing: border-box;" />
         </div>
 
         <div class="sync-field-group" style="margin-top: 0.65rem;">
-          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">应用授权密码 (App Password)</label>
+          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">应用授权密码</label>
           <div style="position: relative;">
             <input type="password" id="sync-input-password" class="jane-modal-input sync-input" placeholder="16 位第三方应用专用授权密码" style="width: 100%; box-sizing: border-box; padding-right: 2.4rem;" />
             <button type="button" id="btn-toggle-sync-pwd" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; justify-content: center;" title="显示密码"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg></button>
@@ -1751,7 +2307,7 @@
         </div>
 
         <div class="sync-field-group" style="margin-top: 0.65rem;">
-          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">云端同步目录 (Remote Folder)</label>
+          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">云端同步目录</label>
           <input type="text" id="sync-input-dir" class="jane-modal-input sync-input" value="LindenLeaf" placeholder="LindenLeaf" style="width: 100%; box-sizing: border-box;" />
         </div>
 
@@ -1811,7 +2367,7 @@
         <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(139, 92, 246, 0.08); border: 1px solid rgba(139, 92, 246, 0.2); border-radius: 8px; padding: 10px 14px; margin-bottom: 1rem;">
           <div>
             <div style="font-size: 0.75rem; color: var(--text-tertiary);">当前版本</div>
-            <div id="update-current-version" style="font-size: 0.95rem; font-weight: 600; color: var(--text-main);">v1.2.3</div>
+            <div id="update-current-version" style="font-size: 0.95rem; font-weight: 600; color: var(--text-main);">v2.0.0</div>
           </div>
           <div style="font-size: 1.2rem; color: var(--accent-purple);">➔</div>
           <div>
@@ -1851,7 +2407,7 @@
       <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
         <div style="display: flex; align-items: center; gap: 8px;">
           <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 7V4h3M20 7V4h-3M4 17v3h3M20 17v3h-3M9 12h6M12 9v6"/></svg>
-          <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">图片 PDF 文本识别提取 (OCR)</span>
+          <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">图片 PDF 文本识别提取</span>
         </div>
         <button id="btn-close-pdf-ocr" class="footnote-popup-close" title="关闭">×</button>
       </div>
@@ -2213,6 +2769,30 @@
       <div class="global-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
         <button type="button" class="btn-secondary-action" id="btn-cancel-advanced-unlock" style="padding: 0.35rem 1rem; font-size: 0.82rem;">暂不开启</button>
         <button type="button" class="btn-primary-action" id="btn-confirm-advanced-unlock" style="padding: 0.35rem 1.1rem; font-size: 0.82rem;">开启高级设置</button>
+      </div>
+    </div>
+  </div>
+  <!-- Modal: Chapter Bilingual Translation Confirmation -->
+  <div id="modal-chapter-trans-confirm" class="global-modal-backdrop" style="display: none; z-index: 99999;">
+    <div class="global-modal-card" style="max-width: 440px; width: 90vw;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem;">
+        <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;">翻译当前章节</span>
+        <button type="button" class="footnote-popup-close" id="btn-cancel-chapter-trans-modal">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 1rem 0; font-size: 0.84rem; line-height: 1.6; color: var(--text-secondary);">
+        <div style="background: var(--bg-tertiary); padding: 10px 12px; border-radius: 8px; margin-bottom: 10px; border: 1px solid var(--border-color);">
+          <div style="font-weight: 600; color: var(--text-main);" id="chapter-trans-confirm-title">加载章节中...</div>
+          <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px;">
+             待译规模：<span id="chapter-trans-confirm-count" style="color: var(--accent); font-weight: 600;">0 段落</span>
+             （原文长度粗估 <span id="chapter-trans-confirm-tokens" style="color: var(--accent); font-weight: 600;">约 0 词元</span>，不含译文输出）
+          </div>
+        </div>
+        <p style="margin: 0 0 8px 0;">系统将使用您配置的第三方 AI 接口分批翻译，并在正文中生成双语交错排版。</p>
+        <p style="margin: 0; font-size: 0.75rem; color: var(--text-muted);">已成功保存的段落可在下次打开时恢复。未完成段落需要手动继续，继续时可能产生新的计费请求。</p>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <button type="button" class="btn-secondary-action" id="btn-cancel-chapter-trans" style="padding: 0.35rem 1rem; font-size: 0.82rem;">取消</button>
+        <button type="button" class="btn-primary-action" id="btn-confirm-chapter-trans-start" style="padding: 0.35rem 1.1rem; font-size: 0.82rem;">开始翻译</button>
       </div>
     </div>
   </div>

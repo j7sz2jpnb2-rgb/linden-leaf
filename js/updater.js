@@ -4,7 +4,7 @@
 
 export class AppUpdater {
     constructor() {
-        this.currentVersion = '1.2.3'
+        this.currentVersion = '2.0.0'
         this.defaultRepo = 'j7sz2jpnb2-rgb/linden-leaf'
         this.lastCheckTime = 0
         this.latestRelease = null
@@ -13,13 +13,13 @@ export class AppUpdater {
     async init() {
         if (typeof platformBridge !== 'undefined' && platformBridge.getAppVersion) {
             try {
-                this.currentVersion = await platformBridge.getAppVersion() || '1.2.3'
+                this.currentVersion = await platformBridge.getAppVersion() || '2.0.0'
                 return
             } catch (e) {}
         }
         if (window.electronAPI?.getVersion) {
             try {
-                this.currentVersion = await window.electronAPI.getVersion() || '1.2.3'
+                this.currentVersion = await window.electronAPI.getVersion() || '2.0.0'
             } catch (e) {
                 console.warn('Failed to get app version from electron:', e)
             }

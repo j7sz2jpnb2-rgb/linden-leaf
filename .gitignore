@@ -6,6 +6,12 @@ node_modules/
 dist/
 dist-tauri/
 src-tauri/target/
+.gradle/
+**/build/
+**/.cxx/
+**/local.properties
+**/keystore.properties
+**/key.properties
 
 # Logs and runtime caches
 *.log

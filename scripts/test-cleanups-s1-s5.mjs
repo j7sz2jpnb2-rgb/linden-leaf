@@ -129,9 +129,9 @@ async function testRecordBookOpened() {
 
     // 1.4 Sync preemption anti-example using real mergeSyncData
     const syncSource = read('js/syncEngine.js');
-    const helpers = syncSource.slice(syncSource.indexOf('export const ALLOWED_BOOK_FORMATS ='), syncSource.indexOf('export const isAutoDownloadEligible =')).replace(/^export /gm, '');
+    const helpers = syncSource.slice(syncSource.indexOf('export const ALLOWED_BOOK_FORMATS ='), syncSource.indexOf('export const buildBookSyncMeta =')).replace(/^export /gm, '');
     const mergeSnippet = syncSource.slice(syncSource.indexOf('export const mergeSyncData ='), syncSource.indexOf('export const applyMergedPayload =')).replace(/^export /gm, '');
-    const merge = vm.runInNewContext(helpers + '\n' + mergeSnippet + '\nmergeSyncData', { Date, Map, Set });
+    const merge = vm.runInNewContext(helpers + '\n' + mergeSnippet + '\nmergeSyncData', { Date, Map, Set, structuredClone });
 
     // Local device: opened book at T=5000, but has NO favorite changes (favoriteUpdatedAt missing, updatedAt=1000)
     // Remote device: edited favorite at T=3000, updatedAt=3000 (missing favoriteUpdatedAt, relies on updatedAt fallback)
@@ -224,9 +224,9 @@ console.log('\nSuite 3: Format & Filename Defense (S2 & S4)');
 async function testFormatAndFilenameDefense() {
     const sync = read('js/syncEngine.js');
     const mergeSource = sync.slice(sync.indexOf('export const mergeSyncData ='), sync.indexOf('export const applyMergedPayload =')).replace(/^export /gm, '');
-    const helpers = sync.slice(sync.indexOf('export const ALLOWED_BOOK_FORMATS ='), sync.indexOf('export const isAutoDownloadEligible =')).replace(/^export /gm, '');
+    const helpers = sync.slice(sync.indexOf('export const ALLOWED_BOOK_FORMATS ='), sync.indexOf('export const buildBookSyncMeta =')).replace(/^export /gm, '');
 
-    const merge = vm.runInNewContext(helpers + '\n' + mergeSource + '\nmergeSyncData', { Date, Map, Set });
+    const merge = vm.runInNewContext(helpers + '\n' + mergeSource + '\nmergeSyncData', { Date, Map, Set, structuredClone });
 
     const untrustedFormat = '<img src="data:," data-audit="probe">';
     const traversalFilename = '../../audit-target.txt';
@@ -255,7 +255,7 @@ async function testFormatAndFilenameDefense() {
     const cardSource = app.slice(app.indexOf('    createBookCard(book,'), app.indexOf('    getDynamicGreeting()'));
     const fakeDocument = { createElement: () => ({ dataset: {}, style: { setProperty() {} }, innerHTML: '' }) };
     const escapeHTML = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const cardMethod = vm.runInNewContext('({' + cardSource + '}).createBookCard', { document: fakeDocument, escapeHTML, tracker: null });
+    const cardMethod = vm.runInNewContext('({' + cardSource + '}).createBookCard', { document: fakeDocument, escapeHTML, tracker: null, resolveReadingState: () => 'unread' });
 
     // Even if somehow an unescaped tag got past, createBookCard must escape it
     const testBook = { id: 'x', title: 'Test', format: '<script>alert(1)</script>', isCloudOnly: true };

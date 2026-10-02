@@ -26,6 +26,19 @@ import { PageTurnController, FoliatePageTurnAdapter, PdfPageTurnAdapter } from '
 import { AiSidebarController } from './ai-sidebar-controller.js'
 import { dictionaryService } from './dictionary-service.js'
 import { advancedSettings } from './advanced-settings.js'
+import { readingPresetsManager, MAX_READING_PRESETS } from './reading-presets.js'
+import { customFontManager } from './custom-font-manager.js'
+import { themeCustomizer, DEFAULT_SEMANTIC_PALETTE } from './theme-customizer.js'
+import { chapterTranslationManager } from './chapter-translation-manager.js'
+import { resolveReaderSettings, READER_OVERRIDE_ALLOWED_KEYS } from './translation-job-core.js'
+import { resolveExcerptSource } from './excerpt-source-resolver.js'
+import { ttsPlayer } from './tts-player.js'
+import { annualReport } from './annual-report.js'
+
+// Emergency Candidate Scope Toggles (2026-09-30 PC Candidate)
+export const FEATURE_CHAPTER_TRANSLATION_ENABLED = false
+export const FEATURE_ANNUAL_REPORT_ENABLED = false
+
 
 // Format language map helper
 const escapeHTML = str => {
@@ -194,9 +207,14 @@ const formatFontWeight = w => {
     return '浓黑 (800)'
 }
 
-// Generate CSS for Reader Content inside iframe
 const buildContentCSS = (settings) => {
-    const { theme, font, fontSize, fontWeight = 400, letterSpacing = 0, lineHeight, justify, hyphenate, writingMode = 'horizontal' } = settings || {}
+    const {
+        theme, font, fontSize, fontWeight = 400, letterSpacing = 0, lineHeight, justify, hyphenate, writingMode = 'horizontal',
+        firstParaIndent = true,
+        paraMarginTop = 0.0,
+        paraMarginBottom = 0.65,
+        paraIndentSize = '2em'
+    } = settings || {}
     const parsedWeight = parseInt(fontWeight, 10)
     const safeWeight = isNaN(parsedWeight) ? 400 : Math.min(900, Math.max(100, parsedWeight))
     const headingWeight = Math.min(900, Math.max(600, safeWeight + 200))
@@ -361,13 +379,13 @@ const buildContentCSS = (settings) => {
 
     // Declarative Theme & Font Configuration Presets
     const THEME_PALETTES = {
-        light: { text: '#1a1815', link: '#da7756', bg: 'transparent', selection: 'rgba(218, 119, 86,  0.22)' },
-        sepia: { text: '#3b2e1e', link: '#b45309', bg: 'transparent', selection: 'rgba(217, 119, 6, 0.26)' },
-        dark:  { text: '#edece6', link: '#d97757', bg: 'transparent', selection: 'rgba(217, 119, 87, 0.28)' },
-        black: { text: '#cccccc', link: '#a1a1aa', bg: 'transparent', selection: 'rgba(96, 165, 250, 0.36)' },
-        green: { text: '#1b4d1d', link: '#2e7d32', bg: 'transparent', selection: 'rgba(16, 185, 129, 0.25)' },
-        eink:  { text: '#000000', link: '#000000', bg: 'transparent', selection: 'rgba(0, 0, 0, 0.18)' },
-        warm:  { text: '#292524', link: '#da7756', bg: 'transparent', selection: 'rgba(218, 119, 86,  0.22)' }
+        light: { text: '#1a1815', link: '#da7756', bg: '#FAF9F5', selection: 'rgba(218, 119, 86,  0.22)' },
+        sepia: { text: '#3b2e1e', link: '#b45309', bg: '#f5eedc', selection: 'rgba(217, 119, 6, 0.26)' },
+        dark:  { text: '#edece6', link: '#d97757', bg: '#1f1f1d', selection: 'rgba(217, 119, 87, 0.28)' },
+        black: { text: '#cccccc', link: '#a1a1aa', bg: '#000000', selection: 'rgba(96, 165, 250, 0.36)' },
+        green: { text: '#1b4d1d', link: '#2e7d32', bg: '#e8f5e9', selection: 'rgba(16, 185, 129, 0.25)' },
+        eink:  { text: '#000000', link: '#000000', bg: '#ffffff', selection: 'rgba(0, 0, 0, 0.18)' },
+        warm:  { text: '#292524', link: '#da7756', bg: '#FAF9F5', selection: 'rgba(218, 119, 86,  0.22)' }
     }
 
     const FONT_PRESETS = {
@@ -377,18 +395,41 @@ const buildContentCSS = (settings) => {
         mono:  '"Cascadia Code", "Fira Code", Consolas, Menlo, Monaco, "Courier New", monospace'
     }
 
-    const activeTheme = THEME_PALETTES[theme] || THEME_PALETTES.light
+    const isDark = (theme === 'dark' || theme === 'black' || (themeCustomizer?.isCustomActive && themeCustomizer?.isDarkPalette))
+    const colorScheme = isDark ? 'dark' : 'light'
+
+    const activeTheme = themeCustomizer.isCustomActive
+        ? {
+            text: themeCustomizer.currentPalette.readerText || '#1a1815',
+            link: themeCustomizer.currentPalette.accent || '#da7756',
+            bg: themeCustomizer.currentPalette.readerBg || (isDark ? '#000000' : '#FAF9F5'),
+            selection: themeCustomizer.currentPalette.selectionBg || 'rgba(217, 119, 6, 0.22)'
+          }
+        : (THEME_PALETTES[theme] || THEME_PALETTES.light)
     const textColor = activeTheme.text
     const linkColor = activeTheme.link
     const bgColor = activeTheme.bg
     const selectionBg = activeTheme.selection
-    const fontFamily = FONT_PRESETS[font] || FONT_PRESETS.serif
+
+    let fontFamily = FONT_PRESETS[font]
+    if (!fontFamily) {
+        const customFont = customFontManager.getFontMeta(font)
+        if (customFont) {
+            fontFamily = `"${customFont.familyName}", ${FONT_PRESETS.serif}`
+        } else {
+            fontFamily = FONT_PRESETS.serif
+        }
+    }
+    const customFontFaceCSS = customFontManager.getCachedCSS()
 
     return `
         @namespace epub "http://www.idpf.org/2007/ops";
+        ${customFontFaceCSS}
         ${verticalStyles}
         html, body {
-            color-scheme: light dark;
+            color-scheme: ${colorScheme} !important;
+            background-color: ${bgColor} !important;
+            color: ${textColor} !important;
             text-spacing-trim: space-first;
             text-autospace: normal;
             font-synthesis: weight style;
@@ -426,11 +467,27 @@ const buildContentCSS = (settings) => {
             hyphens: ${hyphenate ? 'auto' : 'manual'};
         }
         p {
-            text-indent: 2em;
-            margin-top: 0 !important;
-            margin-bottom: 0.65em !important;
+            text-indent: ${paraIndentSize || '2em'};
+            margin-top: ${paraMarginTop != null ? paraMarginTop : 0}em !important;
+            margin-bottom: ${paraMarginBottom != null ? paraMarginBottom : 0.65}em !important;
             orphans: 2 !important;
             widows: 2 !important;
+        }
+        ${firstParaIndent === false ? `
+        [data-first-para="true"],
+        h1 + p, h2 + p, h3 + p,
+        [data-chapter-heading="true"] + p {
+            text-indent: 0 !important;
+        }
+        ` : ''}
+        [data-poetry-line], .poetry, .verse {
+            white-space: pre-wrap !important;
+            text-indent: 0 !important;
+        }
+        .txt-content, [data-format="txt"] {
+            white-space: pre-wrap !important;
+            word-break: break-word !important;
+            overflow-wrap: break-word !important;
         }
         li, dd {
             margin-top: 0.4em;
@@ -497,11 +554,12 @@ const buildContentCSS = (settings) => {
         }
 
         /* Subtitle / Author directly following a heading (Bond tightly with previous heading) */
-        h1 + p, h2 + p, h3 + p,
-        [data-reader-heading] + p[data-align="center"],
-        [data-reader-heading] + .contenttitle1,
-        [data-reader-heading] + [class*="author" i],
-        [data-reader-heading] + [class*="subtitle" i] {
+        :is(h1, h2, h3, [data-reader-heading]) + :is(
+            p[data-align="center"],
+            p.subtitle, p.author, p.center,
+            [class*="subtitle" i], [class*="author" i],
+            .contenttitle1, [class*="subheading" i]
+        ) {
             margin-top: -0.3em !important;
             text-indent: 0 !important;
             page-break-after: avoid !important;
@@ -576,27 +634,44 @@ const buildContentCSS = (settings) => {
         font[size="6"] { font-size: 2.0em !important; font-weight: 700 !important; line-height: 1.3 !important; }
         font[size="7"] { font-size: 2.5em !important; font-weight: 700 !important; line-height: 1.25 !important; }
 
-        ${(theme === 'dark' || theme === 'black') ? `
-        font[color] {
-            filter: brightness(1.7) contrast(1.1) !important;
+        ${isDark ? `
+        /* Comprehensive dark mode text color enforcement against publisher styles */
+        body, p, div, span, li, blockquote, dd, dt, h1, h2, h3, h4, h5, h6, em, strong, i, b, section, article {
+            color: ${textColor} !important;
         }
-        font[color="#000000"], font[color="black"], font[color="#000"], font[color="#111111"], font[color="#222222"], font[color="#333333"] {
+        font[color] {
             color: ${textColor} !important;
             filter: none !important;
         }
-        [style*="color:#000" i], [style*="color: #000" i],
-        [style*="color:#111" i], [style*="color: #111" i],
-        [style*="color:#222" i], [style*="color: #222" i],
-        [style*="color:#333" i], [style*="color: #333" i],
-        [style*="color:black" i], [style*="color: black" i] {
+        [style*="color:#0" i], [style*="color: #0" i],
+        [style*="color:#1" i], [style*="color: #1" i],
+        [style*="color:#2" i], [style*="color: #2" i],
+        [style*="color:#3" i], [style*="color: #3" i],
+        [style*="color:black" i], [style*="color: black" i],
+        [style*="color:rgb(0" i], [style*="color: rgb(0" i],
+        [style*="color:rgb(1" i], [style*="color: rgb(1" i],
+        [style*="color:rgb(2" i], [style*="color: rgb(2" i],
+        [style*="color:rgb(3" i], [style*="color: rgb(3" i] {
             color: ${textColor} !important;
         }
+        /* Preserve links and references */
+        a:link, a:visited, a[href] {
+            color: ${linkColor} !important;
+        }
+        /* Neutralize publisher hardcoded light backgrounds */
         [style*="background:white" i], [style*="background: white" i],
         [style*="background:#fff" i], [style*="background: #fff" i],
         [style*="background-color:white" i], [style*="background-color: white" i],
-        [style*="background-color:#fff" i], [style*="background-color: #fff" i] {
+        [style*="background-color:#fff" i], [style*="background-color: #fff" i],
+        [style*="background-color: rgb(255, 255, 255)" i],
+        [style*="background-color:rgb(255,255,255)" i],
+        .bg-white, [class*="bg-white" i] {
             background-color: transparent !important;
             background: transparent !important;
+        }
+        pre, code, kbd, samp {
+            color: inherit !important;
+            background-color: rgba(255, 255, 255, 0.08) !important;
         }
         ` : ''}
 
@@ -644,7 +719,7 @@ const buildContentCSS = (settings) => {
             display: none !important;
         }
 
-        /* Footnote references styling (WeChat Read style - unselectable so drag selection ignores footnote markers) */
+        /* Footnote references styling (unselectable so drag selection ignores footnote markers) */
         a[epub\\:type~="noteref"],
         a[role~="doc-noteref"],
         a.epub-footnote,
@@ -761,9 +836,35 @@ class UniversalReaderApp {
         this.isGliding = false
         this.cachedShelfHeight = 0
 
-        // Reader typography preferences
+        // Unified Theme Decision Chain ('system' default for new users, 'manual' if user explicitly picked)
+        let themeMode = 'system'
+        let savedManualTheme = null
+        try {
+            themeMode = localStorage.getItem('linden_leaf_theme_mode') || 'system'
+            savedManualTheme = localStorage.getItem('linden_leaf_theme')
+        } catch (e) {}
+
+        const isSystemDark = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
         let initialTheme = 'light'
-        try { initialTheme = localStorage.getItem('linden_leaf_theme') || 'light' } catch (e) {}
+        if (themeMode === 'manual' && savedManualTheme) {
+            initialTheme = savedManualTheme
+        } else {
+            themeMode = 'system'
+            initialTheme = isSystemDark ? 'black' : 'light'
+        }
+        this.themeMode = themeMode
+        this.themeGeneration = 1
+
+        if (typeof window !== 'undefined' && window.matchMedia) {
+            this._sysDarkQuery = window.matchMedia('(prefers-color-scheme: dark)')
+            this._sysDarkQuery.addEventListener('change', (e) => {
+                if (this.themeMode === 'system') {
+                    const newTheme = e.matches ? 'black' : 'light'
+                    this.applyTheme(newTheme, false)
+                }
+            })
+        }
+
         this.settings = {
             theme: initialTheme,
             font: 'serif', // Default to Adobe Source Han Serif
@@ -789,6 +890,8 @@ class UniversalReaderApp {
             searchCustomUrl: '',
             pageTurnMode: 'none'
         }
+        this.globalSettings = structuredClone(this.settings)
+        this._bookSettingsOverride = null
 
         // Import Queue Integration
         this.importQueue = importQueue
@@ -807,7 +910,7 @@ class UniversalReaderApp {
             this.refreshBookshelf()
         }
 
-        // WeChat Read Stats State
+        // Reading Stats State
         this.statsViewMode = 'month' // 'week', 'month', 'year', 'total'
         this.statsYear = new Date().getFullYear()
         this.statsMonth = new Date().getMonth() + 1
@@ -895,6 +998,29 @@ class UniversalReaderApp {
         this.initImportCenter()
         this.clearSearchState(true)
 
+        // Chapter Bilingual Reading Engine Wireup
+        this.chapterTranslationManager = chapterTranslationManager
+        chapterTranslationManager.app = this
+        chapterTranslationManager.init({
+            btnChapterTranslate: document.getElementById('btn-chapter-translate'),
+            modalChapterTransConfirm: document.getElementById('modal-chapter-trans-confirm'),
+            btnCancelChapterTransModal: document.getElementById('btn-cancel-chapter-trans-modal'),
+            btnConfirmChapterTransStart: document.getElementById('btn-confirm-chapter-trans-start'),
+            btnChapterTransStop: document.getElementById('btn-chapter-trans-stop'),
+            btnChapterTransClear: document.getElementById('btn-chapter-trans-clear'),
+            btnTransModeSource: document.getElementById('btn-trans-mode-source'),
+            btnTransModeBilingual: document.getElementById('btn-trans-mode-bilingual'),
+            btnTransModeTarget: document.getElementById('btn-trans-mode-target'),
+            chapterTransBar: document.getElementById('chapter-translation-bar')
+        })
+        document.getElementById('btn-cancel-chapter-trans')?.addEventListener('click', () => {
+            chapterTranslationManager.closeConfirmModal()
+        })
+        document.getElementById('btn-chapter-trans-close')?.addEventListener('click', () => {
+            chapterTranslationManager.hideBilingualBar()
+        })
+        this.initBookOverrideUI()
+
         // Persist reading progress & session time when the window is closed
         // directly (main process waits briefly for this before destroying)
         window.electronAPI?.onFlushBeforeQuit?.(() => this.flushReaderStateOnExit())
@@ -907,9 +1033,130 @@ class UniversalReaderApp {
             this.applyTheme(this.settings.theme)
             await this.ensureRecoveryBarrier()
             await this.renderCustomListsSidebar()
+            // R9: Render bookshelf immediately without waiting for font binaries
             await this.refreshBookshelf()
-            await this.initSyncService()
+
+            // Non-blocking deferred loading of custom fonts & presets
+            setTimeout(async () => {
+                try {
+                    await customFontManager.init(this.settings.font)
+                    await this.renderCustomFontsUI()
+                } catch (e) {
+                    console.warn('[App] Custom fonts init error:', e)
+                }
+                try {
+                    this.renderReadingPresetsUI()
+                } catch (e) {
+                    console.warn('[App] Presets UI error:', e)
+                }
+                await this.initSyncService()
+            }, 0)
+            this.setupAndroidNavigationAndImports()
+        }).catch(err => {
+            console.error('[App] Critical startup error:', err)
         })
+    }
+
+    setupAndroidNavigationAndImports() {
+        // Set dynamic current year on annual report banner
+        const bannerTitle = document.getElementById('banner-annual-report-title')
+        if (bannerTitle) {
+            bannerTitle.innerText = `今年阅读回顾 · 截至今天`
+        }
+
+        // 1. Android Back Button / System Gesture Handler
+        window.__handleAndroidBackPress = () => {
+            // (a) Annual report open?
+            const annualReportOverlay = document.getElementById('modal-annual-report-overlay')
+            if (annualReportOverlay && (annualReportOverlay.classList.contains('show') || annualReportOverlay.style.display === 'flex')) {
+                window.annualReport?.hide()
+                return true
+            }
+
+            // (b) Image viewer or active prompt modals open?
+            const activeModal = document.querySelector('.modal-overlay.show, .modal-backdrop.show, .custom-modal.show, #custom-modal-overlay.active, .dialog-overlay.active, #import-task-panel.open')
+            if (activeModal) {
+                if (typeof this.closeImportPanel === 'function' && activeModal.id === 'import-task-panel') {
+                    this.closeImportPanel()
+                    return true
+                }
+                activeModal.classList.remove('show', 'active')
+                return true
+            }
+
+            // (c) Sidebar Drawer (TOC / Notes / Settings) open in reader?
+            const drawer = document.getElementById('sidebar-drawer')
+            if (drawer && (drawer.classList.contains('open') || drawer.style.display !== 'none')) {
+                this.closeDrawer()
+                return true
+            }
+
+            // (d) AI Sidebar open in reader?
+            if (this.aiSidebarController && this.aiSidebarController.isOpen) {
+                this.aiSidebarController.close()
+                return true
+            }
+
+            // (e) Reader View open? Close reader and return to bookshelf
+            const readerView = document.getElementById('reader-view')
+            if (readerView && (readerView.classList.contains('active') || readerView.style.display !== 'none')) {
+                this.closeReader()
+                return true
+            }
+
+            // (f) Mobile Shelf Sidebar Drawer open?
+            const bookshelf = document.getElementById('bookshelf-view')
+            if (bookshelf && !bookshelf.classList.contains('sidebar-collapsed')) {
+                bookshelf.classList.add('sidebar-collapsed')
+                return true
+            }
+
+            // (g) At root shelf with nothing open: return false to let Android minimize/exit
+            return false
+        }
+
+        // 2. Mobile Bookshelf Sidebar backdrop dismiss
+        document.getElementById('jane-sidebar-backdrop')?.addEventListener('click', () => {
+            document.getElementById('bookshelf-view')?.classList.add('sidebar-collapsed')
+        })
+
+        // 3. Process Pending Android Imports (via intent / file association)
+        this.checkPendingAndroidImports()
+        window.addEventListener('focus', () => this.checkPendingAndroidImports())
+        window.addEventListener('pendingimportready', () => this.checkPendingAndroidImports())
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                this.checkPendingAndroidImports()
+            }
+        })
+    }
+
+    async checkPendingAndroidImports() {
+        if (!platformBridge.isAndroid && platformBridge.getOS?.() !== 'android') return
+        try {
+            const pending = await platformBridge.getPendingImports()
+            if (Array.isArray(pending) && pending.length > 0) {
+                console.log(`[Android Import] Processing ${pending.length} pending imports`)
+                for (const item of pending) {
+                    try {
+                        const fileObj = {
+                            filePath: item.filePath || item.uri,
+                            filename: item.filename,
+                            name: item.filename,
+                            size: 0
+                        }
+                        await this.importFiles([fileObj])
+                        await platformBridge.consumePendingImport(item.id)
+                        this.showToast(`正在导入：${item.filename}`, '⏳')
+                    } catch (err) {
+                        console.error(`[Android Import] Error importing ${item.filename}:`, err)
+                        await platformBridge.consumePendingImport(item.id)
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('[Android Import] Failed to check pending imports:', e)
+        }
     }
 
     get currentBook() {
@@ -1020,7 +1267,7 @@ class UniversalReaderApp {
             btnSidebarSettings: document.getElementById('btn-sidebar-settings'),
             sidebarUserSection: document.getElementById('sidebar-user-section'),
 
-            // WeChat Read Stats Dashboard & P2/P3 Analytics
+            // Stats Dashboard & Reading Analytics
             statsDashboardContainer: document.getElementById('stats-dashboard-container'),
             statsSegmentedTabs: document.querySelectorAll('.stats-tab-btn'),
             statsDateNavigator: document.getElementById('stats-date-navigator'),
@@ -1060,6 +1307,7 @@ class UniversalReaderApp {
             settingGoalYear: document.getElementById('setting-goal-year'),
             settingGoalMonth: document.getElementById('setting-goal-month'),
             settingGoalToday: document.getElementById('setting-goal-today'),
+            bannerAnnualReport: document.getElementById('banner-annual-report'),
 
             // Reader Header & Footer
             readerTopBar: document.getElementById('reader-top-bar'),
@@ -1075,8 +1323,20 @@ class UniversalReaderApp {
             btnToggleTOC: document.getElementById('btn-toggle-toc'),
             btnToggleSearch: document.getElementById('btn-toggle-search'),
             btnToggleNotes: document.getElementById('btn-toggle-notes'),
+            btnToggleTts: document.getElementById('btn-toggle-tts'),
             btnToggleSettings: document.getElementById('btn-toggle-settings'),
             btnToggleFullscreen: document.getElementById('btn-toggle-fullscreen'),
+            ttsPlayerBar: document.getElementById('tts-player-bar'),
+            btnTtsPrev: document.getElementById('btn-tts-prev'),
+            btnTtsTogglePlay: document.getElementById('btn-tts-toggle-play'),
+            btnTtsNext: document.getElementById('btn-tts-next'),
+            iconTtsPlay: document.getElementById('icon-tts-play'),
+            iconTtsPause: document.getElementById('icon-tts-pause'),
+            selectTtsRate: document.getElementById('select-tts-rate'),
+            selectTtsVoice: document.getElementById('select-tts-voice'),
+            btnTtsTimer: document.getElementById('btn-tts-timer'),
+            labelTtsTimer: document.getElementById('label-tts-timer'),
+            btnTtsClose: document.getElementById('btn-tts-close'),
             progressSlider: document.getElementById('reader-progress-slider'),
             progressText: document.getElementById('reader-progress-text'),
 
@@ -1133,6 +1393,36 @@ class UniversalReaderApp {
             chineseQuotesSwitch: document.getElementById('setting-chinese-quotes'),
             btnResetTypography: document.getElementById('btn-reset-typography'),
 
+            // Custom Semantic Palette
+            btnToggleCustomPalette: document.getElementById('btn-toggle-custom-palette'),
+            customPaletteEditor: document.getElementById('custom-palette-editor'),
+            paletteBgPrimary: document.getElementById('palette-bg-primary'),
+            paletteBgPrimaryHex: document.getElementById('palette-bg-primary-hex'),
+            paletteBgSecondary: document.getElementById('palette-bg-secondary'),
+            paletteBgSecondaryHex: document.getElementById('palette-bg-secondary-hex'),
+            paletteBgSidebar: document.getElementById('palette-bg-sidebar'),
+            paletteBgSidebarHex: document.getElementById('palette-bg-sidebar-hex'),
+            paletteTextMain: document.getElementById('palette-text-main'),
+            paletteTextMainHex: document.getElementById('palette-text-main-hex'),
+            paletteAccent: document.getElementById('palette-accent'),
+            paletteAccentHex: document.getElementById('palette-accent-hex'),
+            btnSaveCustomPalette: document.getElementById('btn-save-custom-palette'),
+            btnResetCustomPalette: document.getElementById('btn-reset-custom-palette'),
+
+            // Custom Fonts
+            btnImportCustomFont: document.getElementById('btn-import-custom-font'),
+            customFontsContainer: document.getElementById('custom-fonts-container'),
+            customFontsList: document.getElementById('custom-fonts-list'),
+
+            // Reading Presets
+            btnToggleReadingPresets: document.getElementById('btn-toggle-reading-presets'),
+            badgeActivePreset: document.getElementById('badge-active-preset'),
+            hintPresetsToggle: document.getElementById('hint-presets-toggle'),
+            readingPresetsContainer: document.getElementById('reading-presets-container'),
+            presetsCountLabel: document.getElementById('presets-count-label'),
+            btnSaveCurrentPreset: document.getElementById('btn-save-current-preset'),
+            readingPresetsList: document.getElementById('reading-presets-list'),
+
             // Image Enhancement (GPU accelerated scanner & PDF filters)
             imgBrightnessSlider: document.getElementById('setting-img-brightness'),
             imgBrightnessValue: document.getElementById('value-img-brightness'),
@@ -1176,6 +1466,7 @@ class UniversalReaderApp {
             quoteBookTitleInput: document.getElementById('quote-book-title-input'),
             quoteBookAuthorInput: document.getElementById('quote-book-author-input'),
             quoteChapterTitleInput: document.getElementById('quote-chapter-title-input'),
+            quoteLocationInput: document.getElementById('quote-location-input'),
             btnQuoteSaveToShelf: document.getElementById('btn-quote-save-to-shelf'),
             btnQuoteCopyClipboard: document.getElementById('btn-quote-copy-clipboard'),
             btnQuoteDownload: document.getElementById('btn-quote-download'),
@@ -1401,7 +1692,9 @@ class UniversalReaderApp {
             btnOverviewRatingTrigger: document.getElementById('btn-overview-rating-trigger'),
             overviewRatingTriggerText: document.getElementById('overview-rating-trigger-text'),
             overviewRatingPopover: document.getElementById('overview-rating-popover'),
-            overviewRatingSlider: document.getElementById('overview-rating-slider'),
+            overviewRatingSliderMin: document.getElementById('overview-rating-slider-min'),
+            overviewRatingSliderMax: document.getElementById('overview-rating-slider-max'),
+            overviewRatingTrackHighlight: document.getElementById('overview-rating-track-highlight'),
             overviewRatingValDisplay: document.getElementById('overview-rating-val-display'),
             overviewUnratedCheckbox: document.getElementById('overview-unrated-checkbox'),
             btnResetRating: document.getElementById('btn-reset-rating'),
@@ -1442,18 +1735,12 @@ class UniversalReaderApp {
         if (stored && stored !== 'Linden 读者' && stored !== '我的书架' && stored !== '读者') {
             return stored
         }
-        if (this.syncConfig?.username) {
-            const syncUser = (this.syncConfig.username || '').trim()
-            if (syncUser) {
-                return syncUser.includes('@') ? syncUser.split('@')[0] : syncUser
-            }
-        }
-        return '读者'
+        return '诶云朵？！'
     }
 
     updateUserProfileDisplay() {
         const displayName = this.getUserDisplayName()
-        const isCustom = displayName !== '读者'
+        const isCustom = displayName !== '诶云朵？！'
 
         const el = document.getElementById('user-display-name') || document.getElementById('sidebar-username') || document.querySelector('.sidebar-username')
         const avatarEl = document.getElementById('user-avatar-icon') || document.getElementById('sidebar-user-avatar-char') || document.querySelector('.sidebar-user-avatar')
@@ -1482,13 +1769,13 @@ class UniversalReaderApp {
         this.updateUserProfileDisplay()
         const currentName = this.getUserDisplayName()
         if (this.dom.settingUserName) {
-            this.dom.settingUserName.value = currentName !== '读者' ? currentName : ''
+            this.dom.settingUserName.value = currentName !== '诶云朵？！' ? currentName : ''
         }
         if (this.dom.quoteUserNameInput) {
             this.dom.quoteUserNameInput.value = currentName
         }
         if (!isInit && this.dom.welcomeModalBackdrop) {
-            if (currentName !== '读者') {
+            if (currentName !== '诶云朵？！') {
                 localStorage.setItem('linden_user_initialized', 'true')
                 return
             }
@@ -1652,8 +1939,9 @@ class UniversalReaderApp {
     async loadSettings() {
         const saved = await db.getSetting('readerSettings')
         if (saved) {
-            this.settings = { ...this.settings, ...saved }
+            this.globalSettings = { ...this.globalSettings, ...saved }
         }
+        this.settings = resolveReaderSettings(this.globalSettings, this._bookSettingsOverride, READER_OVERRIDE_ALLOWED_KEYS)
         // Always default to Modern Hero Grid on application startup
         this.shelfViewMode = 'grid'
         try {
@@ -1665,8 +1953,31 @@ class UniversalReaderApp {
         this.updateSettingsUI()
     }
 
+    setSetting(key, value, scope = 'auto') {
+        const bookId = this.currentBookData?.id || this.currentBook?.id || this.bookId
+        const hasBookOverride = !!(this._bookSettingsOverride && bookId)
+        const isTypography = READER_OVERRIDE_ALLOWED_KEYS.includes(key)
+
+        let targetScope = scope
+        if (targetScope === 'auto') {
+            targetScope = (hasBookOverride && isTypography) ? 'book' : 'global'
+        }
+
+        if (targetScope === 'book' && hasBookOverride && isTypography) {
+            if (!this._bookSettingsOverride) this._bookSettingsOverride = {}
+            this._bookSettingsOverride[key] = value
+        } else {
+            if (!this.globalSettings) this.globalSettings = { ...this.settings }
+            this.globalSettings[key] = value
+        }
+
+        this.settings = resolveReaderSettings(this.globalSettings, this._bookSettingsOverride, READER_OVERRIDE_ALLOWED_KEYS)
+        return this.settings
+    }
+
     saveSettingsDebounced(delay = 200) {
         this.applySettingsToReader()
+        this.updatePresetsBadge()
         clearTimeout(this._saveSettingsTimer)
         this._saveSettingsTimer = setTimeout(() => {
             this.saveSettings().catch(err => console.warn('Failed to save settings:', err))
@@ -1675,14 +1986,33 @@ class UniversalReaderApp {
 
     async saveSettings() {
         clearTimeout(this._saveSettingsTimer)
-        this.settings.shelfViewMode = this.shelfViewMode
-        this.settings.updatedAt = Date.now()
+        const bookId = this.currentBookData?.id || this.currentBook?.id || this.bookId
+        if (this._bookSettingsOverride && bookId) {
+            const cleanOverride = {}
+            for (const key of READER_OVERRIDE_ALLOWED_KEYS) {
+                if (Object.hasOwn(this._bookSettingsOverride, key)) {
+                    cleanOverride[key] = this._bookSettingsOverride[key]
+                }
+            }
+            this._bookSettingsOverride = cleanOverride
+            try {
+                localStorage.setItem(`linden_book_settings_${bookId}`, JSON.stringify(this._bookSettingsOverride))
+            } catch (e) {}
+        }
+
+        if (!this.globalSettings) {
+            this.globalSettings = structuredClone(this.settings)
+        }
+        this.globalSettings.shelfViewMode = this.shelfViewMode
+        this.globalSettings.updatedAt = Date.now()
+        this.settings = resolveReaderSettings(this.globalSettings, this._bookSettingsOverride, READER_OVERRIDE_ALLOWED_KEYS)
         try {
-            if (this.settings.theme) localStorage.setItem('linden_leaf_theme', this.settings.theme)
+            if (this.globalSettings.theme) localStorage.setItem('linden_leaf_theme', this.globalSettings.theme)
             if (this.shelfViewMode) localStorage.setItem('linden_leaf_view_mode', this.shelfViewMode)
         } catch (e) {}
-        await db.setSetting('readerSettings', this.settings)
+        await db.setSetting('readerSettings', this.globalSettings)
         this.applySettingsToReader()
+        this.updatePresetsBadge()
     }
 
     updateSettingsUI() {
@@ -1694,6 +2024,11 @@ class UniversalReaderApp {
         this.dom.fontButtons.forEach(btn => {
             btn.classList.toggle('active', btn.dataset.val === this.settings.font)
         })
+        const customFontBtns = document.querySelectorAll('.custom-font-choice-btn')
+        customFontBtns.forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.val === this.settings.font)
+        })
+        this.updatePresetsBadge()
         // Sliders
         if (this.dom.fontSizeSlider) {
             this.dom.fontSizeSlider.value = this.settings.fontSize
@@ -1839,47 +2174,609 @@ class UniversalReaderApp {
         }
     }
 
-    applyTheme(theme) {
+    initCustomPaletteUI() {
+        const btnToggle = this.dom.btnToggleCustomPalette
+        const editor = this.dom.customPaletteEditor
+        const bgPrimary = this.dom.paletteBgPrimary
+        const bgPrimaryHex = this.dom.paletteBgPrimaryHex
+        const bgSecondary = this.dom.paletteBgSecondary
+        const bgSecondaryHex = this.dom.paletteBgSecondaryHex
+        const bgSidebar = this.dom.paletteBgSidebar
+        const bgSidebarHex = this.dom.paletteBgSidebarHex
+        const textMain = this.dom.paletteTextMain
+        const textMainHex = this.dom.paletteTextMainHex
+        const accent = this.dom.paletteAccent
+        const accentHex = this.dom.paletteAccentHex
+        const btnSave = this.dom.btnSaveCustomPalette
+        const btnReset = this.dom.btnResetCustomPalette
+
+        if (btnToggle && editor) {
+            btnToggle.addEventListener('click', () => {
+                const isOpen = editor.style.display !== 'none'
+                editor.style.display = isOpen ? 'none' : 'flex'
+                btnToggle.textContent = isOpen ? '自定义调色盘' : '收起调色盘'
+            })
+        }
+
+        const pairs = [
+            { color: document.getElementById('palette-bg-primary') || bgPrimary, hex: document.getElementById('palette-bg-primary-hex') || bgPrimaryHex, key: 'bgPrimary', defaultVal: '#ffffff' },
+            { color: document.getElementById('palette-bg-secondary') || bgSecondary, hex: document.getElementById('palette-bg-secondary-hex') || bgSecondaryHex, key: 'bgSecondary', defaultVal: '#f9fafb' },
+            { color: document.getElementById('palette-bg-sidebar') || bgSidebar, hex: document.getElementById('palette-bg-sidebar-hex') || bgSidebarHex, key: 'bgSidebar', defaultVal: '#f3f4f6' },
+            { color: document.getElementById('palette-text-main') || textMain, hex: document.getElementById('palette-text-main-hex') || textMainHex, key: 'textMain', defaultVal: '#111827' },
+            { color: document.getElementById('palette-text-muted'), hex: document.getElementById('palette-text-muted-hex'), key: 'textMuted', defaultVal: '#6b7280' },
+            { color: document.getElementById('palette-accent') || accent, hex: document.getElementById('palette-accent-hex') || accentHex, key: 'accent', defaultVal: '#d97706' },
+            { color: document.getElementById('palette-border-color'), hex: document.getElementById('palette-border-color-hex'), key: 'borderColor', defaultVal: '#e5e7eb' },
+            { color: document.getElementById('palette-reader-bg'), hex: document.getElementById('palette-reader-bg-hex'), key: 'readerBg', defaultVal: '#faf9f5' },
+            { color: document.getElementById('palette-reader-text'), hex: document.getElementById('palette-reader-text-hex'), key: 'readerText', defaultVal: '#141413' },
+            { color: document.getElementById('palette-selection-bg'), hex: document.getElementById('palette-selection-bg-hex'), key: 'selectionBg', defaultVal: '#fef08a' }
+        ]
+
+        const syncInputsFromTheme = () => {
+            const p = themeCustomizer.currentPalette
+            for (const { color, hex, key, defaultVal } of pairs) {
+                const val = (p[key] || defaultVal).toLowerCase()
+                if (color) color.value = val
+                if (hex) hex.value = val
+            }
+        }
+        syncInputsFromTheme()
+
+        const onColorInput = () => {
+            const temp = {}
+            for (const { color, key, defaultVal } of pairs) {
+                temp[key] = color?.value || defaultVal
+            }
+            themeCustomizer.preview(temp)
+            if (this.foliateView) {
+                this.applySettingsToReader()
+            }
+        }
+
+        // Two-way synchronization between swatch picker and hex text input
+        pairs.forEach(({ color, hex }) => {
+            if (color && hex) {
+                color.addEventListener('input', () => {
+                    hex.value = color.value.toLowerCase()
+                    onColorInput()
+                })
+                hex.addEventListener('input', () => {
+                    let val = hex.value.trim().toLowerCase()
+                    if (!val.startsWith('#') && /^[0-9a-fA-F]{6}$/.test(val)) {
+                        val = '#' + val
+                    }
+                    if (/^#[0-9a-fA-F]{6}$/.test(val)) {
+                        color.value = val
+                        onColorInput()
+                    }
+                })
+                hex.addEventListener('blur', () => {
+                    // On blur normalize to valid 6-digit hex format
+                    let val = hex.value.trim().toLowerCase()
+                    if (!val.startsWith('#') && /^[0-9a-fA-F]{6}$/.test(val)) {
+                        val = '#' + val
+                    }
+                    if (/^#[0-9a-fA-F]{6}$/.test(val)) {
+                        hex.value = val
+                        color.value = val
+                    } else {
+                        hex.value = color.value.toLowerCase()
+                    }
+                })
+            }
+        })
+
+        btnSave?.addEventListener('click', () => {
+            const finalPalette = {
+                bgPrimary: bgPrimary?.value || '#ffffff',
+                bgSecondary: bgSecondary?.value || '#f9fafb',
+                bgSidebar: bgSidebar?.value || '#f3f4f6',
+                textMain: textMain?.value || '#111827',
+                accent: accent?.value || '#d97706'
+            }
+            themeCustomizer.commit(finalPalette)
+            if (this.foliateView) {
+                this.applySettingsToReader()
+            }
+            this.showToast('全局语义配色已保存', '✓')
+        })
+
+        btnReset?.addEventListener('click', () => {
+            themeCustomizer.resetToDefaults()
+            syncInputsFromTheme()
+            if (this.foliateView) {
+                this.applySettingsToReader()
+            }
+            this.showToast('已恢复默认主题配色', '✓')
+        })
+    }
+
+    initCustomFontsUI() {
+        const btnImport = this.dom.btnImportCustomFont
+        if (!btnImport) return
+
+        btnImport.addEventListener('click', () => {
+            try {
+                const input = document.createElement('input')
+                input.type = 'file'
+                input.accept = '.ttf,.otf,.woff,.woff2'
+                input.onchange = async () => {
+                    const file = input.files?.[0]
+                    if (!file) return
+                    try {
+                        this.showToast(`正在导入并校验字体 ${file.name}...`, '⏳')
+                        const imported = await customFontManager.importFont(file)
+                        this.settings.font = imported.id
+                        await this.saveSettings()
+                        await this.renderCustomFontsUI()
+                        this.updateSettingsUI()
+                        this.showToast(`成功导入并应用字体: ${imported.name}`, '✓')
+                    } catch (err) {
+                        this.showToast(err.message || '导入字体失败', '⚠️')
+                    }
+                }
+                input.click()
+            } catch (err) {
+                this.showToast(`导入字体异常: ${err.message}`, '⚠️')
+            }
+        })
+    }
+
+    async renderCustomFontsUI() {
+        const container = this.dom.customFontsContainer
+        const list = this.dom.customFontsList
+        if (!container || !list) return
+
+        const fonts = await customFontManager.listFonts()
+        if (fonts.length === 0) {
+            container.style.display = 'none'
+            list.innerHTML = ''
+            return
+        }
+
+        container.style.display = 'flex'
+        list.innerHTML = ''
+
+        fonts.forEach(f => {
+            const row = document.createElement('div')
+            row.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 6px; background: var(--bg-tertiary); padding: 4px 8px; border-radius: 6px;'
+
+            const choiceBtn = document.createElement('button')
+            choiceBtn.type = 'button'
+            choiceBtn.className = `font-choice-btn custom-font-choice-btn ${this.settings.font === f.id ? 'active' : ''}`
+            choiceBtn.dataset.val = f.id
+            choiceBtn.style.cssText = `flex: 1; text-align: left; border: none; background: none; font-size: 0.8rem; cursor: pointer; padding: 2px 4px; font-family: "${f.familyName}", sans-serif;`
+            choiceBtn.textContent = `${f.name} (${f.format.toUpperCase()}, ${(f.size / 1024 / 1024).toFixed(1)}MB)`
+            choiceBtn.addEventListener('click', async () => {
+                this.setSetting('font', f.id)
+                await this.saveSettings()
+                this.updateSettingsUI()
+                this.renderReadingPresetsUI()
+            })
+
+            const delBtn = document.createElement('button')
+            delBtn.type = 'button'
+            delBtn.title = '删除此字体'
+            delBtn.style.cssText = 'border: none; background: none; color: var(--text-muted); cursor: pointer; font-size: 0.9rem; padding: 0 4px;'
+            delBtn.textContent = '×'
+            delBtn.addEventListener('click', async (e) => {
+                e.stopPropagation()
+                const isUsing = this.settings.font === f.id
+                const msg = isUsing ? `字体“${f.name}”当前正被使用，删除后排版将自动回退为思源宋体。确定删除吗？` : `确定要删除自定义字体“${f.name}”吗？`
+                if (!confirm(msg)) return
+                await customFontManager.deleteFont(f.id)
+                if (isUsing) {
+                    this.setSetting('font', 'serif')
+                    await this.saveSettings()
+                }
+                await this.renderCustomFontsUI()
+                this.updateSettingsUI()
+                this.showToast('已删除字体', '✓')
+            })
+
+            row.appendChild(choiceBtn)
+            row.appendChild(delBtn)
+            list.appendChild(row)
+        })
+    }
+
+    initReadingPresetsUI() {
+        const btnToggle = this.dom.btnToggleReadingPresets
+        const container = this.dom.readingPresetsContainer
+        const hint = this.dom.hintPresetsToggle
+        const btnSaveCurrent = this.dom.btnSaveCurrentPreset
+
+        if (btnToggle && container) {
+            btnToggle.addEventListener('click', () => {
+                const isOpen = container.style.display !== 'none'
+                container.style.display = isOpen ? 'none' : 'flex'
+                if (hint) hint.textContent = isOpen ? '点击展开' : '点击折叠'
+            })
+        }
+
+        if (btnSaveCurrent) {
+            btnSaveCurrent.addEventListener('click', async () => {
+                const presets = readingPresetsManager.getPresets()
+                if (presets.length >= MAX_READING_PRESETS) {
+                    this.showToast(`预设数量已达上限（最多 ${MAX_READING_PRESETS} 套），请先在列表重命名或删除不需要的预设。`, '⚠️')
+                    return
+                }
+
+                const rawName = prompt(`请输入新预设的名称（最多24字）：`, `排版方案 ${presets.length + 1}`)
+                if (rawName == null) return // cancelled
+                const name = rawName.trim()
+                if (!name) {
+                    this.showToast('预设名称不能为空', '⚠️')
+                    return
+                }
+
+                const res = readingPresetsManager.createPreset(name, this.settings)
+                if (res.success) {
+                    this.renderReadingPresetsUI()
+                    this.showToast(`已保存排版预设：${res.preset.name}`, '✓')
+                } else {
+                    this.showToast(res.error || '保存预设失败', '⚠️')
+                }
+            })
+        }
+
+        this.renderReadingPresetsUI()
+    }
+
+    updatePresetsBadge() {
+        const badge = this.dom?.badgeActivePreset || document.getElementById('badge-active-preset')
+        if (!badge) return
+        const active = readingPresetsManager.getActivePreset()
+        const isMod = readingPresetsManager.isCurrentModified(this.settings)
+        if (active) {
+            badge.textContent = active.name + (isMod ? ' (已修改)' : '')
+            badge.style.color = isMod ? '#f59e0b' : 'var(--accent-purple)'
+        } else {
+            badge.textContent = '默认排版'
+            badge.style.color = 'var(--accent-purple)'
+        }
+    }
+
+    renderReadingPresetsUI() {
+        const countLabel = this.dom?.presetsCountLabel || document.getElementById('presets-count-label')
+        const list = this.dom?.readingPresetsList || document.getElementById('reading-presets-list')
+        const presets = readingPresetsManager.getPresets()
+        const activeId = readingPresetsManager.activePresetId
+
+        if (countLabel) {
+            countLabel.textContent = `已存 ${presets.length} / ${MAX_READING_PRESETS} 套预设`
+        }
+
+        this.updatePresetsBadge()
+
+        if (!list) return
+        list.innerHTML = ''
+
+        if (presets.length === 0) {
+            const emptyEl = document.createElement('div')
+            emptyEl.style.cssText = 'font-size: 0.74rem; color: var(--text-muted); text-align: center; padding: 12px 0;'
+            emptyEl.textContent = '暂无已保存预设，调整好排版后点击右上角“+ 保存当前排版”'
+            list.appendChild(emptyEl)
+            return
+        }
+
+        presets.forEach(p => {
+            const row = document.createElement('div')
+            const isActive = activeId === p.id
+            const isMod = isActive && readingPresetsManager.isCurrentModified(this.settings)
+
+            row.style.cssText = `display: flex; flex-direction: column; gap: 4px; background: var(--bg-tertiary); padding: 6px 8px; border-radius: 6px; border: 1px solid ${isActive ? 'var(--accent)' : 'transparent'};`
+
+            const topRow = document.createElement('div')
+            topRow.style.cssText = 'display: flex; justify-content: space-between; align-items: center;'
+
+            const nameBtn = document.createElement('button')
+            nameBtn.type = 'button'
+            nameBtn.style.cssText = `border: none; background: none; font-size: 0.82rem; font-weight: ${isActive ? '600' : 'normal'}; color: ${isActive ? 'var(--accent)' : 'var(--text-primary)'}; cursor: pointer; text-align: left; padding: 0;`
+            nameBtn.textContent = `${p.name}${isMod ? ' (已修改)' : ''}`
+            nameBtn.title = '点击一键应用此排版预设'
+            nameBtn.addEventListener('click', async () => {
+                const applied = readingPresetsManager.applyPreset(p.id)
+                if (applied) {
+                    for (const [k, v] of Object.entries(applied)) {
+                        this.setSetting(k, v)
+                    }
+                    await this.saveSettings()
+                    this.updateSettingsUI()
+                    this.renderReadingPresetsUI()
+                    this.showToast(`已应用排版预设：${p.name}`, '✓')
+                }
+            })
+
+            const actionsWrap = document.createElement('div')
+            actionsWrap.style.cssText = 'display: flex; align-items: center; gap: 4px;'
+
+            // 覆盖保存按钮
+            const btnUpdate = document.createElement('button')
+            btnUpdate.type = 'button'
+            btnUpdate.title = '用当前排版覆盖更新此预设'
+            btnUpdate.style.cssText = 'border: 1px solid var(--border-color); background: none; color: var(--text-secondary); font-size: 0.7rem; border-radius: 3px; padding: 1px 4px; cursor: pointer;'
+            btnUpdate.textContent = '覆盖'
+            btnUpdate.addEventListener('click', (e) => {
+                e.stopPropagation()
+                readingPresetsManager.updatePreset(p.id, this.settings)
+                this.renderReadingPresetsUI()
+                this.showToast(`已用当前排版更新预设“${p.name}”`, '✓')
+            })
+
+            // 重命名按钮
+            const btnRename = document.createElement('button')
+            btnRename.type = 'button'
+            btnRename.title = '重命名'
+            btnRename.style.cssText = 'border: 1px solid var(--border-color); background: none; color: var(--text-secondary); font-size: 0.7rem; border-radius: 3px; padding: 1px 4px; cursor: pointer;'
+            btnRename.textContent = '改名'
+            btnRename.addEventListener('click', (e) => {
+                e.stopPropagation()
+                const newName = prompt('输入新的预设名称：', p.name)
+                if (newName && newName.trim()) {
+                    readingPresetsManager.renamePreset(p.id, newName.trim())
+                    this.renderReadingPresetsUI()
+                }
+            })
+
+            // 复制按钮
+            const btnDup = document.createElement('button')
+            btnDup.type = 'button'
+            btnDup.title = '复制为此预设副本'
+            btnDup.style.cssText = 'border: 1px solid var(--border-color); background: none; color: var(--text-secondary); font-size: 0.7rem; border-radius: 3px; padding: 1px 4px; cursor: pointer;'
+            btnDup.textContent = '副本'
+            btnDup.addEventListener('click', (e) => {
+                e.stopPropagation()
+                const res = readingPresetsManager.duplicatePreset(p.id)
+                if (res.success) {
+                    this.renderReadingPresetsUI()
+                    this.showToast(`已创建副本：${res.preset.name}`, '✓')
+                } else {
+                    this.showToast(res.error || '复制失败', '⚠️')
+                }
+            })
+
+            // 删除按钮
+            const btnDel = document.createElement('button')
+            btnDel.type = 'button'
+            btnDel.title = '删除此预设'
+            btnDel.style.cssText = 'border: 1px solid var(--border-color); background: none; color: #ef4444; font-size: 0.7rem; border-radius: 3px; padding: 1px 4px; cursor: pointer;'
+            btnDel.textContent = '删除'
+            btnDel.addEventListener('click', (e) => {
+                e.stopPropagation()
+                if (confirm(`确定要删除预设“${p.name}”吗？`)) {
+                    readingPresetsManager.deletePreset(p.id)
+                    this.renderReadingPresetsUI()
+                    this.showToast('已删除预设', '✓')
+                }
+            })
+
+            actionsWrap.appendChild(btnUpdate)
+            actionsWrap.appendChild(btnRename)
+            actionsWrap.appendChild(btnDup)
+            actionsWrap.appendChild(btnDel)
+
+            topRow.appendChild(nameBtn)
+            topRow.appendChild(actionsWrap)
+
+            const s = p.settings || {}
+            const detailsRow = document.createElement('div')
+            detailsRow.style.cssText = 'font-size: 0.7rem; color: var(--text-muted); display: flex; gap: 8px;'
+            const fontLabel = s.font === 'serif' ? '宋体' : s.font === 'sans' ? '黑体' : s.font === 'kaiti' ? '楷体' : s.font === 'mono' ? '等宽' : '自定义字体'
+            detailsRow.textContent = `${fontLabel} · ${s.fontSize || 18}px · ${s.lineHeight || 1.6}行距 · ${s.writingMode === 'vertical-rl' ? '竖排' : '横排'} · ${s.columnCount === '1' ? '单栏' : '双栏'}`
+
+            row.appendChild(topRow)
+            row.appendChild(detailsRow)
+            list.appendChild(row)
+        })
+    }
+
+    resolveThemePalette(themeName) {
+        const theme = themeName || this.settings?.theme || 'light'
+        const isDark = (theme === 'dark' || theme === 'black')
+        const colorScheme = isDark ? 'dark' : 'light'
+        const palettes = {
+            light: { shellBg: '#FAF9F5', readerBg: '#FAF9F5', readerText: '#1a1815', link: '#da7756', selection: 'rgba(218, 119, 86,  0.22)' },
+            sepia: { shellBg: '#f5eedc', readerBg: '#f5eedc', readerText: '#3b2e1e', link: '#b45309', selection: 'rgba(217, 119, 6, 0.26)' },
+            dark:  { shellBg: '#1f1f1d', readerBg: '#1f1f1d', readerText: '#edece6', link: '#d97757', selection: 'rgba(217, 119, 87, 0.28)' },
+            black: { shellBg: '#000000', readerBg: '#000000', readerText: '#cccccc', link: '#a1a1aa', selection: 'rgba(96, 165, 250, 0.36)' },
+            green: { shellBg: '#e8f5e9', readerBg: '#e8f5e9', readerText: '#1b4d1d', link: '#2e7d32', selection: 'rgba(16, 185, 129, 0.25)' },
+            eink:  { shellBg: '#ffffff', readerBg: '#ffffff', readerText: '#000000', link: '#000000', selection: 'rgba(0, 0, 0, 0.18)' },
+            warm:  { shellBg: '#FAF9F5', readerBg: '#FAF9F5', readerText: '#292524', link: '#da7756', selection: 'rgba(218, 119, 86,  0.22)' }
+        }
+        return {
+            ...(palettes[theme] || palettes.light),
+            colorScheme
+        }
+    }
+
+    applyTheme(theme, isUserExplicit = true) {
         this.pageTurnController?.cancelCurrent()
+        this.themeGeneration = (this.themeGeneration || 0) + 1
+        if (isUserExplicit) {
+            this.themeMode = 'manual'
+            try { localStorage.setItem('linden_leaf_theme_mode', 'manual') } catch (e) {}
+        }
         document.documentElement.setAttribute('data-theme', theme)
-        let bg = '#FAF9F5'
-        if (theme === 'dark' || theme === 'black') bg = '#262624'
-        else if (theme === 'sepia') bg = '#f5eedc'
+        const palette = this.resolveThemePalette(theme)
+        const bg = palette.shellBg
         document.documentElement.style.backgroundColor = bg
         if (document.body) document.body.style.backgroundColor = bg
         try { localStorage.setItem('linden_leaf_theme', theme) } catch (e) {}
-        this.settings.theme = theme
+        this.setSetting('theme', theme)
         this.applySettingsToReader()
+
+        // Diagnostics export
+        window.__getReaderThemeDiagnostics = () => {
+            const isSystemDark = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : null
+            const curTheme = this.settings?.theme || document.documentElement.getAttribute('data-theme')
+            const pal = this.resolveThemePalette(curTheme)
+            const iframe = document.querySelector('#reader-content-area iframe')
+            let iframeComp = null
+            if (iframe && iframe.contentDocument) {
+                const body = iframe.contentDocument.body
+                const html = iframe.contentDocument.documentElement
+                const bodyStyle = body ? iframe.contentDocument.defaultView?.getComputedStyle(body) : null
+                const htmlStyle = html ? iframe.contentDocument.defaultView?.getComputedStyle(html) : null
+                const sampleP = body?.querySelector('p, div, span')
+                const pStyle = sampleP ? iframe.contentDocument.defaultView?.getComputedStyle(sampleP) : null
+                iframeComp = {
+                    htmlBg: htmlStyle?.backgroundColor,
+                    bodyBg: bodyStyle?.backgroundColor,
+                    sampleTextTag: sampleP?.tagName,
+                    textColor: pStyle?.color || bodyStyle?.color,
+                    opacity: bodyStyle?.opacity,
+                    filter: bodyStyle?.filter,
+                    textFillColor: bodyStyle?.webkitTextFillColor
+                }
+            }
+            return {
+                themeMode: this.themeMode,
+                isSystemDark,
+                activeTheme: curTheme,
+                palette: pal,
+                rootBg: document.documentElement.style.backgroundColor,
+                iframe: iframeComp,
+                generation: this.themeGeneration || 1
+            }
+        }
     }
 
     applySettingsToReader() {
         this.pageTurnController?.cancelCurrent()
         if (!this.foliateView || !this.foliateView.renderer) return
         const r = this.foliateView.renderer
+        const s = {
+            ...(this.advancedSettings?.config || {}),
+            ...(this.settings || {}),
+            ...(this._bookSettingsOverride || {})
+        }
         
         if (this.foliateView.isFixedLayout) {
-            this.dom.btnPdfSpreadToggle?.classList.toggle('active', this.settings.columnCount === '2')
+            this.dom.btnPdfSpreadToggle?.classList.toggle('active', s.columnCount === '2')
             if (r.setSpread && this.foliateView.lastLocation != null) {
-                r.setSpread(this.settings.columnCount || '1')
+                r.setSpread(s.columnCount || '1')
             }
         } else {
             // Pass margin, max-inline-size, max-column-count, gap, flow to paginator
             if (r.setAttribute) {
-                const isVertical = this.settings.writingMode === 'vertical-rl'
-                const effectiveColumnCount = isVertical ? '1' : (this.settings.columnCount || '2')
-                r.setAttribute('flow', this.settings.layout || 'paginated')
-                r.setAttribute('margin', `${this.settings.margin || 48}px`)
-                r.setAttribute('max-inline-size', `${this.settings.maxWidth || 760}px`)
+                const isVertical = s.writingMode === 'vertical-rl'
+                const effectiveColumnCount = isVertical ? '1' : (s.columnCount || '2')
+                r.setAttribute('flow', s.layout || 'paginated')
+                const effectiveMargin = (s.margin != null && !isNaN(Number(s.margin))) ? Number(s.margin) : 48
+                const effectiveGap = (s.gap != null && !isNaN(Number(s.gap))) ? Number(s.gap) : 6
+                r.setAttribute('margin', `${effectiveMargin}px`)
+                r.setAttribute('max-inline-size', `${s.maxWidth || 760}px`)
                 r.setAttribute('max-column-count', effectiveColumnCount)
-                r.setAttribute('gap', `${this.settings.gap || 6}%`)
+                r.setAttribute('gap', `${effectiveGap}%`)
             }
         }
 
-        // Pass CSS inside iframe
-        const css = buildContentCSS(this.settings)
+        // const css = buildContentCSS(this.settings) - merged with overrides:
+        const css = buildContentCSS(s)
         if (r.setStyles) {
             r.setStyles(css)
         }
+    }
+
+    initBookOverrideUI() {
+        const cb = document.getElementById('setting-book-override')
+        const hint = document.getElementById('book-override-hint')
+        const btnReset = document.getElementById('btn-reset-book-override')
+        if (!cb) return
+
+        cb.addEventListener('change', () => {
+            const bookId = this.currentBookData?.id || this.currentBook?.id || this.bookId
+            if (!bookId) {
+                this.showToast('请先打开一本书籍再设置专属排版', 'info')
+                cb.checked = false
+                return
+            }
+            if (cb.checked) {
+                this._bookSettingsOverride = {}
+                for (const k of READER_OVERRIDE_ALLOWED_KEYS) {
+                    if (this.globalSettings && Object.hasOwn(this.globalSettings, k)) {
+                        this._bookSettingsOverride[k] = structuredClone(this.globalSettings[k])
+                    } else if (Object.hasOwn(this.settings, k)) {
+                        this._bookSettingsOverride[k] = structuredClone(this.settings[k])
+                    }
+                }
+                try {
+                    localStorage.setItem(`linden_book_settings_${bookId}`, JSON.stringify(this._bookSettingsOverride))
+                } catch (e) {}
+                this.settings = resolveReaderSettings(this.globalSettings || this.settings, this._bookSettingsOverride, READER_OVERRIDE_ALLOWED_KEYS)
+                this.updateBookOverrideUI(true)
+                this.updateSettingsUI()
+                this.applySettingsToReader()
+                this.showToast('已为当前图书开启专属排版', '✓')
+            } else {
+                this._bookSettingsOverride = null
+                try {
+                    localStorage.removeItem(`linden_book_settings_${bookId}`)
+                } catch (e) {}
+                this.settings = resolveReaderSettings(this.globalSettings || this.settings, null, READER_OVERRIDE_ALLOWED_KEYS)
+                this.updateBookOverrideUI(false)
+                this.updateSettingsUI()
+                this.applySettingsToReader()
+                this.saveSettingsDebounced()
+                this.showToast('已恢复继承全局默认排版', '✓')
+            }
+        })
+
+        btnReset?.addEventListener('click', () => {
+            const bookId = this.currentBookData?.id || this.currentBook?.id || this.bookId
+            if (bookId) {
+                this._bookSettingsOverride = null
+                try {
+                    localStorage.removeItem(`linden_book_settings_${bookId}`)
+                } catch (e) {}
+                cb.checked = false
+                this.settings = resolveReaderSettings(this.globalSettings || this.settings, null, READER_OVERRIDE_ALLOWED_KEYS)
+                this.updateBookOverrideUI(false)
+                this.updateSettingsUI()
+                this.applySettingsToReader()
+                this.saveSettingsDebounced()
+                this.showToast('已恢复继承全局默认排版', '✓')
+            }
+        })
+    }
+
+    updateBookOverrideUI(hasOverride) {
+        const cb = document.getElementById('setting-book-override')
+        const hint = document.getElementById('book-override-hint')
+        if (cb) cb.checked = !!hasOverride
+        if (hint) hint.style.display = hasOverride ? 'flex' : 'none'
+    }
+
+    async checkBookSpecificSettings(bookId) {
+        if (!bookId) {
+            this._bookSettingsOverride = null
+            this.settings = resolveReaderSettings(this.globalSettings || this.settings, null, READER_OVERRIDE_ALLOWED_KEYS)
+            this.updateBookOverrideUI(false)
+            this.updateSettingsUI()
+            return
+        }
+        try {
+            const key = `linden_book_settings_${bookId}`
+            const raw = localStorage.getItem(key)
+            if (raw) {
+                const parsed = JSON.parse(raw)
+                this._bookSettingsOverride = {}
+                for (const k of READER_OVERRIDE_ALLOWED_KEYS) {
+                    if (parsed && Object.hasOwn(parsed, k)) {
+                        this._bookSettingsOverride[k] = parsed[k]
+                    }
+                }
+                this.updateBookOverrideUI(true)
+            } else {
+                this._bookSettingsOverride = null
+                this.updateBookOverrideUI(false)
+            }
+        } catch (e) {
+            this._bookSettingsOverride = null
+            this.updateBookOverrideUI(false)
+        }
+        this.settings = resolveReaderSettings(this.globalSettings || this.settings, this._bookSettingsOverride, READER_OVERRIDE_ALLOWED_KEYS)
+        this.updateSettingsUI()
     }
 
     bindEvents() {
@@ -2009,7 +2906,7 @@ class UniversalReaderApp {
             }
             this.updateUserProfileDisplay()
             const displayName = this.getUserDisplayName()
-            if (this.dom.settingUserName) this.dom.settingUserName.value = displayName !== '读者' ? displayName : ''
+            if (this.dom.settingUserName) this.dom.settingUserName.value = displayName !== '诶云朵？！' ? displayName : ''
             if (this.dom.quoteUserNameInput) this.dom.quoteUserNameInput.value = displayName
             if (quoteCard) quoteCard.userName = displayName
             if (this.dom.heroGreetingTitle && this.shelfCategory === 'all') {
@@ -2017,7 +2914,7 @@ class UniversalReaderApp {
                 this.dom.heroGreetingTitle.innerText = greetingData.title
                 this.dom.heroGreetingSubtitle.innerText = greetingData.subtitle
             }
-            this.showToast(displayName !== '读者' ? `欢迎您，${displayName}！祝您阅读愉快` : '欢迎使用 Linden Leaf！祝您阅读愉快', 'info')
+            this.showToast(displayName !== '诶云朵？！' ? `欢迎您，${displayName}！祝您阅读愉快` : '欢迎使用 Linden Leaf！祝您阅读愉快', 'info')
         }
         this.dom.btnWelcomeConfirm?.addEventListener('click', handleWelcomeSave)
         this.dom.welcomeUsernameInput?.addEventListener('keydown', e => {
@@ -2248,7 +3145,7 @@ class UniversalReaderApp {
             if (e.target === this.dom.modalBatchAddToList) this.closeBatchAddToListModal()
         })
 
-        // WeChat Read Stats Segmented Tabs (周 / 月 / 年 / 总)
+        // Stats Segmented Tabs (周 / 月 / 年 / 总)
         this.dom.statsSegmentedTabs?.forEach(btn => {
             btn.addEventListener('click', (e) => {
                 this.dom.statsSegmentedTabs.forEach(b => b.classList.remove('active'))
@@ -2536,6 +3433,11 @@ class UniversalReaderApp {
         // Appearance settings
         this.dom.themeButtons.forEach(btn => {
             btn.addEventListener('click', () => {
+                if (themeCustomizer.isCustomActive) {
+                    themeCustomizer.removeTheme()
+                    themeCustomizer.isCustomActive = false
+                    themeCustomizer.save()
+                }
                 this.applyTheme(btn.dataset.val)
                 this.saveSettings()
                 this.updateSettingsUI()
@@ -2544,58 +3446,69 @@ class UniversalReaderApp {
 
         this.dom.fontButtons.forEach(btn => {
             btn.addEventListener('click', () => {
-                this.settings.font = btn.dataset.val
+                this.setSetting('font', btn.dataset.val)
                 this.saveSettings()
                 this.updateSettingsUI()
             })
         })
 
         this.dom.fontSizeSlider?.addEventListener('input', e => {
-            this.settings.fontSize = parseInt(e.target.value, 10)
+            const val = parseInt(e.target.value, 10)
+            this.setSetting('fontSize', val)
             this.dom.fontSizeValue.innerText = `${this.settings.fontSize}px`
             this.saveSettingsDebounced()
         })
 
         this.dom.fontWeightSlider?.addEventListener('input', e => {
-            this.settings.fontWeight = parseInt(e.target.value, 10)
+            const val = parseInt(e.target.value, 10)
+            this.setSetting('fontWeight', val)
             this.dom.fontWeightValue.innerText = formatFontWeight(this.settings.fontWeight)
             this.saveSettingsDebounced()
         })
 
         this.dom.lineHeightSlider?.addEventListener('input', e => {
-            this.settings.lineHeight = parseFloat(e.target.value)
+            const val = parseFloat(e.target.value)
+            this.setSetting('lineHeight', val)
             this.dom.lineHeightValue.innerText = this.settings.lineHeight
             this.saveSettingsDebounced()
         })
 
         this.dom.marginSlider?.addEventListener('input', e => {
-            this.settings.margin = parseInt(e.target.value, 10)
+            const val = parseInt(e.target.value, 10)
+            this.setSetting('margin', val)
             this.dom.marginValue.innerText = `${this.settings.margin}px`
             this.saveSettingsDebounced()
         })
 
         this.dom.maxWidthSlider?.addEventListener('input', e => {
-            this.settings.maxWidth = parseInt(e.target.value, 10)
+            const val = parseInt(e.target.value, 10)
+            this.setSetting('maxWidth', val)
             this.dom.maxWidthValue.innerText = `${this.settings.maxWidth}px`
             this.saveSettingsDebounced()
         })
 
         this.dom.gapSlider?.addEventListener('input', e => {
-            this.settings.gap = parseInt(e.target.value, 10)
+            const val = parseInt(e.target.value, 10)
+            this.setSetting('gap', val)
             this.dom.gapValue.innerText = `${this.settings.gap}%`
             this.saveSettingsDebounced()
         })
 
         this.dom.btnResetTypography?.addEventListener('click', () => {
-            this.settings.fontSize = 18
-            this.settings.fontWeight = 400
-            this.settings.lineHeight = 1.6
-            this.settings.margin = 48
-            this.settings.maxWidth = 760
-            this.settings.gap = 6
-            this.settings.letterSpacing = 0
-            this.settings.chineseQuotes = false
-            this.settings.columnCount = '2'
+            const defaults = {
+                fontSize: 18,
+                fontWeight: 400,
+                lineHeight: 1.6,
+                margin: 48,
+                maxWidth: 760,
+                gap: 6,
+                letterSpacing: 0,
+                chineseQuotes: false,
+                columnCount: '2'
+            }
+            for (const [k, v] of Object.entries(defaults)) {
+                this.setSetting(k, v)
+            }
             this.updateSettingsUI()
             this.saveSettingsDebounced()
             this.showToast('已将排版与间距恢复为默认设置', 'info')
@@ -2607,34 +3520,38 @@ class UniversalReaderApp {
                 this.showToast('古典竖排模式仅支持单栏排版', 'ℹ️')
                 return
             }
-            this.settings.columnCount = e.target.value
+            this.setSetting('columnCount', e.target.value)
             this.saveSettings()
             this.applySettingsToReader()
         })
 
         this.dom.layoutSelect?.addEventListener('change', e => {
             this.pageTurnController?.cancelCurrent()
-            this.settings.layout = e.target.value
+            this.setSetting('layout', e.target.value)
             this.saveSettings()
         })
 
         this.dom.turnAnimationSelect?.addEventListener('change', e => {
             const validTurnModes = ['none', 'slide', 'cover', 'curl']
             const mode = validTurnModes.includes(e.target.value) ? e.target.value : 'slide'
-            this.settings.pageTurnMode = mode
+            this.setSetting('pageTurnMode', mode)
             this.pageTurnController?.setMode(mode)
             this.saveSettings()
         })
 
+        try { this.initCustomPaletteUI() } catch (e) { console.warn('[App] Palette init error:', e) }
+        try { this.initCustomFontsUI() } catch (e) { console.warn('[App] Custom fonts init error:', e) }
+        try { this.initReadingPresetsUI() } catch (e) { console.warn('[App] Reading presets init error:', e) }
+
         this.dom.settingRealisticPen?.addEventListener('change', async e => {
-            this.settings.realisticPen = e.target.checked
+            this.setSetting('realisticPen', e.target.checked)
             await this.saveSettings()
             await this.reloadAnnotations()
             this.showToast(this.settings.realisticPen ? '已开启模拟手绘笔痕' : '已关闭模拟手绘笔痕')
         })
 
         this.dom.settingFullscreenAutohide?.addEventListener('change', async e => {
-            this.settings.fullscreenAutohide = e.target.checked
+            this.setSetting('fullscreenAutohide', e.target.checked)
             await this.saveSettings()
             if (document.fullscreenElement || document.webkitFullscreenElement) {
                 this.toggleReaderUI(!this.settings.fullscreenAutohide)
@@ -2700,11 +3617,137 @@ class UniversalReaderApp {
         // Notes export
         this.dom.btnExportNotes?.addEventListener('click', () => this.exportNotesToMarkdown())
 
+        // TTS Player Controls & Integration
+        ttsPlayer.attachReaderApp(this)
+        ttsPlayer.onStateChange((state) => {
+            if (this.dom.iconTtsPlay && this.dom.iconTtsPause) {
+                const isPlaying = state === 'playing'
+                this.dom.iconTtsPlay.style.display = isPlaying ? 'none' : 'block'
+                this.dom.iconTtsPause.style.display = isPlaying ? 'block' : 'none'
+            }
+        })
+
+        this.dom.btnToggleTts?.addEventListener('click', async () => {
+            const bar = this.dom.ttsPlayerBar
+            if (!bar) return
+            const isHidden = bar.style.display === 'none' || !bar.classList.contains('active')
+            if (isHidden) {
+                bar.style.display = 'flex'
+                bar.classList.add('active')
+                if (this.dom.selectTtsVoice) {
+                    try {
+                        const voices = await ttsPlayer.provider.getVoices()
+                        if (voices.length > 0) {
+                            this.dom.selectTtsVoice.innerHTML = voices.map(v => 
+                                `<option value="${v.id}">${v.name}</option>`
+                            ).join('')
+                        }
+                    } catch (_) {}
+                }
+                try {
+                    ttsPlayer.extractSegments()
+                    await ttsPlayer.play(0)
+                } catch (e) {
+                    this.showToast(e.message, 'warning')
+                }
+            } else {
+                if (ttsPlayer.state === 'playing') {
+                    ttsPlayer.pause()
+                } else if (ttsPlayer.state === 'paused') {
+                    ttsPlayer.resume()
+                } else {
+                    bar.classList.remove('active')
+                    bar.style.display = 'none'
+                    ttsPlayer.stop()
+                }
+            }
+        })
+
+        this.dom.btnTtsTogglePlay?.addEventListener('click', () => {
+            if (ttsPlayer.state === 'playing') {
+                ttsPlayer.pause()
+            } else if (ttsPlayer.state === 'paused') {
+                ttsPlayer.resume()
+            } else {
+                ttsPlayer.extractSegments()
+                ttsPlayer.play(0).catch(e => this.showToast(e.message, 'warning'))
+            }
+        })
+
+        this.dom.btnTtsPrev?.addEventListener('click', () => ttsPlayer.prev())
+        this.dom.btnTtsNext?.addEventListener('click', () => ttsPlayer.next())
+
+        this.dom.selectTtsRate?.addEventListener('change', (e) => {
+            ttsPlayer.setRate(parseFloat(e.target.value))
+        })
+
+        this.dom.selectTtsVoice?.addEventListener('change', (e) => {
+            ttsPlayer.setVoice(e.target.value)
+        })
+
+        const selectTtsProvider = document.getElementById('select-tts-provider')
+        if (selectTtsProvider) {
+            selectTtsProvider.value = ttsPlayer.currentProviderName || 'system'
+            selectTtsProvider.addEventListener('change', async (e) => {
+                const provName = e.target.value
+                ttsPlayer.setProvider(provName)
+                if (this.dom.selectTtsVoice) {
+                    try {
+                        const voices = await ttsPlayer.provider.getVoices()
+                        if (voices && voices.length > 0) {
+                            this.dom.selectTtsVoice.innerHTML = voices.map(v => 
+                                `<option value="${v.id}">${v.name}</option>`
+                            ).join('')
+                            ttsPlayer.setVoice(voices[0].id)
+                        } else {
+                            this.dom.selectTtsVoice.innerHTML = '<option value="">默认语音</option>'
+                        }
+                    } catch (_) {}
+                }
+                this.showToast?.(`已切换 TTS 引擎为：${provName}`, 'info')
+            })
+        }
+
+        const timerOptions = [0, 15, 30, 45, 60, 'end_of_chapter']
+        let timerIdx = 0
+        this.dom.btnTtsTimer?.addEventListener('click', () => {
+            timerIdx = (timerIdx + 1) % timerOptions.length
+            const opt = timerOptions[timerIdx]
+            ttsPlayer.setSleepTimer(opt)
+            if (this.dom.labelTtsTimer) {
+                if (opt === 0) this.dom.labelTtsTimer.innerText = '关'
+                else if (opt === 'end_of_chapter') this.dom.labelTtsTimer.innerText = '章末'
+                else this.dom.labelTtsTimer.innerText = `${opt}m`
+            }
+            const tip = opt === 0 ? '定时关闭：已取消' : (opt === 'end_of_chapter' ? '将在当前章节末尾自动停止' : `将在 ${opt} 分钟后停止`)
+            this.showToast(tip, 'info')
+        })
+
+        this.dom.btnTtsClose?.addEventListener('click', () => {
+            ttsPlayer.stop()
+            if (this.dom.ttsPlayerBar) {
+                this.dom.ttsPlayerBar.classList.remove('active')
+                this.dom.ttsPlayerBar.style.display = 'none'
+            }
+        })
+
         this.dom.letterSpacingSlider?.addEventListener('input', e => {
-            this.settings.letterSpacing = parseFloat(e.target.value) || 0
+            const val = parseFloat(e.target.value) || 0
+            this.setSetting('letterSpacing', val)
             this.dom.letterSpacingValue.innerText = `${this.settings.letterSpacing}px`
             this.saveSettingsDebounced()
         })
+
+        // Annual Reading Report (Disabled for PC Candidate)
+        if (FEATURE_ANNUAL_REPORT_ENABLED) {
+            this.dom.bannerAnnualReport?.addEventListener('click', () => {
+                annualReport.initAndOpen(new Date().getFullYear())
+            })
+            document.getElementById('btn-open-annual-report')?.addEventListener('click', (e) => {
+                e.stopPropagation()
+                annualReport.initAndOpen(new Date().getFullYear())
+            })
+        }
 
         
         // Writing Mode Toggle (Horizontal vs Vertical-RL)
@@ -2712,7 +3755,7 @@ class UniversalReaderApp {
         if (writingModeSelect) {
             writingModeSelect.value = this.settings.writingMode || 'horizontal'
             writingModeSelect.addEventListener('change', async e => {
-                this.settings.writingMode = e.target.value
+                this.setSetting('writingMode', e.target.value)
                 this.saveSettings()
                 this.syncSettingsUI()
                 this.applySettingsToReader()
@@ -2724,20 +3767,20 @@ class UniversalReaderApp {
         }
 
         this.dom.chineseQuotesSwitch?.addEventListener('change', e => {
-            this.settings.chineseQuotes = e.target.checked
+            this.setSetting('chineseQuotes', e.target.checked)
             this.saveSettings()
         })
 
         // Web Search Engine Settings
         this.dom.settingSearchEngine?.addEventListener('change', async e => {
-            this.settings.searchEngine = e.target.value
+            this.setSetting('searchEngine', e.target.value)
             if (this.dom.settingSearchCustomRow) {
                 this.dom.settingSearchCustomRow.style.display = (e.target.value === 'custom') ? 'flex' : 'none'
             }
             await this.saveSettings()
         })
         this.dom.settingSearchCustomUrl?.addEventListener('input', e => {
-            this.settings.searchCustomUrl = e.target.value.trim()
+            this.setSetting('searchCustomUrl', e.target.value.trim())
             this.saveSettingsDebounced()
         })
 
@@ -2981,27 +4024,22 @@ class UniversalReaderApp {
 
         // Selection Share Button
         this.dom.btnPopupShare?.addEventListener('click', () => {
-            const chapter = this.currentLocation?.tocItem?.label || ''
-            let locationInfo = ''
-            if (this.pdfViewport || this.currentBookData?.format === 'pdf') {
-                const page = this.currentLocation?.page ?? this.pdfViewport?.currentPage
-                if (page != null) locationInfo = `第 ${Number(page) + 1} 页`
-            } else if (this.foliateView) {
-                const cur = this.currentLocation?.location?.current
-                const total = this.currentLocation?.location?.total
-                if (cur != null && total > 0) {
-                    locationInfo = `${Math.round(cur / total * 100)}%`
-                } else if (this.currentLocation?.page) {
-                    locationInfo = `第 ${this.currentLocation.page} 页`
-                }
-            }
+            const format = this.currentBookData?.format || (this.pdfViewport ? 'pdf' : 'epub')
+            const sourceToc = this.currentPdfTOC || this.toc || this._activeSession?.toc || []
+            const resolved = resolveExcerptSource({
+                range: this.selectedTextInfo?.range,
+                currentLocation: this.currentLocation,
+                reader: this.foliateView || this.pdfViewport,
+                format,
+                pdfViewport: this.pdfViewport
+            }, sourceToc)
 
             if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
                 const joinedQuote = this.multiSelectedRanges.map(r => r.text).join('\n\n……\n\n')
-                this.openQuoteCardModal(joinedQuote, chapter, locationInfo)
+                this.openQuoteCardModal(joinedQuote, resolved.chapterTitle, resolved.locationInfo)
                 this.hideSelectionPopup()
             } else if (this.selectedTextInfo?.text) {
-                this.openQuoteCardModal(this.selectedTextInfo.text, chapter, locationInfo)
+                this.openQuoteCardModal(this.selectedTextInfo.text, resolved.chapterTitle, resolved.locationInfo)
                 this.hideSelectionPopup()
             }
         })
@@ -3011,14 +4049,17 @@ class UniversalReaderApp {
             if (this.clickedHighlightInfo) {
                 const hl = await this.findHighlightByCFI(this.clickedHighlightInfo.value)
                 if (hl?.text) {
-                    let locationInfo = ''
-                    if (hl.formatType === 'pdf' || hl.pdfTarget) {
-                        const target = hl.pdfTarget || {}
-                        const firstSegment = Array.isArray(target.segments) ? target.segments[0] : null
-                        const page = firstSegment?.page ?? target.page
-                        if (page != null) locationInfo = `第 ${Number(page) + 1} 页`
-                    }
-                    this.openQuoteCardModal(hl.text, hl.chapterTitle || '', locationInfo)
+                    const format = hl.formatType || this.currentBookData?.format || (this.pdfViewport ? 'pdf' : 'epub')
+                    const sourceToc = this.currentPdfTOC || this.toc || this._activeSession?.toc || []
+                    const resolved = resolveExcerptSource({
+                        highlight: hl,
+                        chapterTitle: hl.chapterTitle,
+                        currentLocation: this.currentLocation,
+                        reader: this.foliateView || this.pdfViewport,
+                        format,
+                        pdfViewport: this.pdfViewport
+                    }, sourceToc)
+                    this.openQuoteCardModal(hl.text, resolved.chapterTitle, resolved.locationInfo)
                 }
             }
         })
@@ -3039,7 +4080,7 @@ class UniversalReaderApp {
         })
 
         this.dom.quoteUserNameInput?.addEventListener('input', e => {
-            quoteCard.userName = e.target.value.trim() || 'Linden 读者'
+            quoteCard.userName = e.target.value.trim() || '诶云朵？！'
             this.updateQuoteCardPreview(false)
         })
 
@@ -3070,7 +4111,11 @@ class UniversalReaderApp {
 
         this.dom.quoteChapterTitleInput?.addEventListener('input', e => {
             quoteCard.chapterTitle = e.target.value.trim()
-            quoteCard.locationInfo = ''
+            this.updateQuoteCardPreview(false)
+        })
+
+        this.dom.quoteLocationInput?.addEventListener('input', e => {
+            quoteCard.locationInfo = e.target.value.trim()
             this.updateQuoteCardPreview(false)
         })
 
@@ -3220,7 +4265,7 @@ class UniversalReaderApp {
         this.dom.btnPdfFitPage?.addEventListener('click', () => this.setPDFZoom('fit-page'))
         this.dom.btnPdfSpreadToggle?.addEventListener('click', () => {
             const nextMode = this.settings.columnCount === '2' ? '1' : '2'
-            this.settings.columnCount = nextMode
+            this.setSetting('columnCount', nextMode)
             if (this.dom.columnCountSelect) this.dom.columnCountSelect.value = nextMode
             this.dom.btnPdfSpreadToggle?.classList.toggle('active', nextMode === '2')
             this.saveSettings()
@@ -3255,7 +4300,8 @@ class UniversalReaderApp {
                     // Activate tool
                     this.pdfDrawTool = tool
                     this.pdfDrawColor = color
-                    this.pdfDrawWidth = tool === 'marker' ? 18 : (tool === 'pen' ? 3 : 26)
+                    const configuredPenWidth = Number(this.advancedSettings?.config?.pdfPenWidth) || 2.5
+                    this.pdfDrawWidth = tool === 'marker' ? 18 : (tool === 'pen' ? configuredPenWidth : 26)
                     pdfToolBtns.forEach(b => b?.classList.remove('active'))
                     btn.classList.add('active')
                     this.hideSelectionPopup()
@@ -3545,8 +4591,41 @@ class UniversalReaderApp {
             }
         }, { passive: false })
 
+        // Global Ctrl / Meta key state tracking for multi-selection across frames
+        this.isCtrlPressed = false
+        this._activeSelectionGestureCtrl = false
+        window.addEventListener('keydown', e => {
+            if (e.key === 'Control' || e.key === 'Meta') this.isCtrlPressed = true
+        }, true)
+        window.addEventListener('keyup', e => {
+            if (e.key === 'Control' || e.key === 'Meta') {
+                this.isCtrlPressed = false
+            }
+        }, true)
+        window.addEventListener('blur', () => {
+            this.isCtrlPressed = false
+            this._activeSelectionGestureCtrl = false
+            this._pointerDownWithCtrl = false
+        })
+
         // Keyboard Shortcuts
         document.addEventListener('keydown', e => this.handleGlobalKeydown(e))
+
+        // Global context menu policy (prevent browser default menu on blank reading/shelf areas)
+        window.addEventListener('contextmenu', e => {
+            if (e.target?.matches?.('input, textarea') || e.target?.isContentEditable) {
+                return
+            }
+            const card = e.target?.closest?.('.skeuo-book, .jane-book-card, .jane-table-row')
+            if (card && card.dataset?.id) {
+                e.preventDefault()
+                this.openBookDetailsModal(card.dataset.id)
+                return
+            }
+            if (e.target?.closest?.('#reader-view, #bookshelf-view, .books-workspace, .modern-shelf-screen')) {
+                e.preventDefault()
+            }
+        }, false)
 
         // Reading Overview & Heatmap Details Events
         this.bindOverviewEvents()
@@ -3584,62 +4663,84 @@ class UniversalReaderApp {
                 this.dom.overviewRatingPopover.style.display = 'block'
                 this.dom.btnOverviewRatingTrigger.closest('.overview-popover-wrap')?.classList.add('open')
                 this.syncRatingPopoverUI()
+                this.adjustOverviewPopoverPosition(this.dom.overviewRatingPopover, this.dom.btnOverviewRatingTrigger)
             }
         })
 
         this.dom.overviewRatingPopover?.addEventListener('click', (e) => {
             e.stopPropagation()
         })
+        this.dom.overviewRatingPopover?.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                e.stopPropagation()
+                this.closeOverviewPopovers()
+                this.dom.btnOverviewRatingTrigger?.focus()
+            }
+        })
 
         let ratingSliderTimer = null
-        this.dom.overviewRatingSlider?.addEventListener('input', (e) => {
-            const val = parseFloat(e.target.value)
+        const handleDualSliderInput = (e) => {
             if (this.dom.overviewUnratedCheckbox) this.dom.overviewUnratedCheckbox.checked = false
-            if (val === 0) {
-                this.overviewRatingFilter = 'all'
-            } else {
-                this.overviewRatingFilter = val.toFixed(1)
+            let minVal = parseFloat(this.dom.overviewRatingSliderMin?.value ?? 0)
+            let maxVal = parseFloat(this.dom.overviewRatingSliderMax?.value ?? 5.0)
+
+            if (e.target === this.dom.overviewRatingSliderMin) {
+                if (minVal > maxVal) {
+                    maxVal = minVal
+                    if (this.dom.overviewRatingSliderMax) this.dom.overviewRatingSliderMax.value = maxVal
+                }
+            } else if (e.target === this.dom.overviewRatingSliderMax) {
+                if (maxVal < minVal) {
+                    minVal = maxVal
+                    if (this.dom.overviewRatingSliderMin) this.dom.overviewRatingSliderMin.value = minVal
+                }
             }
+
+            this.setOverviewRatingRange(minVal, maxVal, false)
             this.syncRatingPopoverUI(false)
             clearTimeout(ratingSliderTimer)
             ratingSliderTimer = setTimeout(() => {
                 this.updateOverviewActiveFiltersBar()
                 this.refreshBookshelf()
             }, 120)
-        })
+        }
 
-        this.dom.overviewRatingPopover?.querySelectorAll('.rating-quick-pill').forEach(pill => {
-            pill.addEventListener('click', (e) => {
-                e.stopPropagation()
-                const val = parseFloat(pill.dataset.val)
-                if (this.dom.overviewUnratedCheckbox) this.dom.overviewUnratedCheckbox.checked = false
-                if (val === 0) {
-                    this.overviewRatingFilter = 'all'
-                } else {
-                    this.overviewRatingFilter = val.toFixed(1)
-                }
-                this.syncRatingPopoverUI()
-                this.updateOverviewActiveFiltersBar()
-                this.refreshBookshelf()
-            })
+        this.dom.overviewRatingSliderMin?.addEventListener('input', handleDualSliderInput)
+        this.dom.overviewRatingSliderMax?.addEventListener('input', handleDualSliderInput)
+
+        // Elevate clicked handle to front
+        this.dom.overviewRatingSliderMin?.addEventListener('mousedown', () => {
+            if (this.dom.overviewRatingSliderMin) this.dom.overviewRatingSliderMin.style.zIndex = '5'
+            if (this.dom.overviewRatingSliderMax) this.dom.overviewRatingSliderMax.style.zIndex = '4'
         })
+        this.dom.overviewRatingSliderMax?.addEventListener('mousedown', () => {
+            if (this.dom.overviewRatingSliderMax) this.dom.overviewRatingSliderMax.style.zIndex = '5'
+            if (this.dom.overviewRatingSliderMin) this.dom.overviewRatingSliderMin.style.zIndex = '4'
+        })
+        this.dom.overviewRatingSliderMin?.addEventListener('touchstart', () => {
+            if (this.dom.overviewRatingSliderMin) this.dom.overviewRatingSliderMin.style.zIndex = '5'
+            if (this.dom.overviewRatingSliderMax) this.dom.overviewRatingSliderMax.style.zIndex = '4'
+        }, { passive: true })
+        this.dom.overviewRatingSliderMax?.addEventListener('touchstart', () => {
+            if (this.dom.overviewRatingSliderMax) this.dom.overviewRatingSliderMax.style.zIndex = '5'
+            if (this.dom.overviewRatingSliderMin) this.dom.overviewRatingSliderMin.style.zIndex = '4'
+        }, { passive: true })
 
         this.dom.overviewUnratedCheckbox?.addEventListener('change', (e) => {
             if (e.target.checked) {
-                this.overviewRatingFilter = 'unrated'
+                this.setOverviewRatingRange(0, 5.0, true)
             } else {
-                const sliderVal = parseFloat(this.dom.overviewRatingSlider?.value || 0)
-                this.overviewRatingFilter = sliderVal > 0 ? sliderVal.toFixed(1) : 'all'
+                this.setOverviewRatingRange(0, 5.0, false)
             }
-            this.syncRatingPopoverUI(false)
+            this.syncRatingPopoverUI(true)
             this.updateOverviewActiveFiltersBar()
             this.refreshBookshelf()
         })
 
         this.dom.btnResetRating?.addEventListener('click', (e) => {
             e.stopPropagation()
-            this.overviewRatingFilter = 'all'
-            this.syncRatingPopoverUI()
+            this.setOverviewRatingRange(0, 5.0, false)
+            this.syncRatingPopoverUI(true)
             this.updateOverviewActiveFiltersBar()
             this.refreshBookshelf()
         })
@@ -3653,11 +4754,19 @@ class UniversalReaderApp {
                 this.dom.overviewTagsPopover.style.display = 'block'
                 this.dom.btnOverviewOpenTags.closest('.overview-popover-wrap')?.classList.add('open')
                 await this.renderOverviewTagsPopoverList()
+                this.adjustOverviewPopoverPosition(this.dom.overviewTagsPopover, this.dom.btnOverviewOpenTags)
             }
         })
 
         this.dom.overviewTagsPopover?.addEventListener('click', (e) => {
             e.stopPropagation()
+        })
+        this.dom.overviewTagsPopover?.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                e.stopPropagation()
+                this.closeOverviewPopovers()
+                this.dom.btnOverviewOpenTags?.focus()
+            }
         })
 
         this.dom.btnPopoverManageTags?.addEventListener('click', (e) => {
@@ -3728,11 +4837,6 @@ class UniversalReaderApp {
     }
 
     async switchShelfCategory(cat, options = {}) {
-        if (cat === 'ai-history') {
-            this.aiSidebar?.openHistoryModal()
-            return
-        }
-
         // Support 'finished' navigation alias -> map to overview with finished status
         if (cat === 'finished') {
             cat = 'overview'
@@ -3781,7 +4885,8 @@ class UniversalReaderApp {
             all: '全部图书',
             favorite: '收藏的书',
             overview: '阅读总览',
-            stats: '阅读统计'
+            stats: '阅读统计',
+            'ai-history': 'AI 阅读记录'
         }
         let title = titles[cat]
         if (!title && cat.startsWith('list_')) {
@@ -3796,42 +4901,163 @@ class UniversalReaderApp {
         await this.refreshBookshelf()
     }
 
+    normalizeRatingFilter(filterVal) {
+        if (!filterVal || filterVal === 'all') return 'all'
+        if (filterVal === 'unrated') return 'unrated'
+        if (typeof filterVal === 'string' && filterVal.includes('-')) {
+            const parts = filterVal.split('-')
+            const p0 = parseFloat(parts[0])
+            const p1 = parseFloat(parts[1])
+            const num0 = Number.isFinite(p0) ? p0 : 0.0
+            const num1 = Number.isFinite(p1) ? p1 : 5.0
+            const min = Math.min(5.0, Math.max(0.0, Math.round(num0 * 2) / 2))
+            const max = Math.min(5.0, Math.max(0.0, Math.round(num1 * 2) / 2))
+            const actualMin = Math.min(min, max)
+            const actualMax = Math.max(min, max)
+            if (actualMin === 0.0 && actualMax === 5.0) return 'all'
+            return `${actualMin.toFixed(1)}-${actualMax.toFixed(1)}`
+        }
+        const num = parseFloat(filterVal)
+        if (isNaN(num) || num <= 0) return 'all'
+        const stepped = Math.min(5.0, Math.max(0.5, Math.ceil(num * 2) / 2))
+        return stepped.toFixed(1)
+    }
+
+    getOverviewRatingRange() {
+        if (!this.overviewRatingFilter || this.overviewRatingFilter === 'all') {
+            return { isAll: true, isUnrated: false, min: 0.0, max: 5.0 }
+        }
+        if (this.overviewRatingFilter === 'unrated') {
+            return { isAll: false, isUnrated: true, min: 0.0, max: 5.0 }
+        }
+        if (typeof this.overviewRatingFilter === 'string' && this.overviewRatingFilter.includes('-')) {
+            const parts = this.overviewRatingFilter.split('-')
+            const p0 = parseFloat(parts[0])
+            const p1 = parseFloat(parts[1])
+            const num0 = Number.isFinite(p0) ? p0 : 0.0
+            const num1 = Number.isFinite(p1) ? p1 : 5.0
+            const min = Math.min(5.0, Math.max(0.0, num0))
+            const max = Math.min(5.0, Math.max(0.0, num1))
+            const actualMin = Math.min(min, max)
+            const actualMax = Math.max(min, max)
+            return {
+                isAll: actualMin === 0.0 && actualMax === 5.0,
+                isUnrated: false,
+                min: actualMin,
+                max: actualMax
+            }
+        }
+        const num = parseFloat(this.overviewRatingFilter)
+        if (!isNaN(num) && num > 0) {
+            return { isAll: false, isUnrated: false, min: num, max: 5.0 }
+        }
+        return { isAll: true, isUnrated: false, min: 0.0, max: 5.0 }
+    }
+
+    setOverviewRatingRange(min, max, isUnrated = false) {
+        if (isUnrated) {
+            this.overviewRatingFilter = 'unrated'
+            return
+        }
+        const stepMin = Math.min(5.0, Math.max(0.0, Math.round(min * 2) / 2))
+        const stepMax = Math.min(5.0, Math.max(0.0, Math.round(max * 2) / 2))
+        const actualMin = Math.min(stepMin, stepMax)
+        const actualMax = Math.max(stepMin, stepMax)
+        if (actualMin === 0.0 && actualMax === 5.0) {
+            this.overviewRatingFilter = 'all'
+        } else {
+            this.overviewRatingFilter = `${actualMin.toFixed(1)}-${actualMax.toFixed(1)}`
+        }
+    }
+
+    adjustOverviewPopoverPosition(popoverEl, triggerEl) {
+        if (!popoverEl || !triggerEl || popoverEl.style.display === 'none') return
+        popoverEl.style.transform = ''
+        const rect = popoverEl.getBoundingClientRect()
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth
+        const minMargin = 12
+
+        let shiftX = 0
+        if (rect.right > viewportWidth - minMargin) {
+            shiftX = (viewportWidth - minMargin) - rect.right
+        }
+        if (rect.left + shiftX < minMargin) {
+            shiftX = minMargin - rect.left
+        }
+
+        if (Math.abs(shiftX) > 0.5) {
+            popoverEl.style.transform = `translateX(${Math.round(shiftX)}px)`
+        }
+    }
+
     closeOverviewPopovers() {
         if (this.dom.overviewRatingPopover) this.dom.overviewRatingPopover.style.display = 'none'
         if (this.dom.overviewTagsPopover) this.dom.overviewTagsPopover.style.display = 'none'
         document.querySelectorAll('.overview-popover-wrap.open').forEach(w => w.classList.remove('open'))
     }
 
-    syncRatingPopoverUI(syncSlider = true) {
-        const isUnrated = this.overviewRatingFilter === 'unrated'
-        const isAll = this.overviewRatingFilter === 'all'
-        const numVal = (!isUnrated && !isAll) ? parseFloat(this.overviewRatingFilter) : 0
+    syncRatingPopoverUI(syncSliders = true) {
+        this.overviewRatingFilter = this.normalizeRatingFilter(this.overviewRatingFilter)
+        const range = this.getOverviewRatingRange()
+        const isUnrated = range.isUnrated
+        const isAll = range.isAll
 
         if (this.dom.overviewUnratedCheckbox) {
             this.dom.overviewUnratedCheckbox.checked = isUnrated
         }
 
-        if (syncSlider && this.dom.overviewRatingSlider) {
-            this.dom.overviewRatingSlider.value = isUnrated ? 0 : numVal
+        if (syncSliders) {
+            if (this.dom.overviewRatingSliderMin) {
+                this.dom.overviewRatingSliderMin.value = isUnrated ? 0 : range.min
+            }
+            if (this.dom.overviewRatingSliderMax) {
+                this.dom.overviewRatingSliderMax.value = isUnrated ? 5.0 : range.max
+            }
+        }
+
+        // Update track highlight
+        const trackHighlight = this.dom.overviewRatingTrackHighlight || document.getElementById('overview-rating-track-highlight')
+        if (trackHighlight) {
+            if (isUnrated) {
+                trackHighlight.style.left = '0%'
+                trackHighlight.style.right = '100%'
+            } else {
+                const minPct = (range.min / 5.0) * 100
+                const maxPct = (range.max / 5.0) * 100
+                trackHighlight.style.left = `${minPct}%`
+                trackHighlight.style.right = `${100 - maxPct}%`
+            }
         }
 
         if (this.dom.overviewRatingValDisplay) {
             if (isUnrated) {
                 this.dom.overviewRatingValDisplay.innerText = '仅看未评分'
-            } else if (isAll || numVal === 0) {
-                this.dom.overviewRatingValDisplay.innerText = '全部评分'
+            } else if (isAll) {
+                this.dom.overviewRatingValDisplay.innerText = '全部评分 (0 ~ 5.0)'
+            } else if (range.min === range.max) {
+                this.dom.overviewRatingValDisplay.innerText = `★ 刚好 ${range.min.toFixed(1)} 分`
+            } else if (range.min === 0.0) {
+                this.dom.overviewRatingValDisplay.innerText = `★ ≤ ${range.max.toFixed(1)} 分`
+            } else if (range.max === 5.0) {
+                this.dom.overviewRatingValDisplay.innerText = `★ ≥ ${range.min.toFixed(1)} 分`
             } else {
-                this.dom.overviewRatingValDisplay.innerText = `★ ≥ ${numVal.toFixed(1)} 分`
+                this.dom.overviewRatingValDisplay.innerText = `★ ${range.min.toFixed(1)} ~ ${range.max.toFixed(1)} 分`
             }
         }
 
         if (this.dom.overviewRatingTriggerText) {
             if (isUnrated) {
                 this.dom.overviewRatingTriggerText.innerText = '评分: 未评分'
-            } else if (isAll || numVal === 0) {
+            } else if (isAll) {
                 this.dom.overviewRatingTriggerText.innerText = '评分: 全部'
+            } else if (range.min === range.max) {
+                this.dom.overviewRatingTriggerText.innerText = `评分: ★ ${range.min.toFixed(1)}`
+            } else if (range.min === 0.0) {
+                this.dom.overviewRatingTriggerText.innerText = `评分: ≤ ${range.max.toFixed(1)}`
+            } else if (range.max === 5.0) {
+                this.dom.overviewRatingTriggerText.innerText = `评分: ≥ ${range.min.toFixed(1)}`
             } else {
-                this.dom.overviewRatingTriggerText.innerText = `★ ≥ ${numVal.toFixed(1)}`
+                this.dom.overviewRatingTriggerText.innerText = `评分: ${range.min.toFixed(1)}~${range.max.toFixed(1)}`
             }
         }
 
@@ -3842,20 +5068,6 @@ class UniversalReaderApp {
         if (this.dom.overviewRatingFilterSelect) {
             this.dom.overviewRatingFilterSelect.value = this.overviewRatingFilter
         }
-
-        // Update quick pills active state
-        this.dom.overviewRatingPopover?.querySelectorAll('.rating-quick-pill').forEach(pill => {
-            const pVal = parseFloat(pill.dataset.val)
-            if (isUnrated) {
-                pill.classList.remove('active')
-            } else if ((isAll || numVal === 0) && pVal === 0) {
-                pill.classList.add('active')
-            } else if (!isAll && numVal > 0 && Math.abs(pVal - numVal) < 0.05) {
-                pill.classList.add('active')
-            } else {
-                pill.classList.remove('active')
-            }
-        })
     }
 
     async renderOverviewTagsPopoverList() {
@@ -3950,7 +5162,21 @@ class UniversalReaderApp {
             }
         }
         if (this.overviewRatingFilter && this.overviewRatingFilter !== 'all') {
-            const ratingLabel = this.overviewRatingFilter === 'unrated' ? '评分: 仅未评分' : `评分: ≥ ${this.overviewRatingFilter}分`
+            let ratingLabel = ''
+            if (this.overviewRatingFilter === 'unrated') {
+                ratingLabel = '评分: 仅未评分'
+            } else {
+                const range = this.getOverviewRatingRange()
+                if (range.min === range.max) {
+                    ratingLabel = `评分: ★ ${range.min.toFixed(1)}`
+                } else if (range.min === 0.0) {
+                    ratingLabel = `评分: ≤ ${range.max.toFixed(1)}★`
+                } else if (range.max === 5.0) {
+                    ratingLabel = `评分: ≥ ${range.min.toFixed(1)}★`
+                } else {
+                    ratingLabel = `评分: ${range.min.toFixed(1)} ~ ${range.max.toFixed(1)}★`
+                }
+            }
             pills.push({ type: 'rating', value: this.overviewRatingFilter, label: ratingLabel })
         }
         if (this.overviewSearchQuery && this.overviewSearchQuery.trim()) {
@@ -4709,13 +5935,23 @@ class UniversalReaderApp {
         const p0 = stroke.points[0]
         ctx.moveTo(p0[0] * w, p0[1] * h)
 
+        const useSmoothing = this.advancedSettings?.config?.pdfSmoothing !== false
         if (stroke.points.length === 1) {
             ctx.lineTo(p0[0] * w + 0.5, p0[1] * h + 0.5)
-        } else {
+        } else if (!useSmoothing || stroke.points.length < 3) {
             for (let i = 1; i < stroke.points.length; i++) {
                 const pt = stroke.points[i]
                 ctx.lineTo(pt[0] * w, pt[1] * h)
             }
+        } else {
+            let i = 1
+            for (; i < stroke.points.length - 1; i++) {
+                const xc = ((stroke.points[i][0] + stroke.points[i + 1][0]) / 2) * w
+                const yc = ((stroke.points[i][1] + stroke.points[i + 1][1]) / 2) * h
+                ctx.quadraticCurveTo(stroke.points[i][0] * w, stroke.points[i][1] * h, xc, yc)
+            }
+            const last = stroke.points[stroke.points.length - 1]
+            ctx.lineTo(last[0] * w, last[1] * h)
         }
         ctx.stroke()
         ctx.restore()
@@ -5225,9 +6461,10 @@ class UniversalReaderApp {
                 this.dom.dictCardBody.innerHTML = `
                     <div class="dict-state-container dict-not-installed" style="padding:4px 0;">
                         <div class="dict-state-title" style="font-weight:600;font-size:13px;margin-bottom:4px;color:var(--text-primary,#111827);">尚未安装英汉词库</div>
-                        <div class="dict-state-desc" style="font-size:12px;color:var(--text-secondary,#6b7280);line-height:1.4;margin-bottom:8px;">未检测到 ECDICT 离线英汉词典。安装后可完全离线连续查词。</div>
-                        <div class="dict-state-actions" style="display:flex;gap:6px;">
-                            <button class="dict-btn-install" id="btn-dict-install-action" style="padding:4px 10px;font-size:12px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;">下载安装词库</button>
+                        <div class="dict-state-desc" style="font-size:12px;color:var(--text-secondary,#6b7280);line-height:1.4;margin-bottom:8px;">未检测到 ECDICT 离线英汉词典（约 100MB，收录 77 万词条）。可导入本地 ECDICT SQLite (.db) 文件或启用随包附带词库。</div>
+                        <div class="dict-state-actions" style="display:flex;gap:6px;flex-wrap:wrap;">
+                            <button class="dict-btn-install" id="btn-dict-install-action" style="padding:4px 10px;font-size:12px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;">安装内置词库</button>
+                            <button class="dict-btn-import" id="btn-dict-import-action" style="padding:4px 10px;font-size:12px;background:var(--bg-secondary,#f3f4f6);color:var(--text-primary,#111827);border:1px solid var(--border-color,#e5e7eb);border-radius:4px;cursor:pointer;">导入本地 .db 词库</button>
                         </div>
                     </div>
                 `
@@ -5241,9 +6478,21 @@ class UniversalReaderApp {
                         }
                         this.showDictionaryCard(selectionInfo)
                     } catch (e) {
-                        this.showToast('安装词库失败: ' + e.message, 'warning')
+                        this.showToast('未检测到内置词库，请点击“导入本地 .db 词库”导入', 'warning')
                         btnInstall.disabled = false
-                        btnInstall.innerText = '重试安装'
+                        btnInstall.innerText = '安装内置词库'
+                    }
+                })
+                const btnImport = this.dom.dictCardBody.querySelector('#btn-dict-import-action')
+                btnImport?.addEventListener('click', async () => {
+                    try {
+                        const status = await this.dictionaryService?.pickAndInstallFromFile?.()
+                        if (status) {
+                            this.showToast('词库导入成功！共 ' + (status.wordCount || 0) + ' 词条', 'success')
+                            this.showDictionaryCard(selectionInfo)
+                        }
+                    } catch (e) {
+                        this.showToast('导入词库失败: ' + e.message, 'warning')
                     }
                 })
             } else if (result && result.corrupted) {
@@ -5251,8 +6500,23 @@ class UniversalReaderApp {
                     <div class="dict-state-container dict-corrupted" style="padding:4px 0;">
                         <div class="dict-state-title" style="font-weight:600;font-size:13px;margin-bottom:4px;color:#ef4444;">词典数据校验未通过</div>
                         <div class="dict-state-desc" style="font-size:12px;color:var(--text-secondary,#6b7280);line-height:1.4;margin-bottom:8px;">本地词典数据库已损坏，请重新安装或从文件导入。</div>
+                        <div class="dict-state-actions" style="display:flex;gap:6px;margin-top:6px;">
+                            <button class="dict-btn-import" id="btn-dict-repair-import" style="padding:4px 10px;font-size:12px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;">重新导入词库</button>
+                        </div>
                     </div>
                 `
+                const btnRepair = this.dom.dictCardBody.querySelector('#btn-dict-repair-import')
+                btnRepair?.addEventListener('click', async () => {
+                    try {
+                        const status = await this.dictionaryService?.pickAndInstallFromFile?.()
+                        if (status) {
+                            this.showToast('词库重新导入成功！', 'success')
+                            this.showDictionaryCard(selectionInfo)
+                        }
+                    } catch (e) {
+                        this.showToast('导入失败: ' + e.message, 'warning')
+                    }
+                })
             } else if (result && result.found && result.entries && result.entries.length > 0) {
                 this.dom.dictCardBody.innerHTML = result.entries.map(e => `
                     <div class="dict-entry-row">
@@ -5347,7 +6611,40 @@ class UniversalReaderApp {
             return
         }
 
-        const promptText = `将以下段落翻译为简体中文，保持原意和段落结构，只输出译文：\n\n${selectionInfo.text.trim()}`
+        const originalText = selectionInfo.text.trim()
+        const renderBilingualContent = (translatedText, isStreaming = false) => {
+            const streamIndicator = isStreaming ? ' <span style="display:inline-block;animation:pulse 1s infinite;color:var(--accent);">●</span>' : ''
+            const resultHtml = translatedText ? (renderSafeMarkdown(translatedText) + streamIndicator) : '<span style="color: var(--text-muted); font-size: 0.82rem;">正在流式生成专业译文...</span>'
+            return `
+                <div class="para-trans-bilingual-wrap">
+                  <div class="para-trans-original-wrap">
+                    <div class="para-trans-lang-label">原文</div>
+                    <div class="para-trans-original-text">${escapeHTML(originalText)}</div>
+                  </div>
+                  <div class="para-trans-divider"></div>
+                  <div class="para-trans-result-wrap">
+                    <div class="para-trans-lang-label">中文译文</div>
+                    <div class="para-trans-result-text">${resultHtml}</div>
+                  </div>
+                </div>
+            `
+        }
+
+        content.innerHTML = renderBilingualContent('', true)
+
+        const promptText = `你是一位精通多语言文学与学术专著的资深翻译专家。请将以下原文翻译为纯正、流畅、自然的简体中文。
+
+翻译准则：
+1. 风格自适应：
+   - 文学、小说、散文类内容：在忠实原意的前提下，允许自然润色，体现原作的文采与情感基调，不生硬直译，但绝不可过度演绎或擅自删减篡改事实；
+   - 学术、社科、科技或专业文献：确保专业术语和概念的严谨精确度，表达清晰晓畅、逻辑严密、具备高可读性，避免生搬硬套的机械字面硬译。
+2. 格式与排版：
+   - 保持与原文相符的段落结构与换行；
+   - 专有名词、人名、地名采用通用规范译名；
+   - 严禁输出任何多余的开场白、解释说明、前缀、标号或元陈述（例如严禁输出“这是翻译结果：”、“好的”等），只输出纯净译文内容。
+
+待翻译原文：
+${originalText}`
         const reqId = 'req_para_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)
         this._activeParaTransReqId = reqId
 
@@ -5383,10 +6680,10 @@ class UniversalReaderApp {
             id: 'msg_user_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
             conversationId: convId,
             role: 'user',
-            content: `段落即时翻译: ${selectionInfo.text.trim()}`,
+            content: `段落即时翻译: ${originalText}`,
             actionName: '段落翻译',
             referenceSnapshot: {
-                selectedText: selectionInfo.text.trim(),
+                selectedText: originalText,
                 cfi: selectionInfo.cfi || null,
                 pageIndex: selectionInfo.pageIndex ?? null,
                 chapterTitle: selectionInfo.chapterTitle || ''
@@ -5409,7 +6706,7 @@ class UniversalReaderApp {
         }
 
         try {
-            content.innerHTML = '<span style="color: var(--text-muted); font-size: 0.82rem;">正在流式生成译文...</span>'
+            content.innerHTML = renderBilingualContent('', true)
             const result = await requestAiCompletion({
                 requestId: reqId,
                 prompt: promptText,
@@ -5417,11 +6714,11 @@ class UniversalReaderApp {
                 maxTokens: this.advancedSettings?.aiMaxTokens || 2048,
                 onChunk: (delta, fullText) => {
                     this._currentParaTranslation = fullText
-                    content.innerHTML = renderSafeMarkdown(fullText)
+                    content.innerHTML = renderBilingualContent(fullText, true)
                 }
             })
             this._currentParaTranslation = result
-            content.innerHTML = renderSafeMarkdown(result)
+            content.innerHTML = renderBilingualContent(result, false)
 
             if (convId) {
                 const asstMsg = {
@@ -6144,7 +7441,7 @@ class UniversalReaderApp {
     }
 
     // ==========================================
-    // Quote Card Generator Logic (WeChat Read Style)
+    // Quote Card Generator Logic
     // ==========================================
     cleanFootnoteMarkers(text) {
         if (!text) return ''
@@ -6159,43 +7456,41 @@ class UniversalReaderApp {
             .trim()
     }
 
-    async openQuoteCardModal(text, chapterTitle = '', locationInfo = null) {
+    async openQuoteCardModal(text, chapterTitle = '', locationInfo = null, customBookInfo = null) {
         this.hideSelectionPopup()
         this.hideHighlightActionPopup()
 
         const cleanedText = this.cleanFootnoteMarkers(text)
-        const cleanedChapter = this.cleanFootnoteMarkers(chapterTitle)
+        let resolvedChapter = (chapterTitle || '').trim()
+        let resolvedLocation = locationInfo != null ? String(locationInfo).trim() : null
 
-        const bookTitle = this.currentBookData?.title || '未命名书籍'
-        const author = this.currentBookData?.author || '未知作者'
+        if (!resolvedChapter || resolvedLocation === null) {
+            const format = customBookInfo?.format || this.currentBookData?.format || (this.pdfViewport ? 'pdf' : 'epub')
+            const sourceToc = this.currentPdfTOC || this.toc || this._activeSession?.toc || []
+            const resolved = resolveExcerptSource({
+                range: this.selectedTextInfo?.range,
+                currentLocation: this.currentLocation,
+                reader: this.foliateView || this.pdfViewport,
+                format,
+                pdfViewport: this.pdfViewport,
+                chapterTitle: resolvedChapter,
+                locationInfo: resolvedLocation
+            }, sourceToc)
 
-        if (locationInfo === null) {
-            if (this.pdfViewport || this.currentBookData?.format === 'pdf') {
-                const page = this.currentLocation?.page ?? this.pdfViewport?.currentPage
-                if (page != null) locationInfo = `第 ${Number(page) + 1} 页`
-            } else if (this.foliateView) {
-                const cur = this.currentLocation?.location?.current
-                const total = this.currentLocation?.location?.total
-                if (cur != null && total > 0) {
-                    locationInfo = `${Math.round(cur / total * 100)}%`
-                } else if (this.currentLocation?.page) {
-                    locationInfo = `第 ${this.currentLocation.page} 页`
-                }
-            }
+            if (!resolvedChapter) resolvedChapter = resolved.chapterTitle || ''
+            if (resolvedLocation === null) resolvedLocation = resolved.locationInfo || ''
         }
 
-        const sourceParts = []
-        if (cleanedChapter) sourceParts.push(cleanedChapter)
-        if (locationInfo) sourceParts.push(locationInfo)
-        const initialSource = sourceParts.join(' · ')
+        const bookTitle = customBookInfo?.bookTitle || this.currentBookData?.title || '未命名书籍'
+        const author = customBookInfo?.author || this.currentBookData?.author || '未知作者'
 
         quoteCard.setData({
             bookTitle,
             author,
             quoteText: cleanedText,
-            chapterTitle: initialSource,
-            locationInfo: '',
-            userName: this.dom.quoteUserNameInput?.value || 'Linden 读者'
+            chapterTitle: resolvedChapter,
+            locationInfo: resolvedLocation,
+            userName: this.dom.quoteUserNameInput?.value || '诶云朵？！'
         })
 
         if (this.dom.quoteTextEditor) {
@@ -6208,7 +7503,10 @@ class UniversalReaderApp {
             this.dom.quoteBookAuthorInput.value = author
         }
         if (this.dom.quoteChapterTitleInput) {
-            this.dom.quoteChapterTitleInput.value = initialSource
+            this.dom.quoteChapterTitleInput.value = resolvedChapter
+        }
+        if (this.dom.quoteLocationInput) {
+            this.dom.quoteLocationInput.value = resolvedLocation
         }
 
         // Render Theme Pickers
@@ -6778,12 +8076,33 @@ class UniversalReaderApp {
             if (this.dom.modernGridWrapper) this.dom.modernGridWrapper.style.display = 'none'
             if (this.dom.booksGrid) this.dom.booksGrid.style.display = 'none'
             if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'none'
+            if (this.dom.readingOverviewPanel) this.dom.readingOverviewPanel.style.display = 'none'
+            const wsView = document.getElementById('ai-history-workspace-view')
+            if (wsView) wsView.style.display = 'none'
             if (this.dom.statsDashboardContainer) this.dom.statsDashboardContainer.style.display = 'block'
             if (this.dom.shelfHeaderActions) this.dom.shelfHeaderActions.style.display = 'none'
             if (this.dom.bookCountFooter) this.dom.bookCountFooter.style.display = 'none'
             return this.renderStatsDashboard()
         }
 
+        if (this.shelfCategory === 'ai-history') {
+            this.dom.mainArea?.classList.remove('wood-shelf-active')
+            this.dom.booksWorkspace?.classList.remove('wood-shelf-theme')
+            if (this.dom.booksShelf) this.dom.booksShelf.style.display = 'none'
+            if (this.dom.modernGridWrapper) this.dom.modernGridWrapper.style.display = 'none'
+            if (this.dom.booksGrid) this.dom.booksGrid.style.display = 'none'
+            if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'none'
+            if (this.dom.statsDashboardContainer) this.dom.statsDashboardContainer.style.display = 'none'
+            if (this.dom.readingOverviewPanel) this.dom.readingOverviewPanel.style.display = 'none'
+            if (this.dom.shelfHeaderActions) this.dom.shelfHeaderActions.style.display = 'none'
+            if (this.dom.bookCountFooter) this.dom.bookCountFooter.style.display = 'none'
+            const wsView = document.getElementById('ai-history-workspace-view')
+            if (wsView) wsView.style.display = 'flex'
+            return this.aiSidebar?.renderHistoryWorkspace()
+        }
+
+        const wsView = document.getElementById('ai-history-workspace-view')
+        if (wsView) wsView.style.display = 'none'
         if (this.dom.statsDashboardContainer) this.dom.statsDashboardContainer.style.display = 'none'
         if (this.dom.shelfHeaderActions) this.dom.shelfHeaderActions.style.display = 'flex'
         if (this.dom.bookCountFooter) this.dom.bookCountFooter.style.display = 'block'
@@ -6840,10 +8159,10 @@ class UniversalReaderApp {
             }
             if (this.overviewRatingFilter && this.overviewRatingFilter !== 'all') {
                 if (this.overviewRatingFilter === 'unrated') {
-                    books = books.filter(b => b.rating == null)
+                    books = books.filter(b => b.rating == null || b.rating === 0)
                 } else {
-                    const minRating = parseFloat(this.overviewRatingFilter)
-                    books = books.filter(b => typeof b.rating === 'number' && b.rating >= minRating)
+                    const range = this.getOverviewRatingRange()
+                    books = books.filter(b => typeof b.rating === 'number' && b.rating > 0 && b.rating >= range.min && b.rating <= range.max)
                 }
             }
             if (this.overviewSearchQuery && this.overviewSearchQuery.trim()) {
@@ -7419,7 +8738,7 @@ class UniversalReaderApp {
         }
 
         const displayName = this.getUserDisplayName ? this.getUserDisplayName() : '读者'
-        const isCustomName = displayName && displayName !== '读者'
+        const isCustomName = displayName && displayName !== '诶云朵？！'
         const greetingTitle = isCustomName ? `${titlePrefix}，${displayName.trim()}` : titlePrefix
 
         const subtitlesMap = {
@@ -7676,7 +8995,7 @@ class UniversalReaderApp {
         }
 
         const startTime = performance.now()
-        // Apple / Claude standard deceleration curve: 1 - (1 - t)^4
+        // Ease-out curve: 1 - (1 - t)^4
         const easeOutQuart = (t) => 1 - Math.pow(1 - t, 4)
 
         const step = (currentTime) => {
@@ -7891,7 +9210,7 @@ class UniversalReaderApp {
                     <td class="jane-table-cell text-muted">${dateStr}</td>
                     <td class="jane-table-cell" style="text-align: center; white-space: nowrap;">
                         <button class="table-cloud-btn" title="坚果云备份/拉取" style="${cloudBtnStyle} padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>${cloudBtnText}</button>
-                        <button class="table-list-btn" title="加入与管理书单" style="color: var(--claude-terracotta, #da7756); border: 1px solid rgba(218, 119, 86, 0.25); background: rgba(218, 119, 86, 0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>书单</button>
+                        <button class="table-list-btn" title="加入与管理书单" style="color: var(--brand-terracotta, #da7756); border: 1px solid rgba(218, 119, 86, 0.25); background: rgba(218, 119, 86, 0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>书单</button>
                         <button class="table-details-btn" title="查看书籍详情与统计" style="color: var(--accent-purple, #8b5cf6); border: 1px solid rgba(139,92,246,0.25); background: rgba(139,92,246,0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;">详情</button>
                         <button class="table-delete-btn" title="从书架删除" style="color: #ef4444; border: 1px solid rgba(239,68,68,0.25); background: rgba(239,68,68,0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; transition: all 0.2s;">删除</button>
                     </td>
@@ -8544,8 +9863,8 @@ class UniversalReaderApp {
         }
     }
 
-    async openBook(bookOrId, initialLocation = null) {
-        initialLocation = initialLocation || arguments[1] || null
+    async openBook(bookOrId) {
+        let initialLocation = arguments[1] || null
         const bookId = (typeof bookOrId === 'object' && bookOrId !== null) ? bookOrId.id : bookOrId
         if (!bookId) return this.showToast('找不到该书籍！', '⚠️')
 
@@ -8553,6 +9872,10 @@ class UniversalReaderApp {
         this._currentBookEpoch = (this._currentBookEpoch || 0) + 1
         const currentEpoch = this._currentBookEpoch
         this.currentPdfPageIndex = 0
+
+        if (this.currentBookId && this.currentBookId !== bookId) {
+            this.chapterTranslationManager?.onCloseBook?.().catch?.(() => {})
+        }
 
         if (this._closeTimer) {
             clearTimeout(this._closeTimer)
@@ -8595,6 +9918,8 @@ class UniversalReaderApp {
             ocrService.abort().catch(() => {})
             this.closePdfOcrModal?.()
             this.closeAiAssistantModal?.()
+            chapterTranslationManager.stop()
+            ttsPlayer.stop()
             if (prevSession.view) {
                 try { prevSession.view.close?.() } catch (e) {}
                 try { prevSession.view.remove?.() } catch (e) {}
@@ -8649,6 +9974,8 @@ class UniversalReaderApp {
                 ? { ...snapshot, ...bookOrId }
                 : (await db.getBook(bookId)) || snapshot
             if (!readerSession.isCurrent()) return
+
+            await this.checkBookSpecificSettings(bookId)
 
             // Handle cloud-only books before requiring local Blob
             if (bookData?.isCloudOnly) {
@@ -9139,22 +10466,23 @@ class UniversalReaderApp {
                 }
             })
 
-            // Overlayer Annotation Rendering
             sessionView.addEventListener('draw-annotation', e => {
                 if (!readerSession.isCurrent()) return
                 const { draw, annotation } = e.detail
                 const { color = '#facc15', style = 'highlight' } = annotation
                 const writingMode = this.settings.writingMode || 'horizontal'
+                const underlineWidth = Number(this.advancedSettings?.config?.underlineWidth) || 1.5
+                const highlighterOpacity = Number(this.advancedSettings?.config?.highlighterOpacity) || 0.35
                 if (style === 'underline') {
-                    draw(Overlayer.underline, { color, width: 2.6, writingMode })
+                    draw(Overlayer.underline, { color, width: underlineWidth, writingMode })
                 } else if (style === 'dashed') {
-                    draw(Overlayer.dashed, { color: color === '#facc15' ? '#64748b' : color, width: 1.2, writingMode })
+                    draw(Overlayer.dashed, { color: color === '#facc15' ? '#64748b' : color, width: Math.max(1, underlineWidth * 0.7), writingMode })
                 } else if (style === 'squiggly') {
-                    draw(Overlayer.squiggly, { color, width: 2.2, writingMode })
+                    draw(Overlayer.squiggly, { color, width: Math.max(1.5, underlineWidth * 1.2), writingMode })
                 } else if (style === 'strikethrough') {
-                    draw(Overlayer.strikethrough, { color, width: 2.5, writingMode })
+                    draw(Overlayer.strikethrough, { color, width: underlineWidth, writingMode })
                 } else {
-                    draw(Overlayer.highlight, { color, realisticPen: this.settings.realisticPen !== false, writingMode })
+                    draw(Overlayer.highlight, { color, opacity: highlighterOpacity, realisticPen: this.settings.realisticPen !== false, writingMode })
                 }
             })
 
@@ -9339,6 +10667,10 @@ class UniversalReaderApp {
 
             // 1. Synchronous capture and pre-await backup
             try {
+                chapterTranslationManager.stop()
+                ttsPlayer.stop()
+            } catch (_) {}
+            try {
                 this.foliateView?.renderer?.settle?.()
             } catch (e) {}
             if (this._progressDebounceTimer) {
@@ -9503,6 +10835,12 @@ class UniversalReaderApp {
         ocrService.abort().catch(() => {})
         this.closePdfOcrModal?.()
         this.closeAiAssistantModal?.()
+        chapterTranslationManager.onCloseBook().catch(() => {})
+        ttsPlayer.stop()
+        if (this.dom.ttsPlayerBar) {
+            this.dom.ttsPlayerBar.classList.remove('active')
+            this.dom.ttsPlayerBar.style.display = 'none'
+        }
 
         // 2. Synchronously capture session's fixed parameters and views
         const closingBookId = closingSession.bookId
@@ -9588,6 +10926,10 @@ class UniversalReaderApp {
             this.shelfCategory = 'all'
             this.sidebarUserCollapsed = true
             document.getElementById('bookshelf-view')?.classList.add('sidebar-collapsed')
+            this._bookSettingsOverride = null
+            this.settings = resolveReaderSettings(this.globalSettings || this.settings, null, READER_OVERRIDE_ALLOWED_KEYS)
+            this.updateBookOverrideUI(false)
+            this.chapterTranslationManager?.onCloseBook?.().catch?.(() => {})
             this.updateSettingsUI()
             if (this.dom.booksWorkspace) {
                 this.dom.booksWorkspace.scrollTop = 0
@@ -9649,6 +10991,7 @@ class UniversalReaderApp {
         if (!detail.isSettled) {
             tracker.resetActivity()
             tracker.recordPageTurn()
+            this.aiSidebar?.invalidatePendingLayout?.()
         }
         this.currentLocation = detail
         const fraction = Number.isFinite(detail.fraction) ? detail.fraction : 0
@@ -10011,6 +11354,14 @@ class UniversalReaderApp {
         // Industrial-grade DOM Normalization (Prune ghost pagebreaks, format headings, normalize poetry)
         this.normalizeEpubDocument(doc)
 
+        // Chapter bilingual translation auto-restore or section tracking (Disabled for PC Candidate)
+        const bookId = this.currentBookData?.id || this.currentBook?.id || this.bookId
+        if (FEATURE_CHAPTER_TRANSLATION_ENABLED && bookId && this.chapterTranslationManager) {
+            this.chapterTranslationManager.onSectionChanged(bookId, index, doc).catch(err => {
+                console.warn('[ChapterTrans] Section change hook warning:', err)
+            })
+        }
+
         if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
             setTimeout(() => this.renderVirtualMultiSelections(), 60)
         }
@@ -10061,7 +11412,7 @@ class UniversalReaderApp {
                         // 2. Replace Chinese single opening quote ‘ with 『
                         text = text.replace(/‘/g, '『')
                         // 3. Replace ’ with 』 ONLY when it's NOT an English apostrophe!
-                        // In English, ’ between Latin letters (haven’t, I’ve, Gatsby’s) or plural possessives (workers') is an apostrophe, NOT a quote!
+                        // Preserve apostrophes inside Latin words and plural possessives.
                         text = text.replace(/(?<![a-zA-Z0-9])’|’(?![a-zA-Z0-9])/g, (match, offset, fullStr) => {
                             const before = fullStr.slice(Math.max(0, offset - 10), offset)
                             if (/[a-zA-Z]+s$/i.test(before)) {
@@ -10080,7 +11431,10 @@ class UniversalReaderApp {
         let isCtrlActive = false
 
         const iframeKeyHandler = e => {
-            if (e.key === 'Control' || e.key === 'Meta') isCtrlActive = true
+            if (e.key === 'Control' || e.key === 'Meta') {
+                isCtrlActive = true
+                this.isCtrlPressed = true
+            }
             if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
                 if (!e.altKey) {
                     e.preventDefault()
@@ -10097,26 +11451,36 @@ class UniversalReaderApp {
         // Window -> Document), double-toggling fullscreen and skipping search matches.
         doc.addEventListener('keydown', iframeKeyHandler, true)
         doc.addEventListener('keyup', e => {
-            if (e.key === 'Control' || e.key === 'Meta') isCtrlActive = false
+            if (e.key === 'Control' || e.key === 'Meta') {
+                isCtrlActive = false
+                this.isCtrlPressed = false
+            }
         })
         doc.addEventListener('pointerdown', e => {
+            const hasCtrl = e.ctrlKey || e.metaKey || isCtrlActive || this.isCtrlPressed
+            this._pointerDownWithCtrl = hasCtrl
+            this._activeSelectionGestureCtrl = hasCtrl
+
             if (this.dom.readerDictionaryCard && this.dom.readerDictionaryCard.style.display !== 'none') {
                 if (!this.dom.readerDictionaryCard.contains(e.target)) {
                     this.hideDictionaryCard()
                 }
             }
-            if (e.button === 0 && !e.ctrlKey && !e.metaKey && !isCtrlActive) {
-                const sel = doc.getSelection()
-                if (sel && sel.isCollapsed) {
-                    if (!this.multiSelectedRanges || this.multiSelectedRanges.length <= 1) {
-                        this.clearVirtualMultiSelections()
-                        this.multiSelectedRanges = []
-                        if (this.dom.popupMultiBadge) this.dom.popupMultiBadge.style.display = 'none'
-                    }
+            if (e.button === 0 && !hasCtrl) {
+                // Normal click without Ctrl immediately clears previous multi-selections
+                if (this.multiSelectedRanges && this.multiSelectedRanges.length > 0) {
+                    this.clearVirtualMultiSelections()
+                    this.multiSelectedRanges = []
+                    if (this.dom.popupMultiBadge) this.dom.popupMultiBadge.style.display = 'none'
                 }
             }
         })
         doc.addEventListener('contextmenu', e => {
+            if (e.target?.matches?.('input, textarea') || e.target?.isContentEditable) {
+                return
+            }
+            e.preventDefault()
+
             const sel = doc.getSelection()
             if (sel && !sel.isCollapsed && sel.toString().trim()) {
                 const text = sel.toString().trim()
@@ -10131,6 +11495,16 @@ class UniversalReaderApp {
                     index,
                     bookId: this.currentBookId
                 }
+                const iframe = doc.defaultView?.frameElement || this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView
+                const iframeRect = (iframe || this.foliateView).getBoundingClientRect()
+                this.showSelectionPopup({
+                    top: iframeRect.top + e.clientY,
+                    left: iframeRect.left + e.clientX,
+                    width: 0,
+                    height: 0,
+                    bottom: iframeRect.top + e.clientY,
+                    right: iframeRect.left + e.clientX
+                })
             }
         }, true)
 
@@ -10182,22 +11556,39 @@ class UniversalReaderApp {
                     rect: absRect
                 }
 
-                const isCtrl = evt?.ctrlKey || evt?.metaKey || isCtrlActive
+                const isCtrl = evt?.ctrlKey || evt?.metaKey || isCtrlActive || this.isCtrlPressed || this._activeSelectionGestureCtrl || this._pointerDownWithCtrl
+                this._activeSelectionGestureCtrl = false
+
                 if (isCtrl) {
                     if (!this.multiSelectedRanges) this.multiSelectedRanges = []
-                    const exists = this.multiSelectedRanges.some(r => r.text === text && r.index === index)
+                    const exists = this.multiSelectedRanges.some(r => {
+                        if (r.cfi && currentItem.cfi) return r.cfi === currentItem.cfi
+                        if (r.range && currentItem.range) {
+                            return r.range.startContainer === currentItem.range.startContainer &&
+                                   r.range.startOffset === currentItem.range.startOffset &&
+                                   r.range.endContainer === currentItem.range.endContainer &&
+                                   r.range.endOffset === currentItem.range.endOffset
+                        }
+                        return r.text === text && r.index === index
+                    })
                     if (!exists) {
                         this.multiSelectedRanges.push(currentItem)
                     }
-                    this.renderVirtualMultiSelections()
-                    if (this.dom.popupMultiBadge) {
-                        this.dom.popupMultiBadge.style.display = 'inline-block'
-                        this.dom.popupMultiBadge.innerText = `已选 ${this.multiSelectedRanges.length} 处`
+                    if (this.multiSelectedRanges.length > 1) {
+                        this.renderVirtualMultiSelections()
+                        if (this.dom.popupMultiBadge) {
+                            this.dom.popupMultiBadge.style.display = 'inline-block'
+                            this.dom.popupMultiBadge.innerText = `已选 ${this.multiSelectedRanges.length} 处`
+                        }
+                    } else {
+                        // Exactly 1 selection: browser native selection is already highlighted, clear virtual box
+                        this.clearVirtualMultiSelections()
+                        if (this.dom.popupMultiBadge) {
+                            this.dom.popupMultiBadge.style.display = 'none'
+                        }
                     }
                 } else {
-                    if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
-                        this.clearVirtualMultiSelections()
-                    }
+                    this.clearVirtualMultiSelections()
                     this.multiSelectedRanges = [currentItem]
                     if (this.dom.popupMultiBadge) {
                         this.dom.popupMultiBadge.style.display = 'none'
@@ -10231,7 +11622,8 @@ class UniversalReaderApp {
             if (selectionTimeout) clearTimeout(selectionTimeout)
             const sel = doc.getSelection()
             if (!sel || sel.isCollapsed || sel.toString().trim().length === 0) {
-                if (!this.multiSelectedRanges || this.multiSelectedRanges.length <= 1) {
+                const isCtrlHolding = isCtrlActive || this.isCtrlPressed || this._pointerDownWithCtrl
+                if (!isCtrlHolding && (!this.multiSelectedRanges || this.multiSelectedRanges.length <= 1)) {
                     this.clearVirtualMultiSelections()
                     this.multiSelectedRanges = []
                     if (this.dom.popupMultiBadge) this.dom.popupMultiBadge.style.display = 'none'
@@ -10481,14 +11873,13 @@ class UniversalReaderApp {
                 return
             }
 
-            if (!e.ctrlKey && !e.metaKey && !isCtrlActive) {
-                if (!this.multiSelectedRanges || this.multiSelectedRanges.length <= 1) {
-                    this.clearVirtualMultiSelections()
-                    this.multiSelectedRanges = []
-                    if (this.dom.popupMultiBadge) this.dom.popupMultiBadge.style.display = 'none'
-                    this.hideSelectionPopup()
-                    this.hideDictionaryCard()
-                }
+            const hasCtrl = e.ctrlKey || e.metaKey || isCtrlActive || this.isCtrlPressed
+            if (!hasCtrl) {
+                this.clearVirtualMultiSelections()
+                this.multiSelectedRanges = []
+                if (this.dom.popupMultiBadge) this.dom.popupMultiBadge.style.display = 'none'
+                this.hideSelectionPopup()
+                this.hideDictionaryCard()
             }
 
             this.hideHighlightActionPopup()
@@ -10557,7 +11948,10 @@ class UniversalReaderApp {
             return
         }
         this.clearVirtualMultiSelections()
-        this.multiSelectedRanges.forEach((item, idx) => {
+        // Only render virtual annotations for accumulated historical selections
+        // The latest selection is natively highlighted by the browser
+        const historical = this.multiSelectedRanges.slice(0, this.multiSelectedRanges.length - 1)
+        historical.forEach((item, idx) => {
             if (item.cfi) {
                 try {
                     this.foliateView.addAnnotation({
@@ -11190,16 +12584,32 @@ class UniversalReaderApp {
                 }
             })
 
-            card.querySelector('.btn-note-share')?.addEventListener('click', e => {
+            card.querySelector('.btn-note-share')?.addEventListener('click', async e => {
                 e.stopPropagation()
-                let locationInfo = ''
-                if (note.formatType === 'pdf' || note.pdfTarget) {
-                    const target = note.pdfTarget || {}
-                    const firstSegment = Array.isArray(target.segments) ? target.segments[0] : null
-                    const page = firstSegment?.page ?? target.page
-                    if (page != null) locationInfo = `第 ${Number(page) + 1} 页`
+                let bookMeta = null
+                if (note.bookId) {
+                    try {
+                        bookMeta = await db.getBookById(note.bookId)
+                    } catch (_) {}
                 }
-                this.openQuoteCardModal(note.text, note.chapterTitle || '', locationInfo)
+                const isCurrentBook = this.currentBookId && note.bookId && String(this.currentBookId) === String(note.bookId)
+                const format = note.formatType || bookMeta?.format || (isCurrentBook ? this.currentBookData?.format : null) || 'epub'
+                const sourceToc = isCurrentBook ? (this.currentPdfTOC || this.toc || this._activeSession?.toc || []) : []
+                const resolved = resolveExcerptSource({
+                    highlight: note,
+                    chapterTitle: note.chapterTitle,
+                    currentLocation: isCurrentBook ? this.currentLocation : null,
+                    reader: isCurrentBook ? (this.foliateView || this.pdfViewport) : null,
+                    format,
+                    pdfViewport: isCurrentBook ? this.pdfViewport : null
+                }, sourceToc)
+
+                const customBook = {
+                    bookTitle: note.bookTitle || bookMeta?.title || (isCurrentBook ? this.currentBookData?.title : '') || '未命名书籍',
+                    author: note.bookAuthor || bookMeta?.author || (isCurrentBook ? this.currentBookData?.author : '') || '未知作者',
+                    format
+                }
+                this.openQuoteCardModal(note.text, resolved.chapterTitle, resolved.locationInfo, customBook)
             })
 
             card.querySelector('.btn-note-del')?.addEventListener('click', async e => {
@@ -11572,6 +12982,11 @@ class UniversalReaderApp {
                 }
             }
 
+            // 1.5. Annual Report Banner Visibility (Disabled for PC Candidate)
+            if (this.dom.bannerAnnualReport) {
+                this.dom.bannerAnnualReport.style.display = 'none'
+            }
+
             // 2. Hero Big Duration Banner
             if (this.dom.statsHeroTime) {
                 if (mode === 'total') {
@@ -11638,23 +13053,6 @@ class UniversalReaderApp {
             if (this.dom.quadFinishedBooks) this.dom.quadFinishedBooks.innerText = `${stats.periodFinishedCount != null ? stats.periodFinishedCount : stats.finishedCount}`
             if (this.dom.quadReadDays) this.dom.quadReadDays.innerText = `${stats.viewReadDays || 0}`
             if (this.dom.quadNoteCount) this.dom.quadNoteCount.innerText = `${stats.periodHighlightsCount != null ? stats.periodHighlightsCount : stats.totalHighlightsCount}`
-
-            // 4.5. P3 Literary Comparison Insight
-            if (this.dom.statsLiteraryText) {
-                const totalSeconds = stats.viewTotalSeconds || 0
-                const hours = totalSeconds / 3600
-                if (hours >= 15) {
-                    this.dom.statsLiteraryText.innerText = `您本周期沉浸阅读达 ${hours.toFixed(1)} 小时，所阅字数相当于完整通读了 1.5 本《流俗地》，墨香深沁。`
-                } else if (hours >= 8) {
-                    this.dom.statsLiteraryText.innerText = `您本周期沉浸阅读达 ${hours.toFixed(1)} 小时，字数相当于完整读完了 1 本《月亮与六便士》，文思充沛。`
-                } else if (hours >= 2.5) {
-                    this.dom.statsLiteraryText.innerText = `您已沉浸阅读 ${hours.toFixed(1)} 小时，相当于精读了半本《局外人》，字里行间静水流深。`
-                } else if (hours > 0) {
-                    this.dom.statsLiteraryText.innerText = `今日已翻开书页，阅读是随身携带的避难所，静享当下的安顿心流。`
-                } else {
-                    this.dom.statsLiteraryText.innerText = `本周期暂无阅读记录，挑选一本书开始阅读吧。`
-                }
-            }
 
             // 4.6. P2 Reading Goal Rings (Customizable Targets - Option C: Default hidden for pure, pressure-free reading)
             if (this.dom.statsGoalsRow) {
@@ -12693,4 +14091,3 @@ if (document.readyState === 'loading') {
     window.app = new UniversalReaderApp()
     window.readerApp = window.app
 }
-

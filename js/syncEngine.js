@@ -1,5 +1,6 @@
 // js/syncEngine.js - Multi-device WebDAV & Nutstore Sync and Conflict Resolution Engine
 import * as db from './db.js'
+import { checkTranslationCompatibility, buildTranslationRevisionArchive } from './translation-job-core.js'
 
 let _activeSyncPromise = null
 
@@ -95,13 +96,14 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
         }
     }
 
-    // 4. Favorite: LWW based on favoriteUpdatedAt
+    // 4. Favorite: LWW based on favoriteUpdatedAt (with updatedAt fallback)
     let isFavorite = Boolean(localBook.isFavorite)
-    let favoriteUpdatedAt = localBook.favoriteUpdatedAt || 0
+    let favoriteUpdatedAt = localBook.favoriteUpdatedAt || localBook.updatedAt || 0
     if (incomingMeta.favoriteUpdatedAt || incomingMeta.isFavorite !== undefined) {
-        if (isIncomingNewer(incomingMeta.favoriteUpdatedAt, localBook.favoriteUpdatedAt)) {
+        const inFavTime = incomingMeta.favoriteUpdatedAt || incomingMeta.updatedAt || 0
+        if (isIncomingNewer(inFavTime, favoriteUpdatedAt)) {
             isFavorite = Boolean(incomingMeta.isFavorite)
-            favoriteUpdatedAt = incomingMeta.favoriteUpdatedAt || 0
+            favoriteUpdatedAt = inFavTime
         }
     }
 
@@ -217,6 +219,11 @@ export const exportSyncPayload = async () => {
 
     const booksMeta = allBooks.map(buildBookSyncMeta)
 
+    let chapterTranslations = []
+    const syncChapterTrans = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_chapter_translations') : 'false') === 'true'
+    if (syncChapterTrans && typeof db.getAllChapterTranslations === 'function') {
+        chapterTranslations = await db.getAllChapterTranslations()
+    }
 
     return {
         version: 1,
@@ -230,6 +237,7 @@ export const exportSyncPayload = async () => {
         bookmarks: allBookmarks,
         readingSessions: allSessions,
         pdfDrawings: allPdfDrawings,
+        chapterTranslations,
         deletedRecords: deletedRecords || []
     }
 }
@@ -237,10 +245,10 @@ export const exportSyncPayload = async () => {
 /**
  * 2. Deterministic LWW Merge Algorithm
  */
-export const mergeSyncData = (localPayload, remotePayload) => {
-    if (!remotePayload || !remotePayload.booksMeta) {
+export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
+    if (!remotePayload || typeof remotePayload !== 'object') {
         return {
-            merged: localPayload,
+            merged: localPayload || {},
             stats: { booksUpdated: 0, highlightsAdded: 0, sessionsAdded: 0, listsAdded: 0 }
         }
     }
@@ -265,26 +273,33 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         if (t === 'highlights') return 'highlight'
         if (t === 'books') return 'book'
         if (t === 'pdf_drawings' || t === 'pdfDrawing') return 'pdfDrawing'
+        if (t === 'chapter_translations' || t === 'chapterTranslation') return 'chapter_translation'
         return t
     }
     const tombstoneMap = new Map()
     const registerTomb = (t, delTime) => {
-        if (!t || !t.id) return
-        const normType = normalizeTombType(t.type)
-        const key = `${normType}:${t.id}`
+        if (!t) return
+        const tId = t.id || t.recordId
+        const tType = t.type || t.recordType
+        if (!tId) return
+        const normType = normalizeTombType(tType)
+        const key = `${normType}:${tId}`
         if (!tombstoneMap.has(key) || delTime >= (tombstoneMap.get(key).deletedAt || 0)) {
-            tombstoneMap.set(key, { ...t, type: normType, deletedAt: delTime })
+            tombstoneMap.set(key, { ...t, id: tId, type: normType, deletedAt: delTime })
+        }
+        if (!tombstoneMap.has(tId) || delTime >= (tombstoneMap.get(tId).deletedAt || 0)) {
+            tombstoneMap.set(tId, { ...t, id: tId, type: normType, deletedAt: delTime })
         }
         if (normType === 'book' && t.stableKey) {
             const keyByStable = `book:${t.stableKey}`
             if (!tombstoneMap.has(keyByStable) || delTime >= (tombstoneMap.get(keyByStable).deletedAt || 0)) {
-                tombstoneMap.set(keyByStable, { ...t, type: 'book', deletedAt: delTime })
+                tombstoneMap.set(keyByStable, { ...t, id: tId, type: 'book', deletedAt: delTime })
             }
         }
     }
 
     ;(remotePayload.deletedRecords || []).forEach(t => {
-        if (t && t.id) {
+        if (t && (t.id || t.recordId)) {
             const delTime = clampTime(t.deletedAt)
             if (delTime >= minTombstoneTime) {
                 registerTomb(t, delTime)
@@ -292,7 +307,7 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         }
     })
     ;(localPayload.deletedRecords || []).forEach(t => {
-        if (!t || !t.id) return
+        if (!t || !(t.id || t.recordId)) return
         const localDel = clampTime(t.deletedAt)
         if (localDel < minTombstoneTime) return
         registerTomb(t, localDel)
@@ -583,8 +598,142 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         return true
     })
 
+    // H. Merge Chapter Translations (Stable Identity Normalization, Revision Deduplication, Version-Compatible)
+    const ctMap = new Map()
+    const getCtStableKey = (ct) => {
+        if (!ct) return ''
+        const bookKey = ct.bookStableKey || ct.contentHash || ct.bookId || ''
+        const chapKey = ct.chapterSourceKey || ct.chapterKey || ''
+        return `${bookKey}::${chapKey}` || ct.id || ''
+    }
+
+    ;(remotePayload.chapterTranslations || []).forEach(ct => {
+        if (!ct) return
+        const key = getCtStableKey(ct)
+        if (key) ctMap.set(key, structuredClone(ct))
+    })
+    ;(localPayload.chapterTranslations || []).forEach(ct => {
+        if (!ct) return
+        const key = getCtStableKey(ct)
+        if (!key) return
+        if (!ctMap.has(key)) {
+            ctMap.set(key, structuredClone(ct))
+        } else {
+            const remoteCt = ctMap.get(key)
+            // Strict version compatibility: sourceHash, parserVersion, targetLanguage, promptVersion
+            const isCompatible = typeof db.checkTranslationCompatibility === 'function'
+                ? db.checkTranslationCompatibility(ct, remoteCt)
+                : checkTranslationCompatibility(ct, remoteCt)
+
+            if (!isCompatible) {
+                // Incompatible versions MUST NOT be mixed. Retain both as conflict revisions.
+                const primary = (ct.updatedAt || 0) >= (remoteCt.updatedAt || 0) ? structuredClone(ct) : structuredClone(remoteCt)
+                const secondary = (ct.updatedAt || 0) >= (remoteCt.updatedAt || 0) ? structuredClone(remoteCt) : structuredClone(ct)
+                if (!Array.isArray(primary.conflictRevisions)) primary.conflictRevisions = []
+                const existingRevIds = new Set(primary.conflictRevisions.map(r => r.revisionId).filter(Boolean))
+                const secRevId = secondary.revisionId || `conflict_${secondary.updatedAt || Date.now()}`
+                if (!existingRevIds.has(secRevId)) {
+                    primary.conflictRevisions.push({
+                        revisionId: secRevId,
+                        sourceHash: secondary.sourceHash,
+                        parserVersion: secondary.parserVersion,
+                        targetLanguage: secondary.targetLanguage,
+                        promptVersion: secondary.promptVersion,
+                        updatedAt: secondary.updatedAt,
+                        status: secondary.status,
+                        paragraphs: secondary.paragraphs,
+                        reason: 'incompatible_version_conflict'
+                    })
+                    existingRevIds.add(secRevId)
+                }
+                if (Array.isArray(secondary.conflictRevisions)) {
+                    for (const cr of secondary.conflictRevisions) {
+                        if (cr && cr.revisionId && !existingRevIds.has(cr.revisionId)) {
+                            primary.conflictRevisions.push(cr)
+                            existingRevIds.add(cr.revisionId)
+                        }
+                    }
+                }
+                ctMap.set(key, primary)
+            } else if (Array.isArray(ct.paragraphs) && Array.isArray(remoteCt.paragraphs)) {
+                const paraMap = new Map()
+                remoteCt.paragraphs.forEach(p => { if (p && p.id) paraMap.set(p.id, structuredClone(p)) })
+                ct.paragraphs.forEach(p => {
+                    if (!p || !p.id) return
+                    if (!paraMap.has(p.id)) {
+                        paraMap.set(p.id, structuredClone(p))
+                    } else {
+                        const remP = paraMap.get(p.id)
+                        const pCompleted = p.status === 'completed' && typeof p.translation === 'string' && p.translation.trim().length > 0
+                        const remPCompleted = remP.status === 'completed' && typeof remP.translation === 'string' && remP.translation.trim().length > 0
+
+                        if (pCompleted && !remPCompleted) {
+                            paraMap.set(p.id, structuredClone(p))
+                        } else if (!pCompleted && remPCompleted) {
+                            // keep remote completed paragraph
+                        } else if ((ct.updatedAt || 0) >= (remoteCt.updatedAt || 0)) {
+                            paraMap.set(p.id, structuredClone(p))
+                        }
+                    }
+                })
+                const mergedParas = Array.from(paraMap.values())
+                const maxUpdated = Math.max(ct.updatedAt || 0, remoteCt.updatedAt || 0)
+                const expectedTotal = Math.max(Number(ct.totalParagraphs) || 0, Number(remoteCt.totalParagraphs) || 0)
+
+                // Strict completion condition: ALL expected paragraphs must be verified completed with non-empty translation
+                const hasIncomplete = mergedParas.some(p => p.status !== 'completed' || !p.translation || !String(p.translation).trim())
+                const meetsTotalCount = expectedTotal > 0
+                    ? mergedParas.length >= expectedTotal
+                    : (ct.status === 'completed' || remoteCt.status === 'completed')
+                const allCompleted = mergedParas.length > 0 && !hasIncomplete && meetsTotalCount
+
+                ctMap.set(ct.id, {
+                    ...remoteCt,
+                    ...ct,
+                    status: allCompleted ? 'completed' : 'partial',
+                    paragraphs: mergedParas,
+                    totalParagraphs: expectedTotal > 0 ? expectedTotal : mergedParas.length,
+                    updatedAt: maxUpdated
+                })
+            } else if ((ct.updatedAt || 0) >= (remoteCt.updatedAt || 0)) {
+                ctMap.set(ct.id, structuredClone(ct))
+            }
+        }
+    })
+    const mergedChapterTranslations = Array.from(ctMap.values()).filter(ct => {
+        if (!ct || !ct.bookId) return false
+        const bookTombKey = `book:${ct.bookId}`
+        if (tombstoneMap.has(bookTombKey)) return false
+        const ctTombKey = ct.id ? `chapter_translation:${ct.id}` : null
+        if (ctTombKey && tombstoneMap.has(ctTombKey)) {
+            const tomb = tombstoneMap.get(ctTombKey)
+            if ((tomb.deletedAt || 0) >= (ct.updatedAt || 0)) return false
+        }
+        if (ct.id && tombstoneMap.has(ct.id)) {
+            const tomb = tombstoneMap.get(ct.id)
+            if ((tomb.deletedAt || 0) >= (ct.updatedAt || 0)) return false
+        }
+        return true
+    })
+
+    // Retain unknown top-level schema properties from remotePayload to prevent clobbering future schema extensions
+    const unknownRemoteFields = {}
+    if (remotePayload && typeof remotePayload === 'object') {
+        const knownKeys = new Set([
+            'version', 'clientId', 'deviceName', 'updatedAt', 'settings',
+            'customLists', 'booksMeta', 'highlights', 'bookmarks',
+            'readingSessions', 'pdfDrawings', 'chapterTranslations', 'deletedRecords'
+        ])
+        for (const [k, v] of Object.entries(remotePayload)) {
+            if (!knownKeys.has(k)) {
+                unknownRemoteFields[k] = structuredClone(v)
+            }
+        }
+    }
+
     const merged = {
-        version: 1,
+        ...unknownRemoteFields,
+        version: Math.max(localPayload.version || 1, remotePayload.version || 1),
         clientId: localPayload.clientId || (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || '',
         updatedAt: Date.now(),
         settings: mergedSettings,
@@ -594,6 +743,7 @@ export const mergeSyncData = (localPayload, remotePayload) => {
         bookmarks: mergedBookmarks,
         readingSessions: mergedSessions,
         pdfDrawings: mergedPdfDrawings,
+        chapterTranslations: mergedChapterTranslations,
         deletedRecords: Array.from(tombstoneMap.values())
     }
 
@@ -646,6 +796,14 @@ export const applyMergedPayload = async mergedPayload => {
                     const localDrawing = parts.length === 2 ? await db.getPdfPageDrawing(parts[0], parseInt(parts[1], 10)) : null
                     if (!localDrawing || delTime >= (localDrawing.updatedAt || 0)) {
                         await db.clearPdfDrawingById(tomb.id)
+                    }
+                } else if (tomb.type === 'chapter_translation' || tomb.type === 'chapter_translations' || tomb.type === 'chapterTranslation') {
+                    const parts = tomb.id.split('::')
+                    if (parts.length === 2) {
+                        const localCt = await db.getChapterTranslation(parts[0], parts[1])
+                        if (localCt && delTime >= (localCt.updatedAt || 0)) {
+                            await db.deleteChapterTranslation(parts[0], parts[1])
+                        }
                     }
                 }
             }
@@ -850,6 +1008,24 @@ export const applyMergedPayload = async mergedPayload => {
                 tx.oncomplete = () => res()
                 tx.onerror = () => rej(tx.error || new Error('Failed to save pdf drawings transaction'))
             })
+        }
+    }
+
+    // I. Apply Chapter Translations (with BookId Remapping)
+    const syncChapterTrans = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_chapter_translations') : 'false') === 'true'
+    if (syncChapterTrans && Array.isArray(mergedPayload.chapterTranslations) && mergedPayload.chapterTranslations.length > 0 && typeof db.saveChapterTranslation === 'function') {
+        for (const ct of mergedPayload.chapterTranslations) {
+            if (!ct || !ct.bookId || !ct.chapterKey) continue
+            let targetBookId = ct.bookId
+            if (bookIdRemap.has(targetBookId)) {
+                targetBookId = bookIdRemap.get(targetBookId)
+            }
+            if (deletedBookIds.includes(targetBookId)) continue
+            const record = { ...ct, bookId: targetBookId, id: `${targetBookId}::${ct.chapterKey}` }
+            const localCt = await db.getChapterTranslation(targetBookId, ct.chapterKey)
+            if (!localCt || (record.updatedAt || 0) >= (localCt.updatedAt || 0)) {
+                await db.saveChapterTranslation(record)
+            }
         }
     }
 

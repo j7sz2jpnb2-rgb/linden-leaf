@@ -4,8 +4,8 @@
 
 import * as db from './db.js'
 
-export const EXTRACTOR_VERSION = 'v1.0'
-export const SUPPORTED_SEARCH_FORMATS = ['epub', 'txt', 'md', 'docx']
+export const EXTRACTOR_VERSION = 'v1.1'
+export const SUPPORTED_SEARCH_FORMATS = ['epub', 'txt', 'md', 'docx', 'mobi', 'azw3', 'azw']
 
 /**
  * Tokenize text into searchable CJK bi-grams and alphanumeric terms
@@ -101,6 +101,9 @@ export function extractCleanTextFromHtml(html) {
         cleaned = cleaned.replace(/<head\b[^<]*(?:(?!<\/head>)<[^<]*)*<\/head>/gi, ' ')
     }
 
+    // Strip injected bilingual translation blocks
+    cleaned = cleaned.replace(/<([a-z0-9]+)\b[^>]*(?:class="[^"]*(?:linden-bilingual-target|bilingual-translation-block)[^"]*"|data-injected-translation)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+
     cleaned = cleaned
         .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ')
         .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ')
@@ -126,6 +129,17 @@ export function extractCleanTextFromHtml(html) {
         .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(dec))
         .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
     return cleaned.replace(/\r\n|\r/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n\n').trim()
+}
+
+export function extractCleanTextFromDoc(doc) {
+    if (!doc || !doc.body) return ''
+    try {
+        const clone = doc.body.cloneNode(true)
+        clone.querySelectorAll?.('.linden-bilingual-target, .bilingual-translation-block, .bilingual-derived-view, .linden-inline-translation, [data-injected-translation]').forEach(n => n.remove())
+        return (clone.innerText || clone.textContent || '').trim()
+    } catch (_) {
+        return (doc.body.innerText || doc.body.textContent || '').trim()
+    }
 }
 
 export class FullTextSearchEngine {
@@ -276,7 +290,7 @@ export class FullTextSearchEngine {
                         try {
                             const doc = sec.createDocument ? sec.createDocument() : null
                             if (doc) {
-                                rawText = doc.body?.innerText || doc.body?.textContent || ''
+                                rawText = extractCleanTextFromDoc(doc)
                             }
                         } catch (e) {}
                         if (!rawText && sec.load) {
@@ -335,7 +349,7 @@ export class FullTextSearchEngine {
                         try {
                             const doc = sec.createDocument ? sec.createDocument() : null
                             if (doc) {
-                                rawText = doc.body?.innerText || doc.body?.textContent || ''
+                                rawText = extractCleanTextFromDoc(doc)
                             }
                         } catch (e) {}
                         if (!rawText && sec.load) {
@@ -361,6 +375,55 @@ export class FullTextSearchEngine {
                 }
             } catch (docxErr) {
                 console.warn('[FullTextSearch] DOCX structured extract fallback:', docxErr)
+            }
+        } else if (format === 'mobi' || format === 'azw' || format === 'azw3') {
+            let mobiBook = null
+            try {
+                const { MOBI } = await import('../foliate-js-main/mobi.js')
+                const fflate = await import('../foliate-js-main/vendor/fflate.js')
+                mobiBook = await new MOBI({ unzlib: fflate.unzlibSync }).open(snapshot.blob)
+                if (mobiBook?.sections?.length) {
+                    for (let i = 0; i < mobiBook.sections.length; i++) {
+                        if (signal?.aborted) return false
+                        const sec = mobiBook.sections[i]
+                        const tocItem = mobiBook.toc?.[i]
+                        const title = tocItem?.label || `第 ${i + 1} 节`
+                        let rawText = ''
+                        try {
+                            const doc = sec.createDocument ? await sec.createDocument() : null
+                            if (doc) {
+                                rawText = extractCleanTextFromDoc(doc)
+                            }
+                        } catch (e) {}
+                        if (!rawText && sec.load) {
+                            try {
+                                const url = await sec.load()
+                                if (url) {
+                                    const res = await fetch(url)
+                                    rawText = extractCleanTextFromHtml(await res.text())
+                                }
+                            } catch (e) {}
+                        }
+                        const cleanText = (rawText || '').trim()
+                        if (cleanText.length >= 4) {
+                            sections.push({
+                                id: `${bookId}_sec_${i}`,
+                                sectionIndex: i,
+                                sectionTitle: title,
+                                granularity: 'chapter',
+                                location: { sectionIndex: i, href: `${i}#heading` },
+                                text: cleanText,
+                                tokens: tokenizeText(cleanText)
+                            })
+                        }
+                    }
+                }
+            } catch (mobiErr) {
+                console.warn('[FullTextSearch] MOBI/AZW3 extract warning:', mobiErr)
+            } finally {
+                if (mobiBook && typeof mobiBook.destroy === 'function') {
+                    try { mobiBook.destroy() } catch {}
+                }
             }
         }
 

@@ -1,5 +1,5 @@
 /**
- * quote-card.js - WeChat Read Style Quote Share Card Generator
+ * quote-card.js - Quote Share Card Generator
  * Supports High-DPI Canvas Rendering, Vertical/Horizontal Typography, Multi-Theme Palettes & Direct Clipboard Copying
  */
 
@@ -82,7 +82,7 @@ function mapVerticalPunctuation(text) {
 }
 
 /**
- * Intelligent Vertical Title Column Splitter (WeChat Read Proportions)
+ * Intelligent Vertical Title Column Splitter
  * - Preserves brackets and punctuation pairs (no orphan brackets)
  * - Natural semantic splits (colon, dash, bracket boundaries)
  * - Balanced column lengths with orphan punctuation protection
@@ -149,11 +149,16 @@ export function splitVerticalTitle(title) {
     return { isLatin: false, columns: col2 ? [col1, col2] : [col1] }
 }
 
+const storedReaderName = () => {
+    const name = typeof localStorage !== 'undefined' ? (localStorage.getItem('linden_user_name') || '').trim() : ''
+    return name && !['Linden 读者', '我的书架', '读者'].includes(name) ? name : '诶云朵？！'
+}
+
 export class QuoteCardGenerator {
     constructor() {
         this.currentThemeId = 'dark'
         this.titleLayout = 'vertical' // 'vertical' | 'horizontal'
-        this.userName = (typeof localStorage !== 'undefined' && localStorage.getItem('linden_user_name')) || 'Linden 读者'
+        this.userName = storedReaderName()
         this.bookTitle = ''
         this.author = ''
         this.quoteText = ''
@@ -169,7 +174,7 @@ export class QuoteCardGenerator {
         this.chapterTitle = chapterTitle || ''
         this.locationInfo = locationInfo || (pageIndex ? (String(pageIndex).startsWith('第') ? pageIndex : `第 ${pageIndex} 页`) : '')
         this.pageIndex = this.locationInfo
-        const savedUserName = (typeof localStorage !== 'undefined' && localStorage.getItem('linden_user_name')) || 'Linden 读者'
+        const savedUserName = storedReaderName()
         this.userName = userName || savedUserName
     }
 
@@ -278,7 +283,7 @@ export class QuoteCardGenerator {
     }
 
     /**
-     * Render the ultra-high-resolution canvas (WeChat Read style, compact, crisp & retina sharp)
+     * Render the ultra-high-resolution canvas (compact, crisp & retina sharp)
      */
     async renderCanvas() {
         if (typeof document !== 'undefined' && document.fonts?.ready) {
@@ -359,7 +364,7 @@ export class QuoteCardGenerator {
             sourceMetaHeight = sourceMetaLines.length * 24
         }
 
-        // 4. Calculate Compact Total Height (WeChat Read Proportions)
+        // 4. Calculate Compact Total Height
         const topPadding = 56
         const headerToQuoteGap = 42
         const quoteToMetaGap = sourceMetaHeight > 0 ? 26 : 0
@@ -500,7 +505,7 @@ export class QuoteCardGenerator {
 
         currentY += dividerToFooterGap
 
-        // 6. Draw Footer Section (WeChat Read compact style)
+        // 6. Draw Footer Section
         const today = new Date()
         const dateStr = `${today.getFullYear()}/${today.getMonth() + 1}/${today.getDate()}`
         
@@ -509,7 +514,7 @@ export class QuoteCardGenerator {
         ctx.fillStyle = theme.metaColor
         ctx.textAlign = 'left'
         ctx.textBaseline = 'alphabetic'
-        const currentUserName = this.userName || 'Linden 读者'
+        const currentUserName = this.userName || '诶云朵？！'
         ctx.fillText(`${currentUserName} · 摘录于 ${dateStr}`, padding, currentY + 14)
 
         // Line 2: Brand

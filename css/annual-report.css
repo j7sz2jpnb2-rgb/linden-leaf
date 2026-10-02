@@ -1,0 +1,399 @@
+/* css/annual-report.css - Netease Music / Spotify Wrapped Style Annual Reading Report */
+
+.annual-report-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  background: #09090b;
+  color: #f4f4f5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', 'PingFang SC', sans-serif;
+  user-select: none;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+
+.annual-report-overlay.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.annual-report-stage {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  height: 100%;
+  max-height: 860px;
+  background: #18181b;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+  display: flex;
+  flex-direction: column;
+}
+
+@media (max-width: 540px) {
+  .annual-report-stage {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 0;
+  }
+}
+
+/* Header & Controls */
+.annual-report-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(56px + var(--safe-top, 0px));
+  padding: var(--safe-top, 0px) calc(16px + var(--safe-right, 0px)) 0 calc(16px + var(--safe-left, 0px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 100;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.75) 0%, transparent 100%);
+}
+
+.annual-report-brand {
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: rgba(255, 255, 255, 0.9);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.annual-report-year-select {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 16px;
+  padding: 4px 10px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  backdrop-filter: blur(8px);
+}
+
+.annual-report-brand-text {
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.annual-report-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.annual-report-action-menu {
+  position: absolute;
+  top: calc(54px + var(--safe-top, 0px));
+  right: calc(16px + var(--safe-right, 0px));
+  background: rgba(24, 24, 27, 0.96);
+  backdrop-filter: blur(18px);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 14px;
+  padding: 6px;
+  min-width: 176px;
+  z-index: 200;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.action-menu-item {
+  background: transparent;
+  border: none;
+  color: #ffffff;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.15s ease;
+}
+
+.action-menu-item:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.action-menu-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+  margin: 3px 6px;
+}
+
+.action-menu-privacy {
+  padding: 8px 12px;
+  font-size: 0.74rem;
+  color: rgba(255, 255, 255, 0.85);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.action-menu-privacy:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.btn-report-action {
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-report-action:hover {
+  background: rgba(255, 255, 255, 0.26);
+  transform: translateY(-1px);
+}
+
+.btn-report-close {
+  background: rgba(255, 255, 255, 0.16);
+  border: none;
+  color: #fff;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  transition: background 0.2s ease;
+}
+
+.btn-report-close:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Acts Carousel */
+.annual-report-cards-container {
+  flex: 1;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.annual-report-act-card {
+  position: absolute;
+  inset: 0;
+  padding: calc(72px + var(--safe-top, 0px)) calc(28px + var(--safe-right, 0px)) calc(84px + var(--safe-bottom, 0px)) calc(28px + var(--safe-left, 0px));
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  opacity: 0;
+  transform: translateY(40px) scale(0.96);
+  transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.45s ease;
+  pointer-events: none;
+  background-size: cover;
+  background-position: center;
+}
+
+.annual-report-act-card.active {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+.annual-report-act-card.prev {
+  opacity: 0;
+  transform: translateY(-40px) scale(0.96);
+}
+
+/* Card Content Typography */
+.act-badge {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(6px);
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.9);
+  margin-bottom: 14px;
+}
+
+.act-title {
+  font-size: 1.7rem;
+  font-weight: 800;
+  line-height: 1.25;
+  margin-bottom: 8px;
+  color: #ffffff;
+  letter-spacing: -0.5px;
+}
+
+.act-subtitle {
+  font-size: 0.92rem;
+  color: rgba(255, 255, 255, 0.8);
+  line-height: 1.5;
+  margin-bottom: 24px;
+}
+
+.act-highlight-stat {
+  margin: auto 0;
+  padding: 20px 0;
+}
+
+.stat-giant-num {
+  font-size: 3.5rem;
+  font-weight: 900;
+  line-height: 1;
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -1px;
+  text-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.stat-giant-unit {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin-left: 6px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.stat-desc {
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.75);
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+.act-quote-box {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  padding: 16px;
+  font-style: italic;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.95);
+  margin: 12px 0;
+}
+
+.act-persona-badge {
+  display: inline-block;
+  font-size: 1.4rem;
+  font-weight: 800;
+  color: #fef08a;
+  background: rgba(254, 240, 138, 0.15);
+  padding: 8px 18px;
+  border-radius: 24px;
+  border: 1px solid rgba(254, 240, 138, 0.3);
+  margin-bottom: 12px;
+}
+
+.act-footer-insight {
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.7);
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  padding-top: 14px;
+}
+
+/* Navigation Pager */
+.annual-report-pager {
+  position: absolute;
+  right: calc(16px + var(--safe-right, 0px));
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 100;
+}
+
+.pager-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.pager-dot.active {
+  height: 18px;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+/* Footer Bottom Navigation Bar */
+.annual-report-bottom-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: calc(64px + var(--safe-bottom, 0px));
+  padding: 0 calc(20px + var(--safe-right, 0px)) var(--safe-bottom, 0px) calc(20px + var(--safe-left, 0px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 100;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.7) 0%, transparent 100%);
+}
+
+.report-nav-arrows {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-report-nav {
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  color: #fff;
+  padding: 6px 14px;
+  border-radius: 16px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-report-nav:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.btn-report-nav:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* Act Theme Gradients */
+.act-theme-1 { background: radial-gradient(circle at top right, #312e81, #0f172a 70%); }
+.act-theme-2 { background: radial-gradient(circle at top right, #1e3a8a, #09090b 70%); }
+.act-theme-3 { background: radial-gradient(circle at top right, #4c1d95, #111827 70%); }
+.act-theme-4 { background: radial-gradient(circle at top right, #831843, #09090b 70%); }
+.act-theme-5 { background: radial-gradient(circle at top right, #064e3b, #0f172a 70%); }
+.act-theme-6 { background: radial-gradient(circle at top right, #701a75, #09090b 70%); }
+.act-theme-7 { background: radial-gradient(circle at top right, #7c2d12, #18181b 70%); }
+.act-theme-8 { background: radial-gradient(circle at top right, #14532d, #022c22 70%); }
+.act-theme-9 { background: radial-gradient(circle at top right, #3b0764, #0f172a 70%); }

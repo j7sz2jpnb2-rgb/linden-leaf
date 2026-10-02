@@ -1,7 +1,7 @@
 {
   "name": "linden-leaf",
   "productName": "Linden Leaf",
-  "version": "1.2.3",
+  "version": "2.0.0",
   "description": "Linden Leaf - 现代化全格式电子书阅读器",
   "main": "main.js",
   "author": "Linden Leaf Team",

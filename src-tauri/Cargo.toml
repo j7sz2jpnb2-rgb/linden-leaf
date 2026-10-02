@@ -1,6 +1,6 @@
 [package]
 name = "linden-leaf"
-version = "1.2.3"
+version = "2.0.0"
 description = "Linden Leaf - 现代化全格式超轻量电子书阅读器"
 authors = ["Linden Leaf Team"]
 edition = "2021"
@@ -23,7 +23,7 @@ tauri = { version = "2.0", features = ["devtools"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.38", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 base64 = "0.22"
 rayon = "1.10"
 dirs = "6.0"

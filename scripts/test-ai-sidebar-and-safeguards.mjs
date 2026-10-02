@@ -426,12 +426,12 @@ runTest('Suite 4', '4.3 Config clamps budget [0, 10000] and validates cooldown o
     globalThis.localStorage.removeItem('linden_advanced_settings_config')
     const mgr = new AdvancedSettingsManager()
     mgr.config.aiContextTokenBudget = 25000 // Out of bounds > 10000
-    mgr.config.aiCooldownSeconds = 45      // Invalid, only 10/20/30 allowed
+    mgr.config.aiCooldownSeconds = 5000     // Out of bounds > 3600
     mgr.save()
     mgr.load()
 
     assert.equal(mgr.aiContextTokenBudget, 10000) // Clamped to 10000
-    assert.equal(mgr.aiCooldownSeconds, 10)       // Fallback to 10
+    assert.equal(mgr.aiCooldownSeconds, 3600)      // Clamped to 3600
 })
 
 runTest('Suite 4', '4.4 resetAndLock restores defaults and locks panel', () => {
