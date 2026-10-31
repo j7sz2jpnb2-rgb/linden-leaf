@@ -380,7 +380,10 @@ export class QuoteCardGenerator {
             + quoteToMetaGap + sourceMetaHeight + metaToDividerGap + dividerHeight
             + dividerToFooterGap + footerLine1Height + footerLineGap + footerLine2Height + bottomPadding
 
-        const totalHeight = Math.min(Math.max(Math.round(calculatedHeight), 320), 3200)
+        if (calculatedHeight > 3200) {
+            throw new RangeError('摘录内容过长，单张图片放不下。请缩短摘录后再保存或复制。')
+        }
+        const totalHeight = Math.max(Math.round(calculatedHeight), 320)
 
         // Create Target Canvas with HiDPI Scale
         const canvas = document.createElement('canvas')

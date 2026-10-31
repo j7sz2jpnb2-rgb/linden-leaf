@@ -3,7 +3,8 @@
 # Output is placed in D:\LindenLeaf-Deliveries\2026-09-29\android\
 
 param(
-    [string]$SubDir = ""
+    [string]$SubDir = "",
+    [string]$DeliveryDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,28 +82,32 @@ if (-not (Test-Path $androidProjectDir)) {
     throw "Tauri Android project structure not found at $androidProjectDir"
 }
 
+# Derive Android identity from the same version used by the app.
+$appVersion = (Get-Content -LiteralPath (Join-Path $projectRoot "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json).version
+$parts = $appVersion -split '\.'
+if ($parts.Count -ne 3) { throw "Expected a three-part app version" }
+$androidVersionCode = [int]$parts[0] * 1000000 + [int]$parts[1] * 1000 + [int]$parts[2]
+$versionProperties = Join-Path $androidProjectDir "app\tauri.properties"
+$properties = Get-Content -LiteralPath $versionProperties -Raw
+$properties = $properties -replace '(?m)^tauri.android.versionName=.*$', ("tauri.android.versionName=" + $appVersion)
+$properties = $properties -replace '(?m)^tauri.android.versionCode=.*$', ("tauri.android.versionCode=" + $androidVersionCode)
+[System.IO.File]::WriteAllText($versionProperties, $properties)
+Write-Host "Android version: $appVersion ($androidVersionCode)"
+
 # 4. Compile frontend distribution
 Write-Host "Compiling frontend distribution..." -ForegroundColor Cyan
+$env:LINDEN_SKIP_RESOURCE_HASH = "1"
 & node scripts/build-dist.js
 if ($LASTEXITCODE -ne 0) {
     throw "Frontend distribution build failed with exit code $LASTEXITCODE"
 }
 
-# 5. Clean intermediate outputs to ensure no stale artifacts or zipflinger gaps
+# 5. Stage only the target library; preserve the existing Gradle incremental cache.
 $jniTargetDir = Join-Path $androidProjectDir "app\src\main\jniLibs\arm64-v8a"
-if (-not (Test-Path $jniTargetDir)) {
+if (-not (Test-Path -LiteralPath $jniTargetDir)) {
     New-Item -ItemType Directory -Path $jniTargetDir -Force | Out-Null
 }
 $targetSo = Join-Path $jniTargetDir "liblinden_leaf_lib.so"
-if (Test-Path $targetSo) {
-    Remove-Item -Path $targetSo -Force
-}
-
-$gradleBuildDir = Join-Path $androidProjectDir "app\build"
-if (Test-Path $gradleBuildDir) {
-    Write-Host "Cleaning Gradle build directory to prevent zipflinger padding accumulation..." -ForegroundColor Cyan
-    Remove-Item -Path $gradleBuildDir -Recurse -Force
-}
 
 # 6. Build ARM64 Native Library with Release Optimizations and 16KB Page Alignment
 Write-Host "Compiling Rust cdylib for aarch64-linux-android (release, 16KB page alignment)..." -ForegroundColor Cyan
@@ -162,18 +167,25 @@ try {
 }
 
 # 8. Locate generated APK and copy to delivery directory
-$baseDeliveryDir = "D:\LindenLeaf-Deliveries\2026-09-29"
-$targetSubDir = if ($SubDir) { $SubDir } elseif ($env:LINDEN_DELIVERY_SUBDIR) { $env:LINDEN_DELIVERY_SUBDIR } else { "" }
-if ($targetSubDir) {
-    $deliveryDir = Join-Path $baseDeliveryDir "$targetSubDir\android"
+# 8. Deliver release APK
+if ($DeliveryDir) {
+    $deliveryDir = $DeliveryDir
+} elseif ($SubDir -match "^\d{4}-\d{2}-\d{2}") {
+    $deliveryDir = "D:\LindenLeaf-Deliveries\$SubDir\android"
 } else {
-    $deliveryDir = Join-Path $baseDeliveryDir "android"
-    if (Test-Path (Join-Path $deliveryDir "lindenleaf-arm64-release.apk")) {
-        $runIdx = 2
-        while (Test-Path (Join-Path $baseDeliveryDir "run$runIdx\android\lindenleaf-arm64-release.apk")) {
-            $runIdx++
+    $baseDeliveryDir = "D:\LindenLeaf-Deliveries\2026-09-29"
+    $targetSubDir = if ($SubDir) { $SubDir } elseif ($env:LINDEN_DELIVERY_SUBDIR) { $env:LINDEN_DELIVERY_SUBDIR } else { "" }
+    if ($targetSubDir) {
+        $deliveryDir = Join-Path $baseDeliveryDir "$targetSubDir\android"
+    } else {
+        $deliveryDir = Join-Path $baseDeliveryDir "android"
+        if (Test-Path (Join-Path $deliveryDir "lindenleaf-arm64-release.apk")) {
+            $runIdx = 2
+            while (Test-Path (Join-Path $baseDeliveryDir "run$runIdx\android\lindenleaf-arm64-release.apk")) {
+                $runIdx++
+            }
+            $deliveryDir = Join-Path $baseDeliveryDir "run$runIdx\android"
         }
-        $deliveryDir = Join-Path $baseDeliveryDir "run$runIdx\android"
     }
 }
 if (-not (Test-Path $deliveryDir)) {
@@ -190,43 +202,10 @@ if (-not (Test-Path $apkCandidate)) {
 }
 
 $destApk = Join-Path $deliveryDir "lindenleaf-arm64-release.apk"
-Copy-Item -Path $apkCandidate -Destination $destApk -Force
+if (Test-Path -LiteralPath $destApk) { throw "Delivery already exists: $destApk. Use a new delivery directory." }
+Copy-Item -LiteralPath $apkCandidate -Destination $destApk
 $apkLength = (Get-Item $destApk).Length
 $apkSizeMb = [math]::Round(($apkLength / 1MB), 2)
 Write-Host "SUCCESS: Release APK built and delivered to $destApk" -ForegroundColor Green
 Write-Host "  APK Size: $apkSizeMb MB ($apkLength bytes)" -ForegroundColor Green
 
-# 9. Verify APK structure: Check for zero zip padding / gap records
-Write-Host "Verifying APK ZIP structure..." -ForegroundColor Cyan
-$verifyScript = @"
-const fs = require('fs');
-const buf = fs.readFileSync(process.argv[2]);
-let pos = 0;
-let gapCount = 0;
-let gapBytes = 0;
-let validEntries = 0;
-
-while (pos < buf.length - 4) {
-    if (buf.readUInt32LE(pos) === 0x04034b50) {
-        const nameLen = buf.readUInt16LE(pos + 26);
-        const extraLen = buf.readUInt16LE(pos + 28);
-        const compSize = buf.readUInt32LE(pos + 18);
-        if (nameLen === 0) {
-            gapCount++;
-            gapBytes += (30 + extraLen + compSize);
-        } else {
-            validEntries++;
-        }
-        pos += 30 + nameLen + extraLen + compSize;
-    } else {
-        pos++;
-    }
-}
-console.log(JSON.stringify({ validEntries, gapCount, gapBytes }));
-"@
-
-$verifyFile = Join-Path $env:TEMP "verify-apk-zip.js"
-[System.IO.File]::WriteAllText($verifyFile, $verifyScript)
-$zipStatsJson = & node $verifyFile $destApk
-Remove-Item -Path $verifyFile -Force -ErrorAction SilentlyContinue
-Write-Host "  ZIP Structure Check: $zipStatsJson" -ForegroundColor Cyan

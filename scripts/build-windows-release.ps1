@@ -3,7 +3,9 @@
 # Output is placed in D:\LindenLeaf-Deliveries\2026-09-29\windows\
 
 param(
-    [string]$SubDir = ""
+    [string]$SubDir = "",
+    [string]$DeliveryDir = "",
+    [switch]$NsisOnly = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,8 +60,13 @@ if (Test-Path $releaseExe) {
 }
 
 # 5. Build Windows Release Binary and Installers via Tauri CLI
-Write-Host "Building Tauri Windows Release (NSIS + MSI)..." -ForegroundColor Cyan
-& pnpm tauri build --target x86_64-pc-windows-msvc
+if ($NsisOnly) {
+    Write-Host "Building Tauri Windows Release (NSIS only)..." -ForegroundColor Cyan
+    & pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
+} else {
+    Write-Host "Building Tauri Windows Release (NSIS + MSI)..." -ForegroundColor Cyan
+    & pnpm tauri build --target x86_64-pc-windows-msvc
+}
 if ($LASTEXITCODE -ne 0) {
     throw "Tauri build failed with exit code $LASTEXITCODE"
 }
@@ -72,18 +79,24 @@ $releaseLength = (Get-Item $releaseExe).Length
 Write-Host "Built Windows release binary: $releaseExe ($([math]::Round($releaseLength / 1MB, 2)) MB, $releaseLength bytes)" -ForegroundColor Green
 
 # 6. Deliver Installers and Portable ZIP
-$baseDeliveryDir = "D:\LindenLeaf-Deliveries\2026-09-29"
-$targetSubDir = if ($SubDir) { $SubDir } elseif ($env:LINDEN_DELIVERY_SUBDIR) { $env:LINDEN_DELIVERY_SUBDIR } else { "" }
-if ($targetSubDir) {
-    $deliveryDir = Join-Path $baseDeliveryDir "$targetSubDir\windows"
+if ($DeliveryDir) {
+    $deliveryDir = $DeliveryDir
+} elseif ($SubDir -match "^\d{4}-\d{2}-\d{2}") {
+    $deliveryDir = "D:\LindenLeaf-Deliveries\$SubDir\windows"
 } else {
-    $deliveryDir = Join-Path $baseDeliveryDir "windows"
-    if (Test-Path (Join-Path $deliveryDir "LindenLeaf-1.2.3-x64-portable.zip")) {
-        $runIdx = 2
-        while (Test-Path (Join-Path $baseDeliveryDir "run$runIdx\windows\LindenLeaf-1.2.3-x64-portable.zip")) {
-            $runIdx++
+    $baseDeliveryDir = "D:\LindenLeaf-Deliveries\2026-09-29"
+    $targetSubDir = if ($SubDir) { $SubDir } elseif ($env:LINDEN_DELIVERY_SUBDIR) { $env:LINDEN_DELIVERY_SUBDIR } else { "" }
+    if ($targetSubDir) {
+        $deliveryDir = Join-Path $baseDeliveryDir "$targetSubDir\windows"
+    } else {
+        $deliveryDir = Join-Path $baseDeliveryDir "windows"
+        if (Test-Path (Join-Path $deliveryDir "LindenLeaf-1.2.3-x64-portable.zip")) {
+            $runIdx = 2
+            while (Test-Path (Join-Path $baseDeliveryDir "run$runIdx\windows\LindenLeaf-1.2.3-x64-portable.zip")) {
+                $runIdx++
+            }
+            $deliveryDir = Join-Path $baseDeliveryDir "run$runIdx\windows"
         }
-        $deliveryDir = Join-Path $baseDeliveryDir "run$runIdx\windows"
     }
 }
 if (-not (Test-Path $deliveryDir)) {
@@ -106,26 +119,27 @@ if ($nsisExe) {
     Write-Warning "NSIS installer was not found in $nsisDir"
 }
 
-# (b) MSI Installer (if generated)
-$msiDir = Join-Path $bundleOutputDir "msi"
-$msiFile = $null
-if (Test-Path $msiDir) {
-    $foundMsi = Get-ChildItem -Path $msiDir -Filter "*.msi" | Select-Object -First 1
-    if ($foundMsi) { $msiFile = $foundMsi.FullName }
-}
-if ($msiFile) {
-    $destMsi = Join-Path $deliveryDir (Split-Path -Leaf $msiFile)
-    Copy-Item -Path $msiFile -Destination $destMsi -Force
-    $msiLen = (Get-Item $destMsi).Length
-    Write-Host "Delivered MSI installer: $destMsi ($([math]::Round($msiLen / 1MB, 2)) MB, $msiLen bytes)" -ForegroundColor Green
-}
+if (-not $NsisOnly) {
+    # (b) MSI Installer (if generated)
+    $msiDir = Join-Path $bundleOutputDir "msi"
+    $msiFile = $null
+    if (Test-Path $msiDir) {
+        $foundMsi = Get-ChildItem -Path $msiDir -Filter "*.msi" | Select-Object -First 1
+        if ($foundMsi) { $msiFile = $foundMsi.FullName }
+    }
+    if ($msiFile) {
+        $destMsi = Join-Path $deliveryDir (Split-Path -Leaf $msiFile)
+        Copy-Item -Path $msiFile -Destination $destMsi -Force
+        $msiLen = (Get-Item $destMsi).Length
+        Write-Host "Delivered MSI installer: $destMsi ($([math]::Round($msiLen / 1MB, 2)) MB, $msiLen bytes)" -ForegroundColor Green
+    }
 
-# (c) Portable ZIP distribution
-Write-Host "Creating Portable ZIP package..." -ForegroundColor Cyan
-$portableTemp = Join-Path $env:TEMP ("linden-leaf-portable-" + [System.Guid]::NewGuid().ToString().Substring(0, 8))
-New-Item -ItemType Directory -Path $portableTemp -Force | Out-Null
+    # (c) Portable ZIP distribution
+    Write-Host "Creating Portable ZIP package..." -ForegroundColor Cyan
+    $portableTemp = Join-Path $env:TEMP ("linden-leaf-portable-" + [System.Guid]::NewGuid().ToString().Substring(0, 8))
+    New-Item -ItemType Directory -Path $portableTemp -Force | Out-Null
 
-Copy-Item -Path $releaseExe -Destination (Join-Path $portableTemp "linden-leaf.exe") -Force
+    Copy-Item -Path $releaseExe -Destination (Join-Path $portableTemp "linden-leaf.exe") -Force
 
 # Include resource folder with dictionary metadata
 $portableResources = Join-Path $portableTemp "resources\dictionary"
@@ -158,5 +172,6 @@ Remove-Item -Path $portableTemp -Recurse -Force -ErrorAction SilentlyContinue
 
 $zipLen = (Get-Item $destZip).Length
 Write-Host "Delivered Portable ZIP: $destZip ($([math]::Round($zipLen / 1MB, 2)) MB, $zipLen bytes)" -ForegroundColor Green
+}
 
 Write-Host "=== Windows Release Build Complete ===" -ForegroundColor Green

@@ -255,7 +255,7 @@ async function testFormatAndFilenameDefense() {
     const cardSource = app.slice(app.indexOf('    createBookCard(book,'), app.indexOf('    getDynamicGreeting()'));
     const fakeDocument = { createElement: () => ({ dataset: {}, style: { setProperty() {} }, innerHTML: '' }) };
     const escapeHTML = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const cardMethod = vm.runInNewContext('({' + cardSource + '}).createBookCard', { document: fakeDocument, escapeHTML, tracker: null, resolveReadingState: () => 'unread' });
+    const cardMethod = vm.runInNewContext('({' + cardSource + '}).createBookCard', { document: fakeDocument, escapeHTML, tracker: null, resolveReadingState: () => 'unread', resolveBookTitle: (t, f) => t || f || '' });
 
     // Even if somehow an unescaped tag got past, createBookCard must escape it
     const testBook = { id: 'x', title: 'Test', format: '<script>alert(1)</script>', isCloudOnly: true };

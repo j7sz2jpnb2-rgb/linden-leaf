@@ -151,9 +151,12 @@ const EXTH_RECORD_TYPE = {
     132: ['regionMagnification'],
     201: ['coverOffset', 'uint'],
     202: ['thumbnailOffset', 'uint'],
+    204: ['creatorSoftware'],
     503: ['title'],
     524: ['language', 'string', true],
     527: ['pageProgressionDirection'],
+    528: ['bookType'],
+    529: ['orientationLock'],
 }
 
 const MOBI_LANG = {
@@ -1082,8 +1085,16 @@ class KF8 {
 
         const { exth } = this.mobi.headers
         this.dir = exth.pageProgressionDirection
+        this.isComic = (exth.bookType && exth.bookType.toLowerCase() === 'comic')
+            || exth.bookType === 'comic'
+            || exth.fixedLayout === 'true'
+            || exth.zeroMargin === 'true'
+            || exth.zeroGutter === 'true'
+            || exth.regionMagnification === 'true'
+            || (typeof exth.creatorSoftware === 'string' && exth.creatorSoftware.toLowerCase().includes('comic'))
         this.rendition = {
             layout: exth.fixedLayout === 'true' ? 'pre-paginated' : 'reflowable',
+            isComic: this.isComic,
             viewport: Object.fromEntries(exth.originalResolution
                 ?.split('x')?.slice(0, 2)
                 ?.map((x, i) => [i ? 'height' : 'width', x]) ?? []),

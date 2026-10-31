@@ -23,8 +23,10 @@
 - **拟真翻页**：基于 GPU 加速的圆柱曲面网格算法，支持触摸跟手卷页、反向拖回取消与平滑回弹。
 
 ### 2. 多端同步与数据安全
-- **WebDAV 同步**：支持私有云、坚果云等标准 WebDAV 服务器，双向增量同步阅读进度、笔记划线与书单分类。
-- **系统级凭据保护**：账户密码使用操作系统原生安全机制保护（Windows DPAPI / Android Keystore 加密存储）。
+- **全量有效信息同步 (WebDAV & Local-First)**：双向增量同步阅读进度、**每日各书阅读明细（包含每天具体读了哪几本书、时长与作者，删书或跨设备不丢失书名）**、划线想法、书签、PDF 手绘批注、自定义书单、评分与专属标签、命名阅读预设、自定义语义配色、单书排版覆盖与阅读目标。
+- **自动生成可读 Markdown 总览**：云端同步目录自动维护人类可读的 `LindenLeaf_Reading_Notes_and_Stats.md`，支持通过 Obsidian、Logseq、任意 Markdown 查看器或 WebDAV 网页端直接浏览每日读书明细与笔记。详细协议规范参见 [WebDAV 同步协议规范](docs/WEBDAV_SYNC_SPECIFICATION.md)。
+- **系统级凭据保护与零泄露**：账户密码使用操作系统原生安全机制保护（Windows DPAPI / Android Keystore 加密存储），同步数据包严格脱敏，不携带第三方 API Key。
+- **本地全量灾备备份 (Schema v4)**：支持一键导出/导入单文件全量备份，跨设备灾备恢复 100% 完整无损。
 
 ### 3. 听书与后台播放
 - **Android 前台媒体服务**：接驳系统 MediaSession，支持通知栏/耳机控件双向控制；带会话身份与段完成状态机，锁屏或 WebView 挂起仍可稳定连续播音。
@@ -52,6 +54,10 @@
 
 # 启动开发版预览
 pnpm dev
+
+# 运行自动化语法检查与构建
+node scripts/run-syntax-checks.mjs
+node scripts/build-dist.js
 
 # 构建 Android arm64 安装包 (输出至 D:\LindenLeaf-Deliveries\...)
 powershell -ExecutionPolicy Bypass -File .\scripts\build-android-apk.ps1

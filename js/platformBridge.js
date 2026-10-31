@@ -94,7 +94,6 @@ class PlatformBridge {
         window.addEventListener('unhandledrejection', e => {
             logToServer('UNHANDLED_REJECTION', [e.reason?.stack || e.reason]);
         });
-        setInterval(flush, 400);
         logToServer('SYSTEM', ['PlatformBridge logger initialized in Tauri']);
     }
 
@@ -172,10 +171,14 @@ class PlatformBridge {
      */
     setResourceBudget(budget = {}) {
         const isWin = this.getOS() === 'windows';
+        const isAndroid = this.isAndroid || this.getOS() === 'android';
         this._resourceBudget = {
             maxMemoryMb: budget.maxMemoryMb || (isWin ? 1024 : 384),
             maxCacheMb: budget.maxCacheMb || (isWin ? 512 : 128),
             maxConcurrentTasks: budget.maxConcurrentTasks || (isWin ? 3 : 1),
+            maxConcurrent: budget.maxConcurrent || (isAndroid ? 1 : 2),
+            coverMaxConcurrent: budget.coverMaxConcurrent || 1,
+            isLowMemoryDevice: isAndroid,
             ...budget
         };
         return this._resourceBudget;
@@ -417,14 +420,15 @@ class PlatformBridge {
             try {
                 const items = await this._invokeTauri('dialog_open_file');
                 if (items && items.length > 0) return items;
-                if (!this.isAndroid) return null;
+                // Explicit user cancel returns null immediately, do NOT fallback to web input!
+                return null;
             } catch (err) {
                 console.error('[PlatformBridge] Tauri dialog_open_file failed:', err);
-                if (!this.isAndroid) return null;
+                return null;
             }
         }
 
-        // Web / Fallback file input picker
+        // Web / Fallback file input picker (pass File objects directly without eager arrayBuffer heap preloading)
         return new Promise((resolve) => {
             const input = document.createElement('input');
             input.type = 'file';
@@ -433,22 +437,19 @@ class PlatformBridge {
             input.style.display = 'none';
             document.body.appendChild(input);
 
-            input.onchange = async () => {
+            input.onchange = () => {
                 const files = Array.from(input.files || []);
                 document.body.removeChild(input);
                 if (files.length === 0) {
                     resolve(null);
                     return;
                 }
-                const result = [];
-                for (const f of files) {
-                    const buf = await f.arrayBuffer();
-                    result.push({
-                        filePath: f.name,
-                        filename: f.name,
-                        buffer: buf
-                    });
-                }
+                const result = files.map(f => ({
+                    filePath: f.name,
+                    filename: f.name,
+                    file: f,
+                    size: f.size
+                }));
                 resolve(result);
             };
 
@@ -459,6 +460,44 @@ class PlatformBridge {
 
             input.click();
         });
+    }
+
+    /**
+     * Retrieve Android system window insets (status bar, navigation bar, gesture bar)
+     * @returns {Promise<{ top: number, bottom: number, left: number, right: number }>}
+     */
+    async getSystemInsets() {
+        if (!this.isAndroid) return { top: 0, bottom: 0, left: 0, right: 0 };
+        try {
+            if (this.isTauri) {
+                const res = await this._invokeTauri('android_get_system_insets');
+                if (res) return res;
+            }
+        } catch (e) {
+            console.warn('[PlatformBridge] getSystemInsets warning:', e);
+        }
+        return { top: 0, bottom: 0, left: 0, right: 0 };
+    }
+
+    /**
+     * Synchronize system insets to CSS custom properties on documentElement
+     */
+    async syncSystemInsets() {
+        if (!this.isAndroid) return;
+        const insets = await this.getSystemInsets();
+        if (insets && (insets.top || insets.bottom || insets.left || insets.right)) {
+            const doc = document.documentElement;
+            if (!doc) return;
+            doc.style.setProperty('--safe-area-inset-top', `${insets.top}px`);
+            doc.style.setProperty('--safe-area-inset-bottom', `${insets.bottom}px`);
+            doc.style.setProperty('--safe-area-inset-left', `${insets.left || 0}px`);
+            doc.style.setProperty('--safe-area-inset-right', `${insets.right || 0}px`);
+            doc.style.setProperty('--safe-top', `${insets.top}px`);
+            doc.style.setProperty('--safe-bottom', `${insets.bottom}px`);
+            doc.style.setProperty('--safe-left', `${insets.left || 0}px`);
+            doc.style.setProperty('--safe-right', `${insets.right || 0}px`);
+            doc.style.setProperty('--window-inset-bottom', `${insets.bottom}px`);
+        }
     }
 
     /**
@@ -1151,10 +1190,10 @@ class PlatformBridge {
      * Pause background TTS playback
      * @returns {Promise<boolean>}
      */
-    async pauseBackgroundTts() {
+    async pauseBackgroundTts(options = {}) {
         if (this.isAndroid && this.isTauri) {
             try {
-                return await this._invokeTauri('android_pause_background_tts');
+                return await this._invokeTauri('android_pause_background_tts', { jobId: options.jobId || null });
             } catch (e) {
                 console.warn('[PlatformBridge] pauseBackgroundTts error:', e);
                 return false;
@@ -1167,10 +1206,10 @@ class PlatformBridge {
      * Resume background TTS playback
      * @returns {Promise<boolean>}
      */
-    async resumeBackgroundTts() {
+    async resumeBackgroundTts(options = {}) {
         if (this.isAndroid && this.isTauri) {
             try {
-                return await this._invokeTauri('android_resume_background_tts');
+                return await this._invokeTauri('android_resume_background_tts', { jobId: options.jobId || null });
             } catch (e) {
                 console.warn('[PlatformBridge] resumeBackgroundTts error:', e);
                 return false;
@@ -1183,10 +1222,10 @@ class PlatformBridge {
      * Stop background TTS playback
      * @returns {Promise<boolean>}
      */
-    async stopBackgroundTts() {
+    async stopBackgroundTts(options = {}) {
         if (this.isAndroid && this.isTauri) {
             try {
-                return await this._invokeTauri('android_stop_background_tts');
+                return await this._invokeTauri('android_stop_background_tts', { jobId: options.jobId || null });
             } catch (e) {
                 console.warn('[PlatformBridge] stopBackgroundTts error:', e);
                 return false;
@@ -1199,6 +1238,30 @@ class PlatformBridge {
      * Get background playback state from Android Media Service
      * @returns {Promise<{ isPlaying: boolean, bookTitle: string, text: string }>}
      */
+    async exportBookFile(filePath, filename, share = false) {
+        if (!this.isAndroid || !this.isTauri) throw new Error('当前平台暂不支持此文件导出方式')
+        return this._invokeTauri('android_export_book_file', { filePath, filename, share })
+    }
+
+    async acknowledgeTtsListening(throughSequence) {
+        if (!this.isAndroid || !this.isTauri) return
+        return this._invokeTauri('android_acknowledge_tts_listening', { throughSequence })
+    }
+
+    async requestTtsAudio(endpoint, body, headers = {}, signal) {
+        if (signal?.aborted) throw new DOMException('朗读已停止', 'AbortError')
+        const requestId = `tts_${Date.now()}_${Math.random().toString(36).slice(2)}`
+        const abort = () => this._invokeTauri('tts_cancel_audio', { requestId }).catch(() => {})
+        signal?.addEventListener('abort', abort, { once: true })
+        try {
+            const raw = await this._invokeTauri('tts_request_audio', { requestId, endpoint, body, headers })
+            if (signal?.aborted) throw new DOMException('朗读已停止', 'AbortError')
+            if (raw instanceof ArrayBuffer || ArrayBuffer.isView(raw)) return raw
+            if (Array.isArray(raw)) return new Uint8Array(raw)
+            throw new Error('语音接口未返回音频数据')
+        } finally { signal?.removeEventListener('abort', abort) }
+    }
+
     async getBackgroundPlaybackState() {
         if (this.isAndroid && this.isTauri) {
             try {
@@ -1270,14 +1333,20 @@ class PlatformBridge {
      * @param {string|null} [etag=null]
      * @returns {Promise<{ success: boolean, isConflict?: boolean, etag?: string, error?: string }>}
      */
-    async saveRemoteSyncState(config, data, etag = null) {
+    async saveRemoteSyncState(config, data, etag = null, summaryMarkdown = null) {
         if (this._getNativeElectron()?.syncSaveRemote) {
-            return await this._getNativeElectron().syncSaveRemote(config, data, etag);
+            return await this._getNativeElectron().syncSaveRemote(config, data, etag, summaryMarkdown);
         }
 
         if (this.isTauri) {
             try {
-                const res = await this._invokeTauri('sync_save_remote', { config, data, etag });
+                const res = await this._invokeTauri('sync_save_remote', {
+                    config,
+                    data,
+                    etag,
+                    summaryMarkdown,
+                    summary_markdown: summaryMarkdown
+                });
                 if (res && res.success !== undefined) return res;
             } catch (err) {
                 console.warn('[PlatformBridge] Tauri sync_save_remote failed, trying WebDAVService fallback:', err);
@@ -1285,7 +1354,7 @@ class PlatformBridge {
         }
 
         if (typeof window !== 'undefined' && window.WebDAVService) {
-            return await window.WebDAVService.saveRemoteState({ ...config, data, etag });
+            return await window.WebDAVService.saveRemoteState({ ...config, data, etag, summaryMarkdown });
         }
 
         return { success: false, error: '云同步不可用' };
@@ -1480,12 +1549,36 @@ class PlatformBridge {
                     bookTitle,
                     text,
                     rate: Number(rate) || 1.0,
+                    bookId: options.bookId || null,
                     jobId: options.jobId || null,
                     utteranceId: options.utteranceId || null,
                     generation: options.generation != null ? Number(options.generation) : null
                 });
             } catch (e) {
                 console.warn('[PlatformBridge] startBackgroundTts failed:', e);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    async startBackgroundTtsQueue(bookTitle, segments, startIndex = 0, rate = 1.0, options = {}) {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_start_background_tts_queue', {
+                    bookTitle,
+                    segments: (segments || []).map((s, i) => ({
+                        utteranceId: `${options.jobId || 'job'}:${i}`,
+                        text: s.text || String(s)
+                    })),
+                    startIndex: Number(startIndex) || 0,
+                    rate: Number(rate) || 1.0,
+                    bookId: options.bookId || null,
+                    jobId: options.jobId || null,
+                    generation: options.generation != null ? Number(options.generation) : null
+                });
+            } catch (e) {
+                console.warn('[PlatformBridge] startBackgroundTtsQueue failed:', e);
                 return false;
             }
         }
@@ -1525,6 +1618,28 @@ class PlatformBridge {
         return false;
     }
 
+    async nextBackgroundTts() {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_next_background_tts');
+            } catch (e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    async prevBackgroundTts() {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_prev_background_tts');
+            } catch (e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
     async getBackgroundPlaybackState() {
         if (this.isTauri) {
             try {
@@ -1534,6 +1649,28 @@ class PlatformBridge {
             }
         }
         return { isPlaying: false, state: 'idle', bookTitle: '', text: '' };
+    }
+
+    async setTtsSleepTimer(minutes) {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_set_tts_sleep_timer', { minutes: Number(minutes) || 0 });
+            } catch (e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    async setTtsRate(rate) {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('android_set_tts_rate', { rate: Number(rate) || 1.0 });
+            } catch (e) {
+                return false;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1615,6 +1752,119 @@ class PlatformBridge {
             }
         }
         return { success: false, error: '当前环境不支持分享对话框' };
+    }
+
+    /**
+     * Unified text file export supporting native desktop "Save As" file dialog (Tauri),
+     * Web File System Access API (showSaveFilePicker), and fallback DOM Blob download.
+     * @param {string} filename
+     * @param {string} content
+     * @param {string} [mimeType='text/markdown;charset=utf-8']
+     * @returns {Promise<{ success: boolean, cancelled?: boolean, filePath?: string|null, filename: string, directoryHint?: string, error?: string }>}
+     */
+    async exportTextFile(filename, content, mimeType = 'text/markdown;charset=utf-8') {
+        const cleanFilename = String(filename || 'export.md').replace(/[\\/:*?"<>|]/g, '_').trim();
+        const textContent = String(content ?? '');
+
+        // Branch 1: Tauri Native Desktop Save Dialog (Save As)
+        if (this.isTauri) {
+            try {
+                const savedPath = await this._invokeTauri('dialog_save_text_file', {
+                    defaultName: cleanFilename,
+                    default_name: cleanFilename,
+                    content: textContent,
+                    title: '另存为文件'
+                });
+                if (savedPath) {
+                    return {
+                        success: true,
+                        cancelled: false,
+                        filePath: savedPath,
+                        filename: cleanFilename,
+                        directoryHint: savedPath
+                    };
+                }
+                // User explicitly clicked "Cancel" on native file dialog
+                return {
+                    success: false,
+                    cancelled: true,
+                    filePath: null,
+                    filename: cleanFilename
+                };
+            } catch (tauriErr) {
+                console.warn('[PlatformBridge] Tauri dialog_save_text_file failed, trying fallback:', tauriErr);
+            }
+        }
+
+        // Branch 2: Web File System Access API (e.g. Modern Chromium / Electron showSaveFilePicker)
+        if (typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function') {
+            try {
+                const ext = cleanFilename.split('.').pop() || 'txt';
+                const fileHandle = await window.showSaveFilePicker({
+                    suggestedName: cleanFilename,
+                    types: [{
+                        description: ext.toUpperCase() + ' 文档',
+                        accept: { [mimeType.split(';')[0]]: ['.' + ext] }
+                    }]
+                });
+                const writable = await fileHandle.createWritable();
+                await writable.write(textContent);
+                await writable.close();
+                return {
+                    success: true,
+                    cancelled: false,
+                    filePath: fileHandle.name || cleanFilename,
+                    filename: fileHandle.name || cleanFilename,
+                    directoryHint: '已选择的位置'
+                };
+            } catch (pickerErr) {
+                if (pickerErr?.name === 'AbortError') {
+                    return {
+                        success: false,
+                        cancelled: true,
+                        filePath: null,
+                        filename: cleanFilename
+                    };
+                }
+                console.warn('[PlatformBridge] showSaveFilePicker failed, trying blob download:', pickerErr);
+            }
+        }
+
+        // Branch 3: Fallback DOM Blob download (Browser / Headless CDP)
+        try {
+            const blob = new Blob([textContent], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = cleanFilename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                try {
+                    if (a.parentNode) a.parentNode.removeChild(a);
+                    URL.revokeObjectURL(url);
+                } catch (_) {}
+            }, 1000);
+
+            const directoryHint = this.isAndroid ? '系统【下载】(Download) 目录' : '系统【下载】(Downloads) 文件夹';
+            return {
+                success: true,
+                cancelled: false,
+                filePath: null,
+                filename: cleanFilename,
+                directoryHint
+            };
+        } catch (err) {
+            console.error('[PlatformBridge] exportTextFile error:', err);
+            return {
+                success: false,
+                cancelled: false,
+                filePath: null,
+                filename: cleanFilename,
+                error: err.message || String(err)
+            };
+        }
     }
 
     // ==========================================

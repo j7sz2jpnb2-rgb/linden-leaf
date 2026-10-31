@@ -2147,7 +2147,7 @@ dependencies = [
 
 [[package]]
 name = "linden-leaf"
-version = "2.0.0"
+version = "2.0.17"
 dependencies = [
  "base64 0.22.1",
  "cc",

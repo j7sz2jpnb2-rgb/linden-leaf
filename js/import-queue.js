@@ -5,6 +5,7 @@
 import * as db from './db.js'
 import { platformBridge } from './platformBridge.js'
 import { extractPdfCover } from './pdf-cover.js'
+import { resolveBookTitle } from './book-title.js'
 
 export const findDuplicateBook = (existingBooks, { format, fileName = '', fileObj = {}, metadata = {}, computedStableKey = '' }) => {
     if (!Array.isArray(existingBooks) || existingBooks.length === 0) return null
@@ -135,6 +136,29 @@ export class ImportQueue {
         this._notifyProgress()
         this._scheduleNext()
         return jobIds
+    }
+
+    /**
+     * Enqueue items and await their terminal completion (succeeded, failed, or cancelled)
+     * @param {Array<File | { filePath: string, filename: string }>} items
+     * @returns {Promise<Array<object>>} Completed job objects
+     */
+    enqueueAndWait(items) {
+        const ids = this.enqueue(items)
+        if (!ids || ids.length === 0) return Promise.resolve([])
+        return new Promise(resolve => {
+            const check = () => {
+                const finishedJobs = ids.map(id => this.jobs.get(id)).filter(Boolean)
+                const allFinished = finishedJobs.length === ids.length && finishedJobs.every(j => ['succeeded', 'failed', 'cancelled'].includes(j.status))
+                if (allFinished) {
+                    this._waitCallbacks = (this._waitCallbacks || []).filter(cb => cb !== check)
+                    resolve(finishedJobs)
+                }
+            }
+            if (!this._waitCallbacks) this._waitCallbacks = []
+            this._waitCallbacks.push(check)
+            check()
+        })
     }
 
     /**
@@ -277,6 +301,11 @@ export class ImportQueue {
 
     _notifyJobChange(job) {
         try { this.onJobChange(job) } catch (e) {}
+        if (this._waitCallbacks && this._waitCallbacks.length > 0) {
+            for (const cb of [...this._waitCallbacks]) {
+                try { cb() } catch (_) {}
+            }
+        }
     }
 
     _notifyProgress() {
@@ -378,6 +407,9 @@ export class ImportQueue {
             if (raw instanceof File || raw instanceof Blob) {
                 fileObj = raw
                 job.fileSize = raw.size
+            } else if (raw.file instanceof File || raw.file instanceof Blob) {
+                fileObj = raw.file
+                job.fileSize = raw.file.size
             } else if (raw.buffer) {
                 fileBuffer = raw.buffer
             } else if (raw.filePath) {
@@ -470,9 +502,7 @@ const formatContributor = contributor => {
                         const epub = await new EPUB(loader).init()
                         if (epub?.metadata) {
                             const bookTitle = formatLanguageMap(epub.metadata.title)
-                            if (bookTitle && !['未命名', '未命名书籍', '未命名电子书', 'untitled'].includes(bookTitle.trim().toLowerCase())) {
-                                metadata.title = bookTitle
-                            }
+                            metadata.title = resolveBookTitle(bookTitle, fileName)
                             const bookAuthor = formatContributor(epub.metadata.author)
                             if (bookAuthor && !['未知作者', '未知', 'unknown'].includes(bookAuthor.trim().toLowerCase())) {
                                 metadata.author = bookAuthor
@@ -575,7 +605,8 @@ const formatContributor = contributor => {
 
             let savedBookId = null
 
-            if (match) {
+            if (match && match.isCloudOnly) {
+                // Cloud placeholder download: populate local file content
                 savedBookId = match.id
                 await db.saveBook({
                     id: match.id,
@@ -591,6 +622,7 @@ const formatContributor = contributor => {
                     await db.saveBook({ id: match.id, coverBlob: initialCoverBlob })
                 }
             } else {
+                // Default: Keep both books without silent overwrite to protect existing progress and notes
                 savedBookId = `book_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
                 const stableKey = computedStableKey
                 await db.saveBook({

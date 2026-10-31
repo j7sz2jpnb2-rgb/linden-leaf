@@ -37,7 +37,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // WebDAV / Nutstore Cloud Sync APIs
     syncTestConnection: (config) => ipcRenderer.invoke('sync:testConnection', config),
     syncFetchRemote: (config) => ipcRenderer.invoke('sync:fetchRemote', config),
-    syncSaveRemote: (config, data, etag = null) => ipcRenderer.invoke('sync:saveRemote', { config, data, etag }),
+    syncSaveRemote: (config, data, etag = null, summaryMarkdown = null) => ipcRenderer.invoke('sync:saveRemote', { config, data, etag, summaryMarkdown }),
     syncUploadBookBinary: (config, fileName, buffer) => ipcRenderer.invoke('sync:uploadBookBinary', { config, fileName, buffer }),
     syncDownloadBookBinary: (config, fileName) => ipcRenderer.invoke('sync:downloadBookBinary', { config, fileName }),
     syncDeleteBookBinary: (config, fileName) => ipcRenderer.invoke('sync:deleteBookBinary', { config, fileName }),

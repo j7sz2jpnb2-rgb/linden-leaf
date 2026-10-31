@@ -1,3 +1,5 @@
+import { getAiResponseState } from './ai-response-state.js'
+import { platformBridge } from './platformBridge.js'
 /**
  * ai-sidebar-controller.js - Right AI Reading Sidebar, Context & History Controller
  * AI reading assistant sidebar and conversation history.
@@ -58,7 +60,7 @@ export class AiSidebarController {
         this.cooldownTimer = null
         this.remainingCooldown = 0
         this.resizing = false
-        this.currentWidth = 380
+        this.currentWidth = Number(app?.advancedSettings?.config?.sidebarDefaultWidth) || 380
 
         this.dom = {}
         this.cacheElements()
@@ -224,11 +226,18 @@ export class AiSidebarController {
         this.dom.btnHistoryDeleteConv?.addEventListener('click', () => this.handleHistoryDeleteActive())
 
         // Bookshelf AI History Workspace Actions
-        this.dom.inputAiHistoryPageSearch?.addEventListener('input', () => this.filterWorkspaceHistoryList())
+        this.dom.inputAiHistoryPageSearch?.addEventListener('input', () => {
+            this._workspaceFilterGeneration = (this._workspaceFilterGeneration || 0) + 1
+            clearTimeout(this._workspaceSearchTimer)
+            this._workspaceSearchTimer = setTimeout(() => this.filterWorkspaceHistoryList(), 180)
+        })
         this.dom.btnClearAllAiHistoryPage?.addEventListener('click', () => this.handleClearAllHistory(true))
         this.dom.btnHistoryPageJumpBook?.addEventListener('click', () => this.handleHistoryJumpToBook(this._selectedWorkspaceConvId))
         this.dom.btnHistoryPageExportMd?.addEventListener('click', () => this.handleHistoryExportMarkdown(this._selectedWorkspaceConvId))
         this.dom.btnHistoryPageDeleteConv?.addEventListener('click', () => this.handleHistoryDeleteActive(this._selectedWorkspaceConvId, true))
+        document.getElementById('btn-history-page-mobile-back')?.addEventListener('click', () => {
+            document.querySelector('.ai-history-split-pane')?.classList.remove('show-detail')
+        })
 
         // Audit Log Modal
         this.dom.btnCloseAiAudit?.addEventListener('click', () => this.closeAuditModal())
@@ -364,11 +373,27 @@ export class AiSidebarController {
                         this.app.foliateView.renderer.setAnchor(anchor.range, true)
                     }
                 }
-                await this.app.foliateView.goTo(anchor.cfi)
+                try {
+                    await this.app.foliateView.goTo(anchor.cfi)
+                } finally {
+                    if (typeof this.app.foliateView.renderer?.clearLockedAnchor === 'function') {
+                        this.app.foliateView.renderer.clearLockedAnchor()
+                    } else if (typeof this.app.foliateView.renderer?.setAnchor === 'function') {
+                        this.app.foliateView.renderer.setAnchor(null, false)
+                    }
+                }
                 return
             }
             if (anchor.range && this.app?.foliateView?.renderer?.scrollToAnchor) {
-                await this.app.foliateView.renderer.scrollToAnchor(anchor.range)
+                try {
+                    await this.app.foliateView.renderer.scrollToAnchor(anchor.range)
+                } finally {
+                    if (typeof this.app.foliateView.renderer?.clearLockedAnchor === 'function') {
+                        this.app.foliateView.renderer.clearLockedAnchor()
+                    } else if (typeof this.app.foliateView.renderer?.setAnchor === 'function') {
+                        this.app.foliateView.renderer.setAnchor(null, false)
+                    }
+                }
                 return
             }
             if (anchor.pageIndex != null) {
@@ -921,7 +946,7 @@ export class AiSidebarController {
             // Finalize message on success
             const wasCutOff = finishReason === 'length' || finishReason === 'max_tokens'
             assistantMsg.content = resultText
-            assistantMsg.status = response?.status === 'cancelled' ? 'cancelled' : (wasCutOff ? 'partial' : 'completed')
+            assistantMsg.status = getAiResponseState(response)
             assistantMsg.finishReason = finishReason || null
             assistantMsg.usage = response?.usage || null
             await saveAiMessage(assistantMsg)
@@ -931,13 +956,14 @@ export class AiSidebarController {
             }
             if (metaDiv) {
                 const usageLabel = assistantMsg.usage?.total_tokens ? ` · ${assistantMsg.usage.total_tokens} tokens` : ' · Token: 未知'
-                const stateText = assistantMsg.status === 'cancelled' ? '已停止' : (wasCutOff ? '回答未完：达到模型输出上限' : '生成完成')
-                const continueAction = wasCutOff ? '<button type="button" class="ai-msg-action-btn btn-msg-continue" title="先检查草稿，再手动发送继续请求">继续回答</button>' : ''
+                const isPartial = assistantMsg.status === 'partial'
+                const stateText = assistantMsg.status === 'cancelled' ? '已停止' : isPartial ? (wasCutOff ? '回答未完：达到模型输出上限' : '回答未完：连接中断') : assistantMsg.status === 'failed' ? '请求失败，已保留返回内容' : '生成完成'
+                const continueAction = (isPartial || assistantMsg.status === 'failed') && resultText.trim() ? '<button type="button" class="ai-msg-action-btn btn-msg-continue" title="先检查草稿，再手动发送继续请求">继续回答</button>' : ''
                 const saveAction = assistantMsg.status === 'completed' ? '<button type="button" class="ai-msg-action-btn btn-msg-save-note" title="保存为划线批注">保存为笔记</button>' : ''
                 metaDiv.innerHTML = `<span>${stateText}${usageLabel}</span><div class="ai-msg-actions"><button type="button" class="ai-msg-action-btn btn-msg-copy" title="复制回答">复制</button>${saveAction}${continueAction}</div>`
                 this.bindMessageActionButtons(msgElement, assistantMsg)
             }
-            if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = wasCutOff ? '回答未完，可继续' : (assistantMsg.status === 'cancelled' ? '已停止' : '生成完成')
+            if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = assistantMsg.status === 'partial' ? '回答未完，可继续' : assistantMsg.status === 'cancelled' ? '已停止' : assistantMsg.status === 'failed' ? '请求失败' : '生成完成'
         } catch (err) {
             const errStr = err?.message || String(err)
             const hasPartialAnswer = Boolean(assistantMsg.content?.trim())
@@ -1303,14 +1329,14 @@ export class AiSidebarController {
         if (!this.dom.modalAiPresets) return
         this.renderPresetsManagerList()
         this.dom.modalAiPresets.style.display = 'flex'
-        requestAnimationFrame(() => this.dom.modalAiPresets.classList.add('show'))
+        this.dom.modalAiPresets.classList.add('show')
     }
 
     closePresetsModal() {
         if (!this.dom.modalAiPresets) return
         this.dom.modalAiPresets.classList.remove('show')
         setTimeout(() => {
-            this.dom.modalAiPresets.style.display = 'none'
+            if (!this.dom.modalAiPresets.classList.contains('show')) this.dom.modalAiPresets.style.display = 'none'
             this.renderQuickPresets()
         }, 200)
     }
@@ -1443,14 +1469,14 @@ export class AiSidebarController {
         }
 
         this.dom.modalAiReplacePreset.style.display = 'flex'
-        requestAnimationFrame(() => this.dom.modalAiReplacePreset.classList.add('show'))
+        this.dom.modalAiReplacePreset.classList.add('show')
     }
 
     closeReplacePresetModal() {
         if (!this.dom.modalAiReplacePreset) return
         this.dom.modalAiReplacePreset.classList.remove('show')
         setTimeout(() => {
-            this.dom.modalAiReplacePreset.style.display = 'none'
+            if (!this.dom.modalAiReplacePreset.classList.contains('show')) this.dom.modalAiReplacePreset.style.display = 'none'
         }, 200)
     }
 
@@ -1461,7 +1487,7 @@ export class AiSidebarController {
     async openHistoryModal() {
         if (!this.dom.modalAiHistory) return
         this.dom.modalAiHistory.style.display = 'flex'
-        requestAnimationFrame(() => this.dom.modalAiHistory.classList.add('show'))
+        this.dom.modalAiHistory.classList.add('show')
 
         await this.loadAllHistoryConversations()
     }
@@ -1470,7 +1496,7 @@ export class AiSidebarController {
         if (!this.dom.modalAiHistory) return
         this.dom.modalAiHistory.classList.remove('show')
         setTimeout(() => {
-            this.dom.modalAiHistory.style.display = 'none'
+            if (!this.dom.modalAiHistory.classList.contains('show')) this.dom.modalAiHistory.style.display = 'none'
         }, 200)
     }
 
@@ -1651,14 +1677,20 @@ export class AiSidebarController {
         })
 
         // Download markdown file
-        const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `AI阅读记录_${(conv.title || 'conversation').replace(/[\\/:*?"<>|]/g, '_')}.md`
-        a.click()
-        URL.revokeObjectURL(url)
-        this.app?.showToast?.('已导出 Markdown 文件', 'success')
+        const filename = `AI阅读记录_${(conv.title || 'conversation').replace(/[\\/:*?"<>|]/g, '_')}.md`
+        const res = await platformBridge.exportTextFile(filename, md, 'text/markdown;charset=utf-8')
+        if (res?.cancelled) {
+            return
+        }
+        if (res.success) {
+            if (res.filePath) {
+                this.app?.showToast?.(`已导出至：${res.filePath}`, 'success', 4500)
+            } else {
+                this.app?.showToast?.(`AI 对话记录已导出至${res.directoryHint}：${res.filename}`, 'success', 4500)
+            }
+        } else {
+            this.app?.showToast?.(`导出失败: ${res.error || '未知错误'}`, 'warning')
+        }
     }
 
     async handleHistoryDeleteActive(convId, isWorkspace = false) {
@@ -1743,6 +1775,7 @@ export class AiSidebarController {
     }
 
     async filterWorkspaceHistoryList() {
+        const generation = this._workspaceFilterGeneration = (this._workspaceFilterGeneration || 0) + 1
         const query = (this.dom.inputAiHistoryPageSearch?.value || '').trim().toLowerCase()
         if (!this._cachedWorkspaceList) return
 
@@ -1760,22 +1793,20 @@ export class AiSidebarController {
         })
 
         // Also search in message content and quote text
-        const deepSearchPromises = this._cachedWorkspaceList
-            .filter(c => !directMatches.has(c.id))
-            .map(async conv => {
+        const candidates = this._cachedWorkspaceList.filter(c => !directMatches.has(c.id))
+        const deepMatches = []
+        for (let i = 0; i < candidates.length; i += 4) {
+            if (generation !== this._workspaceFilterGeneration) return
+            const matches = await Promise.all(candidates.slice(i, i + 4).map(async conv => {
                 try {
                     const msgs = await getAiMessages(conv.id)
-                    const hasMatch = msgs.some(m =>
-                        (m.content || '').toLowerCase().includes(query) ||
-                        (m.quoteText || '').toLowerCase().includes(query)
-                    )
-                    return hasMatch ? conv : null
-                } catch {
-                    return null
-                }
-            })
-
-        const deepMatches = (await Promise.all(deepSearchPromises)).filter(Boolean)
+                    return msgs.some(m => (m.content || '').toLowerCase().includes(query) ||
+                        (m.quoteText || '').toLowerCase().includes(query)) ? conv : null
+                } catch { return null }
+            }))
+            deepMatches.push(...matches.filter(Boolean))
+        }
+        if (generation !== this._workspaceFilterGeneration) return
         const combined = [...filtered, ...deepMatches]
         this.renderWorkspaceConversationsList(combined)
     }
@@ -1829,6 +1860,7 @@ export class AiSidebarController {
         cards?.forEach(c => {
             c.classList.toggle('active', c.dataset.convId === convId)
         })
+        document.querySelector('.ai-history-split-pane')?.classList.add('show-detail')
 
         const msgs = await getAiMessages(convId)
         if (generation !== this._selectWorkspaceConvGeneration) return
@@ -1914,7 +1946,7 @@ export class AiSidebarController {
     async openAuditModal() {
         if (!this.dom.modalAiAudit) return
         this.dom.modalAiAudit.style.display = 'flex'
-        requestAnimationFrame(() => this.dom.modalAiAudit.classList.add('show'))
+        this.dom.modalAiAudit.classList.add('show')
 
         const entries = await getAiAuditLog(100)
         this.renderAuditTable(entries)
@@ -1924,7 +1956,7 @@ export class AiSidebarController {
         if (!this.dom.modalAiAudit) return
         this.dom.modalAiAudit.classList.remove('show')
         setTimeout(() => {
-            this.dom.modalAiAudit.style.display = 'none'
+            if (!this.dom.modalAiAudit.classList.contains('show')) this.dom.modalAiAudit.style.display = 'none'
         }, 200)
     }
 
@@ -1940,15 +1972,18 @@ export class AiSidebarController {
         let rows = ''
         entries.forEach(e => {
             const time = e.timestamp ? e.timestamp.replace('T', ' ').replace('Z', '') : ''
-            const statusColor = e.status === 'completed' ? '#10b981' : (e.status === 'cancelled' ? '#f59e0b' : '#ef4444')
-            const totalTok = e.totalTokens !== null && e.totalTokens !== undefined ? `${e.totalTokens}` : '<span style="color: var(--text-muted);">未知</span>'
+            const localWait = e.status === 'cooldown_blocked' || e.status === 'concurrency_blocked'
+            const statusLabels = { completed: '已完成', partial: '回答未完成', cancelled: '已停止', failed: '请求失败', cooldown_blocked: '等待间隔（未发送）', concurrency_blocked: '等待其他请求（未发送）' }
+            const statusLabel = statusLabels[e.status] || e.status || '未知'
+            const statusColor = e.status === 'completed' ? '#10b981' : ((e.status === 'cancelled' || localWait) ? '#b98a3a' : '#ef4444')
+            const totalTok = localWait ? '未发送' : (e.totalTokens !== null && e.totalTokens !== undefined ? `${e.totalTokens}` : '<span style="color: var(--text-muted);">未知</span>')
 
             rows += `
                 <tr>
                     <td style="white-space: nowrap;">${time}</td>
                     <td>${escapeUntrustedHtml(e.model || '-')}</td>
                     <td>${escapeUntrustedHtml(e.endpointHost || '-')}</td>
-                    <td style="color: ${statusColor}; font-weight: 600;">${e.status}</td>
+                    <td style="color: ${statusColor}; font-weight: 600;" title="${escapeUntrustedHtml(e.errorMessage || '')}">${escapeUntrustedHtml(statusLabel)}</td>
                     <td>${totalTok}</td>
                     <td>${e.durationMs}ms</td>
                 </tr>

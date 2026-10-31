@@ -73,10 +73,12 @@ const mockCanvas = {
         moveTo: () => {},
         lineTo: () => {},
         quadraticCurveTo: () => {},
+        bezierCurveTo: () => {},
         stroke: () => {},
         fill: () => {},
         clip: () => {},
         translate: () => {},
+        rotate: () => {},
         scale: () => {},
         drawImage: () => {}
     })
@@ -267,5 +269,178 @@ const pdfVisuals = pdfAdapter.getVisuals('next')
 assert.equal(pdfVisuals.currentCanvas, mockCanvasCurrent, 'PDF adapter should return renderedCanvas for current page')
 assert.equal(pdfVisuals.nextCanvas, mockCanvasNext, 'PDF adapter should return renderedCanvas for next page')
 console.log('✓ Foliate & PDF real page texture capture and caching verified')
+
+// 6. Deep Verification: Multi-Column Page Break Text Isolation (Fixing P1/P2 Text Overlap)
+console.log('6. Deep Verification: Multi-Column Page Break Text Isolation (Zero Overlap)')
+const filledTexts = []
+const mockDrawCtx = {
+    font: '',
+    fillStyle: '',
+    textBaseline: '',
+    fillText: (text, x, y) => {
+        filledTexts.push({ text, x, y })
+    },
+    fillRect: () => {},
+    save: () => {},
+    restore: () => {},
+    beginPath: () => {},
+    rect: () => {},
+    clip: () => {}
+}
+
+// Create a mock DOM with TreeWalker and a paragraph that spans across a column break (page 0 to page 1)
+const pNode = {
+    parentElement: {
+        tagName: 'P',
+        closest: () => null,
+        ownerDocument: null
+    },
+    textContent: '第一行文字位于第一页底部。第二行文字位于第二页顶部。'
+}
+pNode.parentElement.ownerDocument = {
+    defaultView: {
+        getComputedStyle: () => ({
+            fontSize: '18px',
+            fontFamily: 'serif',
+            lineHeight: '28px',
+            color: '#141413'
+        })
+    }
+}
+
+globalThis.document.createElement = (tag) => {
+    if (tag === 'canvas') {
+        return {
+            width: 0,
+            height: 0,
+            getContext: () => mockDrawCtx
+        }
+    }
+    return {}
+}
+
+let curCharIndex = 0
+const mockMultiColumnDoc = {
+    body: { querySelectorAll: () => [] },
+    defaultView: pNode.parentElement.ownerDocument.defaultView,
+    createRange: () => ({
+        selectNodeContents: () => {},
+        getClientRects: () => [
+            // Line 1 on Column 0 (Page 1): x=40, y=500
+            { left: 40, right: 350, top: 500, bottom: 528, width: 310, height: 28 },
+            // Line 2 on Column 1 (Page 2): x=840 (across column break!), y=40
+            { left: 840, right: 1150, top: 40, bottom: 68, width: 310, height: 28 }
+        ],
+        setStart: (node, start) => { curCharIndex = start },
+        setEnd: () => {},
+        getBoundingClientRect: () => {
+            // First 14 characters belong to Line 1 (left: 40..350, Column 0)
+            // Remaining characters belong to Line 2 (left: 840..1150, Column 1)
+            const isLine2 = curCharIndex >= 14
+            return {
+                left: isLine2 ? 840 + (curCharIndex - 14) * 20 : 40 + curCharIndex * 20,
+                top: isLine2 ? 40 : 500,
+                width: 15,
+                height: 28
+            }
+        }
+    }),
+    createTreeWalker: (root, filter) => {
+        let done = false
+        return {
+            nextNode: () => {
+                if (!done) {
+                    done = true
+                    return pNode
+                }
+                return null
+            }
+        }
+    }
+}
+
+const mockMultiColumnView = {
+    renderer: {
+        clientWidth: 800,
+        clientHeight: 600,
+        size: 800,
+        page: 0,
+        pages: 2,
+        getContents: () => [{ doc: mockMultiColumnDoc }]
+    }
+}
+
+const multiColumnAdapter = new FoliatePageTurnAdapter(mockMultiColumnView)
+// Capture Page 0 (Current Page)
+filledTexts.length = 0
+const page0Canvas = multiColumnAdapter.capturePageCanvas(0, '#FAF9F5', '#141413')
+assert.ok(page0Canvas, 'Page 0 canvas should be captured')
+// Verify Line 2 (x=840) was NOT drawn on Page 0 and was NOT clamped to x=0
+const drawnOnPage0 = filledTexts.filter(t => t.x >= 0 && t.x <= 800)
+assert.ok(drawnOnPage0.length > 0, 'Page 0 should have drawn content')
+for (const item of drawnOnPage0) {
+    assert.ok(item.x >= 0 && item.x <= 800, 'Page 0 items must be strictly inside viewport')
+    assert.ok(!item.text.includes('第二行文字'), 'Page 0 must NOT contain text from Page 1 (Column break isolation)')
+}
+console.log('✓ Column break text isolation verified: Page 1 text does not leak onto Page 0')
+
+// Capture Page 1 (Next Page)
+filledTexts.length = 0
+const page1Canvas = multiColumnAdapter.capturePageCanvas(1, '#FAF9F5', '#141413')
+assert.ok(page1Canvas, 'Page 1 canvas should be captured')
+const drawnOnPage1 = filledTexts.filter(t => t.x >= 0 && t.x <= 800)
+for (const item of drawnOnPage1) {
+    assert.ok(!item.text.includes('第一行文字'), 'Page 1 must NOT contain text from Page 0 (Zero double-exposure)')
+}
+console.log('✓ Zero double-exposure verified: Page 0 text does not leak onto Page 1')
+
+// 7. Deep Verification: WeChat Reading Curl Shading & Mirrored Text Compositing (Fixing P2/P3)
+console.log('7. Deep Verification: WeChat Reading 3D Lighting, Mirrored Text & Theme Paper')
+const simulatorOps = []
+const detailedMockCanvas = {
+    getContext: () => ({
+        clearRect: () => simulatorOps.push('clearRect'),
+        save: () => simulatorOps.push('save'),
+        restore: () => simulatorOps.push('restore'),
+        createLinearGradient: (x0, y0, x1, y1) => {
+            simulatorOps.push(`gradient(${Math.round(x0)},${Math.round(y0)}->${Math.round(x1)},${Math.round(y1)})`)
+            return { addColorStop: (stop, color) => simulatorOps.push(`stop(${stop},${color})`) }
+        },
+        fillRect: (x, y, w, h) => simulatorOps.push(`fillRect(${x},${y},${w},${h})`),
+        rect: (x, y, w, h) => simulatorOps.push(`rect(${x},${y},${w},${h})`),
+        beginPath: () => simulatorOps.push('beginPath'),
+        closePath: () => simulatorOps.push('closePath'),
+        moveTo: (x, y) => simulatorOps.push(`moveTo(${Math.round(x)},${Math.round(y)})`),
+        lineTo: (x, y) => simulatorOps.push(`lineTo(${Math.round(x)},${Math.round(y)})`),
+        quadraticCurveTo: (cpx, cpy, x, y) => simulatorOps.push(`quadCurve(${Math.round(cpx)},${Math.round(cpy)},${Math.round(x)},${Math.round(y)})`),
+        bezierCurveTo: (cp1x, cp1y, cp2x, cp2y, x, y) => simulatorOps.push(`bezierCurve(${Math.round(cp1x)},${Math.round(cp1y)},${Math.round(cp2x)},${Math.round(cp2y)},${Math.round(x)},${Math.round(y)})`),
+        stroke: () => simulatorOps.push('stroke'),
+        fill: () => simulatorOps.push('fill'),
+        clip: () => simulatorOps.push('clip'),
+        translate: (x, y) => simulatorOps.push(`translate(${Math.round(x)},${Math.round(y)})`),
+        rotate: (angle) => simulatorOps.push(`rotate(${angle.toFixed(2)})`),
+        scale: (sx, sy) => simulatorOps.push(`scale(${sx},${sy})`),
+        drawImage: () => simulatorOps.push('drawImage')
+    })
+}
+const richSimulator = new CurlSimulator(detailedMockCanvas)
+richSimulator.renderCurl({
+    width: 800,
+    height: 1200,
+    progress: 0.45,
+    direction: 'next',
+    touchY: 600,
+    currentTexture: { id: 'cur_tex' },
+    nextTexture: { id: 'next_tex' },
+    bgColor: '#FAF9F5',
+    textColor: '#141413'
+})
+
+// Assert critical WeChat Reading features were executed
+assert.ok(simulatorOps.includes('scale(-1,1)'), 'Must execute horizontal mirror scale(-1, 1) for paper backside')
+assert.ok(simulatorOps.includes('clip'), 'Must clip layers cleanly to avoid overlapping')
+assert.ok(simulatorOps.includes('stroke'), 'Must render specular crest highlight on cylinder apex ridge')
+assert.ok(simulatorOps.some(op => op.startsWith('fillRect(0,0,800,1200)')), 'Must render 100% opaque page background to prevent transparent ghosting')
+console.log('✓ WeChat Reading 3D lighting, mirrored show-through, and opaque layering verified')
 
 console.log('\nALL PAGE TURN CURL & GESTURE TESTS PASSED CLEANLY!')

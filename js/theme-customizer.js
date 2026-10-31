@@ -17,7 +17,7 @@ export const DEFAULT_SEMANTIC_PALETTE = Object.freeze({
     accent: '#d97706',          // 强调色 / 按钮
     readerBg: '#fbf0d9',        // 阅读纸张背景
     readerText: '#2b2319',      // 阅读正文文字
-    selectionBg: 'rgba(217, 119, 6, 0.22)' // 划词选中高亮
+    selectionBg: '#fde68a' // 划词选中高亮
 })
 
 export class ThemeCustomizer {

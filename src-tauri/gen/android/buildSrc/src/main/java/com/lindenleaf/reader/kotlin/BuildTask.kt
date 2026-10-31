@@ -43,6 +43,13 @@ open class BuildTask : DefaultTask() {
         val cargoTargetDir = System.getenv("CARGO_TARGET_DIR") ?: "D:/LindenLeaf-Build/target"
         val sourceFile = File(cargoTargetDir, "$rustTriple/$mode/liblinden_leaf_lib.so")
 
+        if (System.getenv("LINDEN_EXPLICIT_PRESTAGED_SO") == "1") {
+            if (!destFile.isFile || destFile.length() == 0L)
+                throw GradleException("The active build pipeline did not stage a native library")
+            println("[BuildTask] Using native library staged by this build: " + destFile)
+            return
+        }
+
         // 1. Try running Tauri CLI with proper target and mode
         val candidates = mutableListOf("pnpm")
         if (Os.isFamily(Os.FAMILY_WINDOWS)) {

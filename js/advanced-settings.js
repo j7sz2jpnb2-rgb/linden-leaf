@@ -14,7 +14,7 @@
  * Advanced reader and AI settings.
  */
 
-import { setCustomTxtPatterns } from '../foliate-js-main/txt.js'
+import { setCustomTxtPatterns, setTxtMergeSoftBreaks } from '../foliate-js-main/txt.js'
 import { getChapterTranslationsStats, clearAllChapterTranslations } from './db.js'
 import * as db from './db.js'
 import { runTxtRulesWorker } from './txt-toc-worker.js'
@@ -32,7 +32,7 @@ export const DEFAULT_ADVANCED_SETTINGS = Object.freeze({
     aiContextTokenBudget: 1000,          // 0 to 10000 tokens (0 = no extra context, 10000 = hard ceiling)
     inPlaceParagraphTranslation: false,  // Enable in-place paragraph translation card
     modelTokenizer: 'auto',              // 'auto' | 'cl100k_base' | 'gpt2' | 'cjk_heuristic'
-    aiMaxTokens: 2048,                   // 256 to 8192 tokens
+    aiMaxTokens: 2048,                   // 256 to 20000 tokens
     aiCooldownSeconds: 10,               // 0 to 3600 seconds (0 truly active)
     aiDailyLimit: 0,                     // 0 = unlimited / unconfigured
     dictSaveHistory: false,              // Save local dictionary lookups
@@ -71,6 +71,10 @@ export const DEFAULT_ADVANCED_SETTINGS = Object.freeze({
     ttsProvider: 'system',
     ttsRate: 1.0,
     ttsVoiceId: '',
+    ttsSystemVoiceId: '',
+    ttsApiVoiceId: 'nova',
+    ttsOfflineVoiceId: 'zf_xiaobei',
+    ttsApiNoAuth: false,
     ttsApiEndpoint: 'https://api.openai.com/v1/audio/speech',
     ttsApiKeyConfigured: false,
     ttsApiModel: 'tts-1',
@@ -78,13 +82,32 @@ export const DEFAULT_ADVANCED_SETTINGS = Object.freeze({
     ttsOfflineModel: 'kokoro-82m-zh'
 })
 
+export function sanitizeAdvancedSettings(incoming = {}) {
+    const result = { ...DEFAULT_ADVANCED_SETTINGS }
+    for (const [key, value] of Object.entries(incoming)) {
+        if (!Object.hasOwn(result, key)) continue
+        const type = typeof result[key]
+        if (type === 'boolean' && typeof value === 'boolean') result[key] = value
+        if (type === 'number' && typeof value === 'number' && Number.isFinite(value)) result[key] = value
+        if (type === 'string' && typeof value === 'string') result[key] = value.trim().slice(0, 1000)
+    }
+    const bounds = { aiContextTokenBudget: [0, 10000], aiMaxTokens: [256, 20000], aiCooldownSeconds: [0, 3600], aiDailyLimit: [0, 100000],
+        paraMarginTop: [0, 3], paraMarginBottom: [0, 3], sidebarDefaultWidth: [320, 640], dictLookupDelay: [100, 600],
+        highlighterOpacity: [0.15, 0.75], underlineWidth: [0.5, 5], pdfPenWidth: [0.5, 10], bgIndexConcurrency: [1, 4], ttsRate: [0.5, 3] }
+    for (const [key, [min, max]] of Object.entries(bounds)) result[key] = Math.max(min, Math.min(max, result[key]))
+    const enums = { ttsProvider: ['system', 'api', 'offline'], chapterTransStyle: ['auto', 'literal', 'literary', 'academic'],
+        animIntensity: ['none', 'soft', 'normal'], modelTokenizer: ['auto', 'cl100k_base', 'gpt2', 'cjk_heuristic'], paraIndentSize: ['0', '0em', '1em', '2em', '3em'] }
+    for (const [key, allowed] of Object.entries(enums)) if (!allowed.includes(result[key])) result[key] = DEFAULT_ADVANCED_SETTINGS[key]
+    return result
+}
+
 const STORAGE_KEY_UNLOCKED = 'linden_advanced_settings_unlocked'
 const STORAGE_KEY_CONFIG = 'linden_advanced_settings_config'
 
 export class AdvancedSettingsManager {
     constructor(app = null) {
         this.app = app
-        this.isUnlocked = false
+        this.isUnlocked = true
         this.config = { ...DEFAULT_ADVANCED_SETTINGS }
         this._sessionTtsApiKey = ''
 
@@ -99,7 +122,7 @@ export class AdvancedSettingsManager {
 
     load() {
         try {
-            this.isUnlocked = localStorage.getItem(STORAGE_KEY_UNLOCKED) === 'true'
+            this.isUnlocked = true
             const saved = localStorage.getItem(STORAGE_KEY_CONFIG)
             if (saved) {
                 const parsed = JSON.parse(saved)
@@ -108,16 +131,16 @@ export class AdvancedSettingsManager {
                     this._migrateLegacyTtsKey(parsed.ttsApiKey)
                     delete parsed.ttsApiKey
                 }
-                this.config = {
-                    ...DEFAULT_ADVANCED_SETTINGS,
-                    ...parsed
-                }
+                this.config = sanitizeAdvancedSettings(parsed)
+                const legacyVoice = parsed.ttsVoiceId
+                if (legacyVoice && !Object.hasOwn(parsed, 'ttsApiVoiceId') && parsed.ttsProvider === 'api') this.config.ttsApiVoiceId = legacyVoice
+                if (legacyVoice && !Object.hasOwn(parsed, 'ttsOfflineVoiceId') && parsed.ttsProvider === 'offline') this.config.ttsOfflineVoiceId = legacyVoice
                 delete this.config.ttsApiKey
 
                 // Enforce budget bounds [0, 10000] (0 is a valid budget that disables extra context)
                 const rawBudget = Number(this.config.aiContextTokenBudget)
                 this.config.aiContextTokenBudget = Number.isFinite(rawBudget) ? Math.max(0, Math.min(10000, rawBudget)) : 1000
-                this.config.aiMaxTokens = Math.max(256, Math.min(8192, Number(this.config.aiMaxTokens) || 2048))
+                this.config.aiMaxTokens = Math.max(256, Math.min(20000, Number(this.config.aiMaxTokens) || 2048))
                 const rawCd = Number(this.config.aiCooldownSeconds)
                 this.config.aiCooldownSeconds = Number.isFinite(rawCd) ? Math.max(0, Math.min(3600, rawCd)) : 10
                 this.config.aiDailyLimit = Math.max(0, Number(this.config.aiDailyLimit) || 0)
@@ -169,6 +192,9 @@ export class AdvancedSettingsManager {
     }
 
     applyRuntimeConfig() {
+        setTxtMergeSoftBreaks(this.config.txtMergeSoftBreaks !== false)
+        try { localStorage.setItem('linden_sync_chapter_translations', String(!!this.config.webdavSyncTranslations)) } catch (_) {}
+        if (typeof ttsPlayer !== 'undefined') ttsPlayer.loadSettings?.(this.config)
         try {
             // 1. Reduced motion
             document.documentElement.dataset.reducedMotion = String(!!this.config.reducedMotion)
@@ -212,11 +238,22 @@ export class AdvancedSettingsManager {
                 setCustomTxtPatterns(null)
             }
 
-            // 6. Sync TTS configuration
-            if (typeof ttsPlayer !== 'undefined' && ttsPlayer?.loadSettings) {
-                ttsPlayer.loadSettings(this.config)
+            const width = Math.max(320, Math.min(640, Number(this.config.sidebarDefaultWidth) || 380))
+            if (this._appliedSidebarWidth !== width) {
+                this._appliedSidebarWidth = width
+                const sidebar = this.app?.aiSidebar
+                const anchor = sidebar?.captureCurrentReadingAnchor?.()
+                document.documentElement.style.setProperty('--ai-sidebar-width', `${width}px`)
+                if (sidebar) { sidebar.currentWidth = width; if (sidebar.isOpen) sidebar.relayoutReader(anchor).catch(() => {}) }
             }
+            this.app?.refreshTtsVoiceOptions?.()
         } catch (e) {}
+    }
+
+    applyReaderParameters() {
+        for (const key of ['firstParaIndent', 'paraMarginTop', 'paraMarginBottom', 'paraIndentSize']) this.app?.setSetting?.(key, this.config[key])
+        this.app?.saveSettingsDebounced?.()
+        this.app?.applySettingsToReader?.()
     }
 
     async syncNativeBackendLimits() {
@@ -250,13 +287,13 @@ export class AdvancedSettingsManager {
         const d = this.dom
 
         if (d.badgeAdvancedStatus) {
-            d.badgeAdvancedStatus.innerText = this.isUnlocked ? '已解锁' : '未解锁'
+            d.badgeAdvancedStatus.innerText = this.isUnlocked ? '已展开' : '可展开'
             d.badgeAdvancedStatus.style.background = this.isUnlocked ? 'rgba(74, 222, 128, 0.15)' : 'var(--bg-tertiary)'
             d.badgeAdvancedStatus.style.color = this.isUnlocked ? '#16a34a' : 'var(--text-muted)'
         }
 
         if (d.hintAdvancedTrigger) {
-            d.hintAdvancedTrigger.innerText = this.isUnlocked ? '点击折叠/展开' : '连续点击3次解锁'
+            d.hintAdvancedTrigger.innerText = this.isUnlocked ? '点击折叠/展开' : '点击展开'
         }
 
         if (d.advancedSettingsContainer) {
@@ -312,11 +349,11 @@ export class AdvancedSettingsManager {
         const paraTop = document.getElementById('setting-para-margin-top')
         if (paraTop) paraTop.value = String(effTypography.paraMarginTop ?? 0.0)
         const paraTopVal = document.getElementById('value-para-margin-top')
-        if (paraTopVal) paraTopVal.innerText = `${Number(effTypography.paraMarginTop ?? 0.0).toFixed(1)}em`
+        if (paraTopVal) paraTopVal.innerText = `${Number(effTypography.paraMarginTop ?? 0.0).toFixed(2)}em`
         const paraBottom = document.getElementById('setting-para-margin-bottom')
         if (paraBottom) paraBottom.value = String(effTypography.paraMarginBottom ?? 0.5)
         const paraBottomVal = document.getElementById('value-para-margin-bottom')
-        if (paraBottomVal) paraBottomVal.innerText = `${Number(effTypography.paraMarginBottom ?? 0.5).toFixed(1)}em`
+        if (paraBottomVal) paraBottomVal.innerText = `${Number(effTypography.paraMarginBottom ?? 0.5).toFixed(2)}em`
         const indentSize = document.getElementById('setting-para-indent-size')
         if (indentSize) indentSize.value = effTypography.paraIndentSize || '2em'
 
@@ -379,7 +416,29 @@ export class AdvancedSettingsManager {
         const ttsApiMod = document.getElementById('setting-tts-api-model')
         if (ttsApiMod) ttsApiMod.value = this.config.ttsApiModel || 'tts-1'
         const ttsApiKey = document.getElementById('setting-tts-api-key')
-        if (ttsApiKey) ttsApiKey.value = this.config.ttsApiKey || ''
+        if (ttsApiKey) ttsApiKey.value = this.config.ttsApiKeyConfigured ? '••••••••••••••••' : ''
+        for (const [id, key] of [['setting-tts-api-voice', 'ttsApiVoiceId'], ['setting-tts-offline-voice', 'ttsOfflineVoiceId'], ['setting-sidebar-default-width', 'sidebarDefaultWidth']]) {
+            const el = document.getElementById(id); if (el) el.value = String(this.config[key] ?? '')
+        }
+        const noAuth = document.getElementById('setting-tts-api-no-auth')
+        if (noAuth) noAuth.checked = this.config.ttsApiNoAuth === true
+        this.updateTtsProviderVisibility()
+    }
+
+    updateTtsProviderVisibility() {
+        const provider = this.config.ttsProvider || 'system'
+        const group = document.getElementById('adv-group-tts')
+        group?.querySelectorAll('[data-tts-for]').forEach(row => { row.hidden = row.dataset.ttsFor !== provider })
+        const description = document.getElementById('tts-provider-description')
+        if (description) description.textContent = provider === 'system'
+            ? '使用设备系统语音，无需填写接口地址或密钥。'
+            : '模型与音色名称以所用服务为准；自定义接口不一定支持情绪、风格参数。'
+        if (description && platformBridge.isAndroid) description.textContent += provider === 'system'
+            ? ' 支持锁屏连续播放。'
+            : ' 当前请保持应用在前台；自建服务地址须能由手机访问，127.0.0.1 指手机本机。'
+        const note = document.getElementById('tts-preview-note')
+        if (note) note.textContent = provider === 'api' ? '使用所配置的接口试听，可能产生服务费用'
+            : provider === 'offline' ? '使用用户自建服务试听' : '使用当前系统音色试听'
     }
 
     attachEventListeners() {
@@ -422,6 +481,13 @@ export class AdvancedSettingsManager {
         })
 
         // Cooldown Number Input (Supports 0s for no interval, up to 3600s)
+        document.getElementById('setting-ai-cooldown')?.addEventListener('input', (e) => {
+            const raw = parseInt(e.target.value, 10)
+            const tip = document.getElementById('tip-ai-cooldown-warning')
+            if (tip) {
+                tip.style.display = (!isNaN(raw) && (raw === 0 || raw < 5)) ? 'block' : 'none'
+            }
+        })
         document.getElementById('setting-ai-cooldown')?.addEventListener('change', (e) => {
             const raw = parseInt(e.target.value, 10)
             const val = isNaN(raw) ? 10 : Math.max(0, Math.min(3600, raw))
@@ -444,7 +510,7 @@ export class AdvancedSettingsManager {
 
         // Max Tokens
         document.getElementById('setting-ai-max-tokens')?.addEventListener('change', (e) => {
-            const val = Math.max(256, Math.min(8192, parseInt(e.target.value, 10) || 2048))
+            const val = Math.max(256, Math.min(20000, parseInt(e.target.value, 10) || 2048))
             this.config.aiMaxTokens = val
             e.target.value = String(val)
             this.save()
@@ -505,10 +571,11 @@ export class AdvancedSettingsManager {
         })
 
         document.getElementById('setting-para-margin-top')?.addEventListener('input', (e) => {
-            const val = parseFloat(e.target.value) || 0
+            const raw = parseFloat(e.target.value)
+            const val = Number(Number(Number.isFinite(raw) ? raw : 0).toFixed(2))
             this.config.paraMarginTop = val
             const label = document.getElementById('value-para-margin-top')
-            if (label) label.innerText = `${val.toFixed(1)}em`
+            if (label) label.innerText = `${val.toFixed(2)}em`
             this.app?.setSetting?.('paraMarginTop', val)
             this.app?.saveSettingsDebounced?.()
             this.save()
@@ -516,10 +583,11 @@ export class AdvancedSettingsManager {
         })
 
         document.getElementById('setting-para-margin-bottom')?.addEventListener('input', (e) => {
-            const val = parseFloat(e.target.value) || 0
+            const raw = parseFloat(e.target.value)
+            const val = Number(Number(Number.isFinite(raw) ? raw : 0.5).toFixed(2))
             this.config.paraMarginBottom = val
             const label = document.getElementById('value-para-margin-bottom')
-            if (label) label.innerText = `${val.toFixed(1)}em`
+            if (label) label.innerText = `${val.toFixed(2)}em`
             this.app?.setSetting?.('paraMarginBottom', val)
             this.app?.saveSettingsDebounced?.()
             this.save()
@@ -535,10 +603,16 @@ export class AdvancedSettingsManager {
             this.app?.applySettingsToReader?.()
         })
 
+        document.getElementById('setting-sidebar-default-width')?.addEventListener('change', e => {
+            this.config.sidebarDefaultWidth = Math.max(320, Math.min(640, Number(e.target.value) || 380))
+            this.save()
+        })
+
         // TXT soft break merge & Background indexing settings
         document.getElementById('setting-txt-merge-soft-breaks')?.addEventListener('change', (e) => {
             this.config.txtMergeSoftBreaks = !!e.target.checked
             this.save()
+            this.app?.showToast?.('软换行设置已保存，重新打开 TXT 图书后生效', 'info')
         })
 
         document.getElementById('setting-bg-index-idle-only')?.addEventListener('change', (e) => {
@@ -625,7 +699,10 @@ export class AdvancedSettingsManager {
         })
 
         document.getElementById('btn-clear-trans-cache')?.addEventListener('click', async () => {
-            if (confirm('确定要清空所有书籍的章节双语译文缓存吗？\n（此操作不会删除原书、笔记或划线）')) {
+            const confirmed = this.app?.showConfirmDialog
+                ? await this.app.showConfirmDialog('清空译文缓存', '确定要清空所有书籍的章节双语译文缓存吗？\n（此操作不会删除原书、笔记或划线）')
+                : confirm('确定要清空所有书籍的章节双语译文缓存吗？\n（此操作不会删除原书、笔记或划线）')
+            if (confirmed) {
                 await clearAllChapterTranslations()
                 this.updateTransStorageStats()
                 this.app?.showToast?.('已清空全部章节双语译文缓存', 'info')
@@ -635,8 +712,9 @@ export class AdvancedSettingsManager {
         // Audio Cache & Dictionary Resource Locations
         document.getElementById('btn-clear-audio-cache')?.addEventListener('click', async () => {
             try {
-                const count = await dictionaryService.clearAudioCache()
-                this.app?.showToast?.(`已清空语音音频缓存（共清理 ${count} 个音频文件）`, 'info')
+                const memory = ttsPlayer.clearAudioCache()
+                const diskBytes = Number(await dictionaryService.clearAudioCache()) || 0
+                this.app?.showToast?.(`已清理 ${memory.count} 段缓存音频，共 ${((memory.bytes + diskBytes) / 1024 / 1024).toFixed(1)} MB`, 'info')
             } catch (e) {
                 this.app?.showToast?.(`清空语音缓存失败: ${e.message}`, 'warning')
             }
@@ -646,9 +724,13 @@ export class AdvancedSettingsManager {
             const btn = document.getElementById('btn-dict-download')
             const labelStatus = document.getElementById('label-dict-resource-status')
             if (btn) btn.disabled = true
+            this._dictDownloadController = new AbortController()
+            const cancel = document.getElementById('btn-dict-cancel-download')
+            if (cancel) cancel.style.display = ''
             try {
                 this.app?.showToast?.('开始下载官方 ECDICT 词库...', 'info')
                 await dictionaryService.downloadAndInstall({
+                    signal: this._dictDownloadController.signal,
                     onProgress: (p) => {
                         if (labelStatus) {
                             labelStatus.innerText = p.message || `${p.phase}: ${p.percent}%`
@@ -658,12 +740,16 @@ export class AdvancedSettingsManager {
                 await this.updateDictResourceStatus()
                 this.app?.showToast?.('词库下载并安装成功！', 'success')
             } catch (err) {
-                this.app?.showToast?.(`下载失败: ${err.message}`, 'warning')
+                this.app?.showToast?.(this._dictDownloadController?.signal.aborted ? '词库下载已取消' : `下载失败: ${err.message}`, 'warning')
                 await this.updateDictResourceStatus()
             } finally {
                 if (btn) btn.disabled = false
+                if (cancel) cancel.style.display = 'none'
+                this._dictDownloadController = null
+                this.updateDictResourceStatus()
             }
         })
+        document.getElementById('btn-dict-cancel-download')?.addEventListener('click', () => this._dictDownloadController?.abort())
 
         document.getElementById('btn-dict-install-builtin')?.addEventListener('click', async () => {
             try {
@@ -684,7 +770,7 @@ export class AdvancedSettingsManager {
                 if (targetDir) {
                     await dictionaryService.migrateStorage(targetDir)
                     await this.updateDictResourceStatus()
-                    this.app?.showToast?.(`词典目录已成功迁移至: ${targetDir}`, 'success')
+                    this.app?.showToast?.(`词库目录已设为：${targetDir}`, 'success')
                 }
             } catch (err) {
                 this.app?.showToast?.(`迁移失败: ${err.message}`, 'warning')
@@ -707,10 +793,31 @@ export class AdvancedSettingsManager {
         })
 
         // TTS Audio & Speech Engine Settings
+        for (const [id, key] of [['setting-tts-api-voice', 'ttsApiVoiceId'], ['setting-tts-offline-voice', 'ttsOfflineVoiceId']]) {
+            document.getElementById(id)?.addEventListener('change', e => {
+                this.config[key] = e.target.value.trim()
+                this.save()
+                this.app?.refreshTtsVoiceOptions?.()
+            })
+        }
+        document.getElementById('setting-tts-api-no-auth')?.addEventListener('change', e => {
+            this.config.ttsApiNoAuth = !!e.target.checked
+            this.save()
+        })
+        document.getElementById('btn-tts-preview')?.addEventListener('click', async e => {
+            const button = e.currentTarget
+            if (ttsPlayer._previewController) { ttsPlayer.cancelPreview(); return }
+            button.innerText = '停止试听'
+            this.app?.showToast?.(this.config.ttsProvider === 'api' ? '使用当前朗读接口试听，可能产生服务费用' : '正在试听当前语音', 'info')
+            try { await ttsPlayer.preview() }
+            catch (error) { if (error.name !== 'AbortError') this.app?.showToast?.(`试听失败：${error.message}`, 'warning') }
+            finally { button.innerText = '试听短句' }
+        })
         document.getElementById('setting-tts-provider')?.addEventListener('change', (e) => {
             this.config.ttsProvider = e.target.value
+            this.updateTtsProviderVisibility()
             this.save()
-            ttsPlayer.setProvider(e.target.value)
+            this.app?.refreshTtsVoiceOptions?.()
         })
 
         document.getElementById('setting-tts-rate')?.addEventListener('input', (e) => {
@@ -719,7 +826,7 @@ export class AdvancedSettingsManager {
             const label = document.getElementById('value-tts-rate')
             if (label) label.innerText = `${val.toFixed(1)}x`
             this.save()
-            ttsPlayer.setRate(val)
+            this.app?.refreshTtsVoiceOptions?.()
         })
 
         document.getElementById('setting-tts-offline-endpoint')?.addEventListener('change', (e) => {
@@ -849,51 +956,127 @@ export class AdvancedSettingsManager {
                 db.getAllCustomLists ? db.getAllCustomLists() : Promise.resolve([])
             ])
 
+            let chapterTranslations = []
+            if (db.getAllChapterTranslations) {
+                try {
+                    chapterTranslations = await db.getAllChapterTranslations()
+                } catch (_) {}
+            }
+
+            const readerSettings = (await db.getSetting('readerSettings')) || (await db.getSetting('reader_settings')) || {}
+
+            let readingPresets = []
+            try {
+                const rawPresets = typeof localStorage !== 'undefined' ? localStorage.getItem('linden_reading_presets_v1') : null
+                if (rawPresets) readingPresets = JSON.parse(rawPresets) || []
+            } catch (_) {}
+
+            let customPalette = null
+            try {
+                const rawPalette = typeof localStorage !== 'undefined' ? localStorage.getItem('linden_custom_semantic_palette_v1') : null
+                if (rawPalette) customPalette = JSON.parse(rawPalette)
+            } catch (_) {}
+
+            let userName = ''
+            try {
+                userName = (typeof localStorage !== 'undefined' ? (localStorage.getItem('linden_user_name') || '') : '').trim()
+            } catch (_) {}
+
+            const bookSettingsOverrides = {}
+            try {
+                if (typeof localStorage !== 'undefined') {
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i)
+                        if (k && k.startsWith('linden_book_settings_')) {
+                            const bId = k.replace('linden_book_settings_', '')
+                            try {
+                                bookSettingsOverrides[bId] = JSON.parse(localStorage.getItem(k))
+                            } catch (_) {}
+                        }
+                    }
+                }
+            } catch (_) {}
+
             const safeConfig = { ...this.config }
             const sensitiveKeys = ['ttsApiKey', 'apiKey', 'secret', 'password', 'token', 'auth', 'privateKey', 'dictStoragePath', 'customDirectory']
             for (const k of sensitiveKeys) {
                 delete safeConfig[k]
             }
 
+            const bookMapById = new Map(books.map(b => [b.id, b]))
+            const enrichedSessions = sessions.map(s => {
+                if (!s) return s
+                const b = s.bookId ? bookMapById.get(s.bookId) : null
+                return {
+                    ...s,
+                    bookTitle: s.bookTitle || b?.customTitle || b?.title || '',
+                    bookAuthor: s.bookAuthor || b?.customAuthor || b?.author || ''
+                }
+            })
+
             const payload = {
                 format: 'linden-leaf-full-backup',
-                schemaVersion: 3,
+                schemaVersion: 4,
                 exportedAt: new Date().toISOString(),
+                userName,
+                readerSettings,
+                readingPresets,
+                customPalette,
+                bookSettingsOverrides,
                 config: safeConfig,
-                sessions,
+                sessions: enrichedSessions,
                 highlights,
                 bookmarks,
                 drawings,
                 customLists,
                 readingLists: customLists,
+                chapterTranslations,
                 books: books.map(b => ({
                     id: b.id,
+                    stableKey: b.stableKey || null,
+                    identifier: b.identifier || null,
                     title: b.title,
                     author: b.author,
+                    customTitle: b.customTitle || null,
+                    customAuthor: b.customAuthor || null,
                     format: b.format,
-                    readingStatus: b.readingStatus,
-                    completedAt: b.completedAt,
-                    rating: b.rating,
-                    tags: b.tags,
-                    customListIds: b.customListIds,
-                    totalReadingSeconds: b.totalReadingSeconds,
-                    totalListeningSeconds: b.totalListeningSeconds,
-                    lastReadAt: b.lastReadAt,
-                    currentLocation: b.currentLocation,
-                    progress: b.progress
+                    size: b.size || 0,
+                    cover: b.cover || null,
+                    isFavorite: !!b.isFavorite,
+                    favoriteUpdatedAt: b.favoriteUpdatedAt || 0,
+                    readingStatus: b.readingStatus || 'unread',
+                    statusUpdatedAt: b.statusUpdatedAt || 0,
+                    completedAt: b.completedAt || null,
+                    rating: b.rating !== undefined ? b.rating : null,
+                    ratingUpdatedAt: b.ratingUpdatedAt || 0,
+                    tags: Array.isArray(b.tags) ? b.tags : [],
+                    tagsUpdatedAt: b.tagsUpdatedAt || 0,
+                    customListIds: b.customListIds || [],
+                    listsUpdatedAt: b.listsUpdatedAt || 0,
+                    totalReadingSeconds: b.totalReadingSeconds || 0,
+                    totalListeningSeconds: b.totalListeningSeconds || 0,
+                    lastReadAt: b.lastReadAt || 0,
+                    currentLocation: b.currentLocation || null,
+                    progress: b.progress || { fraction: 0 },
+                    addedAt: b.addedAt || 0,
+                    updatedAt: b.updatedAt || 0
                 }))
             }
 
-            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-            const url = URL.createObjectURL(blob)
-            const a = document.createElement('a')
-            a.href = url
-            a.download = `LindenLeaf_完整备份_${new Date().toISOString().slice(0, 10)}.json`
-            document.body.appendChild(a)
-            a.click()
-            document.body.removeChild(a)
-            URL.revokeObjectURL(url)
-            this.app?.showToast?.('完整阅读与统计数据导出成功', 'success')
+            const filename = `LindenLeaf_阅读记录备份_${new Date().toISOString().slice(0, 10)}.json`
+            const res = await platformBridge.exportTextFile(filename, JSON.stringify(payload, null, 2), 'application/json')
+            if (res?.cancelled) {
+                return
+            }
+            if (res.success) {
+                if (res.filePath) {
+                    this.app?.showToast?.(`阅读记录已导出至：${res.filePath}；原书文件需另外保留`, 'success', 5000)
+                } else {
+                    this.app?.showToast?.(`阅读记录已导出至${res.directoryHint}：${res.filename}；原书文件需另外保留`, 'success', 5000)
+                }
+            } else if (res?.error) {
+                this.app?.showToast?.(`备份导出失败: ${res.error}`, 'warning')
+            }
         } catch (e) {
             this.app?.showToast?.(`备份导出失败: ${e.message}`, 'warning')
         }
@@ -903,7 +1086,7 @@ export class AdvancedSettingsManager {
         if (!backupData || typeof backupData !== 'object') {
             throw new Error('无效的备份数据格式')
         }
-        if (backupData.format !== 'linden-leaf-full-backup' && !backupData.schemaVersion) {
+        if (backupData.format !== 'linden-leaf-full-backup' || ![1, 2, 3, 4].includes(backupData.schemaVersion)) {
             throw new Error('不支持的备份文件格式')
         }
 
@@ -923,17 +1106,17 @@ export class AdvancedSettingsManager {
                     const merged = { ...existing, ...b }
                     await db.saveBook(merged)
                 } else if (db.saveBook) {
-                    await db.saveBook(b)
+                    await db.saveBook({ ...b, hasLocalFile: false, isCloudOnly: true })
                 }
                 restoredBooks++
             }
         }
 
-        // 2. Reading Sessions
+        // 2. Reading Sessions (pass false to prevent duplicate addition to books totalReadingSeconds)
         if (Array.isArray(backupData.sessions) && db.saveReadingSession) {
             for (const s of backupData.sessions) {
                 if (!s || !s.id) continue
-                await db.saveReadingSession(s)
+                await db.saveReadingSession(s, false)
                 restoredSessions++
             }
         }
@@ -975,9 +1158,62 @@ export class AdvancedSettingsManager {
             }
         }
 
-        // 7. Advanced Config
+        // 7. Reader Settings (Global)
+        if (backupData.readerSettings && typeof backupData.readerSettings === 'object' && db.setSetting) {
+            await db.setSetting('readerSettings', backupData.readerSettings)
+        }
+
+        // 8. Reading Presets
+        if (Array.isArray(backupData.readingPresets) && typeof localStorage !== 'undefined') {
+            try {
+                localStorage.setItem('linden_reading_presets_v1', JSON.stringify(backupData.readingPresets))
+                if (typeof window !== 'undefined' && window.readingPresetsManager?.load) {
+                    window.readingPresetsManager.load()
+                }
+            } catch (_) {}
+        }
+
+        // 9. Custom Semantic Palette
+        if (backupData.customPalette && typeof localStorage !== 'undefined') {
+            try {
+                localStorage.setItem('linden_custom_semantic_palette_v1', JSON.stringify(backupData.customPalette))
+                if (typeof window !== 'undefined' && window.themeCustomizer?.load) {
+                    window.themeCustomizer.load()
+                }
+            } catch (_) {}
+        }
+
+        // 10. User Name
+        if (backupData.userName && typeof localStorage !== 'undefined') {
+            try {
+                localStorage.setItem('linden_user_name', backupData.userName)
+            } catch (_) {}
+        }
+
+        // 11. Book Settings Overrides
+        if (backupData.bookSettingsOverrides && typeof localStorage !== 'undefined') {
+            try {
+                for (const [bId, ov] of Object.entries(backupData.bookSettingsOverrides)) {
+                    if (bId && ov && typeof ov === 'object') {
+                        localStorage.setItem(`linden_book_settings_${bId}`, JSON.stringify(ov))
+                    }
+                }
+            } catch (_) {}
+        }
+
+        // 12. Chapter Translations
+        if (Array.isArray(backupData.chapterTranslations) && typeof db.saveChapterTranslation === 'function') {
+            for (const ct of backupData.chapterTranslations) {
+                if (ct && ct.bookId && ct.chapterKey) {
+                    await db.saveChapterTranslation(ct)
+                }
+            }
+        }
+
+        // 13. Advanced Config
         if (backupData.config && typeof backupData.config === 'object') {
-            Object.assign(this.config, backupData.config)
+            this.config = sanitizeAdvancedSettings(backupData.config)
+            this.applyReaderParameters()
             this.applyRuntimeConfig()
             this.save()
         }
@@ -1010,8 +1246,16 @@ export class AdvancedSettingsManager {
                 const picked = await invoke('dialog_open_file')
                 const newPath = picked?.[0]?.filePath
                 if (newPath) {
+                    const format = newPath.split('.').pop().toLowerCase()
+                    if (targetBook.format && format !== targetBook.format.toLowerCase()) throw new Error('请选择与原书相同格式、相同版本的文件')
+                    const buffer = await platformBridge.readFileBuffer(newPath)
+                    if (!buffer?.byteLength) throw new Error('所选文件为空或无法读取，原关联未修改')
+                    const blob = new Blob([buffer], { type: format === 'pdf' ? 'application/pdf' : 'application/octet-stream' })
+                    const wasOpen = this.app?.currentBookId === targetBook.id
+                    if (wasOpen) await this.app.closeBook()
                     if (db.relinkBookFile) {
-                        await db.relinkBookFile(targetBook.id, { nativePath: newPath })
+                        const saved = await db.relinkBookFile(targetBook.id, { blob, nativePath: newPath })
+                        if (!saved) throw new Error('重新关联未保存')
                     } else {
                         targetBook.nativePath = newPath
                         targetBook.filePath = newPath
@@ -1019,7 +1263,8 @@ export class AdvancedSettingsManager {
                         await db.updateBook?.(targetBook)
                     }
                     this.app?.showToast?.(`已成功将《${targetBook.title}》重新关联至: ${newPath}`, 'success')
-                    if (this.app?.loadBookshelf) this.app.loadBookshelf()
+                    await this.app?.refreshBookshelf?.()
+                    if (wasOpen) await this.app.openBook(targetBook.id)
                     return
                 }
             }
@@ -1043,28 +1288,7 @@ export class AdvancedSettingsManager {
             return
         }
 
-        const now = Date.now()
-        if (now - this.lastClickTime > this.clickWindowMs) {
-            this.clickCount = 0
-        }
-
-        this.clickCount++
-        this.lastClickTime = now
-
-        if (this.clickCount === 1) {
-            this.app?.showToast?.('再点两次以开启高级设置', 'info')
-            if (this.dom.hintAdvancedTrigger) {
-                this.dom.hintAdvancedTrigger.innerText = '再点两次以开启'
-            }
-        } else if (this.clickCount === 2) {
-            this.app?.showToast?.('再点一次以开启高级设置', 'info')
-            if (this.dom.hintAdvancedTrigger) {
-                this.dom.hintAdvancedTrigger.innerText = '再点一次以开启'
-            }
-        } else if (this.clickCount >= 3) {
-            this.clickCount = 0
-            this.openConfirmModal()
-        }
+        this.unlock()
     }
 
     openConfirmModal() {
@@ -1085,16 +1309,17 @@ export class AdvancedSettingsManager {
         this.isUnlocked = true
         this.save()
         this.renderUIState()
-        this.app?.showToast?.('高级设置已解锁', 'success')
+        this.app?.showToast?.('高级设置已展开', 'info')
     }
 
     resetAndLock() {
-        this.isUnlocked = false
+        this.isUnlocked = true
         this.config = { ...DEFAULT_ADVANCED_SETTINGS }
+        this.applyReaderParameters()
         this.clickCount = 0
         this.save()
         this.renderUIState()
-        this.app?.showToast?.('已恢复高级默认参数并锁定', 'info')
+        this.app?.showToast?.('已恢复高级默认参数', 'info')
     }
 
     async updateTransStorageStats() {
@@ -1111,7 +1336,7 @@ export class AdvancedSettingsManager {
     }
 
     async updateDictResourceStatus() {
-        if (typeof document === 'undefined') return
+        if (typeof document === 'undefined' || this._dictDownloadController) return
         const labelStatus = document.getElementById('label-dict-resource-status')
         const labelPath = document.getElementById('label-dict-resource-path')
         try {
@@ -1131,7 +1356,8 @@ export class AdvancedSettingsManager {
                 labelPath.innerText = `存储位置：${locations.dictionaryDir}`
             }
         } catch (_) {
-            if (labelStatus) labelStatus.innerText = '未安装'
+            if (labelStatus) { labelStatus.innerText = '暂无法读取词库状态'; labelStatus.style.color = 'var(--text-muted)' }
+            if (labelPath) labelPath.innerText = '可稍后重新打开设置查看'
         }
     }
 
@@ -1214,7 +1440,7 @@ export class AdvancedSettingsManager {
         }
     }
 
-    exportSettingsJSON() {
+    async exportSettingsJSON() {
         const safeConfig = { ...this.config }
         const sensitiveKeys = ['ttsApiKey', 'apiKey', 'secret', 'password', 'token', 'auth', 'privateKey', 'dictStoragePath', 'customDirectory']
         for (const k of sensitiveKeys) {
@@ -1226,14 +1452,20 @@ export class AdvancedSettingsManager {
             exportedAt: new Date().toISOString(),
             advancedSettings: safeConfig
         }
-        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `linden_leaf_settings_${new Date().toISOString().slice(0, 10)}.json`
-        a.click()
-        URL.revokeObjectURL(url)
-        this.app?.showToast?.('配置已安全导出为 JSON 文件', 'success')
+        const filename = `linden_leaf_settings_${new Date().toISOString().slice(0, 10)}.json`
+        const res = await platformBridge.exportTextFile(filename, JSON.stringify(exportData, null, 2), 'application/json')
+        if (res?.cancelled) {
+            return
+        }
+        if (res.success) {
+            if (res.filePath) {
+                this.app?.showToast?.(`配置已安全导出至：${res.filePath}`, 'success', 4500)
+            } else {
+                this.app?.showToast?.(`配置已安全导出至${res.directoryHint}：${res.filename}`, 'success', 4500)
+            }
+        } else if (res?.error) {
+            this.app?.showToast?.(`导出失败: ${res.error}`, 'warning')
+        }
     }
 
     async importSettingsJSON(file) {
@@ -1254,33 +1486,8 @@ export class AdvancedSettingsManager {
             // Create rollback backup snapshot before modifying config
             const rollbackConfig = { ...this.config }
 
-            const sanitized = { ...DEFAULT_ADVANCED_SETTINGS }
-            const allowedKeys = new Set(Object.keys(DEFAULT_ADVANCED_SETTINGS))
-
-            // Prohibited sensitive keys to strictly prevent credential or private path leak
-            const sensitiveKeys = new Set(['ttsApiKey', 'apiKey', 'secret', 'password', 'token', 'auth', 'privateKey', 'dictStoragePath', 'customDirectory', '__proto__', 'constructor', 'prototype'])
-
-            for (const [k, v] of Object.entries(incoming)) {
-                if (!allowedKeys.has(k) || sensitiveKeys.has(k)) continue
-
-                const defaultVal = DEFAULT_ADVANCED_SETTINGS[k]
-                const expectedType = typeof defaultVal
-
-                if (expectedType === 'boolean') {
-                    sanitized[k] = Boolean(v)
-                } else if (expectedType === 'number') {
-                    const n = Number(v)
-                    if (Number.isFinite(n)) {
-                        sanitized[k] = n
-                    }
-                } else if (expectedType === 'string') {
-                    if (typeof v === 'string') {
-                        sanitized[k] = v.trim().slice(0, 500)
-                    }
-                }
-            }
-
-            this.config = sanitized
+            this.config = sanitizeAdvancedSettings(incoming)
+            this.applyReaderParameters()
             this.save()
             this.renderUIState()
             this._lastRollbackConfig = rollbackConfig
@@ -1308,7 +1515,7 @@ export class AdvancedSettingsManager {
     }
 
     get aiMaxTokens() {
-        return Math.max(256, Math.min(8192, Number(this.config.aiMaxTokens) || 2048))
+        return Math.max(256, Math.min(20000, Number(this.config.aiMaxTokens) || 2048))
     }
 
     get aiCooldownSeconds() {

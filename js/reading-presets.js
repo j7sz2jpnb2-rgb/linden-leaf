@@ -60,20 +60,24 @@ export class ReadingPresetsManager {
      * @returns {object}
      */
     extractPresetSettings(settings = {}) {
+        const layout = (settings.layout || settings.layoutMode) === 'scrolled' ? 'scrolled' : 'paginated'
+        const pageTurnMode = (settings.pageTurnMode || settings.turnAnimationMode) || 'none'
         return {
             font: settings.font || 'serif',
-            fontSize: Number(settings.fontSize) || 18,
-            fontWeight: Number(settings.fontWeight) || 400,
-            lineHeight: Number(settings.lineHeight) || 1.6,
-            letterSpacing: Number(settings.letterSpacing) || 0,
-            margin: Number(settings.margin) || 48,
-            maxWidth: Number(settings.maxWidth) || 760,
-            gap: Number(settings.gap) || 6,
+            fontSize: Number.isFinite(Number(settings.fontSize)) ? Number(settings.fontSize) : 18,
+            fontWeight: Number.isFinite(Number(settings.fontWeight)) ? Number(settings.fontWeight) : 400,
+            lineHeight: Number.isFinite(Number(settings.lineHeight)) ? Number(settings.lineHeight) : 1.6,
+            letterSpacing: Number.isFinite(Number(settings.letterSpacing)) ? Number(settings.letterSpacing) : 0,
+            margin: Number.isFinite(Number(settings.margin)) ? Number(settings.margin) : 48,
+            maxWidth: Number.isFinite(Number(settings.maxWidth)) ? Number(settings.maxWidth) : 760,
+            gap: Number.isFinite(Number(settings.gap)) ? Number(settings.gap) : 6,
             chineseQuotes: Boolean(settings.chineseQuotes),
             writingMode: settings.writingMode === 'vertical-rl' ? 'vertical-rl' : 'horizontal',
-            columnCount: String(settings.columnCount || '2'),
-            layoutMode: settings.layoutMode === 'scrolled' ? 'scrolled' : 'paginated',
-            turnAnimationMode: settings.turnAnimationMode === 'slide' ? 'slide' : 'none',
+            columnCount: (settings.writingMode === 'vertical-rl') ? '1' : String(settings.columnCount || '2'),
+            layout,
+            layoutMode: layout,
+            pageTurnMode,
+            turnAnimationMode: pageTurnMode,
             theme: settings.theme || 'light'
         }
     }

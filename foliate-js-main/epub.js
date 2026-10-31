@@ -801,7 +801,19 @@ class Resources {
             const fakeIdx = CFI.fake.toIndex(top)
             index = (fakeIdx >= 0 && fakeIdx < this.spine.length) ? fakeIdx : 0
         }
-        const anchor = doc => CFI.toRange(doc, parts)
+        const filter = this.cfiFilter || (node => {
+            if (node && node.nodeType === 1) {
+                if (node.classList?.contains('linden-bilingual-target') ||
+                    node.classList?.contains('linden-inline-translation') ||
+                    node.classList?.contains('bilingual-translation-block') ||
+                    node.classList?.contains('bilingual-derived-view') ||
+                    node.hasAttribute?.('data-injected-translation')) {
+                    return typeof NodeFilter !== 'undefined' ? NodeFilter.FILTER_REJECT : 2
+                }
+            }
+            return typeof NodeFilter !== 'undefined' ? NodeFilter.FILTER_ACCEPT : 1
+        })
+        const anchor = doc => CFI.toRange(doc, parts, filter)
         return { index, anchor }
     }
 }

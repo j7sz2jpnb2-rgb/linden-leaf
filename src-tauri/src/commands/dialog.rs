@@ -28,11 +28,11 @@ pub async fn dialog_open_file(
                 .add_filter(
                     "所有支持的电子书与文档",
                     &[
-                        "epub", "pdf", "djvu", "docx", "txt", "md", "mobi", "azw", "azw3", "fb2", "cbz",
+                        "epub", "pdf", "docx", "txt", "md", "mobi", "azw", "azw3", "fb2", "cbz",
                     ],
                 )
                 .add_filter("EPUB 电子书", &["epub"])
-                .add_filter("PDF / DjVu 文档", &["pdf", "djvu"])
+                .add_filter("PDF 文档", &["pdf"])
                 .add_filter("Word 文档 (.docx)", &["docx"])
                 .add_filter("Kindle 图书 (MOBI / AZW / AZW3)", &["mobi", "azw", "azw3"])
                 .add_filter("TXT / Markdown 文档", &["txt", "md"])
@@ -130,6 +130,54 @@ pub async fn dialog_pick_folder() -> Result<Option<String>, String> {
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+pub async fn dialog_save_text_file(
+    default_name: String,
+    content: String,
+    title: Option<String>,
+) -> Result<Option<String>, String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let safe_name = default_name.clone();
+        let selected_path: Option<PathBuf> = tokio::task::spawn_blocking(move || {
+            let mut dialog = rfd::FileDialog::new();
+            let dialog_title = title.unwrap_or_else(|| "另存为文件".to_string());
+            dialog = dialog.set_title(&dialog_title).set_file_name(&safe_name);
+
+            let lower = safe_name.to_lowercase();
+            if lower.ends_with(".md") || lower.ends_with(".markdown") {
+                dialog = dialog.add_filter("Markdown 文档 (*.md)", &["md", "markdown"]);
+            } else if lower.ends_with(".json") {
+                dialog = dialog.add_filter("JSON 备份文件 (*.json)", &["json"]);
+            } else if lower.ends_with(".txt") {
+                dialog = dialog.add_filter("文本文档 (*.txt)", &["txt"]);
+            } else if lower.ends_with(".csv") {
+                dialog = dialog.add_filter("CSV 表格 (*.csv)", &["csv"]);
+            }
+            dialog = dialog.add_filter("所有文件 (*.*)", &["*"]);
+
+            dialog.save_file()
+        })
+        .await
+        .map_err(|e| format!("Dialog save task failed: {}", e))?;
+
+        if let Some(path) = selected_path {
+            tokio::fs::write(&path, content.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write file '{}': {}", path.display(), e))?;
+            Ok(Some(path.to_string_lossy().to_string()))
+        } else {
+            Ok(None)
+        }
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        #[allow(unused_variables)]
+        let _ = (default_name, content, title);
         Ok(None)
     }
 }

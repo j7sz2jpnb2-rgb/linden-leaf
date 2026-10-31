@@ -159,10 +159,31 @@ export class FullTextSearchEngine {
     constructor(options = {}) {
         this.db = options.db || db
         this.index = new Map() // bookId -> { meta, sections: Array<{ id, sectionIndex, sectionTitle, location, text, tokens }> }
+        this.maxConcurrent = 2
+        this.maxCacheEntries = 25
         this.indexingState = {
             isIndexing: false,
             currentBookId: null,
             progress: 0
+        }
+    }
+
+    /**
+     * Configure runtime resource budget (concurrency, bounded cache entries)
+     * @param {object} [budget]
+     */
+    setResourceBudget(budget = {}) {
+        this.maxConcurrent = budget.maxConcurrent || (budget.isLowMemoryDevice ? 1 : 2)
+        this.maxCacheEntries = Number(budget.maxCacheEntries) || (budget.isLowMemoryDevice ? 10 : 25)
+        this._trimCache()
+    }
+
+    _trimCache() {
+        const limit = this.maxCacheEntries || 25
+        while (this.index.size > limit) {
+            const firstKey = this.index.keys().next().value
+            if (firstKey) this.index.delete(firstKey)
+            else break
         }
     }
 
@@ -202,6 +223,8 @@ export class FullTextSearchEngine {
             existing?.meta?.blobRevision &&
             authRevision &&
             existing.meta.blobRevision === authRevision) {
+            this.index.delete(bookId)
+            this.index.set(bookId, existing)
             return true
         }
 
@@ -234,6 +257,7 @@ export class FullTextSearchEngine {
                         },
                         sections
                     })
+                    this._trimCache()
                     return true
                 } else if (persisted && this.db.deleteBookSearchIndex) {
                     await this.db.deleteBookSearchIndex(bookId).catch(() => {})
@@ -287,6 +311,9 @@ export class FullTextSearchEngine {
                             })
                         }
                     } catch (e) {}
+                    if (i % 3 === 0) {
+                        await new Promise(r => setTimeout(r, 0))
+                    }
                 }
                 epub?.destroy?.()
             } catch (err) {
@@ -459,6 +486,7 @@ export class FullTextSearchEngine {
                 meta,
                 sections
             })
+            this._trimCache()
 
             // Persist to IndexedDB
             try {
@@ -495,7 +523,7 @@ export class FullTextSearchEngine {
      * @returns {Array<{ bookId: string, bookTitle: string, sectionTitle: string, granularity: string, location: object, snippet: string, matchCount: number }>}
      */
     search(query, options = {}) {
-        const { limit = 40 } = options
+        const { limit = 40, bookIds = null } = options
         const rawQ = (query || '').trim()
         if (!rawQ || rawQ.length < 1) return []
 
@@ -508,6 +536,7 @@ export class FullTextSearchEngine {
         const queryTokens = isExactPhrase ? null : tokenizeText(q)
 
         for (const [bookId, entry] of this.index.entries()) {
+            if (bookIds && !bookIds.includes(bookId)) continue
             const bookTitle = entry.meta.title
 
             for (const section of entry.sections) {
@@ -563,6 +592,89 @@ export class FullTextSearchEngine {
         return results
     }
 
+    // Search all supported books with 100% full traversal and streaming callbacks
+    async searchBooks(query, books, { signal, limit = Infinity, concurrency = this.maxConcurrent, onProgress = () => {}, onBookResult = null } = {}) {
+        const supported = books.filter(book => this.isFormatSupported(book.format))
+        const results = []
+        const bookGroups = []
+        let visited = 0
+        let searched = 0
+        let failed = 0
+        const workers = Math.max(1, Math.min(6, Number(concurrency) || 1))
+        const visit = async () => {
+            while (!signal?.aborted && visited < supported.length) {
+                const book = supported[visited++]
+                if (!book) break
+                try {
+                    if (await this.indexBook(book.id, signal)) {
+                        if (signal?.aborted) return
+                        const matches = this.search(query, { bookIds: [book.id], limit: Infinity })
+                        if (matches && matches.length > 0) {
+                            for (let i = 0; i < matches.length; i++) {
+                                results.push(matches[i])
+                            }
+                            const bookResult = {
+                                bookId: book.id,
+                                bookTitle: book.title || matches[0]?.bookTitle || '未命名书籍',
+                                cover: book.cover || null,
+                                format: book.format || '',
+                                totalHits: matches.length,
+                                previewMatches: matches.slice(0, 3)
+                            }
+                            bookGroups.push(bookResult)
+                            onBookResult?.(bookResult)
+                        }
+                        searched++
+                    } else {
+                        failed++
+                    }
+                } catch (error) {
+                    if (signal?.aborted) return
+                    failed++
+                    console.warn('[FullTextSearch] Unable to search book:', book.id, error)
+                }
+                onProgress({ visited: searched + failed, total: supported.length, matches: results.length, searched, failed })
+            }
+        }
+        await Promise.all(Array.from({ length: workers }, () => visit()))
+        return { results, bookGroups, searched, failed, supported: supported.length, unsupported: books.length - supported.length, limited: false }
+    }
+
+    async searchBookFull(bookId, query) {
+        if (!bookId || !query) return []
+        if (!this.index.has(bookId)) {
+            let hydrated = false
+            try {
+                if (this.db?.getBookSearchIndex) {
+                    const persisted = await this.db.getBookSearchIndex(bookId)
+                    if (persisted && persisted.sections && persisted.extractorVersion === EXTRACTOR_VERSION) {
+                        const sections = persisted.sections.map(s => ({
+                            id: s.id,
+                            sectionIndex: s.sectionIndex,
+                            sectionTitle: s.sectionTitle,
+                            granularity: s.granularity || 'chapter',
+                            location: s.location,
+                            text: s.text,
+                            tokens: Array.isArray(s.tokens) ? new Set(s.tokens) : (s.tokens instanceof Set ? s.tokens : tokenizeText(s.text))
+                        }))
+                        this.index.set(bookId, {
+                            meta: persisted,
+                            sections
+                        })
+                        this._trimCache()
+                        hydrated = true
+                    }
+                }
+            } catch (err) {
+                console.warn('[FullTextSearch] searchBookFull index rehydration notice:', err)
+            }
+            if (!hydrated) {
+                await this.indexBook(bookId)
+            }
+        }
+        return this.search(query, { bookIds: [bookId], limit: Infinity })
+    }
+
     /**
      * Load all valid persisted indexes from IndexedDB into memory cache
      * @returns {Promise<number>} count of loaded indexes
@@ -595,6 +707,7 @@ export class FullTextSearchEngine {
                     sections
                 })
                 loaded++
+                this._trimCache()
             }
             return loaded
         } catch (e) {
@@ -622,11 +735,11 @@ export class FullTextSearchEngine {
 
         // IndexedDB prune
         try {
-            if (this.db.getAllBookSearchIndexes && this.db.deleteBookSearchIndex) {
-                const allPersisted = await this.db.getAllBookSearchIndexes()
-                for (const item of allPersisted) {
-                    if (item?.bookId && !validSet.has(item.bookId)) {
-                        await this.db.deleteBookSearchIndex(item.bookId)
+            if (this.db.deleteBookSearchIndex) {
+                const ids = this.db.getBookSearchIndexIds ? await this.db.getBookSearchIndexIds() : (await this.db.getAllBookSearchIndexes?.() || []).map(item => item.bookId)
+                for (const id of ids) {
+                    if (id && !validSet.has(id)) {
+                        await this.db.deleteBookSearchIndex(id)
                     }
                 }
             }
@@ -651,4 +764,3 @@ export class FullTextSearchEngine {
 }
 
 export const fullTextSearchEngine = new FullTextSearchEngine()
-

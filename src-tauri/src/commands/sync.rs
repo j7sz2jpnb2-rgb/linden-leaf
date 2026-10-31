@@ -726,6 +726,7 @@ pub async fn sync_save_remote(
     config: SyncConfig,
     data: serde_json::Value,
     etag: Option<String>,
+    summary_markdown: Option<String>,
 ) -> Result<SaveRemoteResponse, String> {
     let client = match create_http_client(20) {
         Ok(c) => c,
@@ -789,7 +790,7 @@ pub async fn sync_save_remote(
         });
     }
 
-    let mut req = client.put(url.as_str()).basic_auth(user, Some(pass)).header("Content-Type", "application/json");
+    let mut req = client.put(url.as_str()).basic_auth(&user, Some(&pass)).header("Content-Type", "application/json");
     if let Some(ref tag) = etag {
         if !tag.is_empty() && !tag.starts_with("W/") {
             req = req.header("If-Match", tag.as_str());
@@ -801,6 +802,21 @@ pub async fn sync_save_remote(
     match req.body(body).send().await {
         Ok(res) if res.status().is_success() => {
             let new_etag = res.headers().get("etag").and_then(|h| h.to_str().ok()).map(|s| s.to_string());
+            
+            // Upload summary markdown if provided (non-blocking for overall sync status)
+            if let Some(ref md_text) = summary_markdown {
+                if let Ok(md_url) = get_sync_url(&config, "LindenLeaf_Reading_Notes_and_Stats.md") {
+                    let md_req = client
+                        .put(md_url.as_str())
+                        .basic_auth(&user, Some(&pass))
+                        .header("Content-Type", "text/markdown; charset=utf-8")
+                        .body(md_text.clone());
+                    if let Err(e) = md_req.send().await {
+                        eprintln!("[sync_save_remote] Failed to upload summary markdown: {}", e);
+                    }
+                }
+            }
+
             Ok(SaveRemoteResponse {
                 success: true,
                 etag: new_etag,

@@ -3,16 +3,16 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
 use crate::commands::sync::{is_allowed_server_url, secure_load_credential, secure_store_credential};
 
 use std::collections::HashMap;
 
-/// Global state for AI Request protection, concurrency guard, and cooldown
+/// Shared in-flight state; the user-configured cooldown belongs to chat only.
 pub struct AiState {
-    pub last_dispatched_at: Mutex<Option<Instant>>,
+    pub last_chat_dispatched_at: Mutex<Option<Instant>>,
     pub cooldown_seconds: AtomicU64,
     pub active_request_id: Mutex<Option<String>>,
     pub abort_tx: Mutex<Option<(String, tokio::sync::oneshot::Sender<()>)>>,
@@ -24,8 +24,8 @@ pub struct AiState {
 impl Default for AiState {
     fn default() -> Self {
         Self {
-            last_dispatched_at: Mutex::new(None),
-            cooldown_seconds: AtomicU64::new(10), // Default 10 seconds hard cooldown
+            last_chat_dispatched_at: Mutex::new(None),
+            cooldown_seconds: AtomicU64::new(10), // Default interval between reader questions
             active_request_id: Mutex::new(None),
             abort_tx: Mutex::new(None),
             daily_limit: AtomicU32::new(100), // Default 100 requests per day limit
@@ -42,10 +42,32 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+// This is local scheduling metadata, never a provider request parameter.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AiRequestPurpose {
+    #[default]
+    Chat,
+    ChapterTranslation,
+}
+
+impl AiRequestPurpose {
+    fn cooldown_seconds(self, configured: u64) -> u64 {
+        match self {
+            Self::Chat => configured,
+            Self::ChapterTranslation => 0,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AiCompletionPayload {
     pub request_id: String,
+    #[serde(default)]
+    pub purpose: AiRequestPurpose,
+    #[serde(default)]
+    pub request_scope: Option<String>,
     pub endpoint: String,
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -76,6 +98,7 @@ pub struct AiStatusResponse {
     pub active_request_id: Option<String>,
     pub cooldown_seconds: u64,
     pub remaining_cooldown_seconds: u64,
+    pub remaining_cooldown_ms: u64,
     pub today_count: u32,
     pub daily_limit: u32,
 }
@@ -160,7 +183,10 @@ fn increment_today_count() -> u32 {
     next
 }
 
+static AI_AUDIT_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn append_audit_entry(entry: AiAuditEntry) {
+    let _write_guard = AI_AUDIT_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = get_audit_log_path();
     let mut entries: Vec<AiAuditEntry> = if let Ok(content) = fs::read_to_string(&path) {
         serde_json::from_str(&content).unwrap_or_default()
@@ -225,6 +251,21 @@ fn compute_payload_hash(endpoint: &str, model: &str, messages: &[ChatMessage]) -
     hasher.finish()
 }
 
+// Identical source text at two different locations is not a duplicate user action.
+fn compute_scoped_payload_hash(endpoint: &str, model: &str, messages: &[ChatMessage], scope: Option<&str>) -> u64 {
+    let base = compute_payload_hash(endpoint, model, messages);
+    match scope.filter(|value| !value.is_empty()) {
+        None => base,
+        Some(value) => {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            base.hash(&mut hasher);
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+    }
+}
+
 struct RequestLockGuard<'a> {
     state: &'a AiState,
     request_id: String,
@@ -260,32 +301,24 @@ impl<'a> Drop for RequestLockGuard<'a> {
 }
 
 #[tauri::command]
-pub fn ai_get_status(state: tauri::State<'_, AiState>) -> AiStatusResponse {
+pub fn ai_get_status(state: tauri::State<'_, AiState>, purpose: Option<AiRequestPurpose>) -> AiStatusResponse {
     let active_id = state.active_request_id.lock().unwrap().clone();
     let is_busy = active_id.is_some();
-    let cooldown_secs = state.cooldown_seconds.load(Ordering::Relaxed);
+    let cooldown_secs = purpose.unwrap_or_default().cooldown_seconds(state.cooldown_seconds.load(Ordering::Relaxed));
     let daily_limit = state.daily_limit.load(Ordering::Relaxed);
     let today_count = get_today_count();
 
-    let remaining_cooldown = {
-        let last_disp = state.last_dispatched_at.lock().unwrap();
-        if let Some(prev) = *last_disp {
-            let elapsed = prev.elapsed().as_secs();
-            if elapsed < cooldown_secs {
-                cooldown_secs - elapsed
-            } else {
-                0
-            }
-        } else {
-            0
-        }
+    let remaining_ms = {
+        let last_disp = state.last_chat_dispatched_at.lock().unwrap();
+        last_disp.map(|prev| remaining_cooldown_ms(cooldown_secs, prev.elapsed())).unwrap_or(0)
     };
 
     AiStatusResponse {
         is_busy,
         active_request_id: active_id,
         cooldown_seconds: cooldown_secs,
-        remaining_cooldown_seconds: remaining_cooldown,
+        remaining_cooldown_seconds: (remaining_ms + 999) / 1000,
+        remaining_cooldown_ms: remaining_ms,
         today_count,
         daily_limit,
     }
@@ -381,6 +414,30 @@ pub fn ai_bind_credential(app_handle: tauri::AppHandle, endpoint: String, api_ke
     Ok(true)
 }
 
+// Millisecond admission state uses the same monotonic clock as dispatch.
+fn remaining_cooldown_ms(cooldown_secs: u64, elapsed: Duration) -> u64 {
+    let remaining = Duration::from_secs(cooldown_secs).saturating_sub(elapsed);
+    ((remaining.as_nanos() + 999_999) / 1_000_000) as u64
+}
+
+fn audit_local_rejection(payload: &AiCompletionPayload, request_id: &str, start: Instant, status: &str, message: String) -> String {
+    let (_, timestamp) = format_system_time_iso(SystemTime::now());
+    append_audit_entry(AiAuditEntry {
+        id: format!("audit_{}_local_{}", request_id, SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+        timestamp,
+        request_id: request_id.to_string(),
+        model: payload.model.clone(),
+        endpoint_host: reqwest::Url::parse(&payload.endpoint).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default(),
+        status: status.to_string(),
+        prompt_tokens: None,
+        completion_tokens: None,
+        total_tokens: None,
+        duration_ms: start.elapsed().as_millis(),
+        error_message: Some(message.clone()),
+    });
+    message
+}
+
 #[tauri::command]
 pub async fn ai_request_chat_completion(
     window: tauri::WebviewWindow,
@@ -410,27 +467,23 @@ pub async fn ai_request_chat_completion(
     {
         let active = state.active_request_id.lock().unwrap();
         if let Some(ref cur) = *active {
-            return Err(format!(
-                "CONCURRENCY_BLOCKED: 当前已有正在进行的生成请求 ({})，请等待完成或点击停止",
-                cur
-            ));
+            return Err(audit_local_rejection(&payload, &req_id, start_time, "concurrency_blocked", format!(
+                "CONCURRENCY_BLOCKED: 当前已有正在进行的生成请求 ({})，请等待完成或点击停止", cur
+            )));
         }
     }
 
-    // 3. Cooldown Check (0 means disabled; otherwise enforce cooldown between dispatched model requests)
-    let cooldown_secs = state.cooldown_seconds.load(Ordering::Relaxed);
-    if cooldown_secs > 0 {
-        let last_disp = state.last_dispatched_at.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(prev) = *last_disp {
-            let elapsed = prev.elapsed().as_secs();
-            if elapsed < cooldown_secs {
-                let rem = cooldown_secs - elapsed;
-                return Err(format!(
-                    "COOLDOWN_ACTIVE: 请等待 {} 秒后再发送新请求 (剩余 {} 秒)",
-                    rem, rem
-                ));
-            }
-        }
+    // 3. Reader-question cooldown does not pace an already-started chapter translation.
+    let cooldown_secs = payload.purpose.cooldown_seconds(state.cooldown_seconds.load(Ordering::Relaxed));
+    let remaining_ms = {
+        let last_disp = state.last_chat_dispatched_at.lock().unwrap_or_else(|p| p.into_inner());
+        last_disp.map(|prev| remaining_cooldown_ms(cooldown_secs, prev.elapsed())).unwrap_or(0)
+    };
+    if remaining_ms > 0 {
+        let seconds = (remaining_ms + 999) / 1000;
+        return Err(audit_local_rejection(&payload, &req_id, start_time, "cooldown_blocked", format!(
+            "COOLDOWN_ACTIVE: 请等待 {} 秒后再发送新请求 (剩余 {} 毫秒)", seconds, remaining_ms
+        )));
     }
 
     // 4. Daily Limit Quota Check
@@ -445,9 +498,9 @@ pub async fn ai_request_chat_completion(
         }
     }
 
-    // 5. Payload Hash Deduplication (Independent minimum 10-second window to protect against accidental double clicks / replays)
-    let dedup_window_secs = cooldown_secs.max(10);
-    let payload_hash = compute_payload_hash(&payload.endpoint, &payload.model, &payload.messages);
+    // 5. Chat anti-double-click window; chapter units retain request-ID deduplication.
+    let dedup_window_secs = cooldown_secs;
+    let payload_hash = compute_scoped_payload_hash(&payload.endpoint, &payload.model, &payload.messages, payload.request_scope.as_deref());
     {
         let hashes = state.recent_payload_hashes.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((prev_req_id, prev_time)) = hashes.get(&payload_hash) {
@@ -489,21 +542,32 @@ pub async fn ai_request_chat_completion(
     {
         let mut active = state.active_request_id.lock().unwrap();
         if let Some(ref cur) = *active {
-            return Err(format!(
-                "CONCURRENCY_BLOCKED: 当前已有正在进行的生成请求 ({})，请等待完成或点击停止",
-                cur
-            ));
+            return Err(audit_local_rejection(&payload, &req_id, start_time, "concurrency_blocked", format!(
+                "CONCURRENCY_BLOCKED: 当前已有正在进行的生成请求 ({})，请等待完成或点击停止", cur
+            )));
+        }
+        let mut tx_guard = state.abort_tx.lock().unwrap();
+        let mut last_disp = state.last_chat_dispatched_at.lock().unwrap();
+        // Credential loading can yield; recheck under the dispatch lock before claiming the slot.
+        let remaining_ms = last_disp.map(|prev| remaining_cooldown_ms(
+            payload.purpose.cooldown_seconds(state.cooldown_seconds.load(Ordering::Relaxed)), prev.elapsed()
+        )).unwrap_or(0);
+        if remaining_ms > 0 {
+            return Err(audit_local_rejection(&payload, &req_id, start_time, "cooldown_blocked", format!(
+                "COOLDOWN_ACTIVE: 请等待 {} 秒后再发送新请求 (剩余 {} 毫秒)", (remaining_ms + 999) / 1000, remaining_ms
+            )));
         }
         *active = Some(req_id.clone());
-        let mut tx_guard = state.abort_tx.lock().unwrap();
         *tx_guard = Some((req_id.clone(), abort_tx));
-
-        let mut last_disp = state.last_dispatched_at.lock().unwrap();
-        *last_disp = Some(Instant::now());
+        if payload.purpose == AiRequestPurpose::Chat {
+            *last_disp = Some(Instant::now());
+        }
         let mut seen = state.seen_requests.lock().unwrap();
         seen.insert(req_id.clone(), (Instant::now(), "in_flight".to_string()));
         let mut hashes = state.recent_payload_hashes.lock().unwrap();
-        hashes.insert(payload_hash, (req_id.clone(), Instant::now()));
+        if payload.purpose == AiRequestPurpose::Chat {
+            hashes.insert(payload_hash, (req_id.clone(), Instant::now()));
+        }
         increment_today_count();
     }
     let _guard = RequestLockGuard {
@@ -525,7 +589,7 @@ pub async fn ai_request_chat_completion(
         format!("{}/chat/completions", payload.endpoint.trim_end_matches('/'))
     };
 
-    let max_tokens = payload.max_tokens.unwrap_or(2048).clamp(64, 8192);
+    let max_tokens = payload.max_tokens.unwrap_or(2048).clamp(64, 20000);
 
     let req_body = serde_json::json!({
         "model": payload.model,
@@ -829,18 +893,41 @@ mod tests {
     }
 
     #[test]
+    fn test_cooldown_millisecond_boundary() {
+        assert_eq!(remaining_cooldown_ms(10, Duration::from_millis(9655)), 345);
+        assert_eq!(remaining_cooldown_ms(10, Duration::from_millis(9999)), 1);
+        assert_eq!(remaining_cooldown_ms(10, Duration::from_secs(10)), 0);
+        assert_eq!(remaining_cooldown_ms(0, Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn test_chapter_translation_ignores_chat_cooldown() {
+        let chat = AiRequestPurpose::default();
+        let chapter = AiRequestPurpose::ChapterTranslation;
+        assert_eq!(remaining_cooldown_ms(chat.cooldown_seconds(10), Duration::from_secs(2)), 8000);
+        assert_eq!(remaining_cooldown_ms(chapter.cooldown_seconds(10), Duration::from_secs(2)), 0);
+        assert_eq!(chapter.cooldown_seconds(3600), 0);
+        assert_eq!(chat.cooldown_seconds(0), 0);
+        let old_payload: AiCompletionPayload = serde_json::from_value(serde_json::json!({
+            "requestId": "old-chat", "endpoint": "https://example.com/v1", "model": "fixture", "messages": []
+        })).unwrap();
+        assert_eq!(old_payload.purpose, AiRequestPurpose::Chat);
+        assert_eq!(serde_json::from_str::<AiRequestPurpose>("\"chapterTranslation\"").unwrap(), chapter);
+    }
+
+    #[test]
     fn test_cooldown_enforcement() {
         let state = AiState::default();
         state.cooldown_seconds.store(10, Ordering::Relaxed);
 
         // First dispatch sets timestamp
         {
-            let mut last = state.last_dispatched_at.lock().unwrap();
+            let mut last = state.last_chat_dispatched_at.lock().unwrap();
             *last = Some(Instant::now());
         }
 
         // Within 10s cooldown, checking elapsed should be < 10
-        let last = state.last_dispatched_at.lock().unwrap();
+        let last = state.last_chat_dispatched_at.lock().unwrap();
         let elapsed = last.unwrap().elapsed().as_secs();
         assert!(elapsed < 10);
     }
@@ -920,4 +1007,24 @@ mod tests {
             assert!(active.is_none());
         }
     }
+}
+
+/// Bounded local protocol diagnostics; no original text, translations or credentials.
+#[tauri::command]
+pub fn ai_record_translation_diagnostic(diagnostic: serde_json::Value) -> Result<(), String> {
+    let _guard = AI_AUDIT_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut entry = serde_json::Map::new();
+    for key in ["requestId", "protocol", "errorCode", "batchIndex", "batches", "expected", "matched", "returned", "structure", "itemTypes", "expectedIds", "returnedIds", "status", "finishReason", "recovered", "responseChars", "responsePreview"] {
+        if let Some(value) = diagnostic.get(key) {
+            entry.insert(key.to_owned(), value.clone());
+        }
+    }
+    entry.insert("timestamp".into(), serde_json::Value::String(format_system_time_iso(SystemTime::now()).1));
+    let path = get_ai_storage_dir().join("translation_diagnostics.json");
+    let mut entries: Vec<serde_json::Value> = fs::read_to_string(&path).ok()
+        .and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+    entries.push(serde_json::Value::Object(entry));
+    if entries.len() > 20 { entries.drain(0..entries.len() - 20); }
+    let text = serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?;
+    fs::write(path, text).map_err(|e| e.to_string())
 }

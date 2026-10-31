@@ -13,11 +13,40 @@
 
 export const PAGE_TURN_MODES = ['none', 'slide', 'cover', 'scroll', 'curl']
 export const PAGE_TURN_STATES = ['idle', 'preparing', 'dragging', 'settling']
-export const FEATURE_CURL_PAGE_TURN_ENABLED = false
+export const FEATURE_CURL_PAGE_TURN_ENABLED = true
 
 const safeRaf = typeof requestAnimationFrame === 'function'
     ? requestAnimationFrame
     : (cb) => setTimeout(() => cb(typeof performance !== 'undefined' ? performance.now() : Date.now()), 16)
+
+export function isDarkColor(color) {
+    if (!color) return false
+    const str = String(color).trim().toLowerCase()
+    if (str === 'black' || str === '#000' || str === '#000000') return true
+    if (str.startsWith('#')) {
+        const hex = str.slice(1)
+        let r = 0, g = 0, b = 0
+        if (hex.length === 3) {
+            r = parseInt(hex[0] + hex[0], 16)
+            g = parseInt(hex[1] + hex[1], 16)
+            b = parseInt(hex[2] + hex[2], 16)
+        } else if (hex.length >= 6) {
+            r = parseInt(hex.slice(0, 2), 16)
+            g = parseInt(hex.slice(2, 4), 16)
+            b = parseInt(hex.slice(4, 6), 16)
+        }
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b
+        return lum < 128
+    }
+    if (str.startsWith('rgb')) {
+        const m = str.match(/\d+/g)
+        if (m && m.length >= 3) {
+            const lum = 0.299 * Number(m[0]) + 0.587 * Number(m[1]) + 0.114 * Number(m[2])
+            return lum < 128
+        }
+    }
+    return false
+}
 
 /**
  * Base Adapter Contract for Reader Viewports
@@ -31,6 +60,156 @@ export class PageTurnAdapter {
     isContinuousScroll() { return false }
     getViewElement() { return null }
     getVisuals() { return null } // { currentCanvas, nextCanvas, bgColor }
+}
+
+/**
+ * Accurately renders a text node's wrapped lines to canvas without column leakage or text overlapping
+ */
+function renderTextNodeToCanvas(doc, textNode, ctx, width, height, textColor, arg1 = 0, arg2 = 0, arg3 = null, arg4 = null) {
+    let offsetX = 0
+    let offsetY = 0
+    let colMinX = 0
+    let colMaxX = width
+
+    if (arg3 != null && typeof arg2 === 'number') {
+        // Called with (doc, textNode, ctx, width, height, textColor, colMinX, colMaxX, offsetY)
+        colMinX = arg1
+        colMaxX = arg2
+        offsetY = arg3 || 0
+        offsetX = -colMinX
+    } else {
+        // Called with (doc, textNode, ctx, width, height, textColor, offsetX, offsetY)
+        offsetX = arg1 || 0
+        offsetY = arg2 || 0
+        colMinX = -offsetX
+        colMaxX = -offsetX + width
+    }
+
+    const parent = textNode.parentElement
+    if (!parent) return false
+    const tagName = parent.tagName?.toLowerCase()
+    if (tagName === 'script' || tagName === 'style' || tagName === 'noscript' || tagName === 'svg') return false
+    if (parent.closest('script, style, noscript, svg, [hidden]')) return false
+
+    const fullText = textNode.textContent
+    if (!fullText || !fullText.trim()) return false
+
+    const style = doc.defaultView?.getComputedStyle(parent)
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false
+
+    const fontSize = parseFloat(style.fontSize) || 16
+    const fontFamily = style.fontFamily || 'serif'
+    const fontWeight = style.fontWeight || 'normal'
+    const fontStyle = style.fontStyle || 'normal'
+    const color = (style.color && style.color !== 'rgba(0, 0, 0, 0)' && style.color !== 'transparent') ? style.color : textColor
+
+    ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`
+    ctx.fillStyle = color
+    ctx.textBaseline = 'top'
+
+    const range = doc.createRange()
+    range.selectNodeContents(textNode)
+    const rects = range.getClientRects()
+    if (!rects || rects.length === 0) return false
+
+    // Quick rejection: check if any rect intersects this column slice [colMinX - 8, colMaxX + 8]
+    let inCol = false
+    for (let i = 0; i < rects.length; i++) {
+        const r = rects[i]
+        if (r.right >= colMinX - 8 && r.left < colMaxX + 8) {
+            inCol = true
+            break
+        }
+    }
+    if (!inCol) return false
+
+    let renderedAny = false
+
+    // Single rect: if within this column slice, draw directly
+    if (rects.length === 1) {
+        const r = rects[0]
+        const x = r.left - colMinX
+        const y = r.top + offsetY
+        if (y + r.height >= 0 && y <= height && x + r.width >= 0 && x <= width && x >= -8) {
+            const trimmed = fullText.trim()
+            if (trimmed) {
+                ctx.fillText(trimmed, x, y)
+                return true
+            }
+        }
+        return false
+    }
+
+    // Multiple characters/lines: Group characters strictly within [colMinX - 8, colMaxX - 8]
+    try {
+        const charRange = doc.createRange()
+        let currentLine = ''
+        let currentTop = -999
+        let currentLeft = 0
+        const lineHeight = parseFloat(style.lineHeight) || (fontSize * 1.4)
+
+        for (let c = 0; c < fullText.length; c++) {
+            charRange.setStart(textNode, c)
+            charRange.setEnd(textNode, c + 1)
+            const cr = charRange.getBoundingClientRect()
+            if (!cr || cr.width === 0) {
+                if (currentLine) currentLine += fullText[c]
+                continue
+            }
+
+            // Check if this character is within this column's horizontal slice
+            if (cr.left >= colMinX - 8 && cr.left < colMaxX - 8) {
+                // If baseline moved vertically by more than half line height, emit line
+                if (currentLine && Math.abs(cr.top - currentTop) > 6) {
+                    const lineStr = currentLine.trim()
+                    const x = currentLeft - colMinX
+                    const y = currentTop + offsetY
+                    if (lineStr && y + lineHeight >= 0 && y <= height && x + width >= 0 && x <= width && x >= -8) {
+                        ctx.fillText(lineStr, x, y)
+                        renderedAny = true
+                    }
+                    currentLine = ''
+                }
+                if (!currentLine) {
+                    currentTop = cr.top
+                    currentLeft = cr.left
+                }
+                currentLine += fullText[c]
+            } else {
+                if (currentLine) {
+                    const lineStr = currentLine.trim()
+                    const x = currentLeft - colMinX
+                    const y = currentTop + offsetY
+                    if (lineStr && y + lineHeight >= 0 && y <= height && x + width >= 0 && x <= width && x >= -8) {
+                        ctx.fillText(lineStr, x, y)
+                        renderedAny = true
+                    }
+                    currentLine = ''
+                    currentTop = -999
+                }
+            }
+        }
+        if (currentLine) {
+            const lineStr = currentLine.trim()
+            const x = currentLeft - colMinX
+            const y = currentTop + offsetY
+            if (lineStr && y + lineHeight >= 0 && y <= height && x + width >= 0 && x <= width && x >= -8) {
+                ctx.fillText(lineStr, x, y)
+                renderedAny = true
+            }
+        }
+    } catch (_) {
+        // Fallback for mocked/headless environments without per-character bounding client rects
+        const r0 = rects[0]
+        const x0 = r0.left - colMinX
+        const y0 = r0.top + offsetY
+        if (x0 >= -8 && x0 <= width && y0 <= height) {
+            ctx.fillText(fullText.trim(), x0, y0)
+            renderedAny = true
+        }
+    }
+
+    return renderedAny
 }
 
 /**
@@ -86,7 +265,7 @@ export class FoliatePageTurnAdapter extends PageTurnAdapter {
         this._cachedNextCanvas = null
     }
 
-    captureCurrentPageCanvas(bgColor, textColor) {
+    capturePageCanvas(targetPageIndex, bgColor, textColor) {
         if (typeof document === 'undefined') return null
         const viewEl = this.getViewElement()
         if (!viewEl) return null
@@ -95,72 +274,135 @@ export class FoliatePageTurnAdapter extends PageTurnAdapter {
         const height = viewEl.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 1200)
         if (width <= 0 || height <= 0) return null
 
+        const contents = (typeof this.view?.renderer?.getContents === 'function')
+            ? this.view.renderer.getContents()
+            : []
+        const doc = contents?.[0]?.doc
+        if (!doc || !doc.body) return null
+
+        const pageSize = this.view?.renderer?.size || width
+        const curPage = this.view?.renderer?.page ?? 0
+        const totalPages = this.view?.renderer?.pages ?? 1
+
+        if (targetPageIndex < 0 || targetPageIndex >= totalPages) {
+            return null
+        }
+
+        const hasBoundaries = totalPages > 2 && curPage >= 1
+        const colK = hasBoundaries ? (targetPageIndex - 1) : targetPageIndex
+        const colMinX = Math.max(0, colK * pageSize)
+        const colMaxX = (colK + 1) * pageSize
+        const pageOffset = (targetPageIndex - curPage) * pageSize
+
         const canvas = document.createElement('canvas')
         canvas.width = width
         canvas.height = height
         const ctx = canvas.getContext('2d')
         if (!ctx) return null
 
-        // 1. Fill base paper background
         ctx.fillStyle = bgColor
         ctx.fillRect(0, 0, width, height)
 
-        // 2. Extract DOM contents from active chapter iframe
-        const contents = (typeof this.view?.renderer?.getContents === 'function')
-            ? this.view.renderer.getContents()
-            : []
-        const doc = contents?.[0]?.doc
-        if (!doc || !doc.body) return canvas
+        const viewRect = typeof viewEl.getBoundingClientRect === 'function'
+            ? viewEl.getBoundingClientRect()
+            : { left: 0, top: 0, width, height }
+        const iframeEl = doc.defaultView?.frameElement
+        const iframeRect = (iframeEl && typeof iframeEl.getBoundingClientRect === 'function')
+            ? iframeEl.getBoundingClientRect()
+            : null
+        const offsetX = (iframeRect ? (iframeRect.left - viewRect.left) : 0) - pageOffset
+        const offsetY = (iframeRect ? (iframeRect.top - viewRect.top) : 0)
+
+        let hasContent = false
 
         try {
             ctx.save()
-            const elements = doc.body.querySelectorAll('h1, h2, h3, h4, h5, h6, p, div, span, blockquote, img, li')
-            for (const el of elements) {
-                // If it has children other than text or img, let child elements render instead
-                if (el.tagName !== 'IMG' && el.children && el.children.length > 0) continue
 
-                const rect = el.getBoundingClientRect()
-                if (rect.bottom < 0 || rect.top > height || rect.right < 0 || rect.left > width) {
-                    continue
+            // 1. Draw images
+            if (typeof doc.body.querySelectorAll === 'function') {
+                const images = doc.body.querySelectorAll('img, svg')
+                for (const img of images) {
+                    const rect = typeof img.getBoundingClientRect === 'function' ? img.getBoundingClientRect() : null
+                    if (!rect) continue
+                    if (rect.right < colMinX - 8 || rect.left >= colMaxX + 8) continue
+                    const x = rect.left - colMinX
+                    const y = rect.top + offsetY
+                    if (rect.width <= 0 || rect.height <= 0) continue
+                    if (y + rect.height < 0 || y > height || x + rect.width < 0 || x > width) continue
+
+                    if (img.tagName === 'IMG') {
+                        try {
+                            ctx.drawImage(img, x, y, rect.width, rect.height)
+                            hasContent = true
+                        } catch (_) {}
+                    }
                 }
-
-                if (el.tagName === 'IMG') {
-                    try {
-                        ctx.drawImage(el, rect.left, rect.top, rect.width, rect.height)
-                    } catch (_) {}
-                    continue
-                }
-
-                const text = el.textContent?.trim()
-                if (!text) continue
-
-                const style = doc.defaultView?.getComputedStyle(el)
-                const fontSize = parseFloat(style?.fontSize) || 18
-                const fontFamily = style?.fontFamily || 'serif'
-                const fontWeight = style?.fontWeight || 'normal'
-                const color = (style?.color && style.color !== 'rgba(0, 0, 0, 0)') ? style.color : textColor
-
-                ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`
-                ctx.fillStyle = color
-                ctx.textBaseline = 'top'
-
-                const x = Math.max(0, rect.left)
-                const y = Math.max(0, rect.top)
-                const maxWidth = Math.max(10, Math.min(width - x, rect.width || width))
-                ctx.fillText(text, x, y, maxWidth)
             }
-            ctx.restore()
-        } catch (_) {}
 
-        return canvas
+            // 2. Draw text nodes with TreeWalker
+            if (typeof doc.createTreeWalker === 'function' && typeof doc.createRange === 'function') {
+                const showText = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_TEXT : 4
+                const walker = doc.createTreeWalker(doc.body, showText, null)
+                let node = walker.nextNode()
+                while (node) {
+                    if (renderTextNodeToCanvas(doc, node, ctx, width, height, textColor, colMinX, colMaxX, offsetY)) {
+                        hasContent = true
+                    }
+                    node = walker.nextNode()
+                }
+            } else if (typeof doc.body.querySelectorAll === 'function') {
+                // Headless/test fallback when TreeWalker or Range is not mocked
+                const elements = doc.body.querySelectorAll('h1, h2, h3, h4, h5, h6, p, blockquote, li')
+                for (const el of elements) {
+                    const text = el.textContent?.trim()
+                    if (!text) continue
+                    const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null
+                    if (!rect) continue
+                    if (rect.right < colMinX - 8 || rect.left >= colMaxX + 8) continue
+                    const x = rect.left - colMinX
+                    const y = rect.top + offsetY
+                    if (y + rect.height < 0 || y > height || x + rect.width < 0 || x > width || x < -8) continue
+
+                    const style = doc.defaultView?.getComputedStyle?.(el)
+                    const fontSize = parseFloat(style?.fontSize) || 18
+                    const fontFamily = style?.fontFamily || 'serif'
+                    const fontWeight = style?.fontWeight || 'normal'
+                    const color = (style?.color && style.color !== 'rgba(0, 0, 0, 0)' && style.color !== 'transparent') ? style.color : textColor
+
+                    ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`
+                    ctx.fillStyle = color
+                    ctx.textBaseline = 'top'
+                    ctx.fillText(text, x, y)
+                    hasContent = true
+                }
+            }
+
+            ctx.restore()
+        } catch (e) {
+            console.warn('[FoliatePageTurnAdapter] capturePageCanvas failed:', e)
+            return null
+        }
+
+        return hasContent ? canvas : null
+    }
+
+    captureCurrentPageCanvas(bgColor, textColor) {
+        const curPage = this.view?.renderer?.page ?? 0
+        return this.capturePageCanvas(curPage, bgColor, textColor)
     }
 
     getVisuals(direction = 'next') {
         const bgColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-bg') || getComputedStyle(document.documentElement).getPropertyValue('--book-bg'))) || '#FAF9F5'
         const textColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-color') || getComputedStyle(document.documentElement).getPropertyValue('--book-color'))) || '#141413'
-        
+
+        const curPage = this.view?.renderer?.page ?? 0
         if (!this._cachedCanvas) {
-            this._cachedCanvas = this.captureCurrentPageCanvas(bgColor, textColor)
+            this._cachedCanvas = this.capturePageCanvas(curPage, bgColor, textColor)
+        }
+
+        const targetPage = direction === 'next' ? curPage + 1 : curPage - 1
+        if (!this._cachedNextCanvas) {
+            this._cachedNextCanvas = this.capturePageCanvas(targetPage, bgColor, textColor)
         }
 
         return {
@@ -221,17 +463,32 @@ export class PdfPageTurnAdapter extends PageTurnAdapter {
         return this.viewport?.scrollArea || this.viewport?.container || null
     }
 
+    _getCanvasForPage(pageIndex) {
+        const fromMap = this.viewport?.renderedCanvases?.get?.(pageIndex)
+        if (fromMap) return fromMap
+        const slot = this.viewport?.activeSlots?.get?.(pageIndex)
+        if (slot && typeof slot.querySelector === 'function') {
+            const mainCanvas = slot.querySelector('.pdf-page-canvas')
+            if (mainCanvas && mainCanvas.width > 0) return mainCanvas
+            const previewCanvas = slot.querySelector('.pdf-page-preview, canvas')
+            if (previewCanvas && previewCanvas.width > 0) return previewCanvas
+        }
+        return null
+    }
+
     getVisuals(direction = 'next') {
         // Retrieve current and target page canvases for realistic curl projection
         const curPage = this.getCurrentPage()
-        const curCanvas = this.viewport?.renderedCanvases?.get?.(curPage) || null
+        const curCanvas = this._getCanvasForPage(curPage)
         const targetPage = direction === 'next' ? curPage + 1 : curPage - 1
-        const nextCanvas = this.viewport?.renderedCanvases?.get?.(targetPage) || null
+        const nextCanvas = this._getCanvasForPage(targetPage)
+        const bgColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-bg') || (typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement).getPropertyValue('--book-bg') : ''))) || '#ffffff'
+        const textColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-color') || (typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement).getPropertyValue('--book-color') : ''))) || '#141413'
         return {
             currentCanvas: curCanvas,
             nextCanvas: nextCanvas,
-            bgColor: '#ffffff',
-            textColor: '#141413'
+            bgColor: bgColor.trim() || '#ffffff',
+            textColor: textColor.trim() || '#141413'
         }
     }
 }
@@ -319,154 +576,334 @@ export class CurlSimulator {
         if (clampedProgress <= 0 || clampedProgress >= 1) return
 
         const isNext = direction === 'next'
-        // Fold progress from 1 to 0 (next) or 0 to 1 (prev)
-        const foldProgress = isNext ? (1 - clampedProgress) : clampedProgress
-        const foldX = width * foldProgress
+        const isDark = isDarkColor(bgColor)
 
-        // Radius R smoothly scales with progress for natural paper elasticity
-        const R = Math.max(16, Math.min(width * 0.14, 50 * Math.sin(clampedProgress * Math.PI) + 14))
+        // Ergonomic corner slant (Authentic WeChat Reading conical corner curl):
+        // Pulling near top corner causes top to lead with steep angle; mid swipe maintains natural ergonomic lead
+        const targetY = touchY != null ? Math.max(0, Math.min(height, touchY)) : height * 0.25
+        const normY = (targetY - height * 0.5) / (height * 0.5) // -1 top, +1 bottom
+        const cornerLead = -normY * 0.75 + 0.35
 
-        // Tilt angle from touch position
-        const targetY = touchY != null ? Math.max(height * 0.1, Math.min(height * 0.9, touchY)) : height * 0.5
-        const tiltAngle = ((targetY - height * 0.5) / height) * 0.3 * (1 - clampedProgress)
+        const slantTop = isNext
+            ? (1 - clampedProgress * (1 + 0.75 * cornerLead))
+            : (clampedProgress * (1 + 0.75 * cornerLead))
+        const slantBottom = isNext
+            ? (1 - clampedProgress * (1 - 0.55 * cornerLead))
+            : (clampedProgress * (1 - 0.55 * cornerLead))
 
-        // Normal n (pointing toward the curled side) and Tangent t
-        const nx = isNext ? Math.cos(tiltAngle) : -Math.cos(tiltAngle)
-        const ny = Math.sin(tiltAngle)
-        const n = { x: nx, y: ny }
-        const t = { x: -ny, y: nx }
-        const o = { x: foldX, y: targetY }
+        const foldTopX = width * Math.min(1.05, Math.max(-0.25, slantTop))
+        const foldBottomX = width * Math.min(1.05, Math.max(-0.25, slantBottom))
+
+        const dx = foldBottomX - foldTopX
+        const dy = height
+        const lineLen = Math.hypot(dx, dy) || 1
+        const foldAngle = Math.atan2(dy, dx)
+
+        // Normal pointing towards revealed page:
+        // isNext: revealed page on right -> nx > 0
+        // isPrev: revealed page on left  -> nx < 0
+        const nx = isNext ? (dy / lineLen) : (-dy / lineLen)
+        const ny = isNext ? (-dx / lineLen) : (dx / lineLen)
+
+        // Conical curl radii: larger at leading corner, smoothly tapered
+        const baseR = Math.max(12, Math.min(width * 0.12, 16 + 20 * Math.sin(clampedProgress * Math.PI)))
+        const taper = Math.max(0, Math.min(0.5, Math.abs(dx) / width))
+        const R_top = isNext ? baseR * (1 + taper) : baseR * (1 - taper)
+        const R_bottom = isNext ? baseR * (1 - taper * 0.7) : baseR * (1 + taper * 0.7)
+
+        // Flap reach: Conical curl width (Slender natural strip matching WeChat Reading)
+        const peelDistTop = isNext ? Math.max(0, width - foldTopX) : Math.max(0, foldTopX)
+        const peelDistBottom = isNext ? Math.max(0, width - foldBottomX) : Math.max(0, foldBottomX)
+
+        const flapWidthTop = Math.min(peelDistTop * 0.52, width * 0.36)
+        const flapWidthBottom = Math.min(peelDistBottom * 0.38, width * 0.24)
+
+        const flapCornerTopX = foldTopX - nx * flapWidthTop
+        const flapCornerBottomX = foldBottomX - nx * flapWidthBottom
+
+        const midX = (foldTopX + foldBottomX) / 2
+        const midY = height / 2
+
+        // Shadow color palettes (Warm ambient falloff for light theme, deep charcoal for dark)
+        const shadowBase = isDark ? '0, 0, 0' : '40, 30, 20'
 
         ctx.save()
 
-        // 1. LAYER 1: Stationary Underlying Target Page (Revealed under curl)
+        // =========================================================================
+        // LAYER 1: Stationary Revealed Page (Next Page for isNext, Prev for isPrev)
+        // =========================================================================
+        ctx.fillStyle = bgColor
+        ctx.fillRect(0, 0, width, height)
+
         if (nextTexture) {
             try {
                 ctx.drawImage(nextTexture, 0, 0, width, height)
             } catch (_) {}
         }
 
-        // 2. LAYER 2: Soft Drop Shadow cast onto the stationary underlying page
-        const shadowWidth = Math.min(120, Math.max(36, R * 2.4))
-        ctx.save()
-        const shadowGrad = isNext
-            ? ctx.createLinearGradient(foldX - shadowWidth, 0, foldX, 0)
-            : ctx.createLinearGradient(foldX, 0, foldX + shadowWidth, 0)
+        // Spine shadow on revealed page binding edge
+        const spineSide = isNext ? 0 : width - 24
+        const spineGradNext = ctx.createLinearGradient(spineSide, 0, isNext ? 24 : width, 0)
+        spineGradNext.addColorStop(isNext ? 0 : 1, 'rgba(' + shadowBase + ', 0.10)')
+        spineGradNext.addColorStop(isNext ? 1 : 0, 'rgba(0, 0, 0, 0)')
+        ctx.fillStyle = spineGradNext
+        ctx.fillRect(spineSide, 0, 24, height)
 
-        if (isNext) {
-            shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0)')
-            shadowGrad.addColorStop(0.5, 'rgba(0, 0, 0, 0.14)')
-            shadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0.38)')
-            ctx.fillStyle = shadowGrad
-            ctx.fillRect(Math.max(0, foldX - shadowWidth), 0, shadowWidth, height)
-        } else {
-            shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.38)')
-            shadowGrad.addColorStop(0.5, 'rgba(0, 0, 0, 0.14)')
-            shadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-            ctx.fillStyle = shadowGrad
-            ctx.fillRect(foldX, 0, Math.min(width - foldX, shadowWidth), height)
-        }
-        ctx.restore()
-
-        // 3. LAYER 3: Flat Uncurled portion of current page (s <= 0)
+        // =========================================================================
+        // LAYER 2: Warm Diffuse Crease Drop Shadow cast onto revealed page
+        // =========================================================================
         ctx.save()
         ctx.beginPath()
         if (isNext) {
-            ctx.rect(0, 0, foldX, height)
+            ctx.moveTo(foldTopX, 0)
+            ctx.lineTo(width, 0)
+            ctx.lineTo(width, height)
+            ctx.lineTo(foldBottomX, height)
         } else {
-            ctx.rect(foldX, 0, width - foldX, height)
+            ctx.moveTo(0, 0)
+            ctx.lineTo(foldTopX, 0)
+            ctx.lineTo(foldBottomX, height)
+            ctx.lineTo(0, height)
         }
+        ctx.closePath()
         ctx.clip()
+
+        // Smooth 45px falloff drop shadow cast by the crease
+        const shadowDist = 48
+        const shadG = ctx.createLinearGradient(midX, midY, midX + nx * shadowDist, midY + ny * shadowDist)
+        shadG.addColorStop(0, 'rgba(' + shadowBase + ', ' + (isDark ? 0.40 : 0.35) + ')')
+        shadG.addColorStop(0.20, 'rgba(' + shadowBase + ', ' + (isDark ? 0.22 : 0.18) + ')')
+        shadG.addColorStop(0.55, 'rgba(' + shadowBase + ', ' + (isDark ? 0.08 : 0.05) + ')')
+        shadG.addColorStop(1, 'rgba(0, 0, 0, 0)')
+        ctx.fillStyle = shadG
+        ctx.fillRect(0, 0, width, height)
+        ctx.restore()
+
+        // =========================================================================
+        // LAYER 3: Flat Unpeeled Current Page
+        // =========================================================================
+        ctx.save()
+        ctx.beginPath()
+        if (isNext) {
+            ctx.moveTo(0, 0)
+            ctx.lineTo(foldTopX, 0)
+            ctx.lineTo(foldBottomX, height)
+            ctx.lineTo(0, height)
+        } else {
+            ctx.moveTo(foldTopX, 0)
+            ctx.lineTo(width, 0)
+            ctx.lineTo(width, height)
+            ctx.lineTo(foldBottomX, height)
+        }
+        ctx.closePath()
+        ctx.clip()
+
+        // 100% OPAQUE background fill prevents any bleed-through from underneath
+        ctx.fillStyle = bgColor
+        ctx.fillRect(0, 0, width, height)
 
         if (currentTexture) {
             try {
                 ctx.drawImage(currentTexture, 0, 0, width, height)
             } catch (_) {}
-        } else {
-            ctx.fillStyle = bgColor
-            ctx.fillRect(0, 0, width, height)
-            // Subtle book spine shadow on the binding side
-            const spineGrad = ctx.createLinearGradient(isNext ? 0 : width, 0, isNext ? 32 : width - 32, 0)
-            spineGrad.addColorStop(0, 'rgba(0, 0, 0, 0.15)')
-            spineGrad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-            ctx.fillStyle = spineGrad
-            ctx.fillRect(isNext ? 0 : width - 32, 0, 32, height)
         }
+
+        // Spine shadow on current page
+        const spineSideCur = isNext ? 0 : width - 24
+        const spineGradCur = ctx.createLinearGradient(spineSideCur, 0, isNext ? 24 : width, 0)
+        spineGradCur.addColorStop(isNext ? 0 : 1, 'rgba(' + shadowBase + ', 0.10)')
+        spineGradCur.addColorStop(isNext ? 1 : 0, 'rgba(0, 0, 0, 0)')
+        ctx.fillStyle = spineGradCur
+        ctx.fillRect(spineSideCur, 0, 24, height)
+
         ctx.restore()
 
-        // 4. LAYER 4: Curled Cylinder & Paper Backside Flap
-        // Compute cylindrical roll path
-        const flapWidth = Math.min(width - foldX, foldX) * 0.72 + R * 1.5
-        const drawFlapPath = () => {
-            ctx.beginPath()
-            if (isNext) {
-                ctx.moveTo(foldX, 0)
-                ctx.quadraticCurveTo(foldX + flapWidth * 0.45, targetY, foldX, height)
-                ctx.lineTo(width, height)
-                ctx.lineTo(width, 0)
+        // =========================================================================
+        // LAYER 4: Curled Flap with Organic Paper Lighting & Translucent Show-Through
+        // =========================================================================
+        // 4a. Ambient drop shadow cast by flap edge onto flat current page
+        ctx.save()
+        const edgeShadW = 28
+        ctx.beginPath()
+        if (isNext) {
+            ctx.moveTo(flapCornerTopX - edgeShadW, 40)
+            if (typeof ctx.quadraticCurveTo === 'function') {
+                ctx.quadraticCurveTo(
+                    (flapCornerTopX + flapCornerBottomX) / 2 - edgeShadW, height * 0.5,
+                    flapCornerBottomX - edgeShadW, height
+                )
             } else {
-                ctx.moveTo(foldX, 0)
-                ctx.quadraticCurveTo(foldX - flapWidth * 0.45, targetY, foldX, height)
-                ctx.lineTo(0, height)
-                ctx.lineTo(0, 0)
+                ctx.lineTo(flapCornerBottomX - edgeShadW, height)
             }
-            ctx.closePath()
+            ctx.lineTo(flapCornerBottomX + 2, height)
+            if (typeof ctx.quadraticCurveTo === 'function') {
+                ctx.quadraticCurveTo(
+                    (flapCornerTopX + flapCornerBottomX) / 2 + 2, height * 0.5,
+                    flapCornerTopX + 2, 40
+                )
+            } else {
+                ctx.lineTo(flapCornerTopX + 2, 40)
+            }
+        } else {
+            ctx.moveTo(flapCornerTopX + edgeShadW, 40)
+            if (typeof ctx.quadraticCurveTo === 'function') {
+                ctx.quadraticCurveTo(
+                    (flapCornerTopX + flapCornerBottomX) / 2 + edgeShadW, height * 0.5,
+                    flapCornerBottomX + edgeShadW, height
+                )
+            } else {
+                ctx.lineTo(flapCornerBottomX + edgeShadW, height)
+            }
+            ctx.lineTo(flapCornerBottomX - 2, height)
+            if (typeof ctx.quadraticCurveTo === 'function') {
+                ctx.quadraticCurveTo(
+                    (flapCornerTopX + flapCornerBottomX) / 2 - 2, height * 0.5,
+                    flapCornerTopX - 2, 40
+                )
+            } else {
+                ctx.lineTo(flapCornerTopX - 2, 40)
+            }
+        }
+        ctx.closePath()
+
+        const fEdgeG = isNext
+            ? ctx.createLinearGradient(flapCornerTopX - edgeShadW, 0, flapCornerTopX, 0)
+            : ctx.createLinearGradient(flapCornerTopX, 0, flapCornerTopX + edgeShadW, 0)
+        fEdgeG.addColorStop(isNext ? 0 : 1, 'rgba(' + shadowBase + ', 0)')
+        fEdgeG.addColorStop(isNext ? 0.6 : 0.4, 'rgba(' + shadowBase + ', ' + (isDark ? 0.10 : 0.08) + ')')
+        fEdgeG.addColorStop(isNext ? 1 : 0, 'rgba(' + shadowBase + ', ' + (isDark ? 0.32 : 0.26) + ')')
+        ctx.fillStyle = fEdgeG
+        ctx.fill()
+        ctx.restore()
+
+        // 4b. Flap Paper Body
+        ctx.save()
+        ctx.beginPath()
+        ctx.moveTo(foldTopX, 0)
+
+        // Graceful curled arch at the top corner
+        const archTopX = foldTopX - (isNext ? 45 : -45)
+        if (typeof ctx.bezierCurveTo === 'function') {
+            ctx.bezierCurveTo(
+                archTopX, -12,
+                flapCornerTopX + (isNext ? 20 : -20), 5,
+                flapCornerTopX, 55
+            )
+        } else if (typeof ctx.quadraticCurveTo === 'function') {
+            ctx.quadraticCurveTo(
+                archTopX, 0,
+                flapCornerTopX, 55
+            )
+        } else {
+            ctx.lineTo(flapCornerTopX, 55)
         }
 
-        ctx.save()
-        drawFlapPath()
+        // Organic curved outer peeling edge
+        const midEdgeX = (flapCornerTopX + flapCornerBottomX) / 2 - (isNext ? 8 : -8)
+        if (typeof ctx.quadraticCurveTo === 'function') {
+            ctx.quadraticCurveTo(
+                midEdgeX, height * 0.5,
+                flapCornerBottomX, height
+            )
+        } else {
+            ctx.lineTo(flapCornerBottomX, height)
+        }
+
+        ctx.lineTo(foldBottomX, height)
+        ctx.closePath()
         ctx.clip()
 
-        // If current texture exists, render mirrored text show-through on paper back
+        // 100% OPAQUE base paper fill (pure matte paper, identical to book theme)
+        ctx.fillStyle = bgColor
+        ctx.fillRect(0, 0, width, height)
+
+        // 4c. Mirrored Translucent Show-Through Text across crease line
         if (currentTexture) {
             try {
                 ctx.save()
-                ctx.translate(foldX * 2, 0)
-                ctx.scale(-1, 1)
-                ctx.globalAlpha = 0.12 // Subtle authentic paper show-through
+                // Reflected coordinate system across crease line (aligned with normal vector)
+                const theta = foldAngle - Math.PI / 2
+                ctx.translate(foldTopX, 0)
+                if (typeof ctx.rotate === 'function') ctx.rotate(theta)
+                ctx.scale(-1, 1) // Invert across normal to reflect back of page
+                if (typeof ctx.rotate === 'function') ctx.rotate(-theta)
+                ctx.translate(-foldTopX, 0)
+
+                // Strictly clip to the peeled region to guarantee zero ghosting / overlap
+                ctx.beginPath()
+                if (isNext) {
+                    ctx.moveTo(foldTopX, 0)
+                    ctx.lineTo(width + 20, 0)
+                    ctx.lineTo(width + 20, height + 20)
+                    ctx.lineTo(foldBottomX, height + 20)
+                } else {
+                    ctx.moveTo(-20, 0)
+                    ctx.lineTo(foldTopX, 0)
+                    ctx.lineTo(foldBottomX, height + 20)
+                    ctx.lineTo(-20, height + 20)
+                }
+                ctx.closePath()
+                ctx.clip()
+
+                // Subtle paper fiber show-through (matching WeChat Reading)
+                ctx.globalAlpha = isDark ? 0.15 : 0.20
                 ctx.drawImage(currentTexture, 0, 0, width, height)
                 ctx.restore()
             } catch (_) {}
         }
 
-        // Paper Backside Gradient Shading (Cylindrical roll illumination)
-        const paperBackGrad = ctx.createLinearGradient(foldX, 0, isNext ? foldX + flapWidth : foldX - flapWidth, 0)
-        paperBackGrad.addColorStop(0, 'rgba(235, 228, 215, 0.96)')
-        paperBackGrad.addColorStop(0.2, 'rgba(255, 255, 255, 0.98)')
-        paperBackGrad.addColorStop(0.55, 'rgba(240, 233, 218, 0.95)')
-        paperBackGrad.addColorStop(1, 'rgba(215, 205, 185, 0.92)')
+        // 4d. Matte Paper Crease Shading (Warm ambient AO, ABSOLUTELY NO metallic highlight)
+        const flapGradLen = Math.min(110, Math.max(50, flapWidthTop))
+        const fShadG = ctx.createLinearGradient(midX, midY, midX - nx * flapGradLen, midY - ny * flapGradLen)
+        fShadG.addColorStop(0, 'rgba(' + shadowBase + ', ' + (isDark ? 0.32 : 0.28) + ')') // Crease shadow
+        fShadG.addColorStop(0.20, 'rgba(' + shadowBase + ', ' + (isDark ? 0.12 : 0.10) + ')')
+        fShadG.addColorStop(0.50, 'rgba(' + shadowBase + ', 0)') // Pure paper body in middle
+        fShadG.addColorStop(0.85, 'rgba(' + shadowBase + ', 0)')
+        fShadG.addColorStop(1, 'rgba(' + shadowBase + ', ' + (isDark ? 0.14 : 0.10) + ')') // Subtle rim darkening
+        ctx.fillStyle = fShadG
+        ctx.fillRect(0, 0, width, height)
 
-        drawFlapPath()
-        ctx.fillStyle = paperBackGrad
-        ctx.fill()
-
-        // Cylindrical inner shadow inside the roll
-        const rollShadowGrad = isNext
-            ? ctx.createLinearGradient(foldX, 0, foldX + R * 1.8, 0)
-            : ctx.createLinearGradient(foldX, 0, foldX - R * 1.8, 0)
-        rollShadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.28)')
-        rollShadowGrad.addColorStop(0.45, 'rgba(0, 0, 0, 0.08)')
-        rollShadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-        drawFlapPath()
-        ctx.fillStyle = rollShadowGrad
-        ctx.fill()
-
-        ctx.restore() // restore flap clip
-
-        // 5. Specular Crest Highlight along the cylindrical ridge (z = R)
-        ctx.save()
-        ctx.beginPath()
-        if (isNext) {
-            ctx.moveTo(foldX + 1, 0)
-            ctx.quadraticCurveTo(foldX + flapWidth * 0.45, targetY, foldX + 1, height)
-        } else {
-            ctx.moveTo(foldX - 1, 0)
-            ctx.quadraticCurveTo(foldX - flapWidth * 0.45, targetY, foldX - 1, height)
+        // 4e. Top curl inner depth shadow (gives 3D depth to the rolled top arch)
+        if (typeof ctx.createRadialGradient === 'function') {
+            const topCurlG = ctx.createRadialGradient(foldTopX - (isNext ? 40 : -40), 20, 5, foldTopX - (isNext ? 40 : -40), 20, 75)
+            topCurlG.addColorStop(0, 'rgba(' + shadowBase + ', ' + (isDark ? 0.26 : 0.22) + ')')
+            topCurlG.addColorStop(0.60, 'rgba(' + shadowBase + ', ' + (isDark ? 0.08 : 0.06) + ')')
+            topCurlG.addColorStop(1, 'rgba(' + shadowBase + ', 0)')
+            ctx.fillStyle = topCurlG
+            ctx.fillRect(0, 0, width, 120)
         }
-        ctx.lineWidth = Math.max(1.5, R * 0.07)
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)'
+
+        // 4f. Delicate paper fiber rim outline along top rolled arch & outer edge
+        ctx.beginPath()
+        ctx.moveTo(foldTopX, 0)
+        if (typeof ctx.bezierCurveTo === 'function') {
+            ctx.bezierCurveTo(
+                archTopX, -12,
+                flapCornerTopX + (isNext ? 20 : -20), 5,
+                flapCornerTopX, 55
+            )
+        } else if (typeof ctx.quadraticCurveTo === 'function') {
+            ctx.quadraticCurveTo(
+                archTopX, 0,
+                flapCornerTopX, 55
+            )
+        } else {
+            ctx.lineTo(flapCornerTopX, 55)
+        }
+        if (typeof ctx.quadraticCurveTo === 'function') {
+            ctx.quadraticCurveTo(
+                midEdgeX, height * 0.5,
+                flapCornerBottomX, height
+            )
+        } else {
+            ctx.lineTo(flapCornerBottomX, height)
+        }
+        ctx.lineWidth = 0.8
+        ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(' + shadowBase + ', 0.12)'
         ctx.stroke()
-        ctx.restore()
+
+        ctx.restore() // Restore from Flap clip
+        ctx.restore() // Restore outer
 
         ctx.restore()
     }
@@ -528,7 +965,10 @@ export class PageTurnController {
                 display: none;
                 overflow: hidden;
             `
-            this.container.style.position = 'relative'
+            // An absolutely positioned reader already anchors the overlay.
+            // Overriding it with relative breaks top/bottom viewport insets.
+            const position = this.container.ownerDocument?.defaultView?.getComputedStyle(this.container)?.position || this.container.style.position
+            if (!position || position === 'static') this.container.style.position = 'relative'
             this.container.appendChild(overlay)
         }
         this._overlayEl = overlay
@@ -548,6 +988,10 @@ export class PageTurnController {
     getEffectiveMode() {
         if (this.prefersReducedMotion || (typeof document !== 'undefined' && (document.documentElement?.dataset?.reducedMotion === 'true' || document.documentElement?.dataset?.animIntensity === 'none'))) return 'none'
         if (this.adapter?.isContinuousScroll?.()) return 'scroll'
+        if (typeof window !== 'undefined') {
+            const isMobile = (window.mobileShell?.isMobileViewport?.() ?? false) || Boolean(window.platformBridge?.isAndroid)
+            if (!isMobile) return 'none'
+        }
         if (!FEATURE_CURL_PAGE_TURN_ENABLED && this.mode === 'curl') {
             return 'slide' // Gracefully fallback to stable slide animation while preserving user preference
         }
@@ -671,14 +1115,18 @@ export class PageTurnController {
                 await new Promise(r => setTimeout(r, this.animationDuration * 0.5))
 
             } else if (mode === 'cover') {
-                // Cover Page Peel Animation with themed sheet & edge shadow
+                // Cover Page Peel Animation with themed sheet & current page snapshot
+                const visuals = this.adapter?.getVisuals?.(direction) || {}
+                const bg = visuals.bgColor
+                    || (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue?.('--book-bg') || document.documentElement?.style?.backgroundColor))
+                    || '#FAF9F5'
                 if (this._overlayEl) {
-                    const bg = (typeof document !== 'undefined' && document.documentElement?.style?.backgroundColor) || '#FAF9F5'
                     this._overlayEl.style.display = 'block'
                     this._overlayEl.innerHTML = `
                         <div class="cover-peel-sheet" style="
                             position: absolute;
                             inset: 0;
+                            overflow: hidden;
                             background: ${bg};
                             box-shadow: ${isNext ? '-12px 0 28px rgba(0,0,0,0.18)' : '12px 0 28px rgba(0,0,0,0.18)'};
                             transform: translate3d(0, 0, 0);
@@ -686,6 +1134,17 @@ export class PageTurnController {
                         "></div>
                     `
                     const sheet = this._overlayEl.querySelector('.cover-peel-sheet')
+                    if (sheet && visuals.currentCanvas && typeof document !== 'undefined') {
+                        try {
+                            const snapshotCanvas = document.createElement('canvas')
+                            snapshotCanvas.width = width
+                            snapshotCanvas.height = height
+                            snapshotCanvas.style.cssText = 'width: 100%; height: 100%; display: block; pointer-events: none;'
+                            const sCtx = snapshotCanvas.getContext?.('2d')
+                            sCtx?.drawImage?.(visuals.currentCanvas, 0, 0, width, height)
+                            sheet.appendChild(snapshotCanvas)
+                        } catch (_) {}
+                    }
                     sheet.offsetHeight // reflow
                     sheet.style.transform = `translate3d(${isNext ? -width : width}px, 0, 0)`
                 }
@@ -694,6 +1153,12 @@ export class PageTurnController {
                 await new Promise(r => setTimeout(r, this.animationDuration))
 
             } else if (mode === 'curl') {
+                const visuals = this.adapter?.getVisuals?.(direction) || {}
+                if (!visuals.currentCanvas) {
+                    // Fallback gracefully to slide mode when current page texture cannot be captured
+                    return this._performTransition(direction, 'slide')
+                }
+
                 // Realistic Canvas 2D Curl Simulation (Experimental decorative simulation)
                 if (!this._curlCanvas && typeof document !== 'undefined') {
                     this._curlCanvas = document.createElement('canvas')
@@ -833,16 +1298,26 @@ export class PageTurnController {
             }
 
             const mode = this.getEffectiveMode()
-            if (mode === 'slide') {
+            if (mode === 'slide' || mode === 'cover') {
                 const viewEl = this.adapter?.getViewElement?.()
                 if (viewEl) {
                     viewEl.style.transition = 'none'
-                    viewEl.style.transform = `translate3d(${deltaX * 0.4}px, 0, 0)`
+                    viewEl.style.transform = `translate3d(${deltaX * (mode === 'cover' ? 0.55 : 0.4)}px, 0, 0)`
                 }
             } else if (mode === 'curl') {
                 const direction = deltaX < 0 ? 'next' : 'prev'
                 const canTurn = direction === 'next' ? this.adapter?.canTurnNext() : this.adapter?.canTurnPrev()
                 if (canTurn) {
+                    const visuals = this.adapter?.getVisuals?.(direction) || {}
+                    if (!visuals.currentCanvas) {
+                        const viewEl = this.adapter?.getViewElement?.()
+                        if (viewEl) {
+                            viewEl.style.transition = 'none'
+                            viewEl.style.transform = `translate3d(${deltaX * 0.4}px, 0, 0)`
+                        }
+                        return
+                    }
+
                     if (!this._curlCanvas && typeof document !== 'undefined') {
                         this._curlCanvas = document.createElement('canvas')
                         this._curlCanvas.className = 'page-turn-curl-canvas'
@@ -882,7 +1357,7 @@ export class PageTurnController {
                     const viewEl = this.adapter?.getViewElement?.()
                     if (viewEl) {
                         viewEl.style.transition = 'none'
-                        viewEl.style.transform = `translate3d(${deltaX * 0.06}px, 0, 0)`
+                        viewEl.style.transform = 'translate3d(0, 0, 0)'
                     }
                 }
             }
@@ -939,7 +1414,8 @@ export class PageTurnController {
         this.isGestureActive = false
         this._recentTouches = []
 
-        if (mode === 'curl' && this._curlSimulator && this._curlCanvas) {
+        const curlVisuals = (mode === 'curl') ? (this.adapter?.getVisuals?.(direction) || {}) : {}
+        if (mode === 'curl' && curlVisuals.currentCanvas && this._curlSimulator && this._curlCanvas) {
             const currentProgress = Math.min(1, Math.max(0, Math.abs(deltaX) / width))
             const curGen = ++this.generation
             this.state = 'settling'

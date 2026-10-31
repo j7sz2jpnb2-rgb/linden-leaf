@@ -2,15 +2,17 @@
 // Features: embedded vs forced image OCR, page range validation, memory-capped rendering,
 // progress stages, worker lifecycle management, and clear error classification.
 
+export const MAX_OCR_PAGES = 100
+
 /**
  * Validates and parses user-entered page range
  * @param {string} rangeStr e.g. "current", "12", "15-18"
  * @param {number} totalPages Total pages in PDF
  * @param {number} currentPage 1-based current page
- * @param {number} [maxPages=5] Maximum permitted pages per extraction
+ * @param {number} [maxPages=100] Maximum permitted pages per extraction
  * @returns {{ valid: boolean, pages: number[], error?: string }}
  */
-export function parsePageRange(rangeStr, totalPages, currentPage, maxPages = 5) {
+export function parsePageRange(rangeStr, totalPages, currentPage, maxPages = MAX_OCR_PAGES) {
     const raw = (rangeStr || '').trim().toLowerCase()
     if (!raw || raw === 'current' || raw === '当前页') {
         const cur = Math.max(1, Math.min(currentPage || 1, totalPages))
@@ -65,6 +67,30 @@ export function parsePageRange(rangeStr, totalPages, currentPage, maxPages = 5) 
  */
 export function formatSpansToText(spans) {
     if (!spans || !spans.length) return ''
+
+    // Native MuPDF supplies line/x/y; PDF.js supplies x/y/w/h. Neither
+    // driver supplies the old rect-only shape assumed by the OCR dialog.
+    if (spans.every(s => Number.isFinite(s.line))) {
+        const lines = new Map()
+        for (const span of spans) {
+            if (!lines.has(span.line)) lines.set(span.line, [])
+            lines.get(span.line).push(span)
+        }
+        return [...lines.entries()].sort((a, b) => a[0] - b[0]).map(([, row]) => {
+            row.sort((a, b) => (a.x ?? 0) - (b.x ?? 0))
+            let text = ''
+            for (let i = 0; i < row.length; i++) {
+                const current = row[i], previous = row[i - 1]
+                const gap = previous ? current.x - (previous.x + previous.w) : 0
+                if (previous && /[\w]$/.test(previous.text) && /^[\w]/.test(current.text) &&
+                    gap > (current.size || current.h || 10) * 0.25) text += ' '
+                text += current.text || ''
+            }
+            return text.trim()
+        }).filter(Boolean).join('\n')
+    }
+    spans = spans.map(s => ({ ...s, rect: s.rect || (Number.isFinite(s.x) && Number.isFinite(s.y)
+        ? [s.x, s.y, s.x + (s.w || 0), s.y + (s.h || 0)] : undefined) }))
     
     // Sort spans by vertical position (y), then horizontal (x) if rect exists
     const hasRect = spans.some(s => Array.isArray(s.rect) && s.rect.length >= 4)
@@ -119,9 +145,36 @@ export function formatSpansToText(spans) {
  */
 export function cleanOcrChineseSpaces(text) {
     if (!text) return ''
-    return text.replace(/([\u4e00-\u9fa5\u3000-\u303f\uff01-\uff5e])\s+([\u4e00-\u9fa5\u3000-\u303f\uff01-\uff5e])/g, '$1$2')
-               .replace(/([\u4e00-\u9fa5])\s+([，。！？；：、“”‘’（）《》【】])/g, '$1$2')
-               .replace(/([，。！？；：、“”‘’（）《》【】])\s+([\u4e00-\u9fa5])/g, '$1$2')
+    // Horizontal gaps only. Do not merge real lines or consume alternating
+    // pairs in strings such as "这 是 一 行".
+    return text.replace(/([\u4e00-\u9fff\u3000-\u303f\uff01-\uff5e])[ \t\u00a0]+(?=[\u4e00-\u9fff\u3000-\u303f\uff01-\uff5e])/g, '$1')
+}
+
+export function getOcrAssetOptions(baseUrl = document.baseURI) {
+    // Pin one of the cores actually shipped with the application. Passing
+    // a directory lets Tesseract choose Relaxed SIMD, which is not bundled.
+    const simdProbe = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11])
+    const simd = typeof WebAssembly !== 'undefined' && WebAssembly.validate(simdProbe)
+    const asset = name => new URL(`./vendor/tesseract/${name}`, baseUrl).href
+    return {
+        workerPath: asset('worker.min.js'),
+        corePath: asset(simd ? 'tesseract-core-simd-lstm.wasm.js' : 'tesseract-core-lstm.wasm.js'),
+        langPath: asset('tessdata'),
+        workerBlobURL: false
+    }
+}
+
+function recognizeWithCancellation(worker, canvas, signal) {
+    if (signal.aborted) return Promise.reject(new Error('任务已取消'))
+    let cancel
+    const stopped = new Promise((_, reject) => {
+        cancel = () => reject(new Error('任务已取消'))
+        signal.addEventListener('abort', cancel, { once: true })
+    })
+    // Tesseract.terminate() kills its worker but does not settle pending
+    // recognize() calls. Settle our caller and free its page canvas too.
+    return Promise.race([worker.recognize(canvas), stopped])
+        .finally(() => signal.removeEventListener('abort', cancel))
 }
 
 export class OcrService {
@@ -132,6 +185,8 @@ export class OcrService {
         this._workerInitPromise = null
         this._currentJobId = 0
         this._activeAbortController = null
+        this._onStageChange = null
+        this._cancelWorkerInit = null
     }
 
     /**
@@ -141,6 +196,10 @@ export class OcrService {
         this._currentJobId++
         this._workerInitToken++
         this._workerInitPromise = null
+        this._workerInitializing = false
+        this._onStageChange = null
+        this._cancelWorkerInit?.()
+        this._cancelWorkerInit = null
         if (this._activeAbortController) {
             this._activeAbortController.abort()
             this._activeAbortController = null
@@ -159,6 +218,7 @@ export class OcrService {
      * Lazily get or create Tesseract worker with tokenized abort protection
      */
     async _getWorker(onStageChange, jobId) {
+        this._onStageChange = onStageChange
         if (this._worker) return this._worker
         if (this._workerInitPromise) return this._workerInitPromise
         if (typeof Tesseract === 'undefined') {
@@ -171,25 +231,36 @@ export class OcrService {
 
         this._workerInitPromise = (async () => {
             let worker = null
+            let timer
             try {
-                worker = await Tesseract.createWorker(['chi_sim', 'eng'], 1, {
-                    workerPath: './vendor/tesseract/worker.min.js',
-                    corePath: './vendor/tesseract',
-                    langPath: './vendor/tesseract/tessdata',
-                    workerBlobURL: false,
+                let rejectInitialization
+                const interrupted = new Promise((_, reject) => { rejectInitialization = reject })
+                this._cancelWorkerInit = () => rejectInitialization(new Error('任务已取消'))
+                timer = setTimeout(() => rejectInitialization(new Error('本地 OCR 引擎加载超时，请关闭后重试')), 45000)
+                const creation = Tesseract.createWorker(['chi_sim', 'eng'], 1, {
+                    ...getOcrAssetOptions(),
+                    errorHandler: error => rejectInitialization(new Error(String(error))),
                     logger: (m) => {
+                        if (initToken !== this._workerInitToken || jobId !== this._currentJobId) return
                         if (m.status === 'recognizing text') {
                             const pct = Math.round((m.progress || 0) * 100)
-                            onStageChange?.(`文字识别计算中 (${pct}%)...`)
+                            this._onStageChange?.(`文字识别计算中 (${pct}%)...`)
                         } else if (m.status === 'loading tesseract core') {
-                            onStageChange?.('正在加载 OCR 计算核心...')
+                            this._onStageChange?.('正在加载 OCR 计算核心...')
                         } else if (m.status === 'loading language traineddata') {
-                            onStageChange?.('正在加载中英文字库模型...')
+                            this._onStageChange?.('正在加载中英文字库模型...')
                         } else if (m.status === 'initializing tesseract') {
-                            onStageChange?.('正在初始化 OCR 引擎...')
+                            this._onStageChange?.('正在初始化 OCR 引擎...')
                         }
                     }
                 })
+                // A cancelled initialization may resolve later; do not retain
+                // its worker or let it overwrite a newer request.
+                creation.then(created => {
+                    if (initToken !== this._workerInitToken || jobId !== this._currentJobId) created.terminate().catch(() => {})
+                }, () => {})
+                worker = await Promise.race([creation, interrupted])
+                clearTimeout(timer)
 
                 if (initToken !== this._workerInitToken || (jobId !== undefined && jobId !== this._currentJobId)) {
                     await worker.terminate().catch(() => {})
@@ -218,8 +289,12 @@ export class OcrService {
                 }
                 throw new Error(`OCR 引擎初始化失败: ${msg}`)
             } finally {
-                this._workerInitializing = false
-                this._workerInitPromise = null
+                clearTimeout(timer)
+                if (initToken === this._workerInitToken) {
+                    this._workerInitializing = false
+                    this._workerInitPromise = null
+                    this._cancelWorkerInit = null
+                }
             }
         })()
 
@@ -231,26 +306,39 @@ export class OcrService {
      * @param {object} params
      * @param {object} params.driver PDF driver
      * @param {number[]} params.pages 1-based page numbers
-     * @param {'auto' | 'force_image'} [params.mode='auto']
+     * @param {'auto' | 'text_only' | 'force_image'} [params.mode='auto']
      * @param {function(string, number): void} [params.onProgress] (statusText, overallPercent)
      * @returns {Promise<{ success: boolean, results: Array<{ page: number, text: string, isImageOcr: boolean }>, fullText: string, error?: string }>}
      */
-    async extractText({ driver, pages, mode = 'auto', onProgress }) {
+    async extractText({ driver, pages, mode = 'auto', onProgress, onPageResult }) {
         if (!driver) throw new Error('PDF 驱动不可用')
         if (!pages || !pages.length) throw new Error('请选择需要提取文字的页码')
+        if (pages.length > MAX_OCR_PAGES) throw new Error(`单次最多处理 ${MAX_OCR_PAGES} 页`)
+        if (!['auto', 'text_only', 'force_image'].includes(mode)) throw new Error('不支持的文字提取模式')
 
-        await this.abort()
-        const jobId = ++this._currentJobId
+        const stopping = this.abort()
+        const jobId = this._currentJobId
         this._activeAbortController = new AbortController()
         const signal = this._activeAbortController.signal
+        await stopping
 
         const results = []
         const total = pages.length
+        const formatPage = result => {
+            const body = result.error ? `（本页提取异常: ${result.error}）`
+                : result.text || (mode === 'text_only' ? '（本页没有可提取的文字层，未进行图片 OCR）' : '（本页未检测到明显文字）')
+            return total > 1 ? `【第 ${result.page} 页】\n${body}` : body
+        }
+        const fullTextSoFar = () => results.map(formatPage).join('\n\n')
+        const commitPage = result => {
+            results.push(result)
+            onPageResult?.(result, formatPage(result))
+        }
 
         try {
             for (let i = 0; i < total; i++) {
                 if (signal.aborted || jobId !== this._currentJobId) {
-                    return { success: false, results: [], fullText: '', error: '任务已取消' }
+                    return { success: false, results, fullText: fullTextSoFar(), error: '任务已取消' }
                 }
 
                 const pageNum = pages[i]
@@ -262,33 +350,38 @@ export class OcrService {
 
                 try {
                     // 1. In 'auto' mode, check for embedded text layer first
-                    if (mode === 'auto' && driver.getTextLayer) {
-                        onProgress?.(`正在检查第 ${pageNum} 页内嵌文本 (${i + 1}/${total})...`, baseProgress + 5)
+                    if (mode !== 'force_image' && driver.getTextLayer) {
+                        onProgress?.(`正在检查第 ${pageNum} 页内嵌文本 (${i + 1}/${total})...`, baseProgress + 5 / total)
                         try {
                             const layer = await driver.getTextLayer(pageIndex)
                             if (layer?.spans?.length) {
                                 const formatted = formatSpansToText(layer.spans)
-                                if (formatted.length > 5) {
+                                if (formatted.trim().length > 0) {
                                     pageText = formatted
                                 }
                             }
                         } catch (e) {
+                            if (mode === 'text_only') throw e
+                            onProgress?.(`第 ${pageNum} 页文字层读取失败，转为图片 OCR...`, baseProgress + 5 / total)
                             console.warn(`[OCR] getTextLayer error for page ${pageNum}:`, e)
                         }
                     }
 
                     // 2. If no embedded text or forced image OCR, render high-fidelity page image
-                    if (!pageText || mode === 'force_image') {
+                    if (mode === 'text_only' && !driver.getTextLayer) throw new Error('当前 PDF 驱动不支持文字层提取')
+                    if (mode !== 'text_only' && (!pageText || mode === 'force_image')) {
                         isImageOcr = true
-                        onProgress?.(`正在高精度渲染第 ${pageNum} 页画面 (${i + 1}/${total})...`, baseProgress + 10)
+                        if (mode === 'auto') onProgress?.(`第 ${pageNum} 页无可用文字层，转为图片 OCR...`, baseProgress + 5 / total)
+                        onProgress?.(`正在渲染第 ${pageNum} 页画面 (${i + 1}/${total})...`, baseProgress + 10 / total)
 
                         let canvas = null
                         try {
-                            // Cap dimensions to 1600px max dimension for memory safety (count is 1)
+                            // One whole page at a time; enough detail for small
+                            // Chinese print, bounded to 2400px on the long side.
                             const pageSizes = await driver.getPageSizes(pageIndex, 1, signal)
                             const size = pageSizes?.[0] || { width: 800, height: 1100 }
                             const maxDim = Math.max(size.width, size.height, 1)
-                            const scale = Math.min(2.0, 1600 / maxDim)
+                            const scale = Math.min(3.0, 2400 / maxDim)
 
                             canvas = await driver.renderPage(pageIndex, scale, signal)
                         } catch (renderErr) {
@@ -301,24 +394,30 @@ export class OcrService {
                             throw new Error(`第 ${pageNum} 页无法获取有效画面`)
                         }
 
-                        // 3. Run OCR on canvas
-                        const worker = await this._getWorker((stageMsg) => {
-                            onProgress?.(`[第 ${pageNum} 页] ${stageMsg}`, baseProgress + 20)
-                        }, jobId)
+                        // 3. Run OCR on the original, unfiltered page canvas.
+                        try {
+                            const worker = await this._getWorker((stageMsg) => {
+                                onProgress?.(`[第 ${pageNum} 页] ${stageMsg}`, baseProgress + 20 / total)
+                            }, jobId)
 
-                        if (signal.aborted || jobId !== this._currentJobId) throw new Error('任务已取消')
+                            if (signal.aborted || jobId !== this._currentJobId) throw new Error('任务已取消')
 
-                        onProgress?.(`正在进行深度文字识别 (第 ${pageNum} 页)...`, baseProgress + 30)
-                        const ocrRes = await worker.recognize(canvas)
-                        const rawOcrText = (ocrRes?.data?.text || '').trim()
-                        pageText = cleanOcrChineseSpaces(rawOcrText)
+                            onProgress?.(`正在进行文字识别 (第 ${pageNum} 页)...`, baseProgress + 30 / total)
+                            const ocrRes = await recognizeWithCancellation(worker, canvas, signal)
+                            if (signal.aborted || jobId !== this._currentJobId) throw new Error('任务已取消')
+                            const rawOcrText = (ocrRes?.data?.text || '').trim()
+                            pageText = cleanOcrChineseSpaces(rawOcrText)
+                        } finally {
+                            canvas.width = 0
+                            canvas.height = 0
+                        }
                     }
                 } catch (pageErr) {
                     if (signal.aborted || pageErr.message === '任务已取消') {
-                        return { success: false, results, fullText: '', error: '任务已取消' }
+                        return { success: false, results, fullText: fullTextSoFar(), error: '任务已取消' }
                     }
                     console.warn(`[OCR Service] Page ${pageNum} failed:`, pageErr)
-                    results.push({
+                    commitPage({
                         page: pageNum,
                         text: '',
                         isImageOcr,
@@ -327,7 +426,10 @@ export class OcrService {
                     continue
                 }
 
-                results.push({
+                if (signal.aborted || jobId !== this._currentJobId) {
+                    return { success: false, results, fullText: fullTextSoFar(), error: '任务已取消' }
+                }
+                commitPage({
                     page: pageNum,
                     text: pageText,
                     isImageOcr,
@@ -338,17 +440,7 @@ export class OcrService {
                 onProgress?.(`已完成第 ${pageNum} 页处理 (${i + 1}/${total})`, Math.round(((i + 1) / total) * 100))
             }
 
-            // Build grouped full text
-            const fullText = results.map(r => {
-                const header = total > 1 ? `【第 ${r.page} 页】` : ''
-                let body = ''
-                if (r.error) {
-                    body = `（本页识别异常: ${r.error}）`
-                } else {
-                    body = r.text || '（本页未检测到明显文字）'
-                }
-                return header ? `${header}\n${body}` : body
-            }).join('\n\n')
+            const fullText = fullTextSoFar()
 
             const allFailed = results.length > 0 && results.every(r => r.error)
 
@@ -360,7 +452,7 @@ export class OcrService {
             }
         } catch (err) {
             if (signal.aborted || err.message === '任务已取消') {
-                return { success: false, results, fullText: '', error: '任务已取消' }
+                return { success: false, results, fullText: fullTextSoFar(), error: '任务已取消' }
             }
             console.error('[OCR Service] Error:', err)
             return {
@@ -369,6 +461,8 @@ export class OcrService {
                 fullText: '',
                 error: err.message || String(err)
             }
+        } finally {
+            if (jobId === this._currentJobId) await this.abort()
         }
     }
 }
