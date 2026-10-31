@@ -1,7 +1,7 @@
 [package]
 name = "linden-leaf"
 version = "2.0.17"
-description = "Linden Leaf - 现代化全格式超轻量电子书阅读器"
+description = "Linden Leaf Reader - 现代化全格式超轻量电子书阅读器"
 authors = ["Linden Leaf Team"]
 edition = "2021"
 license = "GPL-3.0-or-later"

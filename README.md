@@ -1,4 +1,4 @@
-# Linden Leaf (菩提叶阅读)
+# Linden Leaf Reader (菩提叶阅读器)
 
 基于 Tauri 2.0 与 Rust 渲染桥接构建的高性能、跨平台全格式电子书阅读器。面向日常专注阅读、深度知识批注与学习场景，支持 Windows (x64) 与 Android (arm64-v8a)。
 
