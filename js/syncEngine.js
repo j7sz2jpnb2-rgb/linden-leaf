@@ -146,6 +146,16 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
         ratingUpdatedAt = incomingMeta.ratingUpdatedAt || 0
     }
 
+    // 8. Custom Title & Custom Author: LWW based on updatedAt
+    let customTitle = localBook.customTitle !== undefined ? localBook.customTitle : null
+    let customAuthor = localBook.customAuthor !== undefined ? localBook.customAuthor : null
+    if (incomingMeta.customTitle !== undefined && isIncomingNewer(incomingMeta.updatedAt, localBook.updatedAt)) {
+        customTitle = incomingMeta.customTitle
+    }
+    if (incomingMeta.customAuthor !== undefined && isIncomingNewer(incomingMeta.updatedAt, localBook.updatedAt)) {
+        customAuthor = incomingMeta.customAuthor
+    }
+
     return {
         tags,
         tagsUpdatedAt,
@@ -158,6 +168,8 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
         favoriteUpdatedAt,
         rating,
         ratingUpdatedAt,
+        customTitle,
+        customAuthor,
         progress,
         lastReadAt,
         totalReadingSeconds,
@@ -180,6 +192,8 @@ export const buildBookSyncMeta = (b) => {
         identifier: validIdent,
         title: b.title,
         author: b.author,
+        customTitle: b.customTitle || null,
+        customAuthor: b.customAuthor || null,
         format: b.format,
         size: b.size,
         cover: b.cover || null,
@@ -220,7 +234,72 @@ export const exportSyncPayload = async () => {
     const allPdfDrawings = (typeof db.getAllPdfDrawings === 'function') ? (await db.getAllPdfDrawings()) : []
     const settings = (await db.getSetting('readerSettings')) || (await db.getSetting('reader_settings')) || {}
 
+    // Enrich reading sessions with bookTitle and bookAuthor if missing from book records
+    const bookMapById = new Map(allBooks.map(b => [b.id, b]))
+    const enrichedSessions = allSessions.map(s => {
+        if (!s) return s
+        const b = s.bookId ? bookMapById.get(s.bookId) : null
+        return {
+            ...s,
+            bookTitle: s.bookTitle || b?.customTitle || b?.title || '',
+            bookAuthor: s.bookAuthor || b?.customAuthor || b?.author || ''
+        }
+    })
+
     const booksMeta = allBooks.map(buildBookSyncMeta)
+
+    // Reading presets
+    let readingPresets = []
+    try {
+        const rawPresets = typeof localStorage !== 'undefined' ? localStorage.getItem('linden_reading_presets_v1') : null
+        if (rawPresets) readingPresets = JSON.parse(rawPresets) || []
+    } catch (_) {}
+
+    // Custom semantic palette
+    let customPalette = null
+    try {
+        const rawPalette = typeof localStorage !== 'undefined' ? localStorage.getItem('linden_custom_semantic_palette_v1') : null
+        if (rawPalette) customPalette = JSON.parse(rawPalette)
+    } catch (_) {}
+
+    // User name
+    let userName = ''
+    try {
+        userName = (typeof localStorage !== 'undefined' ? (localStorage.getItem('linden_user_name') || '') : '').trim()
+    } catch (_) {}
+
+    // Single book setting overrides
+    const bookSettingsOverrides = {}
+    try {
+        if (typeof localStorage !== 'undefined') {
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i)
+                if (k && k.startsWith('linden_book_settings_')) {
+                    const bId = k.replace('linden_book_settings_', '')
+                    try {
+                        bookSettingsOverrides[bId] = JSON.parse(localStorage.getItem(k))
+                    } catch (_) {}
+                }
+            }
+        }
+    } catch (_) {}
+
+    // Safe advanced settings (without sensitive keys)
+    let advancedSettings = {}
+    try {
+        const rawAdv = typeof localStorage !== 'undefined'
+            ? (localStorage.getItem('linden_advanced_settings_config') || localStorage.getItem('linden_advanced_settings'))
+            : null
+        if (rawAdv) {
+            const parsed = JSON.parse(rawAdv)
+            if (parsed && typeof parsed === 'object') {
+                const safe = { ...parsed }
+                const sensitiveKeys = ['ttsApiKey', 'apiKey', 'secret', 'password', 'token', 'auth', 'privateKey', 'dictStoragePath', 'customDirectory']
+                for (const sk of sensitiveKeys) delete safe[sk]
+                advancedSettings = safe
+            }
+        }
+    } catch (_) {}
 
     let chapterTranslations = []
     const syncChapterTrans = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_chapter_translations') : 'false') === 'true'
@@ -229,16 +308,21 @@ export const exportSyncPayload = async () => {
     }
 
     return {
-        version: 1,
-        clientId: localStorage.getItem('linden_sync_client_id') || `client_${Math.random().toString(36).slice(2, 10)}`,
-        deviceName: navigator.userAgent.includes('Windows') ? 'Windows PC' : 'Linden 客户端',
+        version: 2,
+        clientId: (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || `client_${Math.random().toString(36).slice(2, 10)}`,
+        deviceName: (typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Windows')) ? 'Windows PC' : 'Linden 客户端',
         updatedAt: Date.now(),
         settings,
+        readingPresets,
+        customPalette,
+        userName,
+        bookSettingsOverrides,
+        advancedSettings,
         customLists: allLists,
         booksMeta,
         highlights: allHighlights,
         bookmarks: allBookmarks,
-        readingSessions: allSessions,
+        readingSessions: enrichedSessions,
         pdfDrawings: allPdfDrawings,
         chapterTranslations,
         deletedRecords: deletedRecords || []
@@ -578,7 +662,7 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         return !b.deleted
     })
 
-    // F. Merge Reading Sessions (Union by ID with duration max and BookId Remapping)
+    // F. Merge Reading Sessions (Union by ID with duration max, BookId Remapping, and Title/Author Preservation)
     const sessMap = new Map()
     ;(remotePayload.readingSessions || []).forEach(s => {
         if (s && s.id) {
@@ -595,17 +679,94 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
             const remoteS = sessMap.get(s.id)
             const localDur = s.durationSeconds || 0
             const remoteDur = remoteS.durationSeconds || 0
-            if (localDur > remoteDur || (localDur === remoteDur && (s.endTime || 0) > (remoteS.endTime || 0))) {
-                sessMap.set(s.id, { ...remoteS, ...s, durationSeconds: Math.max(localDur, remoteDur) })
-            }
+            const bestTitle = s.bookTitle || remoteS.bookTitle || ''
+            const bestAuthor = s.bookAuthor || remoteS.bookAuthor || ''
+            sessMap.set(s.id, {
+                ...remoteS,
+                ...s,
+                bookTitle: bestTitle,
+                bookAuthor: bestAuthor,
+                durationSeconds: Math.max(localDur, remoteDur)
+            })
         }
     })
-    const mergedSessions = Array.from(sessMap.values())
+    // Backfill missing titles/authors from mergedBooksMeta if available
+    const bookTitleMetaMap = new Map()
+    mergedBooksMeta.forEach(b => {
+        if (b && b.id) {
+            bookTitleMetaMap.set(b.id, {
+                title: b.customTitle || b.title || '',
+                author: b.customAuthor || b.author || ''
+            })
+        }
+    })
+    const mergedSessions = Array.from(sessMap.values()).map(s => {
+        if (!s) return s
+        const meta = s.bookId ? bookTitleMetaMap.get(s.bookId) : null
+        return {
+            ...s,
+            bookTitle: s.bookTitle || meta?.title || '',
+            bookAuthor: s.bookAuthor || meta?.author || ''
+        }
+    })
 
     // G. Merge Settings (LWW on updatedAt)
     const localSetTime = localPayload.settings?.updatedAt || 0
     const remoteSetTime = remotePayload.settings?.updatedAt || 0
     const mergedSettings = remoteSetTime > localSetTime ? remotePayload.settings : localPayload.settings
+
+    // G2. Merge Reading Presets (Union by ID with LWW, max 10)
+    const presetMap = new Map()
+    ;(remotePayload.readingPresets || []).forEach(p => {
+        if (p && p.id) presetMap.set(p.id, { ...p, updatedAt: clampTime(p.updatedAt) || clampTime(p.createdAt) })
+    })
+    ;(localPayload.readingPresets || []).forEach(p => {
+        if (!p || !p.id) return
+        const localUpdated = clampTime(p.updatedAt) || clampTime(p.createdAt) || 0
+        if (!presetMap.has(p.id)) {
+            presetMap.set(p.id, { ...p, updatedAt: localUpdated })
+        } else {
+            const remP = presetMap.get(p.id)
+            const remUpdated = remP.updatedAt || remP.createdAt || 0
+            if (localUpdated >= remUpdated) {
+                presetMap.set(p.id, { ...p, updatedAt: localUpdated })
+            }
+        }
+    })
+    const mergedReadingPresets = Array.from(presetMap.values()).slice(0, 10)
+
+    // G3. Merge Custom Semantic Palette (LWW)
+    let mergedCustomPalette = localPayload.customPalette || null
+    if (remotePayload.customPalette) {
+        if (!mergedCustomPalette || (remotePayload.customPalette.updatedAt || 0) >= (mergedCustomPalette.updatedAt || 0)) {
+            mergedCustomPalette = remotePayload.customPalette
+        }
+    }
+
+    // G4. Merge User Name (Prefer non-empty / newer)
+    const locUserName = (localPayload.userName || '').trim()
+    const remUserName = (remotePayload.userName || '').trim()
+    const mergedUserName = remUserName && (!locUserName || (remotePayload.updatedAt || 0) > (localPayload.updatedAt || 0)) ? remUserName : (locUserName || remUserName)
+
+    // G5. Merge Book Settings Overrides (Remap bookIds, LWW)
+    const mergedBookSettingsOverrides = {}
+    if (remotePayload.bookSettingsOverrides && typeof remotePayload.bookSettingsOverrides === 'object') {
+        for (const [bId, ov] of Object.entries(remotePayload.bookSettingsOverrides)) {
+            const targetId = bookIdRemap.get(bId) || bId
+            mergedBookSettingsOverrides[targetId] = { ...ov }
+        }
+    }
+    if (localPayload.bookSettingsOverrides && typeof localPayload.bookSettingsOverrides === 'object') {
+        for (const [bId, ov] of Object.entries(localPayload.bookSettingsOverrides)) {
+            mergedBookSettingsOverrides[bId] = { ...(mergedBookSettingsOverrides[bId] || {}), ...ov }
+        }
+    }
+
+    // G6. Merge Safe Advanced Settings (Non-sensitive, LWW)
+    const mergedAdvancedSettings = {
+        ...(remotePayload.advancedSettings || {}),
+        ...(localPayload.advancedSettings || {})
+    }
 
     // H. Merge PDF Drawings (Stroke-level merge by identity, filtered by book tombstones and BookId Remapping)
     const drawingMap = new Map()
@@ -775,7 +936,8 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         const knownKeys = new Set([
             'version', 'clientId', 'deviceName', 'updatedAt', 'settings',
             'customLists', 'booksMeta', 'highlights', 'bookmarks',
-            'readingSessions', 'pdfDrawings', 'chapterTranslations', 'deletedRecords'
+            'readingSessions', 'pdfDrawings', 'chapterTranslations', 'deletedRecords',
+            'readingPresets', 'customPalette', 'userName', 'bookSettingsOverrides', 'advancedSettings'
         ])
         for (const [k, v] of Object.entries(remotePayload)) {
             if (!knownKeys.has(k)) {
@@ -790,7 +952,15 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         clientId: localPayload.clientId || (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || '',
         updatedAt: Date.now(),
         settings: mergedSettings,
-        customLists: mergedCustomLists,
+        readingPresets: mergedReadingPresets,
+        customPalette: mergedCustomPalette,
+        userName: mergedUserName,
+        bookSettingsOverrides: mergedBookSettingsOverrides,
+        advancedSettings: mergedAdvancedSettings,
+        customLists: mergedCustomLists.map(l => ({
+            ...l,
+            bookIds: Array.isArray(l.bookIds) ? l.bookIds.map(id => bookIdRemap.get(id) || id) : []
+        })),
         booksMeta: mergedBooksMeta,
         highlights: mergedHighlights,
         bookmarks: mergedBookmarks,
@@ -948,6 +1118,14 @@ export const applyMergedPayload = async mergedPayload => {
                     localBook.cloudBackup = reconciled.cloudBackup
                     changed = true
                 }
+                if (reconciled.customTitle !== undefined && reconciled.customTitle !== localBook.customTitle) {
+                    localBook.customTitle = reconciled.customTitle
+                    changed = true
+                }
+                if (reconciled.customAuthor !== undefined && reconciled.customAuthor !== localBook.customAuthor) {
+                    localBook.customAuthor = reconciled.customAuthor
+                    changed = true
+                }
                 if (changed) {
                     // Check if book was deleted right before saving
                     const liveCheck = await db.getBook(localBook.id)
@@ -982,6 +1160,8 @@ export const applyMergedPayload = async mergedPayload => {
                     completedAt: meta.completedAt || null,
                     rating: meta.rating !== undefined ? meta.rating : null,
                     ratingUpdatedAt: meta.ratingUpdatedAt || 0,
+                    customTitle: meta.customTitle || null,
+                    customAuthor: meta.customAuthor || null,
                     cloudBackup: meta.cloudBackup,
                     cloudBackupState: isAutoEligible ? 'pending_auto_download' : 'cloud_only',
                     addedAt: meta.addedAt || Date.now(),
@@ -1040,9 +1220,7 @@ export const applyMergedPayload = async mergedPayload => {
             if (sess.bookId && bookIdRemap.has(sess.bookId)) {
                 sess.bookId = bookIdRemap.get(sess.bookId)
             }
-            if (sess.bookId && deletedBookIds.includes(sess.bookId)) {
-                continue
-            }
+            // Reading sessions are permanently retained even if books were deleted
             await db.saveReadingSession(sess, false)
         }
     }
@@ -1052,6 +1230,58 @@ export const applyMergedPayload = async mergedPayload => {
         const localSettings = (await db.getSetting('readerSettings')) || {}
         const mergedSettings = { ...localSettings, ...mergedPayload.settings }
         await db.setSetting('readerSettings', mergedSettings)
+    }
+
+    // G2. Apply Reading Presets
+    if (Array.isArray(mergedPayload.readingPresets) && typeof localStorage !== 'undefined') {
+        try {
+            localStorage.setItem('linden_reading_presets_v1', JSON.stringify(mergedPayload.readingPresets))
+            if (typeof window !== 'undefined' && window.readingPresetsManager?.load) {
+                window.readingPresetsManager.load()
+            }
+        } catch (_) {}
+    }
+
+    // G3. Apply Custom Semantic Palette
+    if (mergedPayload.customPalette && typeof localStorage !== 'undefined') {
+        try {
+            localStorage.setItem('linden_custom_semantic_palette_v1', JSON.stringify(mergedPayload.customPalette))
+            if (typeof window !== 'undefined' && window.themeCustomizer?.load) {
+                window.themeCustomizer.load()
+            }
+        } catch (_) {}
+    }
+
+    // G4. Apply User Name
+    if (mergedPayload.userName && typeof localStorage !== 'undefined') {
+        try {
+            localStorage.setItem('linden_user_name', mergedPayload.userName)
+        } catch (_) {}
+    }
+
+    // G5. Apply Book Settings Overrides
+    if (mergedPayload.bookSettingsOverrides && typeof localStorage !== 'undefined') {
+        try {
+            for (const [bId, ov] of Object.entries(mergedPayload.bookSettingsOverrides)) {
+                if (bId && ov && typeof ov === 'object') {
+                    localStorage.setItem(`linden_book_settings_${bId}`, JSON.stringify(ov))
+                }
+            }
+        } catch (_) {}
+    }
+
+    // G6. Apply Safe Advanced Settings
+    if (mergedPayload.advancedSettings && typeof localStorage !== 'undefined') {
+        try {
+            const rawCur = localStorage.getItem('linden_advanced_settings_config') || localStorage.getItem('linden_advanced_settings')
+            const curAdv = rawCur ? JSON.parse(rawCur) : {}
+            const mergedAdv = { ...curAdv, ...mergedPayload.advancedSettings }
+            localStorage.setItem('linden_advanced_settings_config', JSON.stringify(mergedAdv))
+            if (typeof window !== 'undefined') {
+                window.app?.advancedSettings?.load?.()
+                window.app?.advancedSettings?.applyAllSettings?.()
+            }
+        } catch (_) {}
     }
 
     // H. Apply PDF Drawings (with BookId Remapping and Local Tombstone / Edit Protection)
@@ -1166,7 +1396,8 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {} } = {
 
         while (maxRetries >= 0) {
             onProgress('正在上传合并数据至云端...', 'upload')
-            lastSaveRes = await window.electronAPI.syncSaveRemote(config, merged, currentRemoteEtag)
+            const summaryMd = generateReadingSummaryMarkdown(merged)
+            lastSaveRes = await window.electronAPI.syncSaveRemote(config, merged, currentRemoteEtag, summaryMd)
             if (lastSaveRes.success) break
 
             if (lastSaveRes.isConflict && maxRetries > 0) {
@@ -1204,11 +1435,179 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {} } = {
 }
 
 
+
+/**
+ * 5. Auto-Generate Comprehensive Human-Readable Markdown Reading & Sync Report
+ * Covers: Client status, reading stats, daily book-by-book register, shelf items, and notes
+ */
+export const generateReadingSummaryMarkdown = (payload) => {
+    if (!payload || typeof payload !== 'object') return ''
+    const syncTime = new Date(payload.updatedAt || Date.now()).toLocaleString('zh-CN')
+    const device = payload.deviceName || 'Linden Leaf 客户端'
+    const books = Array.isArray(payload.booksMeta) ? payload.booksMeta : []
+    const sessions = Array.isArray(payload.readingSessions) ? payload.readingSessions : []
+    const highlights = Array.isArray(payload.highlights) ? payload.highlights : []
+    const customLists = Array.isArray(payload.customLists) ? payload.customLists : []
+
+    // Sum durations combining booksMeta and readingSessions
+    // to ensure cross-device synced books or deleted books are not omitted
+    const bookSessionReadingMap = new Map()
+    const bookSessionListenMap = new Map()
+    const allBookIdsInSessions = new Set()
+
+    sessions.forEach(s => {
+        if (!s) return
+        const dur = Number(s.durationSeconds || s.activeDurationSeconds || s.readingSeconds || s.seconds || 0) || 0
+        if (dur <= 0) return
+        const bId = s.bookId || 'unknown'
+        allBookIdsInSessions.add(bId)
+        if (s.isListening || s.kind === 'listen') {
+            bookSessionListenMap.set(bId, (bookSessionListenMap.get(bId) || 0) + dur)
+        } else {
+            bookSessionReadingMap.set(bId, (bookSessionReadingMap.get(bId) || 0) + dur)
+        }
+    })
+
+    const accountedBookIds = new Set()
+    let totalSecs = 0
+    let totalListenSecs = 0
+
+    books.forEach(b => {
+        if (!b) return
+        const bId = b.id || b.stableKey
+        if (bId) accountedBookIds.add(bId)
+        const sessRead = bId ? (bookSessionReadingMap.get(bId) || 0) : 0
+        const sessListen = bId ? (bookSessionListenMap.get(bId) || 0) : 0
+        totalSecs += Math.max(b.totalReadingSeconds || 0, sessRead)
+        totalListenSecs += Math.max(b.totalListeningSeconds || 0, sessListen)
+    })
+
+    for (const bId of allBookIdsInSessions) {
+        if (!accountedBookIds.has(bId)) {
+            totalSecs += (bookSessionReadingMap.get(bId) || 0)
+            totalListenSecs += (bookSessionListenMap.get(bId) || 0)
+        }
+    }
+
+    const totalHours = (totalSecs / 3600).toFixed(1)
+    const totalListenHours = (totalListenSecs / 3600).toFixed(1)
+    const finishedBooks = books.filter(b => b.readingStatus === 'finished')
+    const readingBooks = books.filter(b => b.readingStatus === 'reading')
+
+    let md = `# Linden Leaf (菩提叶阅读) - 云端同步与阅读数据总览\n\n`
+    md += `> 本文档由 Linden Leaf WebDAV 云同步引擎自动生成。\n`
+    md += `> 同步时间：**${syncTime}** | 同步设备：**${device}** | 数据协议版本：**v${payload.version || 2}**\n\n`
+
+    md += `## 📊 阅读总体概览\n\n`
+    md += `- **书架藏书**：共 ${books.length} 本（读完 ${finishedBooks.length} 本，在读 ${readingBooks.length} 本）\n`
+    md += `- **总阅读时长**：${totalHours} 小时 (${Math.round(totalSecs / 60)} 分钟)\n`
+    if (totalListenSecs > 0) {
+        md += `- **总听书时长**：${totalListenHours} 小时 (${Math.round(totalListenSecs / 60)} 分钟)\n`
+    }
+    md += `- **读书笔记与划线**：共 ${highlights.length} 条\n`
+    md += `- **阅读会话记录**：共 ${sessions.length} 次登记\n\n`
+
+    // Daily Reading Book-by-Book Register
+    md += `## 📅 每日读书详细登记表\n\n`
+    md += `按日期聚合归档每日所读的具体书名、作者与时长明细：\n\n`
+    md += `| 日期 | 具体阅读书目 | 作者 | 阅读/听书时长 | 记录条数 |\n`
+    md += `| :--- | :--- | :--- | :--- | :--- |\n`
+
+    const dateMap = new Map()
+    sessions.forEach(s => {
+        if (!s) return
+        const d = s.date || (s.startTime ? new Date(s.startTime).toISOString().slice(0, 10) : '未知日期')
+        if (!dateMap.has(d)) dateMap.set(d, [])
+        dateMap.get(d).push(s)
+    })
+
+    const sortedDates = Array.from(dateMap.keys()).sort((a, b) => b.localeCompare(a))
+    if (sortedDates.length === 0) {
+        md += `| - | 暂无每日阅读记录 | - | - | 0 |\n`
+    } else {
+        sortedDates.slice(0, 60).forEach(d => {
+            const daySess = dateMap.get(d)
+            const bookDurMap = new Map()
+            const bookAuthorMap = new Map()
+            let dayTotalSecs = 0
+            daySess.forEach(s => {
+                const title = s.bookTitle || '未知书名'
+                const author = s.bookAuthor || ''
+                const dur = s.durationSeconds || 0
+                dayTotalSecs += dur
+                bookDurMap.set(title, (bookDurMap.get(title) || 0) + dur)
+                if (author) bookAuthorMap.set(title, author)
+            })
+            const bookTitles = Array.from(bookDurMap.entries()).map(([t, sec]) => {
+                const mins = Math.round(sec / 60)
+                const durStr = mins >= 60 ? `${Math.floor(mins / 60)}h${mins % 60}m` : `${mins}m`
+                return `《${t}》(${durStr})`
+            }).join('、')
+            const authors = Array.from(new Set(Array.from(bookAuthorMap.values()).filter(Boolean))).join('、') || '-'
+            const totalMins = Math.round(dayTotalSecs / 60)
+            const dayDurStr = totalMins >= 60 ? `${Math.floor(totalMins / 60)}小时${totalMins % 60}分` : `${totalMins}分钟`
+            md += `| ${d} | ${bookTitles} | ${authors} | ${dayDurStr} | ${daySess.length} 条 |\n`
+        })
+        if (sortedDates.length > 60) {
+            md += `| ... | *(其余 ${sortedDates.length - 60} 天的历史记录已在此处截断，完整数据保存在 linden_sync_data.json)* | ... | ... | ... |\n`
+        }
+    }
+    md += `\n`
+
+    // Bookshelf
+    md += `## 📚 书架图书明细与状态\n\n`
+    md += `| 书名 | 作者 | 格式 | 状态 | 评分 | 标签 | 阅读时长 | 进度 |\n`
+    md += `| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n`
+    const statusLabels = { unread: '未读', want_to_read: '想读', reading: '在读', on_hold: '搁置', finished: '读完' }
+    books.forEach(b => {
+        const title = b.customTitle || b.title || '未知书名'
+        const author = b.customAuthor || b.author || '-'
+        const fmt = (b.format || 'doc').toUpperCase()
+        const st = statusLabels[b.readingStatus] || '未读'
+        const rating = b.rating != null ? `${b.rating} ★` : '-'
+        const tags = Array.isArray(b.tags) && b.tags.length ? b.tags.join(', ') : '-'
+        const dur = Math.round((b.totalReadingSeconds || 0) / 60)
+        const durStr = dur >= 60 ? `${Math.floor(dur / 60)}h${dur % 60}m` : `${dur}m`
+        const frac = Math.round(((b.progress?.fraction || 0) * 100))
+        md += `| 《${title}》 | ${author} | ${fmt} | ${st} | ${rating} | ${tags} | ${durStr} | ${frac}% |\n`
+    })
+    md += `\n`
+
+    // Custom Lists
+    if (customLists.length > 0) {
+        md += `## 📑 自定义书单\n\n`
+        customLists.forEach(l => {
+            const bCount = Array.isArray(l.bookIds) ? l.bookIds.length : 0
+            md += `- **${l.name || '未命名书单'}** (${bCount} 本书)\n`
+        })
+        md += `\n`
+    }
+
+    // Highlights excerpt
+    if (highlights.length > 0) {
+        md += `## ✍️ 近期精选划线与想法笔记 (最新 20 条)\n\n`
+        const sortedHl = [...highlights].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 20)
+        sortedHl.forEach(h => {
+            const bTitle = h.bookTitle ? `《${h.bookTitle}》` : ''
+            const chap = h.chapterTitle ? ` · ${h.chapterTitle}` : ''
+            const date = h.createdAt ? new Date(h.createdAt).toLocaleDateString('zh-CN') : ''
+            md += `> ${h.text || ''}\n\n`
+            if (h.note) {
+                md += `**想法笔记**：${h.note}\n\n`
+            }
+            md += `*—— 出处：${bTitle}${chap} (${date})*\n\n---\n\n`
+        })
+    }
+
+    return md
+}
+
 if (typeof window !== 'undefined') {
     window.syncEngine = {
         exportSyncPayload,
         mergeSyncData,
         applyMergedPayload,
-        executeSyncLifecycle
+        executeSyncLifecycle,
+        generateReadingSummaryMarkdown
     }
 }

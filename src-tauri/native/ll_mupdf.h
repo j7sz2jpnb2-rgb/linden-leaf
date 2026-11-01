@@ -61,6 +61,8 @@ enum {
     LL_ERROR = -1,
 };
 
+LL_API void ll_set_max_store_mb(uint32_t max_mb);
+LL_API uint32_t ll_get_max_store_mb(void);
 LL_API ll_doc *ll_open(const char *path, const char *password, char *error, size_t error_size);
 LL_API void ll_close(ll_doc *doc);
 LL_API int ll_page_count(ll_doc *doc);

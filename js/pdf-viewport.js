@@ -17,7 +17,7 @@ export class PdfViewport {
         this.container = container
         this.options = Object.assign({
             scale: 1.25,
-            minScale: 0.5,
+            minScale: 0.1,
             maxScale: 3.5,
             bufferPages: 2,
             maxCanvasEdge: 4096,
@@ -29,6 +29,7 @@ export class PdfViewport {
             onPageChange: null,
             onOutline: null,
             onSelection: null,
+            onSelectionClear: null,
             onHighlightCreate: null,
             onHighlightClick: null,
             onSlotMount: null,
@@ -36,9 +37,12 @@ export class PdfViewport {
             onSlotGeometrySync: null,
             onInteractionModeChange: null,
             onZoomChange: null,
+            onTap: null,
         }, options)
 
+        this.spreadMode = this.options.spreadMode || 'none'
         this.scale = this.options.scale
+        this.zoomMode = null
         this.driver = null
         this.currentSnapshot = this.options.snapshot || null
         this.numPages = 0
@@ -75,9 +79,18 @@ export class PdfViewport {
         this._nativeGeometryLimit = 16
         this._nativeDrag = null
         this._nativePreview = null
+        this._selectionDismissedTime = 0
+        this._isClearingSelection = false
 
         this._initDOM()
         this._bindEvents()
+        if (typeof ResizeObserver !== 'undefined') {
+            this._resizeObserver = new ResizeObserver(() => {
+                if (this._destroyed || !this.pageSizes.length || this._pinch) return
+                this.setZoom(this.zoomMode || this.scale)
+            })
+            this._resizeObserver.observe(this.scrollArea)
+        }
     }
 
     /**
@@ -130,12 +143,12 @@ export class PdfViewport {
         style.textContent = `
         .pdf-viewport-container{position:relative;width:100%;height:100%;overflow:hidden;background:var(--bg-app,#525659);user-select:none}
         .pdf-viewport-scroll-area{position:absolute;inset:0;overflow:auto;scroll-behavior:auto;-webkit-overflow-scrolling:touch}
-        .pdf-viewport-spacer{position:relative;margin:0 auto;box-sizing:border-box;padding:16px 0}
-        .pdf-page-slot{position:absolute;left:50%;transform:translateX(-50%);background:var(--book-bg,#fff);box-shadow:0 4px 18px #00000047;border-radius:2px;overflow:hidden;box-sizing:border-box;touch-action:pan-y}
+        .pdf-viewport-spacer{position:relative;margin:0 auto;box-sizing:border-box;padding:16px 0;min-width:100%}
+        .pdf-page-slot{position:absolute;left:50%;transform:translateX(-50%);background:var(--book-bg,#fff);box-shadow:0 4px 18px #00000047;border-radius:2px;overflow:hidden;box-sizing:border-box;touch-action: pan-x pan-y}
         .pdf-img-wrapper{position:absolute;inset:0;overflow:hidden;pointer-events:none}
-        .pdf-page-canvas{position:absolute;inset:0;width:100%;height:100%;filter:var(--reader-img-filter,none);pointer-events:none}
-        .pdf-page-preview{position:absolute;inset:0;width:100%;height:100%;filter:var(--reader-img-filter,none);pointer-events:none;z-index:1}
-        .pdf-clip-canvas{position:absolute;left:0;width:100%;filter:var(--reader-img-filter,none);pointer-events:none;z-index:2}
+        .pdf-page-canvas{position:absolute;inset:0;width:100%;height:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none}
+        .pdf-page-preview{position:absolute;inset:0;width:100%;height:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none;z-index:1}
+        .pdf-clip-canvas{position:absolute;left:0;width:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none;z-index:2}
         .pdf-text-layer{position:absolute;inset:0;overflow:clip;z-index:4;opacity:1;line-height:1;text-size-adjust:none;transform-origin:0 0;user-select:text;-webkit-user-select:text;pointer-events:auto;--min-font-size:1;--text-scale-factor:calc(var(--total-scale-factor)*var(--min-font-size));--min-font-size-inv:calc(1/var(--min-font-size))}
         .pdf-text-layer :is(span,br){color:transparent;position:absolute;white-space:pre;cursor:text;transform-origin:0 0}
         .pdf-text-layer>:not(.markedContent),.pdf-text-layer .markedContent span:not(.markedContent){z-index:1;--font-height:0;font-size:calc(var(--text-scale-factor)*var(--font-height));--scale-x:1;--rotate:0deg;transform:rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv))}
@@ -179,13 +192,31 @@ export class PdfViewport {
         this.scrollArea.addEventListener('pointerup', e => this._nativePointerUp(e))
         this.scrollArea.addEventListener('pointercancel', () => this._cancelNativeDrag())
         this.scrollArea.addEventListener('dblclick', e => this._nativeDoubleClick(e))
+        this.scrollArea.addEventListener('touchstart', e => this._handleTouchStart(e), { passive: false })
+        this.scrollArea.addEventListener('touchmove', e => this._handleTouchMove(e), { passive: false })
+        this.scrollArea.addEventListener('touchend', e => this._handleTouchEnd(e), { passive: false })
+        this.scrollArea.addEventListener('touchcancel', () => this._handleTouchCancel())
 
         this.scrollArea.addEventListener('click', e => {
-            if (this.interactionMode === 'draw' || this._nativeDrag) return
+            if (this.interactionMode === 'draw' || this._nativeDrag || this.shouldIgnoreContentClick()) return
+            if (this._ignoreClickUntil && performance.now() < this._ignoreClickUntil) return
             const sel = window.getSelection()
             if (sel && !sel.isCollapsed && sel.toString().trim()) return
+            if (this._selectionDismissedTime && performance.now() - this._selectionDismissedTime < 600) {
+                this._selectionDismissedTime = 0
+                return
+            }
+            if (this._nativePreview?.length) {
+                this.clearSelection()
+                return
+            }
             const slot = e.target.closest?.('.pdf-page-slot')
-            if (!slot) return
+            if (!slot) {
+                if (!this._lastTapHandledTime || (performance.now() - this._lastTapHandledTime > 800)) {
+                    this.options.onTap?.()
+                }
+                return
+            }
             const page = Number(slot.dataset.page)
             const rect = slot.getBoundingClientRect()
             const x = (e.clientX - rect.left) / rect.width
@@ -194,6 +225,8 @@ export class PdfViewport {
                 const segment = this._highlightSegment(hl, page)
                 for (const [x1, y1, x2, y2] of segment?.rects || []) {
                     if (x >= x1 - 6 / rect.width && x <= x2 + 6 / rect.width && y >= y1 - 6 / rect.height && y <= y2 + 6 / rect.height) {
+                        clearTimeout(this._singleTapTimer)
+                        e.stopPropagation()
                         this.options.onHighlightClick?.(hl, e, {
                             left: rect.left + x1 * rect.width,
                             top: rect.top + y1 * rect.height,
@@ -203,6 +236,9 @@ export class PdfViewport {
                         return
                     }
                 }
+            }
+            if (!this._lastTapHandledTime || (performance.now() - this._lastTapHandledTime > 800)) {
+                this.options.onTap?.()
             }
         })
     }
@@ -290,8 +326,7 @@ export class PdfViewport {
                 }
                 if (signal.aborted || this._destroyed || driver !== this.driver || !values?.length) continue
                 const anchorPage = clamp(this.currentPage, 0, this.pageOffsets.length - 1)
-                const old = this.pageOffsets[anchorPage]
-                const ratio = old?.height ? clamp((this.scrollArea.scrollTop - old.top) / old.height, 0, 1) : 0
+                const anchor = this._captureZoomAnchor(null, null, anchorPage)
                 const changedActive = []
                 let changed = false
                 values.forEach((size, j) => {
@@ -307,12 +342,12 @@ export class PdfViewport {
                     }
                 })
                 if (changed) {
+                    if (this.zoomMode) this.scale = this.getFitScale(this.zoomMode)
                     this._recomputeLayout()
-                    const now = this.pageOffsets[anchorPage]
-                    if (now) this.scrollArea.scrollTop = Math.max(0, now.top + now.height * ratio)
+                    this._restoreZoomAnchor(anchor)
                     this._syncActiveSlotGeometry()
                     for (const page of changedActive) this._remountPage(page)
-                    this._renderVisibleSlots()
+                    this._renderVisibleSlots(true)
                 }
                 await sleepFrame()
             }
@@ -324,19 +359,95 @@ export class PdfViewport {
         }
     }
 
+    _recalculateLayout() {
+        return this._recomputeLayout()
+    }
+
     _recomputeLayout() {
         this.pageOffsets = []
-        let y = 16, maxWidth = 0
-        for (const size of this.pageSizes) {
-            const width = Math.max(1, Math.round(size.width * this.scale))
-            const height = Math.max(1, Math.round(size.height * this.scale))
-            this.pageOffsets.push({ top: y, width, height })
-            y += height + 16
-            maxWidth = Math.max(maxWidth, width)
+        const gap = 16
+        let y = 16
+        let maxWidth = 0
+
+        if (this.spreadMode === 'dual') {
+            // Page 0 (Page 1 in 1-based indexing, cover) occupies its own row centered horizontally
+            if (this.pageSizes.length > 0) {
+                const s0 = this.pageSizes[0]
+                const w0 = Math.max(1, Math.round(s0.width * this.scale))
+                const h0 = Math.max(1, Math.round(s0.height * this.scale))
+                this.pageOffsets.push({ top: y, width: w0, height: h0, left: null })
+                maxWidth = Math.max(maxWidth, w0)
+                y += h0 + gap
+            }
+
+            // Subsequent pages (2 & 3, 4 & 5, ...) are placed side-by-side on the same row
+            for (let i = 1; i < this.pageSizes.length; i += 2) {
+                const sL = this.pageSizes[i]
+                const wL = Math.max(1, Math.round(sL.width * this.scale))
+                const hL = Math.max(1, Math.round(sL.height * this.scale))
+
+                if (i + 1 < this.pageSizes.length) {
+                    const sR = this.pageSizes[i + 1]
+                    const wR = Math.max(1, Math.round(sR.width * this.scale))
+                    const hR = Math.max(1, Math.round(sR.height * this.scale))
+                    const rowH = Math.max(hL, hR)
+
+                    this.pageOffsets.push({ top: y, width: wL, height: hL, left: null, _pairRight: i + 1, _wR: wR })
+                    this.pageOffsets.push({ top: y, width: wR, height: hR, left: null })
+                    maxWidth = Math.max(maxWidth, wL + gap + wR)
+                    y += rowH + gap
+                } else {
+                    // Trailing single page
+                    this.pageOffsets.push({ top: y, width: wL, height: hL, left: null })
+                    maxWidth = Math.max(maxWidth, wL)
+                    y += hL + gap
+                }
+            }
+        } else {
+            for (const size of this.pageSizes) {
+                const width = Math.max(1, Math.round(size.width * this.scale))
+                const height = Math.max(1, Math.round(size.height * this.scale))
+                this.pageOffsets.push({ top: y, width, height, left: null })
+                y += height + gap
+                maxWidth = Math.max(maxWidth, width)
+            }
         }
-        this.totalHeight = y
-        this.spacer.style.height = `${y}px`
-        this.spacer.style.width = `${maxWidth + 32}px`
+
+        const lastPage = this.pageOffsets.at(-1)
+        const viewportHeight = this.scrollArea.clientHeight || this.container.clientHeight || 0
+        this.totalHeight = this.zoomMode && lastPage ? Math.max(y, lastPage.top + viewportHeight) : y
+        this._layoutWidth = Math.max(maxWidth + 32, this.scrollArea.clientWidth || this.container.clientWidth || 0)
+
+        // Assign horizontal left offsets
+        if (this.spreadMode === 'dual') {
+            if (this.pageOffsets.length > 0) {
+                this.pageOffsets[0].left = Math.round((this._layoutWidth - this.pageOffsets[0].width) / 2)
+            }
+            for (let i = 1; i < this.pageOffsets.length; i++) {
+                const p = this.pageOffsets[i]
+                if (p._pairRight) {
+                    const pairW = p.width + gap + p._wR
+                    const startX = Math.max(16, Math.round((this._layoutWidth - pairW) / 2))
+                    p.left = startX
+                    const pR = this.pageOffsets[i + 1]
+                    if (pR) {
+                        pR.left = startX + p.width + gap
+                    }
+                    delete p._pairRight
+                    delete p._wR
+                    i++
+                } else if (p.left == null) {
+                    p.left = Math.round((this._layoutWidth - p.width) / 2)
+                }
+            }
+        } else {
+            for (const p of this.pageOffsets) {
+                p.left = null
+            }
+        }
+
+        this.spacer.style.height = `${this.totalHeight}px`
+        this.spacer.style.width = `${this._layoutWidth}px`
     }
 
     _syncActiveSlotGeometry() {
@@ -344,6 +455,13 @@ export class PdfViewport {
             const p = this.pageOffsets[page]
             if (!p) continue
             slot.style.top = `${p.top}px`
+            if (this.spreadMode === 'dual' && p.left != null) {
+                slot.style.left = `${p.left}px`
+                slot.style.transform = 'none'
+            } else {
+                slot.style.left = '50%'
+                slot.style.transform = 'translateX(-50%)'
+            }
             slot.style.width = `${p.width}px`
             slot.style.height = `${p.height}px`
             this.options.onSlotGeometrySync?.(page, slot)
@@ -357,7 +475,30 @@ export class PdfViewport {
             if (p.top + p.height < y) lo = mid + 1
             else hi = mid
         }
+        if (lo > 0 && this.pageOffsets[lo] && this.pageOffsets[lo - 1] && this.pageOffsets[lo].top === this.pageOffsets[lo - 1].top) {
+            lo--
+        }
         return lo
+    }
+
+    _findVisibleRange(bufferPages = this.options.bufferPages) {
+        if (!this.pageOffsets.length) return { first: 0, last: 0, start: 0, end: 0 }
+        const top = this.scrollArea.scrollTop, bottom = top + this.scrollArea.clientHeight
+        let first = this._firstPageAt(top)
+        if (first > 0 && this.pageOffsets[first] && this.pageOffsets[first - 1] && this.pageOffsets[first].top === this.pageOffsets[first - 1].top) {
+            first--
+        }
+        let last = first
+        for (let i = first; i < this.pageOffsets.length && this.pageOffsets[i].top <= bottom; i++) {
+            last = i
+        }
+        if (last + 1 < this.pageOffsets.length && this.pageOffsets[last + 1].top === this.pageOffsets[last].top) {
+            last++
+        }
+        const buf = bufferPages * (this.spreadMode === 'dual' ? 2 : 1)
+        const start = Math.max(0, first - buf)
+        const end = Math.min(this.pageOffsets.length - 1, last + buf)
+        return { first, last, start, end }
     }
 
     _isPageQueuedOrRendering(page, token) {
@@ -371,13 +512,9 @@ export class PdfViewport {
     _renderVisibleSlots(force = false) {
         if (!this.pageOffsets.length) return
         const top = this.scrollArea.scrollTop, bottom = top + this.scrollArea.clientHeight
-        const first = this._firstPageAt(top)
-        let last = first
-        for (let i = first; i < this.pageOffsets.length && this.pageOffsets[i].top <= bottom; i++) last = i
+        const { first, last, start, end } = this._findVisibleRange()
         this._enqueueGeometry(first)
         if (last !== first) this._enqueueGeometry(last)
-        const start = Math.max(0, first - this.options.bufferPages)
-        const end = Math.min(this.pageOffsets.length - 1, last + this.options.bufferPages)
         const needed = new Set()
         for (let i = start; i <= end; i++) needed.add(i)
 
@@ -501,7 +638,19 @@ export class PdfViewport {
         slot.dataset.page = String(page)
         slot._renderToken = 1
         slot.renderAbort = new AbortController()
-        Object.assign(slot.style, { top: `${layout.top}px`, width: `${layout.width}px`, height: `${layout.height}px` })
+        const slotStyle = {
+            top: `${layout.top}px`,
+            width: `${layout.width}px`,
+            height: `${layout.height}px`,
+        }
+        if (this.spreadMode === 'dual' && layout.left != null) {
+            slotStyle.left = `${layout.left}px`
+            slotStyle.transform = 'none'
+        } else {
+            slotStyle.left = '50%'
+            slotStyle.transform = 'translateX(-50%)'
+        }
+        Object.assign(slot.style, slotStyle)
 
         const pixels = document.createElement('div'); pixels.className = 'pdf-img-wrapper'
         const highlights = document.createElement('div'); highlights.className = 'pdf-highlight-layer'
@@ -827,7 +976,7 @@ export class PdfViewport {
                         baseCanvas.style.width = '100%'
                         baseCanvas.style.height = '100%'
                         baseCanvas.style.zIndex = '1'
-                        baseCanvas.style.filter = 'var(--reader-img-filter,none)'
+                        baseCanvas.style.filter = 'var(--pdf-page-filter,var(--reader-img-filter,none))'
                         baseCanvas.style.pointerEvents = 'none'
                         if (typeof pixels.prepend === 'function') pixels.prepend(baseCanvas)
                         else if (pixels.children?.unshift) { pixels.children.unshift(baseCanvas); baseCanvas.parentElement = pixels }
@@ -909,7 +1058,7 @@ export class PdfViewport {
                 canvas.style.top = `${cssTop}px`
                 canvas.style.width = '100%'
                 canvas.style.height = `${cssHeight}px`
-                canvas.style.filter = 'var(--reader-img-filter,none)'
+                canvas.style.filter = 'var(--pdf-page-filter,var(--reader-img-filter,none))'
                 canvas.style.pointerEvents = 'none'
                 canvas.style.zIndex = '3'
 
@@ -1157,7 +1306,7 @@ export class PdfViewport {
         ]
     }
 
-    async _hitNativeChar(page, point) {
+    async _hitNativeChar(page, point, maxDist = 16) {
         const geom = await this._ensureNativeGeometry(page)
         if (!geom?.chars?.length) return null
         const { chars, grid, cellSize } = geom
@@ -1165,14 +1314,16 @@ export class PdfViewport {
         const ids = new Set()
         for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++)
             for (const id of grid.get(`${gx+dx}:${gy+dy}`) || []) ids.add(id)
-        const candidates = ids.size ? [...ids].map(i => chars[i]) : chars
+        if (!ids.size) return null
+        const candidates = [...ids].map(i => chars[i])
         let best = null, dist = Infinity
+        const maxDistSq = maxDist * maxDist
         for (const ch of candidates) {
             const [x0,y0,x1,y1] = ch.bounds
             const dx = point[0] < x0 ? x0-point[0] : point[0] > x1 ? point[0]-x1 : 0
             const dy = point[1] < y0 ? y0-point[1] : point[1] > y1 ? point[1]-y1 : 0
             const d = dx*dx + dy*dy
-            if (d < dist) { dist = d; best = ch }
+            if (d <= maxDistSq && d < dist) { dist = d; best = ch }
         }
         return best
     }
@@ -1181,14 +1332,31 @@ export class PdfViewport {
         if (this.interactionMode === 'draw' || this.driver?.kind !== 'mupdf' || e.button !== 0) return
         const epoch = ++this._nativeGestureEpoch
         const hit = this._slotForPoint(e.clientX, e.clientY)
-        if (!hit) return
+        if (!hit) {
+            if (this._nativePreview?.length) this.clearSelection()
+            return
+        }
+        const isInsideSlot = e.clientX >= hit.rect.left && e.clientX <= hit.rect.right &&
+            e.clientY >= hit.rect.top && e.clientY <= hit.rect.bottom
+        if (!isInsideSlot) {
+            if (this._nativePreview?.length) this.clearSelection()
+            return
+        }
         const point = this._clientToPage(hit, e.clientX, e.clientY)
-        const ch = await this._hitNativeChar(hit.page, point)
-        if (!ch || epoch !== this._nativeGestureEpoch || this.interactionMode === 'draw') return
-        e.preventDefault()
-        try { this.scrollArea.setPointerCapture?.(e.pointerId) } catch (_) {}
-        this._nativeDrag = { pointerId: e.pointerId, epoch, anchor: { page: hit.page, index: ch.index, point }, focus: { page: hit.page, index: ch.index, point } }
-        this._updateNativePreview()
+        const ch = await this._hitNativeChar(hit.page, point, 16)
+        if (!ch || epoch !== this._nativeGestureEpoch || this.interactionMode === 'draw') {
+            if (this._nativePreview?.length) this.clearSelection()
+            return
+        }
+        this._nativeDrag = {
+            pointerId: e.pointerId,
+            epoch,
+            startX: e.clientX,
+            startY: e.clientY,
+            hasMoved: false,
+            anchor: { page: hit.page, index: ch.index, point },
+            focus: { page: hit.page, index: ch.index, point }
+        }
     }
 
     async _nativePointerMove(e) {
@@ -1199,10 +1367,18 @@ export class PdfViewport {
             this._cancelNativeDrag()
             return
         }
+        if (!drag.hasMoved) {
+            if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 3) {
+                drag.hasMoved = true
+                try { this.scrollArea.setPointerCapture?.(e.pointerId) } catch (_) {}
+            } else {
+                return
+            }
+        }
         const hit = this._slotForPoint(e.clientX, e.clientY)
         if (!hit) return
         const point = this._clientToPage(hit, e.clientX, e.clientY)
-        const ch = await this._hitNativeChar(hit.page, point)
+        const ch = await this._hitNativeChar(hit.page, point, 36)
         if (!ch || this._nativeDrag !== drag || this.interactionMode === 'draw') return
         drag.focus = { page: hit.page, index: ch.index, point }
         this._updateNativePreview()
@@ -1219,6 +1395,11 @@ export class PdfViewport {
             this._redrawNativePreview()
             return
         }
+        const isSameChar = drag.anchor.page === drag.focus.page && drag.anchor.index === drag.focus.index
+        if (!drag.hasMoved || isSameChar) {
+            if (this._nativePreview?.length) this.clearSelection()
+            return
+        }
         const selection = await this._finalizeNativeSelection(drag.anchor, drag.focus, 'char').catch(err => {
             console.warn('[PDF] native selection failed:', err); return null
         })
@@ -1233,8 +1414,26 @@ export class PdfViewport {
             try { this.scrollArea.releasePointerCapture?.(this._nativeDrag.pointerId) } catch (_) {}
         }
         this._nativeDrag = null
-        this._nativePreview = null
-        this._redrawNativePreview()
+        this.clearSelection()
+    }
+
+    clearSelection() {
+        if (this._isClearingSelection) return
+        this._isClearingSelection = true
+        try {
+            const hadSelection = Boolean(this._nativePreview?.length)
+            if (hadSelection) {
+                this._selectionDismissedTime = performance.now()
+            }
+            this._nativePreview = null
+            this._redrawNativePreview()
+            try { window.getSelection()?.removeAllRanges?.() } catch (_) {}
+            if (hadSelection) {
+                this.options.onSelectionClear?.()
+            }
+        } finally {
+            this._isClearingSelection = false
+        }
     }
 
     async _nativeDoubleClick(e) {
@@ -1243,12 +1442,196 @@ export class PdfViewport {
         const hit = this._slotForPoint(e.clientX, e.clientY)
         if (!hit) return
         const point = this._clientToPage(hit, e.clientX, e.clientY)
-        const ch = await this._hitNativeChar(hit.page, point)
+        const ch = await this._hitNativeChar(hit.page, point, 16)
         if (!ch || epoch !== this._nativeGestureEpoch || this.interactionMode === 'draw') return
         e.preventDefault()
         const selection = await this._finalizeNativeSelection(
             { page: hit.page, index: ch.index, point }, { page: hit.page, index: ch.index, point }, 'word')
         if (selection && this.interactionMode !== 'draw') this._emitNativeSelection(selection)
+    }
+
+    _handleTouchStart(e) {
+        if (!e.touches) return
+        if (e.touches.length === 2) {
+            clearTimeout(this._singleTapTimer)
+            this._singleTouchStart = null
+            this._ignoreClickUntil = performance.now() + 500
+            // Cancel any pending native drag or text selection
+            this._cancelNativeDrag()
+            try { window.getSelection()?.removeAllRanges?.() } catch (_) {}
+            const t0 = e.touches[0], t1 = e.touches[1]
+            const d0 = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+            const C0 = { x: (t0.clientX + t1.clientX) / 2, y: (t0.clientY + t1.clientY) / 2 }
+            const s0 = this.scale
+
+            // Anchor point relative to current page slot
+            const hit = this._slotForPoint(C0.x, C0.y) || {
+                page: this.currentPage,
+                slot: this.activeSlots.get(this.currentPage)
+            }
+            const anchor = this._captureZoomAnchor(C0.x, C0.y, hit.page ?? this.currentPage)
+
+            this._pinch = {
+                d0: Math.max(10, d0),
+                s0,
+                C0,
+                currentCenter: C0,
+                currentScale: s0,
+                ...anchor,
+                originX: this.scrollArea.scrollLeft + anchor.viewX,
+                originY: this.scrollArea.scrollTop + anchor.viewY,
+                rafPending: false
+            }
+            if (e.cancelable) e.preventDefault()
+        } else if (e.touches.length === 1) {
+            if (this._pinch) {
+                this._cancelPinch()
+            }
+            const touch = e.touches[0]
+            this._singleTouchStart = {
+                time: performance.now(),
+                x: touch.clientX,
+                y: touch.clientY,
+                moved: false
+            }
+        } else {
+            if (this._pinch) this._cancelPinch()
+        }
+    }
+
+    _handleTouchMove(e) {
+        if (!e.touches) return
+        if (this._singleTouchStart && e.touches.length === 1) {
+            const touch = e.touches[0]
+            if (Math.hypot(touch.clientX - this._singleTouchStart.x, touch.clientY - this._singleTouchStart.y) > 24) {
+                this._singleTouchStart.moved = true
+                this._ignoreClickUntil = performance.now() + 450
+            }
+        }
+        if (this._pinch && e.touches.length === 2) {
+            if (e.cancelable) e.preventDefault()
+            const t0 = e.touches[0], t1 = e.touches[1]
+            const d = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY)
+            const C = { x: (t0.clientX + t1.clientX) / 2, y: (t0.clientY + t1.clientY) / 2 }
+            const scaleFactor = d / this._pinch.d0
+            const nextScale = clamp(this._pinch.s0 * scaleFactor, this.options.minScale, this.options.maxScale)
+            this._pinch.currentScale = nextScale
+            this._pinch.currentCenter = C
+
+            // Throttle visual preview to 1 animation frame
+            if (!this._pinch.rafPending) {
+                this._pinch.rafPending = true
+                requestAnimationFrame(() => {
+                    if (!this._pinch) return
+                    this._pinch.rafPending = false
+                    const ratio = this._pinch.currentScale / this._pinch.s0
+                    if (this.spacer) {
+                        const dx = this._pinch.currentCenter.x - this._pinch.C0.x
+                        const dy = this._pinch.currentCenter.y - this._pinch.C0.y
+                        this.spacer.style.transformOrigin = `${this._pinch.originX}px ${this._pinch.originY}px`
+                        this.spacer.style.transform = `translate(${dx}px, ${dy}px) scale(${ratio})`
+                    }
+                })
+            }
+        }
+    }
+
+    async _handleTouchEnd(e) {
+        if (this._pinch) {
+            if (!e.touches || e.touches.length < 2) {
+                const pinch = this._pinch
+                this._pinch = null
+                if (this.spacer) {
+                    this.spacer.style.transform = ''
+                    this.spacer.style.transformOrigin = ''
+                }
+                const finalScale = pinch.currentScale
+                this._ignoreClickUntil = performance.now() + 500
+                this._commitPinchZoom(finalScale, pinch)
+            }
+        } else if (e.changedTouches && e.changedTouches.length === 1 && this._singleTouchStart) {
+            const touch = e.changedTouches[0]
+            const dur = performance.now() - this._singleTouchStart.time
+            const dist = Math.hypot(touch.clientX - this._singleTouchStart.x, touch.clientY - this._singleTouchStart.y)
+            const moved = this._singleTouchStart.moved
+            this._singleTouchStart = null
+
+            // Detect clean tap (< 450ms and moved < 24px)
+            if (!moved && dur < 450 && dist < 24) {
+                const now = performance.now()
+                if (this._lastTapTime && (now - this._lastTapTime < 320)) {
+                    // Double tap detected!
+                    const lastDist = Math.hypot(touch.clientX - this._lastTapPos.x, touch.clientY - this._lastTapPos.y)
+                    if (lastDist < 30) {
+                        this._lastTapTime = 0
+                        clearTimeout(this._singleTapTimer)
+                        this._ignoreClickUntil = now + 450
+                        if (e.cancelable) e.preventDefault()
+                        this._handleDoubleTapToggle(touch.clientX, touch.clientY)
+                        return
+                    }
+                }
+                this._lastTapTime = now
+                this._lastTapPos = { x: touch.clientX, y: touch.clientY }
+                if (this._selectionDismissedTime && performance.now() - this._selectionDismissedTime < 600) {
+                    this._selectionDismissedTime = 0
+                    clearTimeout(this._singleTapTimer)
+                    return
+                }
+                if (this._nativePreview?.length) {
+                    this.clearSelection()
+                    clearTimeout(this._singleTapTimer)
+                    return
+                }
+                if (this.options.onTap) {
+                    this._lastTapHandledTime = now
+                    this._ignoreClickUntil = now + 800
+                    clearTimeout(this._singleTapTimer)
+                    this._singleTapTimer = setTimeout(() => {
+                        if (this._destroyed || this._pinch || this.interactionMode === 'draw') return
+                        const selection = window.getSelection?.()
+                        if (selection && !selection.isCollapsed && selection.toString().trim()) {
+                            try { selection.removeAllRanges?.() } catch {}
+                            return
+                        }
+                        if (this._nativePreview?.length) {
+                            this.clearSelection()
+                            return
+                        }
+                        this.options.onTap()
+                    }, 60)
+                }
+            }
+        }
+    }
+
+    _handleTouchCancel() {
+        clearTimeout(this._singleTapTimer)
+        this._ignoreClickUntil = performance.now() + 450
+        this._cancelPinch()
+        this._singleTouchStart = null
+    }
+
+    _cancelPinch() {
+        if (this._pinch) {
+            this._pinch = null
+            if (this.spacer) {
+                this.spacer.style.transform = ''
+                this.spacer.style.transformOrigin = ''
+            }
+        }
+    }
+
+    _commitPinchZoom(finalScale, pinch) {
+        const center = pinch.currentCenter || pinch.C0
+        const cRect = this.scrollArea.getBoundingClientRect?.() || { left: 0, top: 0 }
+        this.setZoom(finalScale, { anchor: { ...pinch, viewX: center.x - cRect.left, viewY: center.y - cRect.top } })
+    }
+
+    _handleDoubleTapToggle(clientX, clientY) {
+        const fit = this.getFitScale('fit-width')
+        if (this.scale > fit * 1.15) this.setZoom('fit-width')
+        else this.setZoom(fit * 2, { anchor: this._captureZoomAnchor(clientX, clientY) })
     }
 
     async _selectionEndpoints(anchor, focus) {
@@ -1346,18 +1729,124 @@ export class PdfViewport {
         })
     }
 
-    setZoom(value) {
-        let next = this.scale
-        if (typeof value === 'number') next = clamp(value, this.options.minScale, this.options.maxScale)
-        else if (value === 'fit-width') next = (this.container.clientWidth - 48) / (this.pageSizes[this.currentPage]?.width || 595)
-        else if (value === 'fit-page') next = (this.container.clientHeight - 64) / (this.pageSizes[this.currentPage]?.height || 842)
-        next = clamp(next, this.options.minScale, this.options.maxScale)
-        if (Math.abs(next - this.scale) < .01) return
-        const old = this.pageOffsets[this.currentPage], ratio = old?.height ? (this.scrollArea.scrollTop-old.top)/old.height : 0
+    setSpreadMode(mode) {
+        const nextMode = (mode === 'dual' || mode === '2' || mode === 'two') ? 'dual' : 'none'
+        if (this.spreadMode === nextMode) return
+        const curPage = this.currentPage
+        this.spreadMode = nextMode
+        this._recomputeLayout()
+        this._syncActiveSlotGeometry()
+        this.scrollToPage(curPage)
+        this._renderVisibleSlots(true)
+    }
+
+    getSpreadMode() {
+        return this.spreadMode || 'none'
+    }
+
+    scrollToPage(page, yRatio = 0) {
+        return this.goToPage(page, yRatio)
+    }
+
+    _createPageSlot(page) {
+        return this._mountSlot(page)
+    }
+
+    getPageAtViewportCenter() {
+        if (!this.pageOffsets.length) return 0
+        const top = this.scrollArea.scrollTop, centerY = top + this.scrollArea.clientHeight / 2
+        const left = this.scrollArea.scrollLeft, centerX = left + this.scrollArea.clientWidth / 2
+
+        let best = this.currentPage
+        let minDistanceSq = Infinity
+
+        for (let i = 0; i < this.pageOffsets.length; i++) {
+            const p = this.pageOffsets[i]
+            const pLeft = p.left != null ? p.left : (this._layoutWidth - p.width) / 2
+            const pRight = pLeft + p.width
+            const pBottom = p.top + p.height
+
+            if (centerX >= pLeft && centerX <= pRight && centerY >= p.top && centerY <= pBottom) {
+                return i
+            }
+
+            const pCenterX = pLeft + p.width / 2
+            const pCenterY = p.top + p.height / 2
+            const distSq = (centerX - pCenterX) ** 2 + (centerY - pCenterY) ** 2
+            if (distSq < minDistanceSq) {
+                minDistanceSq = distSq
+                best = i
+            }
+        }
+        return best
+    }
+
+    getFitScale(mode = 'fit-width', page = this.currentPage) {
+        const size = this.pageSizes[page] || { width: 595, height: 842 }
+        const width = this.scrollArea.clientWidth || this.container.clientWidth
+        const height = this.scrollArea.clientHeight || this.container.clientHeight
+        const isMobile = window.innerWidth < 768 || window.mobileShell?.isMobileViewport?.() || window.platformBridge?.isAndroid
+        const margin = isMobile ? 24 : 48
+        const spreadFactor = (this.spreadMode === 'dual' && page > 0) ? 2.05 : 1
+        const fitWidth = Math.max(1, width - margin) / (size.width * spreadFactor)
+        const fitHeight = Math.max(1, height - 32) / size.height
+        return clamp(mode === 'fit-page' ? Math.min(fitWidth, fitHeight) : fitWidth, this.options.minScale, this.options.maxScale)
+    }
+
+    canPanHorizontally() {
+        const page = this.pageOffsets[this.currentPage]
+        const width = this.scrollArea.clientWidth || this.container.clientWidth
+        return Boolean(page && page.width > width - 8)
+    }
+
+    ownsTouchGesture() {
+        const selection = window.getSelection?.()
+        return Boolean(this._pinch || this.interactionMode === 'draw' || this.canPanHorizontally() ||
+            (selection && !selection.isCollapsed && selection.toString().trim()))
+    }
+
+    shouldIgnoreContentClick() {
+        return Boolean(this._pinch || this.interactionMode === 'draw' || (performance.now() < this._ignoreClickUntil))
+    }
+
+    _captureZoomAnchor(clientX = null, clientY = null, page = this.currentPage) {
+        const rect = this.scrollArea.getBoundingClientRect?.() || { left: 0, top: 0 }
+        const viewX = clientX == null ? (this.scrollArea.clientWidth || this.container.clientWidth) / 2 : clientX - rect.left
+        const viewY = clientY == null ? 0 : clientY - rect.top
+        const p = this.pageOffsets[page]
+        const left = p ? (this._layoutWidth - p.width) / 2 : 0
+        return {
+            page, viewX, viewY,
+            normX: p ? clamp(((this.scrollArea.scrollLeft || 0) + viewX - left) / p.width, 0, 1) : .5,
+            normY: p ? clamp((this.scrollArea.scrollTop + viewY - p.top) / p.height, 0, 1) : 0,
+        }
+    }
+
+    _restoreZoomAnchor(anchor, centerHorizontally = Boolean(this.zoomMode)) {
+        const p = this.pageOffsets[anchor.page]
+        if (!p) return
+        const width = this.scrollArea.clientWidth || this.container.clientWidth
+        const height = this.scrollArea.clientHeight || this.container.clientHeight
+        const x = centerHorizontally ? (this._layoutWidth - width) / 2 :
+            (this._layoutWidth - p.width) / 2 + anchor.normX * p.width - anchor.viewX
+        this.scrollArea.scrollLeft = clamp(x, 0, Math.max(0, this._layoutWidth - width))
+        this.scrollArea.scrollTop = clamp(p.top + anchor.normY * p.height - anchor.viewY, 0, Math.max(0, this.totalHeight - height))
+    }
+
+    setPageAppearance(mode) {
+        this.pageAppearance = mode === 'night' ? 'night' : 'original'
+        if (this.pageAppearance === 'night') this.container.style.setProperty('--pdf-page-filter', 'invert(0.9) hue-rotate(180deg)')
+        else this.container.style.removeProperty('--pdf-page-filter')
+    }
+
+    setZoom(value, { anchor = null } = {}) {
+        this.zoomMode = value === 'fit-width' || value === 'fit-page' ? value : null
+        const next = clamp(this.zoomMode ? this.getFitScale(value) : Number(value), this.options.minScale, this.options.maxScale)
+        if (!Number.isFinite(next)) return
+        const viewAnchor = anchor || this._captureZoomAnchor()
         this.scale = next
         this._recomputeLayout()
-        const now = this.pageOffsets[this.currentPage]
-        if (now) this.scrollArea.scrollTop = Math.max(0, now.top + clamp(ratio,0,1)*now.height)
+        this._restoreZoomAnchor(viewAnchor)
         this._syncActiveSlotGeometry()
         this.options.onZoomChange?.(this.scale)
         for (const slot of this.activeSlots.values()) {
@@ -1383,9 +1872,10 @@ export class PdfViewport {
 
     goToPage(page, yRatio = 0) {
         if (page < 0 || page >= this.pageOffsets.length) return
+        this.currentPage = page
+        if (this.zoomMode) this.setZoom(this.zoomMode)
         const p = this.pageOffsets[page]
         this.scrollArea.scrollTop = Math.max(0, p.top + p.height * clamp(yRatio,0,1) - (yRatio ? this.scrollArea.clientHeight/3 : 8))
-        this.currentPage = page
         this._renderVisibleSlots()
         this.options.onPageChange?.(page, this.numPages)
     }
@@ -1412,14 +1902,16 @@ export class PdfViewport {
 
     _detectCurrentPage() {
         if (!this.pageOffsets.length) return
-        const top=this.scrollArea.scrollTop,bottom=top+this.scrollArea.clientHeight
-        let best=this.currentPage,bestH=-1
-        for(let i=this._firstPageAt(top);i<this.pageOffsets.length;i++){
-            const p=this.pageOffsets[i]; if(p.top>bottom)break
-            const h=Math.max(0,Math.min(bottom,p.top+p.height)-Math.max(top,p.top))
-            if(h>bestH){bestH=h;best=i}
+        const best = this.getPageAtViewportCenter()
+        if (best !== this.currentPage) {
+            this.currentPage = best
+            if (this.zoomMode && Math.abs(this.getFitScale(this.zoomMode) - this.scale) > .01) {
+                const rect = this.scrollArea.getBoundingClientRect?.() || { left: 0, top: 0 }
+                const viewY = Math.max(0, this.pageOffsets[best].top - this.scrollArea.scrollTop)
+                this.setZoom(this.zoomMode, { anchor: this._captureZoomAnchor(null, rect.top + viewY, best) })
+            }
+            this.options.onPageChange?.(best, this.numPages)
         }
-        if(best!==this.currentPage){this.currentPage=best;this.options.onPageChange?.(best,this.numPages)}
     }
 
     setHighlights(highlights, snapshot = null) {
@@ -1448,6 +1940,9 @@ export class PdfViewport {
     destroy() {
         if (this._destroyed) return
         this._destroyed = true
+        this._resizeObserver?.disconnect()
+        clearTimeout(this._singleTapTimer)
+        this._cancelPinch?.()
         this._loadGeneration = (this._loadGeneration || 0) + 1
         this._geometryAbort?.abort()
         this._geometryQueue.length = 0
@@ -1472,6 +1967,10 @@ export class PdfViewport {
         this._bitmapCacheBytes = 0
         this._nativeGeometry.clear()
         this._nativeGeometryUse.clear()
+        this._nativeDrag = null
+        this._nativePreview = null
+        this._selectionDismissedTime = 0
+        this._isClearingSelection = false
         this.driver?.destroy?.()
         this.driver = null
         this.container.innerHTML = ''

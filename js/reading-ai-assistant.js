@@ -1,4 +1,5 @@
 import { platformBridge } from './platformBridge.js'
+import { runWithAiAdmission } from './ai-request-scheduler.js'
 import { BUILTIN_PROMPTS } from './ai-presets.js'
 
 const LOCAL_STORAGE_KEY_AI_CONFIG = 'linden_ai_assistant_config'
@@ -23,7 +24,7 @@ export const SYSTEM_PROMPTS = {
 }
 
 // In-memory fallback guards for non-Tauri / test environments
-let _mockLastDispatched = 0
+let _mockLastChatDispatched = 0
 let _mockActiveRequestId = null
 let _mockTodayCount = 0
 let _mockDailyDate = ''
@@ -127,7 +128,7 @@ export async function saveAiConfig(cfg = {}) {
         }
     }
     if (typeof cfg.cooldownSeconds === 'number') {
-        merged.cooldownSeconds = Math.max(5, Math.min(60, cfg.cooldownSeconds))
+        merged.cooldownSeconds = Math.max(0, Math.min(3600, cfg.cooldownSeconds))
         try {
             const advRaw = localStorage.getItem('linden_advanced_settings_config') || '{}'
             const adv = JSON.parse(advRaw)
@@ -145,7 +146,7 @@ export async function saveAiConfig(cfg = {}) {
         } catch (_) {}
     }
     if (typeof cfg.maxTokens === 'number') {
-        merged.maxTokens = Math.max(64, Math.min(8192, cfg.maxTokens))
+        merged.maxTokens = Math.max(64, Math.min(20000, cfg.maxTokens))
     }
 
     if (cfg.apiKey !== undefined) {
@@ -265,13 +266,49 @@ export function escapeUntrustedHtml(str) {
  * Render basic safe markdown formatting (bold, italic, code blocks, lists) without allowing raw HTML
  */
 export function renderSafeMarkdown(markdownText) {
-    const escaped = escapeUntrustedHtml(markdownText)
-    let formatted = escaped.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
-    formatted = formatted.replace(/`([^`]+)`/g, '<code>$1</code>')
-    formatted = formatted.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    formatted = formatted.replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    formatted = formatted.replace(/\n/g, '<br/>')
-    return formatted
+    const lines = String(markdownText ?? '').replace(/\r\n?/g, '\n').split('\n')
+    const inline = text => {
+        const code = []
+        const escaped = escapeUntrustedHtml(text).replace(/`([^`]+)`/g, (_, value) => {
+            code.push(`<code>${value}</code>`)
+            return `\u0000${code.length - 1}\u0000`
+        })
+        return escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+            .replace(/\u0000(\d+)\u0000/g, (_, index) => code[Number(index)] || '')
+    }
+    const out = []
+    let paragraph = [], list = null, fence = false, codeLines = []
+    const flushParagraph = () => { if (paragraph.length) out.push(`<p>${paragraph.map(inline).join('<br/>')}</p>`); paragraph = [] }
+    const closeList = () => { if (list) out.push(`</${list}>`); list = null }
+    for (const line of lines) {
+        if (/^\s*```/.test(line)) {
+            flushParagraph(); closeList()
+            if (fence) { out.push(`<pre><code>${escapeUntrustedHtml(codeLines.join('\n'))}</code></pre>`); codeLines = [] }
+            fence = !fence
+            continue
+        }
+        if (fence) { codeLines.push(line); continue }
+        if (!line.trim()) { flushParagraph(); closeList(); continue }
+        const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+)$/)
+        const item = line.match(/^\s*(?:([-+*])|\d+[.)])\s+(.+)$/)
+        const quote = line.match(/^\s*>\s?(.*)$/)
+        if (heading) {
+            flushParagraph(); closeList()
+            const level = Math.min(heading[1].length + 1, 6)
+            out.push(`<h${level}>${inline(heading[2])}</h${level}>`)
+        } else if (item) {
+            flushParagraph()
+            const type = item[1] ? 'ul' : 'ol'
+            if (list !== type) { closeList(); list = type; out.push(`<${list}>`) }
+            out.push(`<li>${inline(item[2])}</li>`)
+        } else if (quote) {
+            flushParagraph(); closeList(); out.push(`<blockquote>${inline(quote[1])}</blockquote>`)
+        } else { closeList(); paragraph.push(line) }
+    }
+    flushParagraph(); closeList()
+    if (fence) out.push(`<pre><code>${escapeUntrustedHtml(codeLines.join('\n'))}</code></pre>`)
+    return out.join('')
 }
 
 /**
@@ -294,27 +331,29 @@ export function createQuestionPrompt(selectedText, question) {
  * Queries native cooldown and in-flight request status
  * @returns {Promise<{ isBusy: boolean, remainingCooldownSeconds: number, todayCount: number, dailyLimit: number }>}
  */
-export async function getAiStatus() {
+export async function getAiStatus({ requireNative = false, purpose = 'chat' } = {}) {
     if (globalThis.__TAURI__?.core?.invoke) {
         try {
-            const res = await globalThis.__TAURI__.core.invoke('ai_get_status')
+            const res = await globalThis.__TAURI__.core.invoke('ai_get_status', { purpose })
             return {
                 isBusy: Boolean(res.isBusy),
                 activeRequestId: res.activeRequestId || null,
-                remainingCooldownSeconds: res.remainingCooldownSeconds || 0,
-                todayCount: res.todayCount || 0,
-                dailyLimit: res.dailyLimit || 100
+                remainingCooldownSeconds: res.remainingCooldownSeconds ?? 0,
+                remainingCooldownMs: res.remainingCooldownMs,
+                todayCount: res.todayCount ?? 0,
+                dailyLimit: res.dailyLimit ?? 100
             }
         } catch (e) {
             console.warn('[AI Assistant] Failed to get native status:', e)
+            if (requireNative) throw new Error('AI_STATUS_UNAVAILABLE: 无法读取本地 AI 请求状态，请稍后继续')
         }
     }
 
     // In-memory fallback
     const cfg = getAiConfig()
     const now = Date.now()
-    const elapsedSecs = Math.floor((now - _mockLastDispatched) / 1000)
-    const cd = cfg.cooldownSeconds || 10
+    const elapsedSecs = Math.floor((now - _mockLastChatDispatched) / 1000)
+    const cd = purpose === 'chapterTranslation' ? 0 : (cfg.cooldownSeconds ?? 10)
     const rem = elapsedSecs < cd ? cd - elapsedSecs : 0
 
     return {
@@ -322,7 +361,7 @@ export async function getAiStatus() {
         activeRequestId: _mockActiveRequestId,
         remainingCooldownSeconds: rem,
         todayCount: _mockTodayCount,
-        dailyLimit: cfg.dailyLimit || 100
+        dailyLimit: cfg.dailyLimit ?? 100
     }
 }
 
@@ -375,7 +414,7 @@ export async function clearAiAuditLog() {
 
 /**
  * Dispatches an AI chat completion request through the Native Rust request layer with:
- * - 10-second hard cooldown
+ * - User-configured interval for reader questions; continuous chapter tasks are exempt
  * - Concurrency limit (max 1 in-flight per application)
  * - Atomic deduplication
  * - Max output tokens limit
@@ -385,6 +424,7 @@ export async function clearAiAuditLog() {
  *
  * @param {object} params
  * @param {string} [params.requestId]
+ * @param {'chat'|'chapterTranslation'} [params.purpose='chat'] Local scheduling intent
  * @param {string} [params.endpoint]
  * @param {string} [params.model]
  * @param {string} [params.apiKey]
@@ -399,6 +439,8 @@ export async function clearAiAuditLog() {
  */
 export async function requestAiCompletion({
     requestId,
+    requestScope,
+    purpose = 'chat',
     endpoint,
     model,
     apiKey,
@@ -407,6 +449,9 @@ export async function requestAiCompletion({
     messages,
     maxTokens,
     returnMetadata = false,
+    queueIfBusy = false,
+    beforeDispatch,
+    onWait,
     onChunk,
     signal
 }) {
@@ -422,6 +467,7 @@ export async function requestAiCompletion({
     const targetMaxTokens = maxTokens || cfg.maxTokens || DEFAULT_AI_CONFIG.maxTokens || 2048
     const resultValue = (payload, fallbackText = '') => returnMetadata
         ? {
+            requestId: reqId,
             fullText: payload?.fullText ?? fallbackText,
             finishReason: payload?.finishReason ?? null,
             status: payload?.status || 'completed',
@@ -430,6 +476,18 @@ export async function requestAiCompletion({
         : (payload?.fullText ?? fallbackText)
 
     const reqId = requestId || ('req_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7))
+
+    if (queueIfBusy) {
+        return runWithAiAdmission({
+            signal, beforeDispatch, onWait,
+            getStatus: () => getAiStatus({ requireNative: !!globalThis.__TAURI__?.core?.invoke, purpose }),
+            invoke: () => requestAiCompletion({
+                requestId: reqId, requestScope, purpose, endpoint: targetEndpoint, model: targetModel, apiKey,
+                prompt, systemPrompt, messages, maxTokens: targetMaxTokens,
+                returnMetadata, onChunk, signal
+            })
+        })
+    }
 
     let chatMessages = messages
     if (!chatMessages) {
@@ -448,8 +506,10 @@ export async function requestAiCompletion({
         let unlistenDone = null
         let unlistenStopped = null
         let unlistenError = null
+        let abortHandler = null
 
         const cleanupListeners = () => {
+            if (abortHandler) { signal?.removeEventListener('abort', abortHandler); abortHandler = null }
             if (unlistenChunk) { unlistenChunk(); unlistenChunk = null }
             if (unlistenDone) { unlistenDone(); unlistenDone = null }
             if (unlistenStopped) { unlistenStopped(); unlistenStopped = null }
@@ -463,9 +523,8 @@ export async function requestAiCompletion({
                 abortErr.name = 'AbortError'
                 return Promise.reject(abortErr)
             }
-            signal.addEventListener('abort', () => {
-                abortAiRequest(reqId).catch(() => {})
-            }, { once: true })
+            abortHandler = () => { abortAiRequest(reqId).catch(() => {}) }
+            signal.addEventListener('abort', abortHandler, { once: true })
         }
 
         return new Promise((resolve, reject) => {
@@ -504,6 +563,8 @@ export async function requestAiCompletion({
                 return globalThis.__TAURI__.core.invoke('ai_request_chat_completion', {
                     payload: {
                         requestId: reqId,
+                        requestScope,
+                        purpose,
                         endpoint: targetEndpoint,
                         model: targetModel,
                         messages: chatMessages,
@@ -523,14 +584,14 @@ export async function requestAiCompletion({
 
     // 2. Fallback for non-Tauri / mock test environment
     const now = Date.now()
-    const cooldown = (cfg.cooldownSeconds ?? 10) * 1000
+    const cooldown = purpose === 'chapterTranslation' ? 0 : (cfg.cooldownSeconds ?? 10) * 1000
 
     if (_mockActiveRequestId) {
         throw new Error(`CONCURRENCY_BLOCKED: 当前已有正在进行的生成请求，请等待完成或点击停止`)
     }
 
-    if (cooldown > 0 && now - _mockLastDispatched < cooldown) {
-        const remSecs = Math.ceil((cooldown - (now - _mockLastDispatched)) / 1000)
+    if (cooldown > 0 && now - _mockLastChatDispatched < cooldown) {
+        const remSecs = Math.ceil((cooldown - (now - _mockLastChatDispatched)) / 1000)
         throw new Error(`COOLDOWN_ACTIVE: 请等待 ${remSecs} 秒后再发送新请求 (剩余 ${remSecs} 秒)`)
     }
 
@@ -539,12 +600,12 @@ export async function requestAiCompletion({
         _mockDailyDate = todayStr
         _mockTodayCount = 0
     }
-    const limit = cfg.dailyLimit || 100
+    const limit = cfg.dailyLimit ?? 100
     if (limit > 0 && _mockTodayCount >= limit) {
         throw new Error(`DAILY_LIMIT_EXCEEDED: 已达到今日请求上限 (${limit} 次)，请在设置中调整上限`)
     }
 
-    _mockLastDispatched = now
+    if (purpose !== 'chapterTranslation') _mockLastChatDispatched = now
     _mockActiveRequestId = reqId
     _mockTodayCount++
 
@@ -660,4 +721,13 @@ export async function requestAiCompletion({
     } finally {
         _mockActiveRequestId = null
     }
+}
+
+// Translation parsing happens after a successful API response; the transport audit alone cannot show it.
+export async function recordTranslationDiagnostic(diagnostic) {
+    if (globalThis.__TAURI__?.core?.invoke) {
+        return globalThis.__TAURI__.core.invoke('ai_record_translation_diagnostic', { diagnostic });
+    }
+    console.warn('[ChapterTranslation]', diagnostic);
+    return false;
 }

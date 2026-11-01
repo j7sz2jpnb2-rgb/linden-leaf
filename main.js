@@ -364,9 +364,9 @@ ipcMain.handle('sync:fetchRemote', async (_event, config) => {
     return await WebDAVService.fetchRemoteState(resolved)
 })
 
-ipcMain.handle('sync:saveRemote', async (_event, { config, data, etag }) => {
+ipcMain.handle('sync:saveRemote', async (_event, { config, data, etag, summaryMarkdown }) => {
     const resolved = getResolvedSyncConfig(config)
-    return await WebDAVService.saveRemoteState({ ...resolved, data, etag })
+    return await WebDAVService.saveRemoteState({ ...resolved, data, etag, summaryMarkdown })
 })
 
 ipcMain.handle('sync:uploadBookBinary', async (_event, { config, fileName, buffer }) => {

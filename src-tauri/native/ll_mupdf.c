@@ -159,6 +159,18 @@ static ll_quad quad_out(fz_quad q) {
     return out;
 }
 
+static uint32_t g_max_store_mb = 256;
+
+void ll_set_max_store_mb(uint32_t max_mb) {
+    if (max_mb < 32) max_mb = 32;
+    if (max_mb > 1024) max_mb = 1024;
+    g_max_store_mb = max_mb;
+}
+
+uint32_t ll_get_max_store_mb(void) {
+    return g_max_store_mb;
+}
+
 ll_doc *ll_open(const char *path, const char *password, char *error, size_t n) {
     ll_doc *d = calloc(1, sizeof(*d));
     fz_var(d);
@@ -168,7 +180,8 @@ ll_doc *ll_open(const char *path, const char *password, char *error, size_t n) {
     }
     for (int i = 0; i < CACHE_PAGES; ++i) d->pages[i].page = -1;
 
-    d->ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
+    size_t store_bytes = ((size_t)g_max_store_mb) * 1024 * 1024;
+    d->ctx = fz_new_context(NULL, NULL, store_bytes);
     if (!d->ctx) {
         free(d);
         if (n) snprintf(error, n, "Context allocation failed");

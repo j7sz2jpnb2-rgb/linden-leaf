@@ -3,7 +3,7 @@ use tokio::fs;
 use tauri::ipc::Response;
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "epub", "pdf", "djvu", "docx", "txt", "md", "mobi", "azw", "azw3", "fb2", "cbz",
+    "epub", "pdf", "docx", "txt", "md", "mobi", "azw", "azw3", "fb2", "cbz", "djvu",
 ];
 
 #[tauri::command]
@@ -33,4 +33,3 @@ pub async fn fs_read_buffer(file_path: String) -> Result<Response, String> {
 
     Ok(Response::new(bytes))
 }
-

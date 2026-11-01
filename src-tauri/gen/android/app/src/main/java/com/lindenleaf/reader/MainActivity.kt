@@ -22,16 +22,15 @@ class MainActivity : TauriActivity() {
         const val REQUEST_CODE_PICK_BOOKS = 1002
         var pendingPickCallback: ((List<Map<String, String>>?) -> Unit)? = null
         var instance: MainActivity? = null
+        var lastInsetsTop = 0f
+        var lastInsetsBottom = 0f
+        var lastInsetsLeft = 0f
+        var lastInsetsRight = 0f
+        var lastInsetsIme = 0f
     }
 
     var currentWebView: WebView? = null
         private set
-
-    private var lastInsetsTop = 0f
-    private var lastInsetsBottom = 0f
-    private var lastInsetsLeft = 0f
-    private var lastInsetsRight = 0f
-    private var lastInsetsIme = 0f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         instance = this
@@ -45,16 +44,15 @@ class MainActivity : TauriActivity() {
             val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
 
-            // Per spec: union of obstruction rectangle, system bars and cutout take max, not sum
+            // Per spec: system bars and cutout take max; IME is tracked separately to avoid double-padding
             val topCss = maxOf(systemBars.top, cutout.top) / density
             val leftCss = maxOf(systemBars.left, cutout.left) / density
             val rightCss = maxOf(systemBars.right, cutout.right) / density
             val bottomBarCss = maxOf(systemBars.bottom, cutout.bottom) / density
             val imeCss = ime.bottom / density
-            val bottomCss = maxOf(bottomBarCss, imeCss)
 
             lastInsetsTop = topCss
-            lastInsetsBottom = bottomCss
+            lastInsetsBottom = bottomBarCss
             lastInsetsLeft = leftCss
             lastInsetsRight = rightCss
             lastInsetsIme = imeCss
@@ -67,6 +65,10 @@ class MainActivity : TauriActivity() {
         // 2. Intercept native Android back button navigation
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                if (ViewCompat.getRootWindowInsets(window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == true) {
+                    ViewCompat.getWindowInsetsController(window.decorView)?.hide(WindowInsetsCompat.Type.ime())
+                    return
+                }
                 val wv = currentWebView
                 if (wv != null) {
                     wv.evaluateJavascript(
@@ -106,7 +108,7 @@ class MainActivity : TauriActivity() {
         applyInsetsToWebView()
     }
 
-    private fun applyInsetsToWebView() {
+    fun applyInsetsToWebView() {
         val wv = currentWebView ?: return
         val js = """
             (function() {
@@ -122,13 +124,20 @@ class MainActivity : TauriActivity() {
                 doc.style.setProperty('--safe-right', '${lastInsetsRight}px');
                 doc.style.setProperty('--ime-inset-bottom', '${lastInsetsIme}px');
                 doc.style.setProperty('--ime-bottom', '${lastInsetsIme}px');
+                doc.style.setProperty('--window-inset-bottom', '${maxOf(lastInsetsBottom, lastInsetsIme)}px');
+                if ($lastInsetsIme > 50) {
+                    doc.classList.add('keyboard-open');
+                } else {
+                    doc.classList.remove('keyboard-open');
+                }
                 window.dispatchEvent(new CustomEvent('safeareachanged', {
                     detail: {
                         top: $lastInsetsTop,
                         bottom: $lastInsetsBottom,
                         left: $lastInsetsLeft,
                         right: $lastInsetsRight,
-                        ime: $lastInsetsIme
+                        ime: $lastInsetsIme,
+                        keyboardOpen: ($lastInsetsIme > 50)
                     }
                 }));
             })();
@@ -149,6 +158,9 @@ class MainActivity : TauriActivity() {
             instance = null
         }
         pendingPickCallback = null
+        pendingExportCallback?.invoke(JSONObject().put("success", false).put("cancelled", true))
+        pendingExportCallback = null
+        bookIo.shutdown()
         currentWebView = null
         super.onDestroy()
     }
@@ -171,7 +183,7 @@ class MainActivity : TauriActivity() {
         }
 
         if (uri != null) {
-            Thread {
+            bookIo.execute {
                 try {
                     val resolvedJson = LindenNativeBridge.resolveContentUri(this@MainActivity, uri.toString())
                     val obj = JSONObject(resolvedJson)
@@ -186,7 +198,7 @@ class MainActivity : TauriActivity() {
                 } catch (e: Exception) {
                     android.util.Log.e("MainActivity", "Failed staging incoming intent uri: $uri", e)
                 }
-            }.start()
+            }
         }
     }
 
@@ -282,6 +294,69 @@ class MainActivity : TauriActivity() {
         }
     }
 
+    private val bookIo = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var pendingExportSource: File? = null
+    private var pendingExportCallback: ((JSONObject) -> Unit)? = null
+
+    fun requestListeningNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33) return
+        runOnUiThread {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) return@runOnUiThread
+            val preferences = getSharedPreferences("listening-permissions", MODE_PRIVATE)
+            if (!preferences.getBoolean("notification-asked", false)) {
+                preferences.edit().putBoolean("notification-asked", true).apply()
+                androidx.core.app.ActivityCompat.requestPermissions(this,
+                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1004)
+            }
+        }
+    }
+
+    fun exportBookFile(filePath: String, filename: String, share: Boolean, callback: (JSONObject) -> Unit) {
+        val source = File(filePath)
+        if (!source.isFile) { callback(JSONObject().put("success", false).put("error", "原始图书文件不存在")); return }
+        val name = filename.replace('\\', '/').substringAfterLast('/').ifBlank { "book.epub" }
+        val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
+            ?: "application/octet-stream"
+        if (share) {
+            bookIo.execute {
+                try {
+                    val directory = File(cacheDir, "share").apply { mkdirs() }
+                    val output = File(directory, System.currentTimeMillis().toString() + "-" + name)
+                    source.inputStream().use { input -> output.outputStream().use { input.copyTo(it, 64 * 1024) } }
+                    val uri = androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", output)
+                    runOnUiThread {
+                        try {
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = mime
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                clipData = android.content.ClipData.newUri(contentResolver, name, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            startActivity(Intent.createChooser(intent, "分享图书"))
+                            callback(JSONObject().put("success", true).put("opened", true))
+                        } catch (e: Exception) { callback(JSONObject().put("success", false).put("error", e.message)) }
+                    }
+                } catch (e: Exception) { callback(JSONObject().put("success", false).put("error", e.message)) }
+            }
+        } else runOnUiThread {
+            if (pendingExportCallback != null) {
+                callback(JSONObject().put("success", false).put("error", "请先完成当前的文件保存"))
+                return@runOnUiThread
+            }
+            pendingExportSource = source
+            pendingExportCallback = callback
+            try {
+                startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE); type = mime; putExtra(Intent.EXTRA_TITLE, name)
+                }, 1003)
+            } catch (e: Exception) {
+                pendingExportSource = null; pendingExportCallback = null
+                callback(JSONObject().put("success", false).put("error", e.message))
+            }
+        }
+    }
+
     fun launchBookPicker(callback: (List<Map<String, String>>?) -> Unit) {
         pendingPickCallback = callback
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -311,48 +386,49 @@ class MainActivity : TauriActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_CODE_PICK_BOOKS) {
-            val cb = pendingPickCallback
-            pendingPickCallback = null
-
-            if (resultCode != Activity.RESULT_OK || data == null) {
-                cb?.invoke(null)
+        if (requestCode == 1003) {
+            val callback = pendingExportCallback
+            val source = pendingExportSource
+            pendingExportCallback = null
+            pendingExportSource = null
+            val uri = data?.data
+            if (resultCode != Activity.RESULT_OK || uri == null || source == null) {
+                callback?.invoke(JSONObject().put("success", false).put("cancelled", true))
                 return
             }
-
-            Thread {
+            bookIo.execute {
+                try {
+                    source.inputStream().use { input ->
+                        val output = contentResolver.openOutputStream(uri, "wt") ?: error("无法写入所选位置")
+                        output.use { input.copyTo(it, 64 * 1024) }
+                    }
+                    callback?.invoke(JSONObject().put("success", true).put("path", uri.toString()))
+                } catch (e: Exception) { callback?.invoke(JSONObject().put("success", false).put("error", e.message)) }
+            }
+        } else if (requestCode == REQUEST_CODE_PICK_BOOKS) {
+            val callback = pendingPickCallback
+            pendingPickCallback = null
+            if (resultCode != Activity.RESULT_OK || data == null) { callback?.invoke(null); return }
+            bookIo.execute {
                 val results = mutableListOf<Map<String, String>>()
-                val clipData = data.clipData
-                if (clipData != null) {
-                    for (i in 0 until clipData.itemCount) {
-                        val uri = clipData.getItemAt(i).uri
-                        val resJson = LindenNativeBridge.resolveContentUri(this@MainActivity, uri.toString())
-                        val obj = JSONObject(resJson)
-                        if (obj.optBoolean("success", false)) {
-                            val path = obj.optString("snapshot_path", "")
-                            val name = obj.optString("filename", "")
-                            if (path.isNotEmpty()) {
-                                results.add(mapOf("filePath" to path, "filename" to name))
+                try {
+                    val uris = mutableListOf<Uri>()
+                    val clip = data.clipData
+                    if (clip != null) for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+                    else data.data?.let { uris.add(it) }
+                    for (uri in uris) {
+                        try {
+                            val result = JSONObject(LindenNativeBridge.resolveContentUri(this, uri.toString()))
+                            if (result.optBoolean("success")) {
+                                val path = result.optString("snapshot_path")
+                                if (path.isNotEmpty()) results.add(mapOf("filePath" to path, "filename" to result.optString("filename")))
                             }
-                        }
+                        } catch (e: Exception) { android.util.Log.w("LindenImport", "Cannot import selected document", e) }
                     }
-                } else if (data.data != null) {
-                    val uri = data.data!!
-                    val resJson = LindenNativeBridge.resolveContentUri(this@MainActivity, uri.toString())
-                    val obj = JSONObject(resJson)
-                    if (obj.optBoolean("success", false)) {
-                        val path = obj.optString("snapshot_path", "")
-                        val name = obj.optString("filename", "")
-                        if (path.isNotEmpty()) {
-                            results.add(mapOf("filePath" to path, "filename" to name))
-                        }
-                    }
+                } finally {
+                    runOnUiThread { callback?.invoke(if (results.isEmpty()) null else results) }
                 }
-
-                runOnUiThread {
-                    cb?.invoke(if (results.isEmpty()) null else results)
-                }
-            }.start()
+            }
         }
     }
 }

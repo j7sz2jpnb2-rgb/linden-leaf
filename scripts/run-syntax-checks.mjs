@@ -12,7 +12,6 @@ const files = [
   'js/advanced-settings.js',
   'js/ai-sidebar-controller.js',
   'js/reading-ai-assistant.js',
-  'js/annual-report.js',
   'js/tts-player.js',
   'js/excerpt-source-resolver.js',
   'js/dictionary-service.js',

@@ -38,3 +38,39 @@ credentials.json
 # System files
 .DS_Store
 Thumbs.db
+build-temp-*/
+prototype/
+mupdf-clip-scroll-evidence-*/
+
+# Internal development notes, scratchpads, and agent handoffs
+GEMINI*.md
+*HANDOFF*.md
+*HANDOVER*.md
+CURRENT_STATUS.md
+TECHNICAL_SPEC_AND_PLAN.md
+*CHECKLIST*.md
+
+# Local sample files (kept locally only)
+samples/
+
+# Local historical & obsolete scripts (kept locally only)
+scripts/build-android-apk.ps1
+scripts/setup-android-toolchain.ps1
+scripts/finish-toolchain-and-init.ps1
+scripts/build-pc-2.0.17.ps1
+scripts/install-pc-2.0.17.ps1
+scripts/build-windows-release.ps1
+scripts/setup-env.ps1
+scripts/install-rust-standalone.ps1
+scripts/find-mupdf.js
+scripts/fast-download.js
+scripts/get-process-mem.ps1
+scripts/run-dev.js
+scripts/make-shortcut.js
+scripts/create-desktop-shortcut.ps1
+scripts/update-shortcut.ps1
+scripts/launch-preview.ps1
+scripts/launch-preview.vbs
+
+
+

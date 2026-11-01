@@ -157,6 +157,7 @@ pub fn run() {
             dialog_open_file,
             dialog_open_dict_file,
             dialog_pick_folder,
+            dialog_save_text_file,
             fs_read_buffer,
             // Window & App
             window_minimize,
@@ -188,6 +189,7 @@ pub fn run() {
             ai_abort_request,
             ai_get_status,
             ai_get_audit_log,
+            ai_record_translation_diagnostic,
             ai_clear_audit_log,
             ai_set_cooldown_and_limit,
             ai_bind_credential,
@@ -204,6 +206,7 @@ pub fn run() {
             resource_clear_audio_cache,
             // MuPDF Native Reader
             mupdf_is_available,
+            mupdf_set_store_limit,
             mupdf_stage_pdf,
             mupdf_open_document,
             mupdf_get_page_sizes,
@@ -225,14 +228,24 @@ pub fn run() {
             android_keystore_load,
             android_keystore_delete,
             android_start_background_tts,
+            android_start_background_tts_queue,
             android_pause_background_tts,
             android_resume_background_tts,
             android_stop_background_tts,
+            android_next_background_tts,
+            android_prev_background_tts,
             android_get_playback_state,
+            android_acknowledge_tts_listening,
+            android_export_book_file,
+            tts_request_audio,
+            tts_cancel_audio,
             android_get_pending_imports,
             android_consume_pending_import,
             android_save_image_to_gallery,
             android_share_image,
+            android_get_system_insets,
+            android_set_tts_sleep_timer,
+            android_set_tts_rate,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Linden Leaf Tauri application");

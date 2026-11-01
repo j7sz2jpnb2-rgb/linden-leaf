@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
+const hashResources = process.env.LINDEN_SKIP_RESOURCE_HASH !== '1';
 
 const rootDir = path.resolve(__dirname, '..');
 const distDir = path.resolve(rootDir, 'dist-tauri');
@@ -111,8 +112,8 @@ function hashDirectory(dir, baseDir = dir) {
     return hashes;
 }
 
-const allFileHashes = hashDirectory(distDir);
-const combinedDigest = crypto.createHash('sha256').update(allFileHashes.join('\n')).digest('hex');
+const allFileHashes = hashResources ? hashDirectory(distDir) : [];
+const combinedDigest = hashResources ? crypto.createHash('sha256').update(allFileHashes.join('\n')).digest('hex') : null;
 
 // Helper to run git commands
 function runGit(args) {
@@ -166,5 +167,5 @@ const buildInfo = {
 };
 
 fs.writeFileSync(path.join(distDir, 'build-info.json'), JSON.stringify(buildInfo, null, 2), 'utf8');
-console.log(`[build-dist] Generated build-info.json: buildId=${buildId} resources=${allFileHashes.length} hash=${combinedDigest.slice(0, 12)}`);
+console.log(`[build-dist] Generated build-info.json: buildId=${buildId} resources=${allFileHashes.length} hash=${combinedDigest ? combinedDigest.slice(0, 12) : 'skipped'}`);
 console.log('[build-dist] Frontend dist preparation complete at dist-tauri!');

@@ -5,19 +5,47 @@
 //     2. 'slide'      - Horizontal smooth sliding translation (recommended default)
 //     3. 'cover'      - Overlapping sheet page flip with edge drop shadow
 //     4. 'scroll'     - Continuous vertical/horizontal stream reading flow
-//     5. 'curl'       - Realistic 2D Canvas simulation turn with paper deformation & shadow gradients
 // - State Machine: 'idle' -> 'preparing' -> 'dragging' -> 'settling' -> 'idle'
 // - Generation Counter: Cancels stale textures/animations immediately on resize, font, theme, or book changes
 // - Interaction Priority: Drawing tool, text selection, zoomed PDF panning strictly supersede page turns
 // - Respects 'prefers-reduced-motion' automatically
 
-export const PAGE_TURN_MODES = ['none', 'slide', 'cover', 'scroll', 'curl']
-export const PAGE_TURN_STATES = ['idle', 'preparing', 'dragging', 'settling']
 export const FEATURE_CURL_PAGE_TURN_ENABLED = false
+export const PAGE_TURN_MODES = ['none', 'slide', 'cover', 'scroll']
+export const PAGE_TURN_STATES = ['idle', 'preparing', 'dragging', 'settling']
 
 const safeRaf = typeof requestAnimationFrame === 'function'
     ? requestAnimationFrame
     : (cb) => setTimeout(() => cb(typeof performance !== 'undefined' ? performance.now() : Date.now()), 16)
+
+export function isDarkColor(color) {
+    if (!color) return false
+    const str = String(color).trim().toLowerCase()
+    if (str === 'black' || str === '#000' || str === '#000000') return true
+    if (str.startsWith('#')) {
+        const hex = str.slice(1)
+        let r = 0, g = 0, b = 0
+        if (hex.length === 3) {
+            r = parseInt(hex[0] + hex[0], 16)
+            g = parseInt(hex[1] + hex[1], 16)
+            b = parseInt(hex[2] + hex[2], 16)
+        } else if (hex.length >= 6) {
+            r = parseInt(hex.slice(0, 2), 16)
+            g = parseInt(hex.slice(2, 4), 16)
+            b = parseInt(hex.slice(4, 6), 16)
+        }
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b
+        return lum < 128
+    }
+    if (str.startsWith('rgb')) {
+        const m = str.match(/\d+/g)
+        if (m && m.length >= 3) {
+            const lum = 0.299 * Number(m[0]) + 0.587 * Number(m[1]) + 0.114 * Number(m[2])
+            return lum < 128
+        }
+    }
+    return false
+}
 
 /**
  * Base Adapter Contract for Reader Viewports
@@ -31,6 +59,156 @@ export class PageTurnAdapter {
     isContinuousScroll() { return false }
     getViewElement() { return null }
     getVisuals() { return null } // { currentCanvas, nextCanvas, bgColor }
+}
+
+/**
+ * Accurately renders a text node's wrapped lines to canvas without column leakage or text overlapping
+ */
+function renderTextNodeToCanvas(doc, textNode, ctx, width, height, textColor, arg1 = 0, arg2 = 0, arg3 = null, arg4 = null) {
+    let offsetX = 0
+    let offsetY = 0
+    let colMinX = 0
+    let colMaxX = width
+
+    if (arg3 != null && typeof arg2 === 'number') {
+        // Called with (doc, textNode, ctx, width, height, textColor, colMinX, colMaxX, offsetY)
+        colMinX = arg1
+        colMaxX = arg2
+        offsetY = arg3 || 0
+        offsetX = -colMinX
+    } else {
+        // Called with (doc, textNode, ctx, width, height, textColor, offsetX, offsetY)
+        offsetX = arg1 || 0
+        offsetY = arg2 || 0
+        colMinX = -offsetX
+        colMaxX = -offsetX + width
+    }
+
+    const parent = textNode.parentElement
+    if (!parent) return false
+    const tagName = parent.tagName?.toLowerCase()
+    if (tagName === 'script' || tagName === 'style' || tagName === 'noscript' || tagName === 'svg') return false
+    if (parent.closest('script, style, noscript, svg, [hidden]')) return false
+
+    const fullText = textNode.textContent
+    if (!fullText || !fullText.trim()) return false
+
+    const style = doc.defaultView?.getComputedStyle(parent)
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false
+
+    const fontSize = parseFloat(style.fontSize) || 16
+    const fontFamily = style.fontFamily || 'serif'
+    const fontWeight = style.fontWeight || 'normal'
+    const fontStyle = style.fontStyle || 'normal'
+    const color = (style.color && style.color !== 'rgba(0, 0, 0, 0)' && style.color !== 'transparent') ? style.color : textColor
+
+    ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`
+    ctx.fillStyle = color
+    ctx.textBaseline = 'top'
+
+    const range = doc.createRange()
+    range.selectNodeContents(textNode)
+    const rects = range.getClientRects()
+    if (!rects || rects.length === 0) return false
+
+    // Quick rejection: check if any rect intersects this column slice [colMinX - 8, colMaxX + 8]
+    let inCol = false
+    for (let i = 0; i < rects.length; i++) {
+        const r = rects[i]
+        if (r.right >= colMinX - 8 && r.left < colMaxX + 8) {
+            inCol = true
+            break
+        }
+    }
+    if (!inCol) return false
+
+    let renderedAny = false
+
+    // Single rect: if within this column slice, draw directly
+    if (rects.length === 1) {
+        const r = rects[0]
+        const x = r.left - colMinX
+        const y = r.top + offsetY
+        if (y + r.height >= 0 && y <= height && x + r.width >= 0 && x <= width && x >= -8) {
+            const trimmed = fullText.trim()
+            if (trimmed) {
+                ctx.fillText(trimmed, x, y)
+                return true
+            }
+        }
+        return false
+    }
+
+    // Multiple characters/lines: Group characters strictly within [colMinX - 8, colMaxX - 8]
+    try {
+        const charRange = doc.createRange()
+        let currentLine = ''
+        let currentTop = -999
+        let currentLeft = 0
+        const lineHeight = parseFloat(style.lineHeight) || (fontSize * 1.4)
+
+        for (let c = 0; c < fullText.length; c++) {
+            charRange.setStart(textNode, c)
+            charRange.setEnd(textNode, c + 1)
+            const cr = charRange.getBoundingClientRect()
+            if (!cr || cr.width === 0) {
+                if (currentLine) currentLine += fullText[c]
+                continue
+            }
+
+            // Check if this character is within this column's horizontal slice
+            if (cr.left >= colMinX - 8 && cr.left < colMaxX - 8) {
+                // If baseline moved vertically by more than half line height, emit line
+                if (currentLine && Math.abs(cr.top - currentTop) > 6) {
+                    const lineStr = currentLine.trim()
+                    const x = currentLeft - colMinX
+                    const y = currentTop + offsetY
+                    if (lineStr && y + lineHeight >= 0 && y <= height && x + width >= 0 && x <= width && x >= -8) {
+                        ctx.fillText(lineStr, x, y)
+                        renderedAny = true
+                    }
+                    currentLine = ''
+                }
+                if (!currentLine) {
+                    currentTop = cr.top
+                    currentLeft = cr.left
+                }
+                currentLine += fullText[c]
+            } else {
+                if (currentLine) {
+                    const lineStr = currentLine.trim()
+                    const x = currentLeft - colMinX
+                    const y = currentTop + offsetY
+                    if (lineStr && y + lineHeight >= 0 && y <= height && x + width >= 0 && x <= width && x >= -8) {
+                        ctx.fillText(lineStr, x, y)
+                        renderedAny = true
+                    }
+                    currentLine = ''
+                    currentTop = -999
+                }
+            }
+        }
+        if (currentLine) {
+            const lineStr = currentLine.trim()
+            const x = currentLeft - colMinX
+            const y = currentTop + offsetY
+            if (lineStr && y + lineHeight >= 0 && y <= height && x + width >= 0 && x <= width && x >= -8) {
+                ctx.fillText(lineStr, x, y)
+                renderedAny = true
+            }
+        }
+    } catch (_) {
+        // Fallback for mocked/headless environments without per-character bounding client rects
+        const r0 = rects[0]
+        const x0 = r0.left - colMinX
+        const y0 = r0.top + offsetY
+        if (x0 >= -8 && x0 <= width && y0 <= height) {
+            ctx.fillText(fullText.trim(), x0, y0)
+            renderedAny = true
+        }
+    }
+
+    return renderedAny
 }
 
 /**
@@ -86,7 +264,7 @@ export class FoliatePageTurnAdapter extends PageTurnAdapter {
         this._cachedNextCanvas = null
     }
 
-    captureCurrentPageCanvas(bgColor, textColor) {
+    capturePageCanvas(targetPageIndex, bgColor, textColor) {
         if (typeof document === 'undefined') return null
         const viewEl = this.getViewElement()
         if (!viewEl) return null
@@ -95,72 +273,135 @@ export class FoliatePageTurnAdapter extends PageTurnAdapter {
         const height = viewEl.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 1200)
         if (width <= 0 || height <= 0) return null
 
+        const contents = (typeof this.view?.renderer?.getContents === 'function')
+            ? this.view.renderer.getContents()
+            : []
+        const doc = contents?.[0]?.doc
+        if (!doc || !doc.body) return null
+
+        const pageSize = this.view?.renderer?.size || width
+        const curPage = this.view?.renderer?.page ?? 0
+        const totalPages = this.view?.renderer?.pages ?? 1
+
+        if (targetPageIndex < 0 || targetPageIndex >= totalPages) {
+            return null
+        }
+
+        const hasBoundaries = totalPages > 2 && curPage >= 1
+        const colK = hasBoundaries ? (targetPageIndex - 1) : targetPageIndex
+        const colMinX = Math.max(0, colK * pageSize)
+        const colMaxX = (colK + 1) * pageSize
+        const pageOffset = (targetPageIndex - curPage) * pageSize
+
         const canvas = document.createElement('canvas')
         canvas.width = width
         canvas.height = height
         const ctx = canvas.getContext('2d')
         if (!ctx) return null
 
-        // 1. Fill base paper background
         ctx.fillStyle = bgColor
         ctx.fillRect(0, 0, width, height)
 
-        // 2. Extract DOM contents from active chapter iframe
-        const contents = (typeof this.view?.renderer?.getContents === 'function')
-            ? this.view.renderer.getContents()
-            : []
-        const doc = contents?.[0]?.doc
-        if (!doc || !doc.body) return canvas
+        const viewRect = typeof viewEl.getBoundingClientRect === 'function'
+            ? viewEl.getBoundingClientRect()
+            : { left: 0, top: 0, width, height }
+        const iframeEl = doc.defaultView?.frameElement
+        const iframeRect = (iframeEl && typeof iframeEl.getBoundingClientRect === 'function')
+            ? iframeEl.getBoundingClientRect()
+            : null
+        const offsetX = (iframeRect ? (iframeRect.left - viewRect.left) : 0) - pageOffset
+        const offsetY = (iframeRect ? (iframeRect.top - viewRect.top) : 0)
+
+        let hasContent = false
 
         try {
             ctx.save()
-            const elements = doc.body.querySelectorAll('h1, h2, h3, h4, h5, h6, p, div, span, blockquote, img, li')
-            for (const el of elements) {
-                // If it has children other than text or img, let child elements render instead
-                if (el.tagName !== 'IMG' && el.children && el.children.length > 0) continue
 
-                const rect = el.getBoundingClientRect()
-                if (rect.bottom < 0 || rect.top > height || rect.right < 0 || rect.left > width) {
-                    continue
+            // 1. Draw images
+            if (typeof doc.body.querySelectorAll === 'function') {
+                const images = doc.body.querySelectorAll('img, svg')
+                for (const img of images) {
+                    const rect = typeof img.getBoundingClientRect === 'function' ? img.getBoundingClientRect() : null
+                    if (!rect) continue
+                    if (rect.right < colMinX - 8 || rect.left >= colMaxX + 8) continue
+                    const x = rect.left - colMinX
+                    const y = rect.top + offsetY
+                    if (rect.width <= 0 || rect.height <= 0) continue
+                    if (y + rect.height < 0 || y > height || x + rect.width < 0 || x > width) continue
+
+                    if (img.tagName === 'IMG') {
+                        try {
+                            ctx.drawImage(img, x, y, rect.width, rect.height)
+                            hasContent = true
+                        } catch (_) {}
+                    }
                 }
-
-                if (el.tagName === 'IMG') {
-                    try {
-                        ctx.drawImage(el, rect.left, rect.top, rect.width, rect.height)
-                    } catch (_) {}
-                    continue
-                }
-
-                const text = el.textContent?.trim()
-                if (!text) continue
-
-                const style = doc.defaultView?.getComputedStyle(el)
-                const fontSize = parseFloat(style?.fontSize) || 18
-                const fontFamily = style?.fontFamily || 'serif'
-                const fontWeight = style?.fontWeight || 'normal'
-                const color = (style?.color && style.color !== 'rgba(0, 0, 0, 0)') ? style.color : textColor
-
-                ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`
-                ctx.fillStyle = color
-                ctx.textBaseline = 'top'
-
-                const x = Math.max(0, rect.left)
-                const y = Math.max(0, rect.top)
-                const maxWidth = Math.max(10, Math.min(width - x, rect.width || width))
-                ctx.fillText(text, x, y, maxWidth)
             }
-            ctx.restore()
-        } catch (_) {}
 
-        return canvas
+            // 2. Draw text nodes with TreeWalker
+            if (typeof doc.createTreeWalker === 'function' && typeof doc.createRange === 'function') {
+                const showText = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_TEXT : 4
+                const walker = doc.createTreeWalker(doc.body, showText, null)
+                let node = walker.nextNode()
+                while (node) {
+                    if (renderTextNodeToCanvas(doc, node, ctx, width, height, textColor, colMinX, colMaxX, offsetY)) {
+                        hasContent = true
+                    }
+                    node = walker.nextNode()
+                }
+            } else if (typeof doc.body.querySelectorAll === 'function') {
+                // Headless/test fallback when TreeWalker or Range is not mocked
+                const elements = doc.body.querySelectorAll('h1, h2, h3, h4, h5, h6, p, blockquote, li')
+                for (const el of elements) {
+                    const text = el.textContent?.trim()
+                    if (!text) continue
+                    const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null
+                    if (!rect) continue
+                    if (rect.right < colMinX - 8 || rect.left >= colMaxX + 8) continue
+                    const x = rect.left - colMinX
+                    const y = rect.top + offsetY
+                    if (y + rect.height < 0 || y > height || x + rect.width < 0 || x > width || x < -8) continue
+
+                    const style = doc.defaultView?.getComputedStyle?.(el)
+                    const fontSize = parseFloat(style?.fontSize) || 18
+                    const fontFamily = style?.fontFamily || 'serif'
+                    const fontWeight = style?.fontWeight || 'normal'
+                    const color = (style?.color && style.color !== 'rgba(0, 0, 0, 0)' && style.color !== 'transparent') ? style.color : textColor
+
+                    ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`
+                    ctx.fillStyle = color
+                    ctx.textBaseline = 'top'
+                    ctx.fillText(text, x, y)
+                    hasContent = true
+                }
+            }
+
+            ctx.restore()
+        } catch (e) {
+            console.warn('[FoliatePageTurnAdapter] capturePageCanvas failed:', e)
+            return null
+        }
+
+        return hasContent ? canvas : null
+    }
+
+    captureCurrentPageCanvas(bgColor, textColor) {
+        const curPage = this.view?.renderer?.page ?? 0
+        return this.capturePageCanvas(curPage, bgColor, textColor)
     }
 
     getVisuals(direction = 'next') {
         const bgColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-bg') || getComputedStyle(document.documentElement).getPropertyValue('--book-bg'))) || '#FAF9F5'
         const textColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-color') || getComputedStyle(document.documentElement).getPropertyValue('--book-color'))) || '#141413'
-        
+
+        const curPage = this.view?.renderer?.page ?? 0
         if (!this._cachedCanvas) {
-            this._cachedCanvas = this.captureCurrentPageCanvas(bgColor, textColor)
+            this._cachedCanvas = this.capturePageCanvas(curPage, bgColor, textColor)
+        }
+
+        const targetPage = direction === 'next' ? curPage + 1 : curPage - 1
+        if (!this._cachedNextCanvas) {
+            this._cachedNextCanvas = this.capturePageCanvas(targetPage, bgColor, textColor)
         }
 
         return {
@@ -221,256 +462,36 @@ export class PdfPageTurnAdapter extends PageTurnAdapter {
         return this.viewport?.scrollArea || this.viewport?.container || null
     }
 
+    _getCanvasForPage(pageIndex) {
+        const fromMap = this.viewport?.renderedCanvases?.get?.(pageIndex)
+        if (fromMap) return fromMap
+        const slot = this.viewport?.activeSlots?.get?.(pageIndex)
+        if (slot && typeof slot.querySelector === 'function') {
+            const mainCanvas = slot.querySelector('.pdf-page-canvas')
+            if (mainCanvas && mainCanvas.width > 0) return mainCanvas
+            const previewCanvas = slot.querySelector('.pdf-page-preview, canvas')
+            if (previewCanvas && previewCanvas.width > 0) return previewCanvas
+        }
+        return null
+    }
+
     getVisuals(direction = 'next') {
-        // Retrieve current and target page canvases for realistic curl projection
+        // Retrieve current and target page canvases for realistic page-turn projection
         const curPage = this.getCurrentPage()
-        const curCanvas = this.viewport?.renderedCanvases?.get?.(curPage) || null
+        const curCanvas = this._getCanvasForPage(curPage)
         const targetPage = direction === 'next' ? curPage + 1 : curPage - 1
-        const nextCanvas = this.viewport?.renderedCanvases?.get?.(targetPage) || null
+        const nextCanvas = this._getCanvasForPage(targetPage)
+        const bgColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-bg') || (typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement).getPropertyValue('--book-bg') : ''))) || '#ffffff'
+        const textColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-color') || (typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement).getPropertyValue('--book-color') : ''))) || '#141413'
         return {
             currentCanvas: curCanvas,
             nextCanvas: nextCanvas,
-            bgColor: '#ffffff',
-            textColor: '#141413'
+            bgColor: bgColor.trim() || '#ffffff',
+            textColor: textColor.trim() || '#141413'
         }
     }
 }
 
-/**
- * Cylindrical 2D Canvas Paper Curl Renderer
- * Computes curved page geometry, dynamic soft shadows, light reflection, and texture mapping
- */
-/**
- * Cylindrical 2D Canvas Paper Curl Renderer
- * Computes curved page geometry, dynamic soft shadows, light reflection, and texture mapping
- * using exact cylindrical projection formulas:
- *   s = dot(p - o, n),  q = dot(p - o, t),  t = (-n.y, n.x),  R > 0
- *   s <= 0:         Pxy = o + q*t + s*n;               z = 0;              N = (0, 0, 1)
- *   0 < s < π*R:    θ = s/R;
- *                   Pxy = o + q*t + R*sin(θ)*n;        z = R*(1 - cos(θ)); N = (-sinθ*nx, -sinθ*ny, cosθ)
- *   s >= π*R:       Pxy = o + q*t - (s - π*R)*n;       z = 2*R;            N = (0, 0, -1)
- */
-export class CurlSimulator {
-    constructor(canvas) {
-        this.canvas = canvas
-        this.ctx = canvas?.getContext('2d') || null
-    }
-
-    /**
-     * Exact Cylindrical Surface Mapping
-     */
-    static mapPoint(p, o, n, t, R) {
-        const po_x = p.x - o.x
-        const po_y = p.y - o.y
-        const s = po_x * n.x + po_y * n.y
-        const q = po_x * t.x + po_y * t.y
-
-        if (s <= 0) {
-            return {
-                x: o.x + q * t.x + s * n.x,
-                y: o.y + q * t.y + s * n.y,
-                z: 0,
-                s,
-                q,
-                normal: { x: 0, y: 0, z: 1 }
-            }
-        } else if (s < Math.PI * R) {
-            const theta = s / R
-            const sinTheta = Math.sin(theta)
-            const cosTheta = Math.cos(theta)
-            return {
-                x: o.x + q * t.x + R * sinTheta * n.x,
-                y: o.y + q * t.y + R * sinTheta * n.y,
-                z: R * (1 - cosTheta),
-                s,
-                q,
-                normal: { x: -sinTheta * n.x, y: -sinTheta * n.y, z: cosTheta }
-            }
-        } else {
-            const rolledS = s - Math.PI * R
-            return {
-                x: o.x + q * t.x - rolledS * n.x,
-                y: o.y + q * t.y - rolledS * n.y,
-                z: 2 * R,
-                s,
-                q,
-                normal: { x: 0, y: 0, z: -1 }
-            }
-        }
-    }
-
-    renderCurl({
-        width,
-        height,
-        progress,
-        direction = 'next',
-        touchX = null,
-        touchY = null,
-        currentTexture = null,
-        nextTexture = null,
-        bgColor = '#FAF9F5',
-        textColor = '#141413'
-    }) {
-        if (!this.ctx || width <= 0 || height <= 0) return
-        const ctx = this.ctx
-        ctx.clearRect(0, 0, width, height)
-
-        const clampedProgress = Math.min(1, Math.max(0, progress))
-        if (clampedProgress <= 0 || clampedProgress >= 1) return
-
-        const isNext = direction === 'next'
-        // Fold progress from 1 to 0 (next) or 0 to 1 (prev)
-        const foldProgress = isNext ? (1 - clampedProgress) : clampedProgress
-        const foldX = width * foldProgress
-
-        // Radius R smoothly scales with progress for natural paper elasticity
-        const R = Math.max(16, Math.min(width * 0.14, 50 * Math.sin(clampedProgress * Math.PI) + 14))
-
-        // Tilt angle from touch position
-        const targetY = touchY != null ? Math.max(height * 0.1, Math.min(height * 0.9, touchY)) : height * 0.5
-        const tiltAngle = ((targetY - height * 0.5) / height) * 0.3 * (1 - clampedProgress)
-
-        // Normal n (pointing toward the curled side) and Tangent t
-        const nx = isNext ? Math.cos(tiltAngle) : -Math.cos(tiltAngle)
-        const ny = Math.sin(tiltAngle)
-        const n = { x: nx, y: ny }
-        const t = { x: -ny, y: nx }
-        const o = { x: foldX, y: targetY }
-
-        ctx.save()
-
-        // 1. LAYER 1: Stationary Underlying Target Page (Revealed under curl)
-        if (nextTexture) {
-            try {
-                ctx.drawImage(nextTexture, 0, 0, width, height)
-            } catch (_) {}
-        }
-
-        // 2. LAYER 2: Soft Drop Shadow cast onto the stationary underlying page
-        const shadowWidth = Math.min(120, Math.max(36, R * 2.4))
-        ctx.save()
-        const shadowGrad = isNext
-            ? ctx.createLinearGradient(foldX - shadowWidth, 0, foldX, 0)
-            : ctx.createLinearGradient(foldX, 0, foldX + shadowWidth, 0)
-
-        if (isNext) {
-            shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0)')
-            shadowGrad.addColorStop(0.5, 'rgba(0, 0, 0, 0.14)')
-            shadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0.38)')
-            ctx.fillStyle = shadowGrad
-            ctx.fillRect(Math.max(0, foldX - shadowWidth), 0, shadowWidth, height)
-        } else {
-            shadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.38)')
-            shadowGrad.addColorStop(0.5, 'rgba(0, 0, 0, 0.14)')
-            shadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-            ctx.fillStyle = shadowGrad
-            ctx.fillRect(foldX, 0, Math.min(width - foldX, shadowWidth), height)
-        }
-        ctx.restore()
-
-        // 3. LAYER 3: Flat Uncurled portion of current page (s <= 0)
-        ctx.save()
-        ctx.beginPath()
-        if (isNext) {
-            ctx.rect(0, 0, foldX, height)
-        } else {
-            ctx.rect(foldX, 0, width - foldX, height)
-        }
-        ctx.clip()
-
-        if (currentTexture) {
-            try {
-                ctx.drawImage(currentTexture, 0, 0, width, height)
-            } catch (_) {}
-        } else {
-            ctx.fillStyle = bgColor
-            ctx.fillRect(0, 0, width, height)
-            // Subtle book spine shadow on the binding side
-            const spineGrad = ctx.createLinearGradient(isNext ? 0 : width, 0, isNext ? 32 : width - 32, 0)
-            spineGrad.addColorStop(0, 'rgba(0, 0, 0, 0.15)')
-            spineGrad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-            ctx.fillStyle = spineGrad
-            ctx.fillRect(isNext ? 0 : width - 32, 0, 32, height)
-        }
-        ctx.restore()
-
-        // 4. LAYER 4: Curled Cylinder & Paper Backside Flap
-        // Compute cylindrical roll path
-        const flapWidth = Math.min(width - foldX, foldX) * 0.72 + R * 1.5
-        const drawFlapPath = () => {
-            ctx.beginPath()
-            if (isNext) {
-                ctx.moveTo(foldX, 0)
-                ctx.quadraticCurveTo(foldX + flapWidth * 0.45, targetY, foldX, height)
-                ctx.lineTo(width, height)
-                ctx.lineTo(width, 0)
-            } else {
-                ctx.moveTo(foldX, 0)
-                ctx.quadraticCurveTo(foldX - flapWidth * 0.45, targetY, foldX, height)
-                ctx.lineTo(0, height)
-                ctx.lineTo(0, 0)
-            }
-            ctx.closePath()
-        }
-
-        ctx.save()
-        drawFlapPath()
-        ctx.clip()
-
-        // If current texture exists, render mirrored text show-through on paper back
-        if (currentTexture) {
-            try {
-                ctx.save()
-                ctx.translate(foldX * 2, 0)
-                ctx.scale(-1, 1)
-                ctx.globalAlpha = 0.12 // Subtle authentic paper show-through
-                ctx.drawImage(currentTexture, 0, 0, width, height)
-                ctx.restore()
-            } catch (_) {}
-        }
-
-        // Paper Backside Gradient Shading (Cylindrical roll illumination)
-        const paperBackGrad = ctx.createLinearGradient(foldX, 0, isNext ? foldX + flapWidth : foldX - flapWidth, 0)
-        paperBackGrad.addColorStop(0, 'rgba(235, 228, 215, 0.96)')
-        paperBackGrad.addColorStop(0.2, 'rgba(255, 255, 255, 0.98)')
-        paperBackGrad.addColorStop(0.55, 'rgba(240, 233, 218, 0.95)')
-        paperBackGrad.addColorStop(1, 'rgba(215, 205, 185, 0.92)')
-
-        drawFlapPath()
-        ctx.fillStyle = paperBackGrad
-        ctx.fill()
-
-        // Cylindrical inner shadow inside the roll
-        const rollShadowGrad = isNext
-            ? ctx.createLinearGradient(foldX, 0, foldX + R * 1.8, 0)
-            : ctx.createLinearGradient(foldX, 0, foldX - R * 1.8, 0)
-        rollShadowGrad.addColorStop(0, 'rgba(0, 0, 0, 0.28)')
-        rollShadowGrad.addColorStop(0.45, 'rgba(0, 0, 0, 0.08)')
-        rollShadowGrad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-        drawFlapPath()
-        ctx.fillStyle = rollShadowGrad
-        ctx.fill()
-
-        ctx.restore() // restore flap clip
-
-        // 5. Specular Crest Highlight along the cylindrical ridge (z = R)
-        ctx.save()
-        ctx.beginPath()
-        if (isNext) {
-            ctx.moveTo(foldX + 1, 0)
-            ctx.quadraticCurveTo(foldX + flapWidth * 0.45, targetY, foldX + 1, height)
-        } else {
-            ctx.moveTo(foldX - 1, 0)
-            ctx.quadraticCurveTo(foldX - flapWidth * 0.45, targetY, foldX - 1, height)
-        }
-        ctx.lineWidth = Math.max(1.5, R * 0.07)
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)'
-        ctx.stroke()
-        ctx.restore()
-
-        ctx.restore()
-    }
-}
 
 /**
  * Universal Page Turn Controller
@@ -479,7 +500,14 @@ export class PageTurnController {
     constructor(options = {}) {
         this.container = options.container || null
         this.adapter = options.adapter || null
-        this.mode = options.mode || 'none' // 'none' | 'slide' | 'cover' | 'scroll' | 'curl'
+        let initialMode = options.mode || 'none'
+        if (initialMode === 'curl') {
+            initialMode = 'slide'
+        }
+        if (!PAGE_TURN_MODES.includes(initialMode)) {
+            initialMode = 'none'
+        }
+        this.mode = initialMode
         this.state = 'idle'
         this.generation = 0
         this.animationDuration = options.animationDuration || 220 // ms
@@ -492,8 +520,6 @@ export class PageTurnController {
 
         // Overlay elements
         this._overlayEl = null
-        this._curlCanvas = null
-        this._curlSimulator = null
 
         this._checkReducedMotion()
         this._initOverlay()
@@ -528,7 +554,10 @@ export class PageTurnController {
                 display: none;
                 overflow: hidden;
             `
-            this.container.style.position = 'relative'
+            // An absolutely positioned reader already anchors the overlay.
+            // Overriding it with relative breaks top/bottom viewport insets.
+            const position = this.container.ownerDocument?.defaultView?.getComputedStyle(this.container)?.position || this.container.style.position
+            if (!position || position === 'static') this.container.style.position = 'relative'
             this.container.appendChild(overlay)
         }
         this._overlayEl = overlay
@@ -540,6 +569,9 @@ export class PageTurnController {
     }
 
     setMode(mode) {
+        if (mode === 'curl') {
+            mode = 'slide'
+        }
         if (!PAGE_TURN_MODES.includes(mode)) return
         this.cancelCurrent()
         this.mode = mode
@@ -548,8 +580,15 @@ export class PageTurnController {
     getEffectiveMode() {
         if (this.prefersReducedMotion || (typeof document !== 'undefined' && (document.documentElement?.dataset?.reducedMotion === 'true' || document.documentElement?.dataset?.animIntensity === 'none'))) return 'none'
         if (this.adapter?.isContinuousScroll?.()) return 'scroll'
-        if (!FEATURE_CURL_PAGE_TURN_ENABLED && this.mode === 'curl') {
-            return 'slide' // Gracefully fallback to stable slide animation while preserving user preference
+        if (typeof window !== 'undefined') {
+            const isMobile = (window.mobileShell?.isMobileViewport?.() ?? false) || Boolean(window.platformBridge?.isAndroid)
+            if (!isMobile) return 'none'
+        }
+        if (this.mode === 'curl') {
+            return 'slide'
+        }
+        if (!PAGE_TURN_MODES.includes(this.mode)) {
+            return 'none'
         }
         return this.mode
     }
@@ -671,14 +710,18 @@ export class PageTurnController {
                 await new Promise(r => setTimeout(r, this.animationDuration * 0.5))
 
             } else if (mode === 'cover') {
-                // Cover Page Peel Animation with themed sheet & edge shadow
+                // Cover Page Peel Animation with themed sheet & current page snapshot
+                const visuals = this.adapter?.getVisuals?.(direction) || {}
+                const bg = visuals.bgColor
+                    || (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue?.('--book-bg') || document.documentElement?.style?.backgroundColor))
+                    || '#FAF9F5'
                 if (this._overlayEl) {
-                    const bg = (typeof document !== 'undefined' && document.documentElement?.style?.backgroundColor) || '#FAF9F5'
                     this._overlayEl.style.display = 'block'
                     this._overlayEl.innerHTML = `
                         <div class="cover-peel-sheet" style="
                             position: absolute;
                             inset: 0;
+                            overflow: hidden;
                             background: ${bg};
                             box-shadow: ${isNext ? '-12px 0 28px rgba(0,0,0,0.18)' : '12px 0 28px rgba(0,0,0,0.18)'};
                             transform: translate3d(0, 0, 0);
@@ -686,6 +729,17 @@ export class PageTurnController {
                         "></div>
                     `
                     const sheet = this._overlayEl.querySelector('.cover-peel-sheet')
+                    if (sheet && visuals.currentCanvas && typeof document !== 'undefined') {
+                        try {
+                            const snapshotCanvas = document.createElement('canvas')
+                            snapshotCanvas.width = width
+                            snapshotCanvas.height = height
+                            snapshotCanvas.style.cssText = 'width: 100%; height: 100%; display: block; pointer-events: none;'
+                            const sCtx = snapshotCanvas.getContext?.('2d')
+                            sCtx?.drawImage?.(visuals.currentCanvas, 0, 0, width, height)
+                            sheet.appendChild(snapshotCanvas)
+                        } catch (_) {}
+                    }
                     sheet.offsetHeight // reflow
                     sheet.style.transform = `translate3d(${isNext ? -width : width}px, 0, 0)`
                 }
@@ -693,65 +747,7 @@ export class PageTurnController {
                 await (isNext ? this.adapter.turnNext() : this.adapter.turnPrev())
                 await new Promise(r => setTimeout(r, this.animationDuration))
 
-            } else if (mode === 'curl') {
-                // Realistic Canvas 2D Curl Simulation (Experimental decorative simulation)
-                if (!this._curlCanvas && typeof document !== 'undefined') {
-                    this._curlCanvas = document.createElement('canvas')
-                    this._curlCanvas.className = 'page-turn-curl-canvas'
-                    this._curlSimulator = new CurlSimulator(this._curlCanvas)
-                }
 
-                if (this._curlCanvas) {
-                    this._curlCanvas.width = width
-                    this._curlCanvas.height = height
-                    this._curlCanvas.style.cssText = 'position: absolute; inset: 0; pointer-events: none;'
-                }
-
-                if (this._overlayEl && this._curlCanvas) {
-                    this._overlayEl.innerHTML = ''
-                    this._overlayEl.appendChild(this._curlCanvas)
-                    this._overlayEl.style.display = 'block'
-                }
-
-                const startTime = performance.now()
-                const dur = this.animationDuration * 1.2
-
-                await new Promise((resolve) => {
-                    const animateCurl = (now) => {
-                        if (curGen !== this.generation) {
-                            resolve()
-                            return
-                        }
-                        const elapsed = now - startTime
-                        const progress = Math.min(1, elapsed / dur)
-
-                        const visuals = this.adapter.getVisuals?.(direction) || {}
-                        if (this._curlSimulator) {
-                            this._curlSimulator.renderCurl({
-                                width,
-                                height,
-                                progress,
-                                direction,
-                                currentTexture: visuals.currentCanvas,
-                                nextTexture: visuals.nextCanvas,
-                                bgColor: visuals.bgColor,
-                                textColor: visuals.textColor
-                            })
-                        }
-
-                        if (progress < 1 && curGen === this.generation) {
-                            safeRaf(animateCurl)
-                        } else {
-                            resolve()
-                        }
-                    }
-                    safeRaf(animateCurl)
-                })
-
-                // Atomically commit page turn upon animation completion
-                if (curGen === this.generation) {
-                    await (isNext ? this.adapter.turnNext() : this.adapter.turnPrev())
-                }
             }
         } catch (err) {
             console.warn('[PageTurnController] Transition failed, fallback to jump:', err)
@@ -833,58 +829,13 @@ export class PageTurnController {
             }
 
             const mode = this.getEffectiveMode()
-            if (mode === 'slide') {
+            if (mode === 'slide' || mode === 'cover') {
                 const viewEl = this.adapter?.getViewElement?.()
                 if (viewEl) {
                     viewEl.style.transition = 'none'
-                    viewEl.style.transform = `translate3d(${deltaX * 0.4}px, 0, 0)`
+                    viewEl.style.transform = `translate3d(${deltaX * (mode === 'cover' ? 0.55 : 0.4)}px, 0, 0)`
                 }
-            } else if (mode === 'curl') {
-                const direction = deltaX < 0 ? 'next' : 'prev'
-                const canTurn = direction === 'next' ? this.adapter?.canTurnNext() : this.adapter?.canTurnPrev()
-                if (canTurn) {
-                    if (!this._curlCanvas && typeof document !== 'undefined') {
-                        this._curlCanvas = document.createElement('canvas')
-                        this._curlCanvas.className = 'page-turn-curl-canvas'
-                        this._curlSimulator = new CurlSimulator(this._curlCanvas)
-                    }
-                    if (this._curlCanvas) {
-                        if (this._curlCanvas.width !== width || this._curlCanvas.height !== height) {
-                            this._curlCanvas.width = width
-                            this._curlCanvas.height = height
-                        }
-                    }
-                    if (this._overlayEl && this._curlCanvas) {
-                        if (this._overlayEl.firstChild !== this._curlCanvas) {
-                            this._overlayEl.innerHTML = ''
-                            this._overlayEl.appendChild(this._curlCanvas)
-                        }
-                        this._overlayEl.style.display = 'block'
-                    }
 
-                    if (this._curlSimulator) {
-                        const curlProgress = Math.min(1, Math.max(0, Math.abs(deltaX) / width))
-                        const visuals = this.adapter?.getVisuals?.(direction) || {}
-                        this._curlSimulator.renderCurl({
-                            width,
-                            height,
-                            progress: curlProgress,
-                            direction,
-                            touchX: touch.clientX,
-                            touchY: touch.clientY,
-                            currentTexture: visuals.currentCanvas,
-                            nextTexture: visuals.nextCanvas,
-                            bgColor: visuals.bgColor,
-                            textColor: visuals.textColor
-                        })
-                    }
-
-                    const viewEl = this.adapter?.getViewElement?.()
-                    if (viewEl) {
-                        viewEl.style.transition = 'none'
-                        viewEl.style.transform = `translate3d(${deltaX * 0.06}px, 0, 0)`
-                    }
-                }
             }
         }
     }
@@ -938,99 +889,6 @@ export class PageTurnController {
         this.currentDrag = null
         this.isGestureActive = false
         this._recentTouches = []
-
-        if (mode === 'curl' && this._curlSimulator && this._curlCanvas) {
-            const currentProgress = Math.min(1, Math.max(0, Math.abs(deltaX) / width))
-            const curGen = ++this.generation
-            this.state = 'settling'
-
-            const canTurn = direction === 'next' ? this.adapter?.canTurnNext() : this.adapter?.canTurnPrev()
-
-            if (shouldTurn && canTurn) {
-                // Smoothly finish turning (progress -> 1.0)
-                const startTime = performance.now()
-                const dur = Math.max(120, (1 - currentProgress) * this.animationDuration)
-
-                await new Promise((resolve) => {
-                    const animateCommit = (now) => {
-                        if (curGen !== this.generation) {
-                            resolve()
-                            return
-                        }
-                        const elapsed = now - startTime
-                        const t = Math.min(1, elapsed / dur)
-                        const easeOut = 1 - Math.pow(1 - t, 2)
-                        const p = currentProgress + (1 - currentProgress) * easeOut
-
-                        const visuals = this.adapter?.getVisuals?.(direction) || {}
-                        if (this._curlSimulator) {
-                            this._curlSimulator.renderCurl({
-                                width,
-                                height,
-                                progress: p,
-                                direction,
-                                currentTexture: visuals.currentCanvas,
-                                nextTexture: visuals.nextCanvas,
-                                bgColor: visuals.bgColor,
-                                textColor: visuals.textColor
-                            })
-                        }
-
-                        if (t < 1 && curGen === this.generation) {
-                            safeRaf(animateCommit)
-                        } else {
-                            resolve()
-                        }
-                    }
-                    safeRaf(animateCommit)
-                })
-
-                // Atomically commit page turn upon reaching 1.0
-                if (curGen === this.generation) {
-                    await (direction === 'next' ? this.adapter.turnNext() : this.adapter.turnPrev())
-                }
-            } else {
-                // Dynamic roll-back to 0
-                const startTime = performance.now()
-                const dur = Math.max(100, currentProgress * this.animationDuration * 0.8)
-
-                await new Promise((resolve) => {
-                    const animateRollback = (now) => {
-                        if (curGen !== this.generation) {
-                            resolve()
-                            return
-                        }
-                        const elapsed = now - startTime
-                        const t = Math.min(1, elapsed / dur)
-                        const easeOut = 1 - Math.pow(1 - t, 2)
-                        const p = currentProgress * (1 - easeOut)
-
-                        const visuals = this.adapter?.getVisuals?.() || {}
-                        if (this._curlSimulator) {
-                            this._curlSimulator.renderCurl({
-                                width,
-                                height,
-                                progress: p,
-                                direction,
-                                currentTexture: visuals.currentCanvas,
-                                bgColor: visuals.bgColor,
-                                textColor: visuals.textColor
-                            })
-                        }
-
-                        if (t < 1 && curGen === this.generation) {
-                            safeRaf(animateRollback)
-                        } else {
-                            resolve()
-                        }
-                    }
-                    safeRaf(animateRollback)
-                })
-            }
-
-            this.cancelCurrent()
-            return
-        }
 
         // Crucial fix: return controller state to idle before invoking turnNext/turnPrev
         this.state = 'idle'

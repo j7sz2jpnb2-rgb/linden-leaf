@@ -1,7 +1,7 @@
 {
   "name": "linden-leaf",
   "productName": "Linden Leaf",
-  "version": "2.0.0",
+  "version": "2.0.17",
   "description": "Linden Leaf - 现代化全格式电子书阅读器",
   "main": "main.js",
   "author": "Linden Leaf Team",
@@ -11,7 +11,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "build:dist": "node scripts/build-dist.js",
-    "test:batch1": "node scripts/test-batch1.mjs",
+    "check:syntax": "node scripts/run-syntax-checks.mjs",
     "start": "electron .",
     "dist": "electron-builder --win",
     "pack": "electron-builder --dir"

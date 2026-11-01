@@ -302,6 +302,8 @@ pub fn android_keystore_delete(
 struct BackgroundTtsStartReq<'a> {
     #[serde(rename = "bookTitle")]
     book_title: &'a str,
+    #[serde(rename = "bookId")]
+    book_id: &'a str,
     text: &'a str,
     rate: f32,
     #[serde(rename = "jobId")]
@@ -337,6 +339,14 @@ pub struct BackgroundPlaybackState {
     pub event_seq: i64,
     #[serde(default)]
     pub error: String,
+    #[serde(rename = "queueIndex", default)]
+    pub queue_index: i32,
+    #[serde(rename = "queueTotal", default)]
+    pub queue_total: i32,
+    #[serde(rename = "totalPlayingSeconds", default)]
+    pub total_playing_seconds: i64,
+    #[serde(rename = "listeningIntervals", default)]
+    pub listening_intervals: Vec<NativeListeningInterval>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -390,6 +400,7 @@ pub fn android_start_background_tts(
     book_title: String,
     text: String,
     rate: f32,
+    book_id: Option<String>,
     job_id: Option<String>,
     utterance_id: Option<String>,
     generation: Option<i64>,
@@ -401,6 +412,7 @@ pub fn android_start_background_tts(
             .try_state::<crate::LindenMobileBridge>()
             .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
 
+        let b_id = book_id.unwrap_or_default();
         let j_id = job_id.unwrap_or_default();
         let u_id = utterance_id.unwrap_or_default();
         let gen = generation.unwrap_or(0);
@@ -411,6 +423,7 @@ pub fn android_start_background_tts(
                 "startBackgroundTts",
                 BackgroundTtsStartReq {
                     book_title: &book_title,
+                    book_id: &b_id,
                     text: &text,
                     rate,
                     job_id: &j_id,
@@ -425,13 +438,46 @@ pub fn android_start_background_tts(
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app_handle, book_title, text, rate, job_id, utterance_id, generation);
+        let _ = (app_handle, book_id, book_title, text, rate, job_id, utterance_id, generation);
         Ok(false)
     }
 }
 
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TtsQueueSegment {
+    #[serde(rename = "utteranceId")]
+    pub utterance_id: String,
+    pub text: String,
+}
+
+#[allow(dead_code)]
+#[derive(Serialize)]
+struct BackgroundTtsQueueReq<'a> {
+    #[serde(rename = "bookTitle")]
+    book_title: &'a str,
+    #[serde(rename = "bookId")]
+    book_id: &'a str,
+    segments: &'a [TtsQueueSegment],
+    #[serde(rename = "startIndex")]
+    start_index: i32,
+    rate: f32,
+    #[serde(rename = "jobId")]
+    job_id: &'a str,
+    generation: i64,
+}
+
 #[tauri::command]
-pub fn android_pause_background_tts(app_handle: tauri::AppHandle) -> Result<bool, String> {
+pub fn android_start_background_tts_queue(
+    app_handle: tauri::AppHandle,
+    book_title: String,
+    segments: Vec<TtsQueueSegment>,
+    start_index: Option<i32>,
+    rate: f32,
+    book_id: Option<String>,
+    job_id: Option<String>,
+    generation: Option<i64>,
+) -> Result<bool, String> {
     #[cfg(target_os = "android")]
     {
         use tauri::Manager;
@@ -439,12 +485,49 @@ pub fn android_pause_background_tts(app_handle: tauri::AppHandle) -> Result<bool
             .try_state::<crate::LindenMobileBridge>()
             .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
 
-        #[derive(Serialize)]
-        struct EmptyArgs {}
+        let b_id = book_id.unwrap_or_default();
+        let j_id = job_id.unwrap_or_default();
+        let gen = generation.unwrap_or(0);
+        let s_idx = start_index.unwrap_or(0);
 
         let res = bridge
             .0
-            .run_mobile_plugin::<BoolVal>("pauseBackgroundTts", EmptyArgs {})
+            .run_mobile_plugin::<BoolVal>(
+                "startBackgroundTtsQueue",
+                BackgroundTtsQueueReq {
+                    book_title: &book_title,
+                    book_id: &b_id,
+                    segments: &segments,
+                    start_index: s_idx,
+                    rate,
+                    job_id: &j_id,
+                    generation: gen,
+                },
+            )
+            .map(|r| r.value)
+            .map_err(|e| format!("startBackgroundTtsQueue failed: {e}"))?;
+
+        Ok(res)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app_handle, book_id, book_title, segments, start_index, rate, job_id, generation);
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub fn android_pause_background_tts(app_handle: tauri::AppHandle, job_id: Option<String>) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let bridge = app_handle
+            .try_state::<crate::LindenMobileBridge>()
+            .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
+
+        let res = bridge
+            .0
+            .run_mobile_plugin::<BoolVal>("pauseBackgroundTts", JobControlReq { job_id: job_id.unwrap_or_default() })
             .map(|r| r.value)
             .map_err(|e| format!("pauseBackgroundTts failed: {e}"))?;
 
@@ -452,13 +535,61 @@ pub fn android_pause_background_tts(app_handle: tauri::AppHandle) -> Result<bool
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app_handle;
+        let _ = (app_handle, job_id);
         Ok(false)
     }
 }
 
 #[tauri::command]
-pub fn android_resume_background_tts(app_handle: tauri::AppHandle) -> Result<bool, String> {
+pub fn android_resume_background_tts(app_handle: tauri::AppHandle, job_id: Option<String>) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let bridge = app_handle
+            .try_state::<crate::LindenMobileBridge>()
+            .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
+
+        let res = bridge
+            .0
+            .run_mobile_plugin::<BoolVal>("resumeBackgroundTts", JobControlReq { job_id: job_id.unwrap_or_default() })
+            .map(|r| r.value)
+            .map_err(|e| format!("resumeBackgroundTts failed: {e}"))?;
+
+        Ok(res)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app_handle, job_id);
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub fn android_stop_background_tts(app_handle: tauri::AppHandle, job_id: Option<String>) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let bridge = app_handle
+            .try_state::<crate::LindenMobileBridge>()
+            .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
+
+        let res = bridge
+            .0
+            .run_mobile_plugin::<BoolVal>("stopBackgroundTts", JobControlReq { job_id: job_id.unwrap_or_default() })
+            .map(|r| r.value)
+            .map_err(|e| format!("stopBackgroundTts failed: {e}"))?;
+
+        Ok(res)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app_handle, job_id);
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub fn android_next_background_tts(app_handle: tauri::AppHandle) -> Result<bool, String> {
     #[cfg(target_os = "android")]
     {
         use tauri::Manager;
@@ -471,9 +602,9 @@ pub fn android_resume_background_tts(app_handle: tauri::AppHandle) -> Result<boo
 
         let res = bridge
             .0
-            .run_mobile_plugin::<BoolVal>("resumeBackgroundTts", EmptyArgs {})
+            .run_mobile_plugin::<BoolVal>("nextBackgroundTts", EmptyArgs {})
             .map(|r| r.value)
-            .map_err(|e| format!("resumeBackgroundTts failed: {e}"))?;
+            .map_err(|e| format!("nextBackgroundTts failed: {e}"))?;
 
         Ok(res)
     }
@@ -485,7 +616,7 @@ pub fn android_resume_background_tts(app_handle: tauri::AppHandle) -> Result<boo
 }
 
 #[tauri::command]
-pub fn android_stop_background_tts(app_handle: tauri::AppHandle) -> Result<bool, String> {
+pub fn android_prev_background_tts(app_handle: tauri::AppHandle) -> Result<bool, String> {
     #[cfg(target_os = "android")]
     {
         use tauri::Manager;
@@ -498,9 +629,9 @@ pub fn android_stop_background_tts(app_handle: tauri::AppHandle) -> Result<bool,
 
         let res = bridge
             .0
-            .run_mobile_plugin::<BoolVal>("stopBackgroundTts", EmptyArgs {})
+            .run_mobile_plugin::<BoolVal>("prevBackgroundTts", EmptyArgs {})
             .map(|r| r.value)
-            .map_err(|e| format!("stopBackgroundTts failed: {e}"))?;
+            .map_err(|e| format!("prevBackgroundTts failed: {e}"))?;
 
         Ok(res)
     }
@@ -664,5 +795,197 @@ pub fn android_share_image(
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct SystemInsets {
+    pub top: f64,
+    pub bottom: f64,
+    pub left: f64,
+    pub right: f64,
+    pub ime: f64,
+    #[serde(rename = "keyboardOpen", default)]
+    pub keyboard_open: bool,
+}
+
+#[tauri::command]
+pub fn android_get_system_insets(app_handle: tauri::AppHandle) -> Result<SystemInsets, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let bridge = app_handle
+            .try_state::<crate::LindenMobileBridge>()
+            .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
+
+        #[derive(Serialize)]
+        struct EmptyArgs {}
+
+        let res = bridge
+            .0
+            .run_mobile_plugin::<SystemInsets>("getSystemInsets", EmptyArgs {})
+            .map_err(|e| format!("getSystemInsets failed: {e}"))?;
+
+        Ok(res)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app_handle;
+        Ok(SystemInsets::default())
+    }
+}
+
+#[derive(Serialize)]
+struct SetSleepTimerReq {
+    minutes: i32,
+}
+
+#[tauri::command]
+pub fn android_set_tts_sleep_timer(app_handle: tauri::AppHandle, minutes: i32) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let bridge = app_handle
+            .try_state::<crate::LindenMobileBridge>()
+            .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
+
+        let res = bridge
+            .0
+            .run_mobile_plugin::<BoolVal>("setTtsSleepTimer", SetSleepTimerReq { minutes })
+            .map(|r| r.value)
+            .map_err(|e| format!("setTtsSleepTimer failed: {e}"))?;
+
+        Ok(res)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app_handle, minutes);
+        Ok(false)
+    }
+}
+
+#[derive(Serialize)]
+struct SetRateReq {
+    rate: f32,
+}
+
+#[tauri::command]
+pub fn android_set_tts_rate(app_handle: tauri::AppHandle, rate: f32) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let bridge = app_handle
+            .try_state::<crate::LindenMobileBridge>()
+            .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
+
+        let res = bridge
+            .0
+            .run_mobile_plugin::<BoolVal>("setTtsRate", SetRateReq { rate })
+            .map(|r| r.value)
+            .map_err(|e| format!("setTtsRate failed: {e}"))?;
+
+        Ok(res)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app_handle, rate);
+        Ok(false)
+    }
+}
 
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeListeningInterval {
+    pub sequence: i64,
+    pub book_id: String,
+    pub book_title: String,
+    pub job_id: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListeningAck { through_sequence: i64 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobControlReq { job_id: String }
+
+#[tauri::command]
+pub fn android_acknowledge_tts_listening(app_handle: tauri::AppHandle, through_sequence: i64) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let bridge = app_handle.try_state::<crate::LindenMobileBridge>()
+            .ok_or("Android bridge is unavailable")?;
+        bridge.0.run_mobile_plugin::<BoolVal>("acknowledgeTtsListening", ListeningAck { through_sequence })
+            .map(|r| r.value).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    { let _ = (app_handle, through_sequence); Ok(false) }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BookExportReq { file_path: String, filename: String, share: bool }
+
+#[tauri::command]
+pub async fn android_export_book_file(app_handle: tauri::AppHandle, file_path: String, filename: String, share: bool) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let bridge = app_handle.try_state::<crate::LindenMobileBridge>()
+            .ok_or("Android bridge is unavailable")?;
+        bridge.0.run_mobile_plugin::<serde_json::Value>("exportBookFile", BookExportReq { file_path, filename, share })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    { let _ = (app_handle, file_path, filename, share); Err("当前平台暂不支持此导出方式".into()) }
+}
+
+type TtsCancellations = std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>;
+fn tts_cancellations() -> &'static TtsCancellations {
+    static REQUESTS: std::sync::OnceLock<TtsCancellations> = std::sync::OnceLock::new();
+    REQUESTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[tauri::command]
+pub fn tts_cancel_audio(request_id: String) -> bool {
+    tts_cancellations().lock().ok()
+        .and_then(|mut requests| requests.remove(&request_id))
+        .map(|sender| sender.send(()).is_ok()).unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn tts_request_audio(
+    request_id: String, endpoint: String, body: String,
+    headers: std::collections::HashMap<String, String>,
+) -> Result<tauri::ipc::Response, String> {
+    let url = reqwest::Url::parse(&endpoint).map_err(|_| "朗读接口地址无效")?;
+    if !matches!(url.scheme(), "http" | "https") { return Err("朗读接口需要 HTTP 或 HTTPS 地址".into()); }
+    let (sender, mut cancelled) = tokio::sync::oneshot::channel();
+    tts_cancellations().lock().map_err(|_| "语音请求状态暂不可用")?.insert(request_id.clone(), sender);
+    let result = tokio::select! {
+        _ = &mut cancelled => Err("朗读已停止".to_string()),
+        value = async {
+            static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+            let client = CLIENT.get_or_init(reqwest::Client::new);
+            let mut request = client.post(url).timeout(std::time::Duration::from_secs(90)).body(body);
+            for (key, value) in headers { request = request.header(key, value); }
+            let mut response = request.send().await.map_err(|e| format!("朗读接口连接失败：{e}"))?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let detail = response.chunk().await.ok().flatten().unwrap_or_default();
+                let detail: String = String::from_utf8_lossy(&detail).chars().take(200).collect();
+                return Err(format!("语音服务返回 {status}：{detail}"));
+            }
+            let mut audio = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|e| format!("音频接收中断：{e}"))? {
+                if audio.len() + chunk.len() > 16 * 1024 * 1024 { return Err("单段语音过大，请减少朗读分段长度".into()); }
+                audio.extend_from_slice(&chunk);
+            }
+            if audio.is_empty() { return Err("语音服务返回了空音频".into()); }
+            Ok(tauri::ipc::Response::new(audio))
+        } => value
+    };
+    if let Ok(mut requests) = tts_cancellations().lock() { requests.remove(&request_id); }
+    result
+}

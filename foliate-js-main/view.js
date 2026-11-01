@@ -5,6 +5,19 @@ import { textWalker } from './text-walker.js'
 
 const SEARCH_PREFIX = 'foliate-search:'
 
+const defaultCfiFilter = node => {
+    if (node && node.nodeType === 1) {
+        if (node.classList?.contains('linden-bilingual-target') ||
+            node.classList?.contains('linden-inline-translation') ||
+            node.classList?.contains('bilingual-translation-block') ||
+            node.classList?.contains('bilingual-derived-view') ||
+            node.hasAttribute?.('data-injected-translation')) {
+            return typeof NodeFilter !== 'undefined' ? NodeFilter.FILTER_REJECT : 2
+        }
+    }
+    return typeof NodeFilter !== 'undefined' ? NodeFilter.FILTER_ACCEPT : 1
+}
+
 const isZip = async file => {
     const arr = new Uint8Array(await file.slice(0, 4).arrayBuffer())
     return arr[0] === 0x50 && arr[1] === 0x4b && arr[2] === 0x03 && arr[3] === 0x04
@@ -398,10 +411,10 @@ export class View extends HTMLElement {
 
         this.isFixedLayout = this.book.rendition?.layout === 'pre-paginated'
         if (this.isFixedLayout) {
-            await import('./fixed-layout.js?v=20260914_rel_v1')
+            await import('./fixed-layout.js?v=20261029_rel_v2')
             this.renderer = document.createElement('foliate-fxl')
         } else {
-            await import('./paginator.js?v=20260914_rel_v1')
+            await import('./paginator.js?v=20261029_rel_v2')
             this.renderer = document.createElement('foliate-paginator')
         }
         this.renderer.setAttribute('exportparts', 'head,foot,filter')
@@ -578,7 +591,14 @@ export class View extends HTMLElement {
         } catch (e) {}
     }
     async addAnnotation(annotation, remove) {
-        const { value } = annotation
+        const { value } = annotation || {}
+        if (remove && (!value || typeof value !== 'string') && annotation.id) {
+            for (const item of this.renderer?.getContents?.() || []) {
+                item.overlayer?.remove?.(annotation.id)
+            }
+            return
+        }
+        if (typeof value !== 'string' || !value) return null
         if (value.startsWith(SEARCH_PREFIX)) {
             if (remove) {
                 if (this.#searchHighlights.has(value)) {
@@ -617,12 +637,6 @@ export class View extends HTMLElement {
                     return
                 }
                 overlayer.add(value, range, this.#searchDraw, this.#searchDrawOptions)
-            }
-            return
-        }
-        if (remove && (!value || typeof value !== 'string') && annotation.id) {
-            for (const item of this.renderer?.getContents?.() || []) {
-                item.overlayer?.remove?.(annotation.id)
             }
             return
         }
@@ -682,7 +696,8 @@ export class View extends HTMLElement {
     getCFI(index, range) {
         const baseCFI = this.book.sections[index].cfi ?? CFI.fake.fromIndex(index)
         if (!range) return baseCFI
-        return CFI.joinIndir(baseCFI, CFI.fromRange(range))
+        const filter = this.cfiFilter || this.book?.cfiFilter || defaultCfiFilter
+        return CFI.joinIndir(baseCFI, CFI.fromRange(range, filter))
     }
     resolveCFI(cfi) {
         if (this.book.resolveCFI)
@@ -690,7 +705,8 @@ export class View extends HTMLElement {
         else {
             const parts = CFI.parse(cfi)
             const index = CFI.fake.toIndex((parts.parent ?? parts).shift())
-            const anchor = doc => CFI.toRange(doc, parts)
+            const filter = this.cfiFilter || this.book?.cfiFilter || defaultCfiFilter
+            const anchor = doc => CFI.toRange(doc, parts, filter)
             return { index, anchor }
         }
     }

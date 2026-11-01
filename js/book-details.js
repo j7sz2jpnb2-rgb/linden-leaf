@@ -129,6 +129,7 @@ export class BookDetailsModal {
         if (!container || !bookId) return
         this._renderGeneration = (this._renderGeneration || 0) + 1
         const gen = this._renderGeneration
+        if (this.currentBookId !== bookId) this.mobileDetailsTab = 'reading'
         this.currentBookId = bookId
         this.currentContainer = container
         container.innerHTML = '<div class="book-details-loading">正在载入书籍信息...</div>'
@@ -161,7 +162,7 @@ export class BookDetailsModal {
         const safeAuthor = escapeHTML(b.author || '未知作者')
 
         container.innerHTML = `
-            <div class="book-details-content">
+            <div class="book-details-content" data-details-view="${this.mobileDetailsTab || 'reading'}">
                 <header class="book-details-header">
                     <div class="book-details-cover-box" id="details-cover-box">
                         ${this._activeCoverUrl ? `<img class="book-details-cover-img" src="${this._activeCoverUrl}" alt="Cover" />` : `<div class="book-details-cover-fallback"><span>${safeTitle}</span></div>`}
@@ -184,6 +185,10 @@ export class BookDetailsModal {
                     </div>
                 </header>
 
+                <nav class="book-details-mobile-tabs" aria-label="图书详情分组">
+                    <button type="button" data-details-tab="reading" class="${this.mobileDetailsTab !== 'info' ? 'active' : ''}" aria-pressed="${this.mobileDetailsTab !== 'info'}">阅读记录</button>
+                    <button type="button" data-details-tab="info" class="${this.mobileDetailsTab === 'info' ? 'active' : ''}" aria-pressed="${this.mobileDetailsTab === 'info'}">信息与标签</button>
+                </nav>
                 <div class="book-details-stats-grid">
                     <div class="stat-card">
                         <div class="stat-num">${progressPct}%</div>
@@ -203,7 +208,7 @@ export class BookDetailsModal {
                     </div>
                 </div>
 
-                <section class="book-details-section">
+                <section class="book-details-section book-details-reading">
                     <h3 class="section-title">阅读状态与时间线</h3>
                     <div class="status-selector-group">
                         <button class="status-btn ${currentStatus === 'unread' ? 'active' : ''}" data-status="unread">未读</button>
@@ -219,7 +224,7 @@ export class BookDetailsModal {
                     </div>
                 </section>
 
-                <section class="book-details-section">
+                <section class="book-details-section book-details-tags">
                     <h3 class="section-title">专属标签</h3>
                     <div class="tags-badge-container" id="details-tags-list">
                         ${tags.length ? tags.map(t => {
@@ -229,19 +234,32 @@ export class BookDetailsModal {
                     </div>
                     <div class="add-tag-row">
                         <input type="text" class="tag-input" id="input-new-tag" placeholder="输入标签名..." maxlength="24" />
-                        <button class="btn-secondary" id="btn-add-tag">添加标签</button>
+                        <button class="btn-secondary-action" id="btn-add-tag">添加标签</button>
                     </div>
                 </section>
 
                 <footer class="book-details-actions">
-                    <button class="btn-primary" id="btn-details-read">开始阅读</button>
-                    <button class="btn-secondary" id="btn-details-manage-lists" title="将此书加入或移出自定义书单">加入书单</button>
-                    <button class="btn-secondary" id="btn-details-regen-cover">重新生成封面</button>
-                    <button class="btn-danger" id="btn-details-delete" title="从书架中移除此书">移出书架</button>
+                    <button class="btn-primary-action" id="btn-details-read">开始阅读</button>
+                    <button class="btn-secondary-action" id="btn-details-manage-lists" title="将此书加入或移出自定义书单">加入书单</button>
+                    <button class="btn-secondary-action" id="btn-details-change-cover" title="上传自定义图片作为图书封面">更换封面</button>
+                    <button class="btn-secondary-action" id="btn-details-reset-cover" title="恢复文档内置的原始第一页/内嵌封面">恢复默认</button>
+                    <input type="file" id="input-details-custom-cover" accept="image/png,image/jpeg,image/webp,image/avif" style="display: none;" />
+                    <button class="btn-secondary-action btn-danger" id="btn-details-delete" title="从书架中移除此书">移出书架</button>
                 </footer>
             </div>
         `
 
+        container.querySelectorAll('[data-details-tab]').forEach(button => {
+            button.addEventListener('click', () => {
+                this.mobileDetailsTab = button.dataset.detailsTab
+                container.querySelector('.book-details-content').dataset.detailsView = this.mobileDetailsTab
+                container.querySelectorAll('[data-details-tab]').forEach(tab => {
+                    const selected = tab === button
+                    tab.classList.toggle('active', selected)
+                    tab.setAttribute('aria-pressed', String(selected))
+                })
+            })
+        })
         // Bind events
         container.querySelectorAll('.status-btn').forEach(btn => {
             btn.addEventListener('click', async () => {
@@ -400,13 +418,80 @@ export class BookDetailsModal {
             callbacks.onDeleteBook?.(bookId)
         })
 
-        container.querySelector('#btn-details-regen-cover')?.addEventListener('click', async () => {
+        const fileInput = container.querySelector('#input-details-custom-cover')
+        const changeCoverBtn = container.querySelector('#btn-details-change-cover')
+        const coverBox = container.querySelector('#details-cover-box')
+
+        if (coverBox) {
+            coverBox.style.cursor = 'pointer'
+            coverBox.title = '点击上传更换封面'
+            coverBox.addEventListener('click', () => fileInput?.click())
+        }
+
+        changeCoverBtn?.addEventListener('click', () => {
+            fileInput?.click()
+        })
+
+        const resetCoverBtn = container.querySelector('#btn-details-reset-cover')
+        const doRestoreDefaultCover = async () => {
             const res = await regenerateBookCover(bookId)
             if (res.success && res.hasCover) {
+                window.coverUrlPool?.revoke?.(bookId)
                 if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
                     await this.render(container, bookId, callbacks)
                 }
                 callbacks.onShelfRefresh?.()
+                window.app?.showToast?.('已恢复文档原始封面', 'success')
+            } else {
+                window.app?.showToast?.('未检测到文档内置封面，已重置为默认', 'info')
+            }
+        }
+        resetCoverBtn?.addEventListener('click', doRestoreDefaultCover)
+
+        // Also support contextmenu (right-click / long-press) to restore document original cover
+        changeCoverBtn?.addEventListener('contextmenu', async (e) => {
+            e.preventDefault()
+            await doRestoreDefaultCover()
+        })
+
+        fileInput?.addEventListener('change', async (e) => {
+            const rawFile = e.target.files?.[0]
+            if (!rawFile) return
+            const isImageMime = rawFile.type && rawFile.type.startsWith('image/')
+            const isImageExt = /\.(jpe?g|png|webp|avif|gif|bmp)$/i.test(rawFile.name || '')
+            if (!isImageMime && !isImageExt) {
+                e.target.value = ''
+                window.app?.showToast?.('请选择图片文件 (JPG, PNG, WebP)', 'warning')
+                return
+            }
+            if (rawFile.size > 15 * 1024 * 1024) {
+                e.target.value = ''
+                window.app?.showToast?.('封面图片大小不能超过 15MB', 'warning')
+                return
+            }
+            try {
+                let file = rawFile
+                if (typeof rawFile.arrayBuffer === 'function') {
+                    const buf = await rawFile.arrayBuffer()
+                    const inferredMime = isImageMime ? rawFile.type : (
+                        /\.png$/i.test(rawFile.name) ? 'image/png' :
+                        /\.webp$/i.test(rawFile.name) ? 'image/webp' :
+                        /\.avif$/i.test(rawFile.name) ? 'image/avif' : 'image/jpeg'
+                    )
+                    file = new Blob([buf], { type: inferredMime })
+                }
+                await db.saveBook({ id: bookId, coverBlob: file })
+                window.coverUrlPool?.revoke?.(bookId)
+                if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                    await this.render(container, bookId, callbacks)
+                }
+                callbacks.onShelfRefresh?.()
+                window.app?.showToast?.('封面已成功更新', 'success')
+            } catch (err) {
+                console.error('[book-details] Failed to update custom cover:', err)
+                window.app?.showToast?.('更换封面失败: ' + (err.message || String(err)), 'error')
+            } finally {
+                e.target.value = ''
             }
         })
     }

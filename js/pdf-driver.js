@@ -286,10 +286,13 @@ export class MuPdfTauriDriver {
         if (this._destroyed) throw new Error('Driver is destroyed')
         const nativePath = source?.nativePath || source?.path
         if (!nativePath) throw new Error('Native MuPDF requires a local file path')
+        const savedStoreMb = typeof localStorage !== 'undefined' ? Number(localStorage.getItem('linden_pdf_store_mb')) : null
+        const maxStoreMb = (savedStoreMb && savedStoreMb >= 32 && savedStoreMb <= 1024) ? savedStoreMb : (source?.maxStoreMb ?? null)
         const meta = await platformBridge._invokeTauri('mupdf_open_document', {
             filePath: nativePath,
             password: null,
             expectedSize: source?.expectedSize ?? null,
+            maxStoreMb: maxStoreMb,
         })
         if (this._destroyed) {
             platformBridge._invokeTauri('mupdf_close_document', { docId: meta.docId }).catch(() => {})
@@ -483,24 +486,36 @@ export class AdaptivePdfDriver {
         // A staged native file and the IndexedDB Blob must have been created
         // from the same immutable import snapshot and bound in one DB write.
         const snap = this.snapshot
-        const nativeReady = snap?.nativeSnapshotPath && snap.blob &&
-            snap.nativeSnapshotRevision === snap.blobRevision &&
-            snap.nativeSnapshotOrigin === snap.revisionOrigin &&
-            snap.nativeSnapshotSize === snap.blob.size
+        const nativeReady = snap?.nativeSnapshotPath && (
+            snap.nativeSnapshotOnly ? (snap.nativeSnapshotSize > 0) :
+            (snap.blob &&
+             snap.nativeSnapshotRevision === snap.blobRevision &&
+             snap.nativeSnapshotOrigin === snap.revisionOrigin &&
+             snap.nativeSnapshotSize === snap.blob.size)
+        )
         if (nativeReady && await MuPdfTauriDriver.isAvailable()) {
             if (this._destroyed) throw new Error('Driver is destroyed')
             const native = new MuPdfTauriDriver()
             this.backend = native
             this.kind = native.kind
             try {
-                return await native.open({ nativePath: snap.nativeSnapshotPath, expectedSize: snap.blob.size })
+                const expectedSize = snap.nativeSnapshotSize || snap.blob?.size || null
+                return await native.open({ nativePath: snap.nativeSnapshotPath, expectedSize })
             } catch (err) {
                 native.destroy()
                 if (this._destroyed) throw err
                 console.warn('[PDF] Native snapshot open failed; using PDF.js:', err)
             }
         }
-        const blobToOpen = this.snapshot?.blob || source?.blob || source?.file || source
+        let blobToOpen = this.snapshot?.blob || source?.blob || source?.file || source
+        if ((!blobToOpen || blobToOpen.size === 0) && snap?.nativeSnapshotPath && typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
+            try {
+                const buf = await platformBridge.readFileBuffer(snap.nativeSnapshotPath)
+                if (buf) blobToOpen = new Blob([buf], { type: 'application/pdf' })
+            } catch (e) {
+                console.warn('[PDF] Native fallback buffer read notice:', e)
+            }
+        }
         const fallback = new PdfJsDriver()
         this.backend = fallback
         this.kind = fallback.kind
@@ -520,4 +535,20 @@ export class AdaptivePdfDriver {
         this.backend?.destroy?.()
         this.backend = null
     }
+}
+
+export function setMuPdfStoreLimit(maxMb) {
+    const val = Math.max(32, Math.min(1024, Number(maxMb) || 256))
+    if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('linden_pdf_store_mb', String(val))
+    }
+    return val
+}
+
+export function getMuPdfStoreLimit() {
+    if (typeof localStorage !== 'undefined') {
+        const v = Number(localStorage.getItem('linden_pdf_store_mb'))
+        if (v && v >= 32 && v <= 1024) return v
+    }
+    return 256
 }

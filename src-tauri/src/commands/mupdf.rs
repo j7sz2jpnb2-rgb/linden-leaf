@@ -134,6 +134,9 @@ mod imp {
     }
 
     extern "C" {
+        fn ll_set_max_store_mb(max_mb: u32);
+        #[allow(dead_code)]
+        fn ll_get_max_store_mb() -> u32;
         fn ll_open(path: *const c_char, password: *const c_char, error: *mut c_char, error_size: usize) -> *mut LlDoc;
         fn ll_close(doc: *mut LlDoc);
         fn ll_page_count(doc: *mut LlDoc) -> c_int;
@@ -583,7 +586,10 @@ mod imp {
     }
 
     #[tauri::command]
-    pub async fn mupdf_open_document(app: tauri::AppHandle, file_path: String, password: Option<String>, expected_size: Option<u64>) -> Result<DocumentMetadata, String> {
+    pub async fn mupdf_open_document(app: tauri::AppHandle, file_path: String, password: Option<String>, expected_size: Option<u64>, max_store_mb: Option<u32>) -> Result<DocumentMetadata, String> {
+        if let Some(mb) = max_store_mb {
+            unsafe { ll_set_max_store_mb(mb) };
+        }
         let size = expected_size.ok_or_else(|| "Native PDF open requires expectedSize to verify snapshot boundary".to_string())?;
         if size == 0 {
             return Err("Native PDF snapshot size cannot be zero".into());
@@ -788,6 +794,15 @@ mod imp {
             Err(format!("Failed to remove snapshot file: {}", last_err.unwrap()))
         }).await.map_err(|e| format!("Snapshot reclaim worker failed: {e}"))?
     }
+
+    #[tauri::command]
+    pub fn mupdf_set_store_limit(max_mb: u32) -> Result<u32, String> {
+        let clamped = max_mb.clamp(32, 1024);
+        unsafe {
+            ll_set_max_store_mb(clamped);
+            Ok(ll_get_max_store_mb())
+        }
+    }
 }
 
 #[cfg(not(ll_mupdf))]
@@ -796,8 +811,9 @@ mod imp {
     fn unavailable<T>() -> Result<T, String> { Err("MuPDF native backend is not compiled into this build".into()) }
 
     #[tauri::command] pub fn mupdf_is_available() -> bool { false }
+    #[tauri::command] pub fn mupdf_set_store_limit(_max_mb: u32) -> Result<u32, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_stage_pdf(_app: tauri::AppHandle, _file_path: String) -> Result<String, String> { unavailable() }
-    #[tauri::command] pub async fn mupdf_open_document(_app: tauri::AppHandle, _file_path: String, _password: Option<String>, _expected_size: Option<u64>) -> Result<DocumentMetadata, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_open_document(_app: tauri::AppHandle, _file_path: String, _password: Option<String>, _expected_size: Option<u64>, _max_store_mb: Option<u32>) -> Result<DocumentMetadata, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_bounds_range(_doc_id: String, _start_page: usize, _count: usize) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_sizes(_doc_id: String) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_text_layer(_doc_id: String, _page_index: usize) -> Result<TextLayerResponse, String> { unavailable() }

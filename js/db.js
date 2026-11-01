@@ -1,6 +1,7 @@
 // db.js - IndexedDB storage wrapper for Universal E-Book Reader
 import { buildTranslationRevisionArchive, checkTranslationCompatibility } from './translation-job-core.js'
 import { resolveReadingState } from './tags-manager.js'
+import { withReadableBookTitle } from './book-title.js'
 
 const DB_NAME = 'UniversalReaderDB'
 const DB_VERSION = 10
@@ -283,6 +284,43 @@ export const isContentIdentityMatching = (item, currentSnapshot, options = {}) =
 }
 
 // Books CRUD
+export const LARGE_PDF_SNAPSHOT_THRESHOLD = 25 * 1024 * 1024 // 25 MB
+
+export function createLazySnapshotBlob(filePath, size, type = 'application/pdf') {
+    const dummy = new Blob([], { type })
+    return new Proxy(dummy, {
+        get(target, prop) {
+            if (prop === 'size') return size
+            if (prop === 'type') return type
+            if (prop === 'nativeSnapshotOnly') return true
+            if (prop === 'nativeSnapshotPath') return filePath
+            if (prop === 'arrayBuffer') {
+                return async () => {
+                    if (typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
+                        const buf = await platformBridge.readFileBuffer(filePath)
+                        return buf instanceof ArrayBuffer ? buf : (buf?.buffer || buf)
+                    }
+                    return new ArrayBuffer(0)
+                }
+            }
+            if (prop === 'text') {
+                return async () => {
+                    if (typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
+                        const buf = await platformBridge.readFileBuffer(filePath)
+                        return new TextDecoder().decode(buf)
+                    }
+                    return ''
+                }
+            }
+            if (prop === 'slice') {
+                return () => dummy
+            }
+            const val = Reflect.get(target, prop)
+            return typeof val === 'function' ? val.bind(target) : val
+        }
+    })
+}
+
 export const saveBook = async bookData => {
     const db = await openDB()
     const origin = await getRevisionOrigin()
@@ -337,14 +375,29 @@ export const saveBook = async bookData => {
                     const local = fileReq.result || { id: meta.id }
                     if (blob) {
                         previousSnapshotPath = local.nativeSnapshotPath || null
-                        local.blob = blob
+                        const isTauri = typeof platformBridge !== 'undefined' && platformBridge.isTauri
+                        const effectiveSnapshotPath = nativeSnapshotPath || local.nativeSnapshotPath || null
+                        const format = (meta.format || '').toLowerCase()
+                        const isLargeNativePdf = isTauri &&
+                            (format === 'pdf' || (blob.type && blob.type.includes('pdf'))) &&
+                            effectiveSnapshotPath &&
+                            blob.size > LARGE_PDF_SNAPSHOT_THRESHOLD
+
                         local.blobRevision = generateRevision()
                         local.revisionOrigin = origin
                         local.documentHash = null // Clear old hash association
-                        local.nativeSnapshotPath = nativeSnapshotPath || null
-                        local.nativeSnapshotRevision = nativeSnapshotPath ? local.blobRevision : null
-                        local.nativeSnapshotOrigin = nativeSnapshotPath ? origin : null
-                        local.nativeSnapshotSize = nativeSnapshotPath ? blob.size : null
+                        local.nativeSnapshotPath = effectiveSnapshotPath
+                        local.nativeSnapshotRevision = effectiveSnapshotPath ? local.blobRevision : null
+                        local.nativeSnapshotOrigin = effectiveSnapshotPath ? origin : null
+                        local.nativeSnapshotSize = effectiveSnapshotPath ? blob.size : null
+
+                        if (isLargeNativePdf) {
+                            local.blob = null
+                            local.nativeSnapshotOnly = true
+                        } else {
+                            local.blob = blob
+                            local.nativeSnapshotOnly = false
+                        }
                     }
                     if (nativePath !== undefined) local.nativePath = nativePath
                     local.updatedAt = Date.now()
@@ -393,17 +446,31 @@ export const getBookFileBlob = async id => {
             const tx = db.transaction(['book_files', 'books'], 'readonly')
             const fileStore = tx.objectStore('book_files')
             const req = fileStore.get(id)
-            req.onsuccess = () => {
-                if (req.result && req.result.blob) {
-                    resolve(req.result.blob)
-                } else {
-                    // Fallback to legacy books table
-                    const bookReq = tx.objectStore('books').get(id)
-                    bookReq.onsuccess = () => {
-                        resolve(bookReq.result?.blob || null)
-                    }
-                    bookReq.onerror = () => resolve(null)
+            req.onsuccess = async () => {
+                const rec = req.result
+                if (rec && rec.blob instanceof Blob) {
+                    resolve(rec.blob)
+                    return
                 }
+                const diskPath = rec?.nativeSnapshotPath || rec?.nativePath
+                if (diskPath && typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
+                    try {
+                        const buf = await platformBridge.readFileBuffer(diskPath)
+                        if (buf) {
+                            const blob = new Blob([buf], { type: 'application/pdf' })
+                            resolve(blob)
+                            return
+                        }
+                    } catch (e) {
+                        console.warn('[db.getBookFileBlob] native read buffer notice:', e)
+                    }
+                }
+                // Fallback to legacy books table
+                const bookReq = tx.objectStore('books').get(id)
+                bookReq.onsuccess = () => {
+                    resolve(bookReq.result?.blob || null)
+                }
+                bookReq.onerror = () => resolve(null)
             }
             req.onerror = () => resolve(null)
         } catch (e) {
@@ -561,7 +628,31 @@ export const getBookFileSnapshot = async id => {
             nativeSnapshotRevision: fileRecord.nativeSnapshotRevision || null,
             nativeSnapshotOrigin: fileRecord.nativeSnapshotOrigin || null,
             nativeSnapshotSize: fileRecord.nativeSnapshotSize ?? null,
+            nativeSnapshotOnly: false,
             format: bookRecord?.format || null,
+            title: bookRecord?.title || '',
+            author: bookRecord?.author || '',
+            progress: bookRecord?.progress || null
+        })
+    }
+
+    // Check if large native PDF with nativeSnapshotOnly
+    if (fileRecord && (fileRecord.nativeSnapshotOnly || (!fileRecord.blob && fileRecord.nativeSnapshotPath))) {
+        const snapshotSize = fileRecord.nativeSnapshotSize || bookRecord?.size || 0
+        const virtualBlob = createLazySnapshotBlob(fileRecord.nativeSnapshotPath, snapshotSize)
+        return Object.freeze({
+            bookId: id,
+            blob: virtualBlob,
+            blobRevision: fileRecord.blobRevision || 'v_native',
+            revisionOrigin: fileRecord.revisionOrigin || origin,
+            documentHash: fileRecord.documentHash || null,
+            nativePath: fileRecord.nativePath || null,
+            nativeSnapshotPath: fileRecord.nativeSnapshotPath,
+            nativeSnapshotRevision: fileRecord.nativeSnapshotRevision || fileRecord.blobRevision || 'v_native',
+            nativeSnapshotOrigin: fileRecord.nativeSnapshotOrigin || origin,
+            nativeSnapshotSize: snapshotSize,
+            nativeSnapshotOnly: true,
+            format: bookRecord?.format || 'pdf',
             title: bookRecord?.title || '',
             author: bookRecord?.author || '',
             progress: bookRecord?.progress || null
@@ -678,7 +769,7 @@ export const getBook = async id => {
             const tx = db.transaction('books', 'readonly')
             const store = tx.objectStore('books')
             const req = store.get(id)
-            req.onsuccess = () => resolve(req.result || null)
+            req.onsuccess = () => resolve(withReadableBookTitle(req.result || null))
             req.onerror = () => reject(req.error || new Error(`Failed to get book ${id}`))
         } catch (err) {
             reject(err)
@@ -694,7 +785,7 @@ export const getAllBooks = async () => {
             const store = tx.objectStore('books')
             const req = store.getAll()
             req.onsuccess = () => {
-                const list = req.result || []
+                const list = (req.result || []).map(withReadableBookTitle)
                 list.sort((a, b) => {
                     const aRead = a.lastReadAt || 0
                     const bRead = b.lastReadAt || 0
@@ -762,6 +853,10 @@ export const recordBookOpened = async (id, openedAt = Date.now()) => {
             const book = getReq.result
             if (!book) return resolve(null)
             book.lastOpenedAt = Math.max(book.lastOpenedAt || 0, openedAt)
+            if (book.readingStatus === 'unread' || book.readingStatus === 'want_to_read') {
+                book.readingStatus = 'reading'
+                book.updatedAt = Math.max(book.updatedAt || 0, openedAt)
+            }
             store.put(book)
         }
         tx.oncomplete = () => resolve(true)
@@ -1034,6 +1129,7 @@ export const relinkBookFile = async (bookId, fileData = {}) => {
     const origin = await getRevisionOrigin()
     const { blob = null, nativePath = null, nativeSnapshotPath = null, documentHash = null } = fileData
 
+    const newRevision = blob ? generateRevision() : null
     return new Promise((resolve, reject) => {
         const storeNames = ['books', 'book_files'].filter(s => db.objectStoreNames.contains(s))
         const tx = db.transaction(storeNames, 'readwrite')
@@ -1048,6 +1144,11 @@ export const relinkBookFile = async (bookId, fileData = {}) => {
                     book.isCloudOnly = false
                     book.hasLocalFile = true
                     book.size = blob.size
+                    book.blobRevision = newRevision
+                    book.revisionOrigin = origin
+                    book.documentHash = documentHash || null
+                    delete book.blob
+                    if (book.progress && typeof book.progress === 'object') book.progress = { ...book.progress, blobRevision: newRevision, revisionOrigin: origin, documentHash: documentHash || null }
                 }
                 if (nativePath !== undefined && nativePath !== null) {
                     book.nativePath = nativePath
@@ -1063,14 +1164,29 @@ export const relinkBookFile = async (bookId, fileData = {}) => {
             fileReq.onsuccess = () => {
                 const local = fileReq.result || { id: bookId }
                 if (blob) {
-                    local.blob = blob
-                    local.blobRevision = generateRevision()
+                    const isTauri = typeof platformBridge !== 'undefined' && platformBridge.isTauri
+                    const effectiveSnapshotPath = nativeSnapshotPath || local.nativeSnapshotPath || null
+                    const format = (book?.format || '').toLowerCase()
+                    const isLargeNativePdf = isTauri &&
+                        (format === 'pdf' || (blob.type && blob.type.includes('pdf'))) &&
+                        effectiveSnapshotPath &&
+                        blob.size > LARGE_PDF_SNAPSHOT_THRESHOLD
+
+                    local.blobRevision = newRevision
                     local.revisionOrigin = origin
                     local.documentHash = documentHash || null
-                    local.nativeSnapshotPath = nativeSnapshotPath || null
-                    local.nativeSnapshotRevision = nativeSnapshotPath ? local.blobRevision : null
-                    local.nativeSnapshotOrigin = nativeSnapshotPath ? origin : null
-                    local.nativeSnapshotSize = nativeSnapshotPath ? blob.size : null
+                    local.nativeSnapshotPath = effectiveSnapshotPath
+                    local.nativeSnapshotRevision = effectiveSnapshotPath ? local.blobRevision : null
+                    local.nativeSnapshotOrigin = effectiveSnapshotPath ? origin : null
+                    local.nativeSnapshotSize = effectiveSnapshotPath ? blob.size : null
+
+                    if (isLargeNativePdf) {
+                        local.blob = null
+                        local.nativeSnapshotOnly = true
+                    } else {
+                        local.blob = blob
+                        local.nativeSnapshotOnly = false
+                    }
                 } else if (documentHash) {
                     local.documentHash = documentHash
                 }
@@ -1456,7 +1572,7 @@ export const recordReadingSession = async (session, updateBookTotal = true) => {
                         } else {
                             book.totalReadingSeconds = (book.totalReadingSeconds || 0) + delta
                         }
-                        book.lastReadAt = Date.now()
+                        book.lastReadAt = Math.max(book.lastReadAt || 0, Number(session.endTime) || Date.now())
                         bookStore.put(book)
                     }
                 }
@@ -1488,7 +1604,8 @@ export const getAllReadingSessions = async () => {
 
 export const getSessionDur = s => {
     if (!s) return 0
-    const v = s.durationSeconds != null ? s.durationSeconds
+    const v = s.activeDurationSeconds != null ? s.activeDurationSeconds
+        : s.durationSeconds != null ? s.durationSeconds
         : s.readingSeconds != null ? s.readingSeconds
         : s.seconds != null ? s.seconds : 0
     return typeof v === 'number' && !isNaN(v) && v > 0 ? Math.round(v) : 0
@@ -1503,6 +1620,7 @@ export const computeActiveSessionSeconds = (sessList) => {
         if (dur <= 0) continue
         // Only construct intervals if activeIntervals was explicitly recorded (LL-28)
         if (Array.isArray(s.activeIntervals) && s.activeIntervals.length > 0) {
+            const before = rawIntervals.length
             for (const iv of s.activeIntervals) {
                 if (Array.isArray(iv) && iv.length >= 2) {
                     const st = normalizeTimestampMs(iv[0])
@@ -1512,6 +1630,7 @@ export const computeActiveSessionSeconds = (sessList) => {
                     }
                 }
             }
+            if (rawIntervals.length === before) unintervaledSeconds += dur
         } else {
             unintervaledSeconds += dur
         }
@@ -1525,20 +1644,52 @@ export const computeActiveSessionSeconds = (sessList) => {
         if (next[0] <= cur[1]) {
             cur[1] = Math.max(cur[1], next[1])
         } else {
-            unionSecs += Math.round((cur[1] - cur[0]) / 1000)
+            unionSecs += (cur[1] - cur[0]) / 1000
             cur = [next[0], next[1]]
         }
     }
-    unionSecs += Math.round((cur[1] - cur[0]) / 1000)
-    return unionSecs + unintervaledSeconds
+    unionSecs += (cur[1] - cur[0]) / 1000
+    return Math.round(unionSecs) + unintervaledSeconds
 }
 
 // Calculate Reading Full Statistics (Supports Week, Month, Year, Total views)
 export const getReadingStats = async (viewMode = 'month', targetYear = new Date().getFullYear(), targetMonth = new Date().getMonth() + 1, weekOffset = 0) => {
+    const _normalizeTimestampMs = typeof normalizeTimestampMs === 'function' ? normalizeTimestampMs : (t) => {
+        if (!t) return 0
+        if (typeof t === 'number') return t
+        const p = Date.parse(t)
+        return isNaN(p) ? 0 : p
+    }
+    const _getSessionDur = typeof getSessionDur === 'function' ? getSessionDur : (s) => {
+        if (!s) return 0
+        const v = s.activeDurationSeconds != null ? s.activeDurationSeconds
+            : s.durationSeconds != null ? s.durationSeconds
+            : s.readingSeconds != null ? s.readingSeconds
+            : s.seconds != null ? s.seconds : 0
+        return typeof v === 'number' && !isNaN(v) && v > 0 ? Math.round(v) : 0
+    }
+    const _computeActiveSessionSeconds = typeof computeActiveSessionSeconds === 'function' ? computeActiveSessionSeconds : (sessList) => {
+        if (!sessList) return 0
+        let total = 0
+        for (const s of sessList) {
+            total += _getSessionDur(s)
+        }
+        return total
+    }
+    const _resolveReadingState = typeof resolveReadingState === 'function' ? resolveReadingState : (b) => {
+        if (!b) return 'unread'
+        if (b.readingStatus) return b.readingStatus
+        if (b.status) return b.status
+        if (b.completedAt) return 'finished'
+        const f = b.progress?.fraction || 0
+        return f >= 0.999 ? 'finished' : (f > 0 ? 'reading' : 'unread')
+    }
+
     const allRawSessions = await getAllReadingSessions()
-    const sessions = allRawSessions.filter(s => s && getSessionDur(s) > 0)
+    const sessions = allRawSessions.filter(s => s && _getSessionDur(s) > 0)
     const books = await getAllBooks()
     const highlights = await getAllHighlights()
+    const bookTitles = new Map(books.map(book => [book.id, book.title]))
 
     const now = new Date()
     const todayStr = toLocalDateKey(now)
@@ -1555,14 +1706,14 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         if (!dayGroupMap.has(d)) dayGroupMap.set(d, [])
         dayGroupMap.get(d).push(sess)
 
-        const sStart = normalizeTimestampMs(sess.startTime)
+        const sStart = _normalizeTimestampMs(sess.startTime)
         if (sStart && sStart < earliestTime) {
             earliestTime = sStart
         }
     }
 
     for (const [d, daySessions] of dayGroupMap.entries()) {
-        const dur = computeActiveSessionSeconds(daySessions)
+        const dur = _computeActiveSessionSeconds(daySessions)
         totalSeconds += dur
         dailyMap[d] = dur
         const ym = d.slice(0, 7)
@@ -1627,7 +1778,7 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
 
     // 1. Overall Stats
     const todaySeconds = dailyMap[todayStr] || 0
-    const finishedCount = books.filter(b => resolveReadingState(b) === 'finished').length
+    const finishedCount = books.filter(b => _resolveReadingState(b) === 'finished').length
     const companionDays = Math.max(1, Math.floor((now.getTime() - earliestTime) / (86400 * 1000)) + 1)
 
     // 2. View Specific Distribution Charts
@@ -1789,20 +1940,21 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         }
     })
     for (const [bId, bSessList] of periodBookSessions.entries()) {
-        periodBookDurationMap.set(bId, computeActiveSessionSeconds(bSessList))
+        periodBookDurationMap.set(bId, _computeActiveSessionSeconds(bSessList))
     }
 
     const allSessionBookMap = new Map()
     const allBookSessions = new Map()
     for (const sess of allRawSessions) {
-        if (sess && sess.bookId && (sess.durationSeconds || 0) > 0) {
+        if (sess && sess.bookId && (_getSessionDur(sess) > 0)) {
             if (!allBookSessions.has(sess.bookId)) allBookSessions.set(sess.bookId, [])
             allBookSessions.get(sess.bookId).push(sess)
         }
     }
     for (const [bId, bSessList] of allBookSessions.entries()) {
-        allSessionBookMap.set(bId, computeActiveSessionSeconds(bSessList))
+        allSessionBookMap.set(bId, _computeActiveSessionSeconds(bSessList))
     }
+    const localBookMap = new Map(books.map(b => [b.id, b]))
     const enrichedBooks = books.map(b => {
         const sessTotal = allSessionBookMap.get(b.id) || 0
         return {
@@ -1810,6 +1962,31 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
             totalReadingSeconds: Math.max(b.totalReadingSeconds || 0, sessTotal)
         }
     })
+
+    // Collect all bookIds that appear in sessions but are not in local books
+    // (e.g. read on another device and synced via WebDAV, or locally deleted book)
+    for (const [bId, bSessList] of allBookSessions.entries()) {
+        if (!localBookMap.has(bId)) {
+            const sorted = [...bSessList].sort((a, b) => {
+                const ta = _normalizeTimestampMs(a.endTime || a.startTime || 0)
+                const tb = _normalizeTimestampMs(b.endTime || b.startTime || 0)
+                return tb - ta
+            })
+            const latestSession = sorted[0] || {}
+            const sessTotal = allSessionBookMap.get(bId) || 0
+            enrichedBooks.push({
+                id: bId,
+                title: latestSession.bookTitle || '跨端同步或已归档图书',
+                author: latestSession.bookAuthor || '未知作者',
+                cover: null,
+                format: 'epub',
+                totalReadingSeconds: sessTotal,
+                isCloudOrArchived: true,
+                progress: { fraction: latestSession.endProgress || 0 }
+            })
+        }
+    }
+
     const topBooks = [...enrichedBooks].sort((a, b) => (b.totalReadingSeconds || 0) - (a.totalReadingSeconds || 0))
 
     const isCurrentPeriod = (viewMode === 'month' && targetYear === now.getFullYear() && targetMonth === (now.getMonth() + 1))
@@ -1863,7 +2040,7 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
 
     const isCompletedInPeriod = (b) => {
         if (!b) return false
-        const isFinished = resolveReadingState(b) === 'finished'
+        const isFinished = _resolveReadingState(b) === 'finished'
         if (!isFinished) return false
         if (viewMode === 'total') return true
         if (b.completedAt) {
@@ -1930,12 +2107,12 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         periodBooksCount: periodBooks.length,
         periodFinishedBooks,
         periodFinishedCount: periodFinishedBooks.length,
-        periodHighlights,
+        periodHighlights: periodHighlights.map(note => ({ ...note, bookTitle: note.bookTitle || bookTitles.get(note.bookId) || '已移除的图书' })),
         periodHighlightsCount: periodHighlights.length,
         chartData,
         peakInfo: peakInfo.seconds > 0 ? peakInfo : null,
         topBooks: topBooks.slice(0, 10),
-        recentSessions: sessions.slice(0, 15)
+        recentSessions: sessions.slice(0, 15).map(session => ({ ...session, bookTitle: session.bookTitle || bookTitles.get(session.bookId) || '已移除的图书', date: session.date || toLocalDateKey(session.startTime) }))
     }
 }
 
@@ -2475,6 +2652,17 @@ export const deleteBookSearchIndex = async (bookId) => {
     })
 }
 
+export const getBookSearchIndexIds = async () => {
+    if (typeof indexedDB === 'undefined') return []
+    const db = await openDB()
+    if (!db.objectStoreNames.contains('fulltext_index')) return []
+    return new Promise(resolve => {
+        const request = db.transaction('fulltext_index', 'readonly').objectStore('fulltext_index').getAllKeys()
+        request.onsuccess = () => resolve(request.result || [])
+        request.onerror = () => resolve([])
+    })
+}
+
 export const getAllBookSearchIndexes = async () => {
     if (typeof indexedDB === 'undefined') return []
     const db = await openDB()
@@ -2910,4 +3098,3 @@ export const getChapterTranslationsStats = async () => {
         }
     })
 }
-

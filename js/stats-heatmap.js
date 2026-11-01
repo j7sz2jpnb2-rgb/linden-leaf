@@ -85,6 +85,17 @@ export function renderCleanBarChart(container, data, options = {}) {
 
         container.appendChild(col)
     })
+
+    // Auto-scroll to current day (today) or latest column if horizontally scrollable on mobile
+    const currentDayCol = container.querySelector('.chart-clean-col .chart-clean-bar.today')?.closest('.chart-clean-col')
+    if (currentDayCol && typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => {
+            if (container.scrollWidth > container.clientWidth) {
+                const targetScroll = currentDayCol.offsetLeft - (container.clientWidth / 2) + (currentDayCol.clientWidth / 2)
+                container.scrollTo({ left: Math.max(0, targetScroll), behavior: 'smooth' })
+            }
+        })
+    }
 }
 
 /**
@@ -170,15 +181,23 @@ export function aggregateSessions(sessions = [], options = {}) {
         totalSeconds += secs
 
         if (!dayMap.has(dateStr)) {
-            dayMap.set(dateStr, { seconds: 0, minutes: 0, bookIds: new Set(), sessionCount: 0, bookDurationMap: new Map() })
+            dayMap.set(dateStr, { seconds: 0, minutes: 0, bookIds: new Set(), sessionCount: 0, bookDurationMap: new Map(), bookMetaMap: new Map() })
         }
         const item = dayMap.get(dateStr)
         if (!item.bookDurationMap) item.bookDurationMap = new Map()
+        if (!item.bookMetaMap) item.bookMetaMap = new Map()
         item.seconds += secs
         item.sessionCount++
         if (session.bookId) {
             item.bookIds.add(session.bookId)
             item.bookDurationMap.set(session.bookId, (item.bookDurationMap.get(session.bookId) || 0) + secs)
+            if (!item.bookMetaMap.has(session.bookId) || session.bookTitle) {
+                const prev = item.bookMetaMap.get(session.bookId) || {}
+                item.bookMetaMap.set(session.bookId, {
+                    title: session.bookTitle || prev.title || '',
+                    author: session.bookAuthor || prev.author || ''
+                })
+            }
         }
     }
 
@@ -292,7 +311,10 @@ export async function renderCalendarHeatmap(container, targetYear = new Date().g
 
                 cell.classList.add(`level-${level}`)
                 const durationStr = formatMinutesClean(mins)
-                const bookNames = info ? Array.from(info.bookIds).map(id => bookTitleMap.get(id) || '未知书籍').join('、') : ''
+                const bookNames = info ? Array.from(info.bookIds).map(id => {
+                    const meta = info.bookMetaMap?.get(id)
+                    return bookTitleMap.get(id) || meta?.title || '已读图书'
+                }).filter(Boolean).join('、') : ''
                 const tipText = mins > 0 ? `${dateStr}: ${durationStr}${bookNames ? `\n阅读: ${bookNames}` : ''}` : `${dateStr}: 未阅读`
                 cell.title = tipText
 
@@ -304,9 +326,11 @@ export async function renderCalendarHeatmap(container, targetYear = new Date().g
                         const bookList = []
                         if (info && info.bookDurationMap) {
                             for (const [bId, bSecs] of info.bookDurationMap.entries()) {
+                                const meta = info.bookMetaMap?.get(bId)
                                 bookList.push({
                                     bookId: bId,
-                                    title: bookTitleMap.get(bId) || '未知书籍',
+                                    title: bookTitleMap.get(bId) || meta?.title || '已读图书',
+                                    author: meta?.author || '',
                                     seconds: bSecs,
                                     minutes: Math.round(bSecs / 60)
                                 })

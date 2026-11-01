@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
-const PORT = 18420;
+const PORT = parseInt(process.env.PORT, 10) || 18420;
 
 const MIME_MAP = {
   '.html': 'text/html; charset=utf-8',

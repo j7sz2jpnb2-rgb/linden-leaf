@@ -1,6 +1,11 @@
 // Translation task state and validation, independent of DOM, network and credentials.
 // Integration contract: request uses the existing guarded native AI broker.
 // commit must verify isCurrent() and content revision INSIDE its storage transaction.
+import { getAiResponseState } from './ai-response-state.js';
+
+export function translationError(code, message, diagnostic = {}) {
+  return Object.assign(new Error(message), { code, diagnostic: { ...diagnostic, errorCode: code } });
+}
 export function translationIdentity(value) {
   const keys = ['bookContentHash', 'chapterSourceKey', 'sourceHash', 'parserVersion', 'targetLanguage', 'promptVersion'];
   for (const key of keys) {
@@ -13,14 +18,14 @@ export function translationIdentity(value) {
  * Robust linear scanner that recovers complete, closed JSON objects from a truncated JSON array.
  * Correctly distinguishes braces inside string literals vs real JSON structural delimiters.
  */
-export function parseTruncatedJsonArray(text) {
+export function parseTruncatedJsonArray(text, { details = false } = {}) {
   if (!text || typeof text !== 'string') return null;
   const trimmed = text.trim();
 
   // 1. First attempt direct parse
   try {
     const val = JSON.parse(trimmed);
-    if (Array.isArray(val)) return val;
+    if (Array.isArray(val)) return details ? { items: val, complete: true, closed: true } : val;
   } catch (_) {}
 
   // 2. Find start of JSON array
@@ -40,6 +45,8 @@ export function parseTruncatedJsonArray(text) {
   let objectDepth = 0;
   let arrayDepth = 0;
   let objectStart = -1;
+  let complete = false;
+  let closed = false;
 
   for (let i = startIndex; i < trimmed.length; i++) {
     const ch = trimmed[i];
@@ -65,6 +72,8 @@ export function parseTruncatedJsonArray(text) {
     } else if (ch === ']') {
       arrayDepth--;
       if (arrayDepth === 0) {
+        closed = true;
+        try { complete = Array.isArray(JSON.parse(trimmed.slice(startIndex, i + 1))); } catch (_) {}
         break; // Clean closure of root array
       }
     } else if (ch === '{') {
@@ -87,12 +96,48 @@ export function parseTruncatedJsonArray(text) {
     }
   }
 
-  return recovered.length > 0 ? recovered : null;
+  return recovered.length > 0 ? (details ? { items: recovered, complete, closed } : recovered) : null;
 }
 
-export function validateTranslationResponse(raw, expectedIds) {
+// A response to exactly one source unit needs no model-generated alignment metadata.
+function inspectSingleTranslation(raw, expectedIds) {
+  if (expectedIds.length !== 1) throw new Error('Single-text translation requires exactly one source unit');
+  let text = String(raw ?? '').trim();
+  text = text.replace(/^<think>[\s\S]*?<\/think>\s*/i, '');
+  const fence = text.match(/^```(?:json|text|plaintext)?\s*\n([\s\S]*?)\n```\s*$/i);
+  if (fence) text = fence[1].trim();
+  const diagnostic = { protocol: 'single-text-v1', expected: 1, expectedIds: expectedIds.slice(), matched: 0, structure: 'text', recovered: false, responseChars: text.length };
+  const fail = (code, message) => { throw translationError(code, message, { ...diagnostic, responsePreview: text.slice(0, 2000) }); };
+  // Compatible services sometimes keep a JSON wrapper despite a plain-text instruction.
+  // Every returned translation still belongs to this one source unit, so no positional guessing occurs.
+  if (/^[\[{]/.test(text)) {
+    let value;
+    try { value = JSON.parse(text); } catch (_) {
+      if (/^\{\s*"(?:translations?|id)"\s*:|^\[\s*(?:"|\{)/.test(text)) fail('invalid_json', '译文包装不完整，请继续本段');
+    }
+    if (value !== undefined) {
+      let pieces = Array.isArray(value) ? value : value?.translations;
+      if (typeof value?.translation === 'string') pieces = [value.translation];
+      if (Array.isArray(pieces)) {
+        const texts = pieces.map(item => typeof item === 'string' ? item : item?.translation);
+        if (!texts.length || texts.some(item => typeof item !== 'string') || !texts.some(item => item.trim())) fail('invalid_items', '模型未返回有效译文正文');
+        text = texts.map(item => item.trim()).filter(Boolean).join('\n\n');
+        diagnostic.structure = 'single_translation_wrapper';
+      } else if (value && ('translation' in value || 'translations' in value || 'id' in value)) {
+        fail('invalid_items', '模型未返回有效译文正文');
+      }
+    }
+  }
+  if (!text || text === '""' || text === '{}') fail('empty_response', '模型未返回译文正文');
+  diagnostic.matched = 1;
+  diagnostic.returned = 1;
+  return { translated: [{ id: expectedIds[0], translation: text }], diagnostic };
+}
+
+export function inspectTranslationResponse(raw, expectedIds, { protocol = 'id-v1' } = {}) {
   if (!Array.isArray(expectedIds) || !expectedIds.length || new Set(expectedIds).size !== expectedIds.length)
     throw new Error('Invalid expected paragraph IDs');
+  if (protocol === 'single-text-v1') return inspectSingleTranslation(raw, expectedIds);
   let text = String(raw ?? '').trim();
   // Strip code fences if present (tolerant to ```json, whitespace, CRLF)
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -103,20 +148,49 @@ export function validateTranslationResponse(raw, expectedIds) {
     text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   }
 
+  const diagnostic = { protocol, expected: expectedIds.length, expectedIds: expectedIds.slice(), matched: 0, structure: 'invalid', recovered: false };
   let parsed = null;
   try {
     parsed = JSON.parse(text);
   } catch (err) {
-    // Linear scan recovery: immune to braces inside strings
-    parsed = parseTruncatedJsonArray(text);
-    if (!parsed) {
-      throw new Error(`Failed to parse translation JSON: ${err.message}`);
+    // Ordered output needs a complete array: a missing item would shift every later paragraph.
+    if (protocol === 'ordered-v1') {
+      throw translationError(text ? 'invalid_json' : 'empty_response', text ? '返回译文 JSON 不完整或格式有误' : '模型未返回译文', diagnostic);
     }
+    // Linear scan recovery: immune to braces inside strings
+    const recovered = parseTruncatedJsonArray(text, { details: true });
+    if (!recovered) {
+      throw translationError(text ? 'invalid_json' : 'empty_response', text ? '返回内容不是有效的翻译 JSON' : '模型未返回译文', diagnostic);
+    }
+    parsed = recovered.items;
+    diagnostic.recovered = !recovered.complete;
+    diagnostic.arrayClosed = recovered.closed;
   }
 
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error('Incomplete translation response: empty or non-array payload');
+  diagnostic.structure = Array.isArray(parsed) ? 'array' : (parsed && typeof parsed === 'object' ? 'object' : typeof parsed);
+  // A common compatible-service envelope. IDs are still validated; never infer correspondence.
+  if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.translations)) {
+    parsed = parsed.translations;
+    diagnostic.structure = 'translations_array';
   }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw translationError(Array.isArray(parsed) ? 'empty_response' : 'non_array', '返回内容缺少非空译文数组', diagnostic);
+  }
+
+  diagnostic.returned = parsed.length;
+  diagnostic.itemTypes = [...new Set(parsed.map(item => item === null ? 'null' : typeof item))];
+  if (protocol === 'ordered-v1') {
+    // The request explicitly asks for an ordered string array. Stable storage IDs never leave the app.
+    if (parsed.length !== expectedIds.length) {
+      throw translationError('count_mismatch', `本批需要 ${expectedIds.length} 段译文，模型返回了 ${parsed.length} 段`, diagnostic);
+    }
+    if (parsed.some(item => typeof item !== 'string' || !item.trim())) {
+      throw translationError('invalid_items', '译文数组必须逐段返回非空文字，不能返回段落编号或对象', diagnostic);
+    }
+    diagnostic.matched = expectedIds.length;
+    return { translated: expectedIds.map((id, index) => ({ id, translation: parsed[index].trim() })), diagnostic };
+  }
+  diagnostic.returnedIds = parsed.slice(0, 12).map(item => typeof item?.id === 'string' ? item.id.slice(0, 80) : null);
 
   const allowed = new Set(expectedIds);
   const result = new Map();
@@ -145,10 +219,15 @@ export function validateTranslationResponse(raw, expectedIds) {
   }
 
   if (result.size === 0) {
-    throw new Error('No valid paragraph translations matched the expected IDs');
+    throw translationError('id_mismatch', '返回译文没有匹配本批段落 ID', diagnostic);
   }
 
-  return expectedIds.map(id => ({ id, translation: result.get(id) || '' })).filter(item => Boolean(item.translation));
+  diagnostic.matched = result.size;
+  return { translated: expectedIds.map(id => ({ id, translation: result.get(id) || '' })).filter(item => Boolean(item.translation)), diagnostic };
+}
+
+export function validateTranslationResponse(raw, expectedIds) {
+  return inspectTranslationResponse(raw, expectedIds).translated;
 }
 
 // One active task, including its cancellation/commit cleanup. Never unlock on stop alone.
@@ -197,16 +276,27 @@ export class TranslationJobCoordinator {
     this.#active = job;
     const isCurrent = () => this.#active === job && !job.controller.signal.aborted;
     let completed = 0;
+    let durableCompleted = 0;
+    let batchIndex = 0;
+    const waitUntilRunnable = async () => {
+      while (job.state === 'paused' && isCurrent()) {
+        await new Promise(resolve => { job.wake = resolve; });
+      }
+      job.wake = null;
+      if (!isCurrent()) throw new DOMException('Translation cancelled before dispatch', 'AbortError');
+    };
 
     try {
       let isFirst = true;
       for (const chunk of batch) {
+        batchIndex++;
         if (!isFirst) {
           const waitTime = typeof getCooldownRemainingMs === 'function'
             ? Math.max(0, getCooldownRemainingMs())
             : cooldownMs;
 
           if (waitTime > 0) {
+            onProgress({ key, completed, durableCompleted, total: ids.length, batchIndex, batches: batch.length, waitingMs: waitTime });
             if (!isCurrent() || job.controller.signal.aborted) return { status: 'cancelled', completed };
             const aborted = await new Promise(resolve => {
               if (job.controller.signal.aborted) return resolve(true);
@@ -235,19 +325,40 @@ export class TranslationJobCoordinator {
 
         // Broker implements native concurrency, cooldown, output budget and cancellation.
         // No automatic retry: a failed network response may already have been billed.
-        const raw = await request({ identity: structuredClone(snapshot), key, chunk: structuredClone(chunk), signal: job.controller.signal });
+        const raw = await request({ identity: structuredClone(snapshot), key, chunk: structuredClone(chunk), signal: job.controller.signal, waitUntilRunnable });
         if (!isCurrent()) return { status: 'cancelled', completed };
-        const translated = validateTranslationResponse(raw, chunk.map(p => p.id));
+        const status = getAiResponseState(raw);
+        const terminal = { batchIndex, batches: batch.length, status, requestId: typeof raw === 'string' ? null : (raw?.requestId || null), finishReason: typeof raw === 'string' ? null : (raw?.finishReason || null) };
+        if (status === 'cancelled') return { status, completed, durableCompleted };
+        if (raw?.translationProtocol === 'single-text-v1' && (status !== 'completed' || (terminal.finishReason && !['stop', 'end_turn', 'eos_token'].includes(terminal.finishReason)))) {
+          const limited = ['length', 'max_tokens'].includes(terminal.finishReason);
+          throw translationError(limited ? 'output_limit' : 'interrupted', limited ? '本段译文达到输出上限，尚未标记完成；可提高回答长度后继续' : '本段请求未正常完成，已保留此前进度', { ...terminal, protocol: 'single-text-v1', expected: 1, expectedIds: chunk.map(p => p.id), matched: 0, responsePreview: String(raw?.fullText || raw?.text || '').slice(0, 2000) });
+        }
+        let inspected;
+        try {
+          inspected = inspectTranslationResponse(typeof raw === 'string' ? raw : (raw?.fullText || raw?.text || ''), chunk.map(p => p.id), { protocol: raw?.translationProtocol || 'id-v1' });
+        } catch (error) {
+          error.diagnostic = { ...error.diagnostic, ...terminal };
+          throw error;
+        }
+        const { translated } = inspected;
+        const diagnostic = { ...inspected.diagnostic, ...terminal };
         const saved = await commit({ identity: structuredClone(snapshot), key, chunk: structuredClone(chunk), translated, isCurrent });
         if (!isCurrent()) return { status: 'cancelled', completed };
-        if (saved !== true) throw new Error('Translation was not durably saved');
+        if (saved !== true && saved?.accepted !== true) throw translationError('save_failed', '本地译文保存失败', diagnostic);
         completed += translated.length;
-        onProgress({ key, completed, total: ids.length });
-        if (translated.length < chunk.length) {
-          throw new Error('模型单次输出达到上限，部分段落未在本次返回中完成');
+        if (saved === true || saved?.durable === true) durableCompleted += translated.length;
+        onProgress({ key, completed, durableCompleted, total: ids.length, diagnostic });
+        if (status !== 'completed') {
+          throw translationError(terminal.finishReason === 'length' || terminal.finishReason === 'max_tokens' ? 'output_limit' : 'interrupted', terminal.finishReason === 'length' || terminal.finishReason === 'max_tokens' ? '模型输出达到长度上限' : '请求未完整结束', diagnostic);
+        }
+        if (translated.length < chunk.length || inspected.diagnostic.recovered) {
+          const damaged = inspected.diagnostic.recovered;
+          const code = damaged ? (diagnostic.arrayClosed ? 'invalid_json' : 'truncated_json') : 'missing_ids';
+          throw translationError(code, damaged ? '返回 JSON 不完整或格式有误，已保留有效译文' : '模型漏回部分段落或段落 ID 不匹配', diagnostic);
         }
       }
-      return { status: 'completed', completed };
+      return { status: 'completed', completed, durableCompleted };
     } catch (error) {
       if (!isCurrent()) return { status: 'cancelled', completed };
       throw error; // Caller displays partial/failed; already committed chunks remain durable.
@@ -354,4 +465,31 @@ export function buildTranslationRevisionArchive(data = {}) {
     createdAt: data.createdAt || now,
     updatedAt: data.updatedAt || now
   };
+}
+
+// Opt-in per chapter launch. Only explicit HTTP service failures before any returned text qualify.
+export async function requestTranslationWithRecovery({ invoke, signal, beforeDispatch, onWait, maxRetries = 0, wait = null }) {
+  const limit = Math.max(0, Math.min(2, Number(maxRetries) || 0));
+  const stopped = () => { if (signal?.aborted) throw new DOMException('Translation cancelled', 'AbortError'); };
+  const sleep = wait || ((ms) => new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', stop);
+    const timer = setTimeout(() => { cleanup(); resolve(); }, ms);
+    const stop = () => { clearTimeout(timer); cleanup(); reject(new DOMException('Translation cancelled', 'AbortError')); };
+    signal?.addEventListener('abort', stop, { once: true });
+    if (signal?.aborted) stop();
+  }));
+  for (let retries = 0; ; retries++) {
+    stopped();
+    await beforeDispatch?.();
+    stopped();
+    try { return await invoke(); }
+    catch (error) {
+      const message = typeof error === 'string' ? error : error?.message || '';
+      const status = message.match(/^HTTP[\s_:]*(429|502|503|504)\b/)?.[1];
+      if (!status || retries >= limit || signal?.aborted) throw error;
+      const remainingMs = status === '429' ? 30000 * (retries + 1) : 3000 * (2 ** retries);
+      onWait?.({ reason: 'service', status, remainingMs, retryIndex: retries + 1, maxRetries: limit });
+      await sleep(remainingMs, signal);
+    }
+  }
 }

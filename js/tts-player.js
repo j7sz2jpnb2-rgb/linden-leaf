@@ -17,6 +17,13 @@
 import * as db from './db.js'
 import { platformBridge } from './platformBridge.js'
 
+async function requestSpeechAudio(endpoint, options) {
+    if (!platformBridge.isAndroid || !platformBridge.isTauri) return fetch(endpoint, options)
+    const data = await platformBridge.requestTtsAudio(endpoint, options.body, options.headers, options.signal)
+    return new Response(data, { headers: { 'Content-Type': 'audio/mpeg' } })
+}
+
+
 export class SystemTtsProvider {
     constructor() {
         this.name = 'system'
@@ -39,12 +46,15 @@ export class SystemTtsProvider {
         let voices = window.speechSynthesis.getVoices()
         if (voices.length === 0) {
             voices = await new Promise(resolve => {
-                const handler = () => {
+                let timer
+                const finish = voices => {
+                    clearTimeout(timer)
                     window.speechSynthesis.removeEventListener('voiceschanged', handler)
-                    resolve(window.speechSynthesis.getVoices())
+                    resolve(voices)
                 }
+                const handler = () => finish(window.speechSynthesis.getVoices())
                 window.speechSynthesis.addEventListener('voiceschanged', handler)
-                setTimeout(() => resolve([]), 500)
+                timer = setTimeout(() => finish(window.speechSynthesis.getVoices()), 500)
             })
         }
         return voices.map((v, i) => ({
@@ -69,6 +79,7 @@ export class SystemTtsProvider {
             const utteranceId = options.utteranceId || `utt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
             const generation = options.generation || 0
 
+            this._nativeJobId = jobId
             const started = await platformBridge.startBackgroundTts(bookTitle, text, rate, {
                 jobId,
                 utteranceId,
@@ -84,15 +95,21 @@ export class SystemTtsProvider {
 
                 const eventHandler = (e) => {
                     const d = e.detail || {}
-                    if (d.utteranceId && d.utteranceId !== utteranceId) return
-                    if (d.type === 'playbackstarted') {
-                        options.onPlaybackStarted?.()
+                    if (d.jobId !== jobId || Number(d.generation) !== generation) return
+                    if (d.type === 'playbacksegmentcompleted' && d.utteranceId === utteranceId) {
+                        if (!resolved) {
+                            resolved = true
+                            cleanup()
+                            resolve()
+                        }
                     } else if (d.type === 'playbackcompleted') {
                         if (!resolved) {
                             resolved = true
                             cleanup()
                             resolve()
                         }
+                    } else if (d.type === 'playbackstarted' && (!d.utteranceId || d.utteranceId === utteranceId)) {
+                        options.onPlaybackStarted?.()
                     } else if (d.type === 'playbackerror') {
                         if (!resolved) {
                             resolved = true
@@ -112,6 +129,7 @@ export class SystemTtsProvider {
 
                 const pollTimer = setInterval(async () => {
                     if (resolved) return
+                    if (typeof document !== 'undefined' && document.hidden) return
                     if (this._stopped) {
                         resolved = true
                         cleanup()
@@ -130,7 +148,7 @@ export class SystemTtsProvider {
                             reject(new Error(state.error || 'Android朗读出错'))
                         }
                     } catch (_) {}
-                }, 400)
+                }, 1000)
 
                 cleanup = () => {
                     window.removeEventListener('androidttsevent', eventHandler)
@@ -201,7 +219,9 @@ export class SystemTtsProvider {
         this._stopped = true
         this._paused = false
         if (platformBridge.isAndroid && platformBridge.isTauri) {
-            platformBridge.stopBackgroundTts()
+            const jobId = this._nativeJobId
+            this._nativeJobId = null
+            if (jobId) platformBridge.stopBackgroundTts({ jobId })
             return
         }
         if (typeof window !== 'undefined' && window.speechSynthesis) {
@@ -218,7 +238,7 @@ export class SystemTtsProvider {
 export class ApiTtsProvider {
     constructor() {
         this.name = 'api'
-        this.label = '云端 AI 拟真语音 (OpenAI / Qwen / CosyVoice)'
+        this.label = '云端 / 自定义语音接口'
         this.cache = new Map() // key -> { url, size, lastUsed }
         this.maxCacheBytes = 50 * 1024 * 1024 // 50MB bounded LRU cache
         this.currentCacheBytes = 0
@@ -227,7 +247,10 @@ export class ApiTtsProvider {
         this._prefetchErrors = new Map()
     }
 
-    async getVoices() {
+    async getVoices(options = {}) {
+        let official = false
+        try { official = new URL(options.apiEndpoint || 'https://api.openai.com/v1/audio/speech').hostname === 'api.openai.com' } catch (_) {}
+        if (!official) return [{ id: options.voiceId || '', name: options.voiceId || '使用服务默认音色' }]
         return [
             { id: 'alloy', name: 'Alloy (标准男声)' },
             { id: 'echo', name: 'Echo (沉稳男声)' },
@@ -280,8 +303,8 @@ export class ApiTtsProvider {
 
         const fetchPromise = (async () => {
             const endpoint = options.apiEndpoint || 'https://api.openai.com/v1/audio/speech'
-            let apiKey = options.apiKey || ''
-            if (!apiKey) {
+            let apiKey = options.allowUnauthenticated ? '' : options.apiKey || ''
+            if (!apiKey && !options.allowUnauthenticated) {
                 try {
                     const storedOrigin = await platformBridge.secureLoadCredential('tts_api_origin').catch(() => null)
                     let currentOrigin = ''
@@ -297,14 +320,14 @@ export class ApiTtsProvider {
             const voice = options.voiceId || 'nova'
             const speed = options.rate || 1.0
 
-            if (!apiKey) {
-                throw new Error('未配置 TTS API Key，请在高级设置中配置 AI 密钥')
+            if (!apiKey && !options.allowUnauthenticated) {
+                throw new Error('未配置朗读接口密钥；免认证服务请在听书设置中启用免密模式')
             }
 
-            const resp = await fetch(endpoint, {
+            const resp = await requestSpeechAudio(endpoint, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${apiKey}`,
+                    ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
@@ -322,6 +345,7 @@ export class ApiTtsProvider {
             }
 
             const blob = await resp.blob()
+            if (options.signal?.aborted) throw new DOMException('朗读已停止', 'AbortError')
             const url = URL.createObjectURL(blob)
             this._addToCache(cacheKey, url, blob.size || 64 * 1024)
             return url
@@ -332,7 +356,7 @@ export class ApiTtsProvider {
             const resultUrl = await fetchPromise
             return resultUrl
         } finally {
-            this._inflight.delete(cacheKey)
+            if (this._inflight.get(cacheKey) === fetchPromise) this._inflight.delete(cacheKey)
         }
     }
 
@@ -343,6 +367,7 @@ export class ApiTtsProvider {
         try {
             await this.fetchAudioBlob(segment.text, options)
         } catch (e) {
+            if (options.signal?.aborted || e.name === 'AbortError') return
             console.debug('[ApiTtsProvider] prefetch failed:', e)
             this._prefetchErrors.set(cacheKey, e)
         }
@@ -430,6 +455,7 @@ export class ApiTtsProvider {
     }
 
     clearCache() {
+        const cleared = { count: this.cache.size, bytes: this.currentCacheBytes }
         for (const [_, item] of this.cache.entries()) {
             try { URL.revokeObjectURL(item.url) } catch (_) {}
         }
@@ -437,6 +463,7 @@ export class ApiTtsProvider {
         this.currentCacheBytes = 0
         this._inflight.clear()
         this._prefetchErrors.clear()
+        return cleared
     }
 }
 
@@ -469,56 +496,50 @@ export class OfflineTtsProvider {
     async play(segment, options = {}) {
         this.stop()
         const text = segment?.text?.trim()
-        if (!text) return
-
-        // 1. Try connecting to local sherpa-onnx / Kokoro HTTP engine endpoint
+        if (!text || options.signal?.aborted) return
+        const endpoint = options.localEndpoint || this.localEndpoint
+        const controller = new AbortController()
+        this.abortController = controller
+        const onAbort = () => controller.abort()
+        options.signal?.addEventListener('abort', onAbort, { once: true })
+        let timedOut = false
+        const timer = setTimeout(() => { timedOut = true; controller.abort() }, 15000)
         try {
-            const controller = new AbortController()
-            const timer = setTimeout(() => controller.abort(), 15000)
-            const endpoint = options.localEndpoint || this.localEndpoint
-            const resp = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model: options.model || 'kokoro-82m-zh',
-                    input: text,
-                    voice: options.voiceId || 'zf_xiaobei',
-                    speed: options.rate || 1.0
-                }),
-                signal: controller.signal
-            })
+            const resp = await requestSpeechAudio(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: options.model || 'kokoro-82m-zh', input: text, voice: options.voiceId || 'zf_xiaobei', speed: options.rate || 1 }), signal: controller.signal })
+            if (!resp.ok) throw new Error(`语音服务返回 ${resp.status}：${(await resp.text()).slice(0, 200)}`)
+            const blob = await resp.blob()
             clearTimeout(timer)
-
-            if (resp.ok) {
-                const blob = await resp.blob()
-                const url = URL.createObjectURL(blob)
-                return new Promise((resolve, reject) => {
-                    const audio = new Audio(url)
-                    // Note: speed was already rendered into the synthesized waveform, keep playbackRate at 1.0
-                    audio.playbackRate = 1.0
-                    audio.onplay = () => {
-                        options.onPlaybackStarted?.()
-                    }
-                    audio.onended = () => {
-                        this.currentAudio = null
-                        URL.revokeObjectURL(url)
-                        resolve()
-                    }
-                    audio.onerror = () => {
-                        this.currentAudio = null
-                        URL.revokeObjectURL(url)
-                        reject(new Error('离线音频解码失败'))
-                    }
-                    this.currentAudio = audio
-                    audio.play().catch(reject)
-                })
-            }
-        } catch (_) {
-            // Local server not running
+            if (timedOut) throw new Error('连接自建语音服务超时')
+            if (controller.signal.aborted || options.signal?.aborted) return
+            const url = URL.createObjectURL(blob)
+            this.currentUrl = url
+            await new Promise((resolve, reject) => {
+                const audio = new Audio(url)
+                this.currentAudio = audio
+                const finish = error => {
+                    controller.signal.removeEventListener('abort', cancelled)
+                    audio.onended = null; audio.onerror = null
+                    if (this.currentAudio === audio) this.currentAudio = null
+                    if (this.currentUrl === url) this.currentUrl = null
+                    URL.revokeObjectURL(url)
+                    error ? reject(error) : resolve()
+                }
+                const cancelled = () => { audio.pause(); finish() }
+                controller.signal.addEventListener('abort', cancelled, { once: true })
+                audio.onplay = () => options.onPlaybackStarted?.()
+                audio.onended = () => finish()
+                audio.onerror = () => finish(new Error('自建语音音频解码失败'))
+                audio.play().catch(error => finish(error))
+            })
+        } catch (error) {
+            if (!timedOut && (controller.signal.aborted || options.signal?.aborted)) return
+            throw new Error('无法播放自建语音：' + error.message + '。请检查服务地址、模型与音色 ID。')
+        } finally {
+            clearTimeout(timer)
+            options.signal?.removeEventListener('abort', onAbort)
+            if (this.abortController === controller) this.abortController = null
         }
-
-        // 2. Explicit dependency check: HTTP service unavailable
-        throw new Error('无法连接到自建语音服务（' + endpoint + '）。请确认本地或局域网中的 sherpa-onnx / Kokoro HTTP 语音服务已启动，或切换使用「系统原生语音」/「云端 AI 拟真语音」。')
     }
 
     pause() {
@@ -530,12 +551,47 @@ export class OfflineTtsProvider {
     }
 
     stop() {
+        if (this.abortController) {
+            try { this.abortController.abort() } catch (_) {}
+            this.abortController = null
+        }
         if (this.currentAudio) {
             this.currentAudio.pause()
             this.currentAudio.currentTime = 0
             this.currentAudio = null
         }
+        if (this.currentUrl) {
+            try { URL.revokeObjectURL(this.currentUrl) } catch (_) {}
+            this.currentUrl = null
+        }
     }
+}
+
+function splitTextIntoSentences(text, maxLen = 800) {
+    if (!text || text.length <= maxLen) return [text]
+    const parts = text.match(/[^。！？!?；;\n\r]+[。！？!?；;\n\r]*|.+/g) || [text]
+    const chunks = []
+    let current = ''
+    for (const part of parts) {
+        if (!part) continue
+        if (current.length + part.length <= maxLen) {
+            current += part
+        } else {
+            if (current.trim()) chunks.push(current.trim())
+            if (part.length > maxLen) {
+                let rem = part
+                while (rem.length > maxLen) {
+                    chunks.push(rem.slice(0, maxLen).trim())
+                    rem = rem.slice(maxLen)
+                }
+                current = rem
+            } else {
+                current = part
+            }
+        }
+    }
+    if (current.trim()) chunks.push(current.trim())
+    return chunks.length > 0 ? chunks : [text]
 }
 
 export class TtsPlayer {
@@ -565,12 +621,15 @@ export class TtsPlayer {
             system: {},
             offline: {
                 localEndpoint: 'http://127.0.0.1:8880/v1/audio/speech',
-                model: 'kokoro-82m-zh'
+                model: 'kokoro-82m-zh',
+                voiceId: 'zf_xiaobei'
             },
             api: {
                 apiEndpoint: 'https://api.openai.com/v1/audio/speech',
                 apiKey: '',
-                model: 'tts-1'
+                model: 'tts-1',
+                voiceId: 'nova',
+                allowUnauthenticated: false
             }
         }
 
@@ -581,19 +640,13 @@ export class TtsPlayer {
         if (typeof window !== 'undefined') {
             window.addEventListener('androidmedianext', () => this.next())
             window.addEventListener('androidmediaprev', () => this.prev())
-            window.addEventListener('androidttsevent', (e) => {
-                const d = e.detail || {}
-                if (d.type === 'playbackpaused') {
-                    if (this.state === 'playing') {
-                        this.pause(false)
-                    }
-                } else if (d.type === 'playbackstarted') {
-                    if (this.state === 'paused') {
-                        this.resume(false)
-                    } else if (this.state === 'playing' && !this._currentSegmentStartTime) {
-                        this._currentSegmentStartTime = Date.now()
-                    }
-                }
+            window.addEventListener('androidttsevent', e => this.handleNativePlaybackEvent(e.detail || {}))
+            document.addEventListener('visibilitychange', async () => {
+                if (document.hidden || !platformBridge.isAndroid || !platformBridge.isTauri) return
+                try {
+                    const state = await this.syncNativeListening()
+                    if (state) this.handleNativePlaybackEvent({ ...state, type: ({playing: 'playbackstarted', preparing: 'playbackpreparing', paused: 'playbackpaused', completed: 'playbackcompleted', stopped: 'playbackstopped', error: 'playbackerror'})[state.state] }, false)
+                } catch (e) { console.debug('Playback restore deferred:', e) }
             })
         }
 
@@ -605,56 +658,57 @@ export class TtsPlayer {
     }
 
     setProvider(name, config = {}) {
-        if (!this.providers[name]) {
-            throw new Error(`未知语音引擎: ${name}`)
-        }
-        const wasPlaying = this.state === 'playing'
-        const resumeIdx = this.currentIndex
-        this.stop()
+        if (!this.providers[name]) throw new Error(`未知语音引擎: ${name}`)
+        if (name !== this.currentProviderName) this.stop()
         this.currentProviderName = name
-        if (config && typeof config === 'object') {
-            this.providerConfigs[name] = { ...this.providerConfigs[name], ...config }
-        }
-        this.voiceId = null
+        this.providerConfigs[name] = { ...this.providerConfigs[name], ...config }
+        this.voiceId = this.providerConfigs[name].voiceId || ''
+        this.persistPreferences()
         this.notifyStateChange()
-        if (wasPlaying && resumeIdx >= 0) {
-            this.play(resumeIdx).catch(() => {})
-        }
     }
 
     loadSettings(settings = {}) {
-        if (!settings || typeof settings !== 'object') return
-        if (settings.ttsProvider && this.providers[settings.ttsProvider]) {
-            this.currentProviderName = settings.ttsProvider
-        }
-        if (settings.ttsRate != null) {
-            this.setRate(settings.ttsRate)
-        }
-        if (settings.ttsVoiceId) {
-            this.voiceId = settings.ttsVoiceId
-        }
-        if (settings.ttsApiEndpoint) {
-            this.providerConfigs.api.apiEndpoint = settings.ttsApiEndpoint
-        }
-        if (settings.ttsApiKey) {
-            this.providerConfigs.api.apiKey = settings.ttsApiKey
-        }
-        if (settings.ttsApiModel) {
-            this.providerConfigs.api.model = settings.ttsApiModel
-        }
-        if (settings.ttsOfflineEndpoint) {
-            this.providerConfigs.offline.localEndpoint = settings.ttsOfflineEndpoint
-        }
-        if (settings.ttsOfflineModel) {
-            this.providerConfigs.offline.model = settings.ttsOfflineModel
-        }
+        this._loadingSettings = true
+        try {
+            const provider = this.providers[settings.ttsProvider] ? settings.ttsProvider : this.currentProviderName
+            if (provider !== this.currentProviderName && ['playing', 'paused', 'preparing'].includes(this.state)) this.stop()
+            this.currentProviderName = provider
+            this.rate = Math.max(0.5, Math.min(3, Number(settings.ttsRate) || 1))
+            const nextEndpoint = settings.ttsApiEndpoint || 'https://api.openai.com/v1/audio/speech'
+            try {
+                if (new URL(nextEndpoint).origin !== new URL(this.providerConfigs.api.apiEndpoint).origin) this.providerConfigs.api.apiKey = ''
+            } catch (_) { this.providerConfigs.api.apiKey = '' }
+            this.providerConfigs.api = { ...this.providerConfigs.api,
+                apiEndpoint: settings.ttsApiEndpoint || 'https://api.openai.com/v1/audio/speech',
+                model: settings.ttsApiModel || 'tts-1', voiceId: settings.ttsApiVoiceId ?? 'nova',
+                allowUnauthenticated: settings.ttsApiNoAuth === true }
+            this.providerConfigs.offline = { ...this.providerConfigs.offline,
+                localEndpoint: settings.ttsOfflineEndpoint || 'http://127.0.0.1:8880/v1/audio/speech',
+                model: settings.ttsOfflineModel || 'kokoro-82m-zh', voiceId: settings.ttsOfflineVoiceId ?? 'zf_xiaobei' }
+            this.providerConfigs.system.voiceId = settings.ttsSystemVoiceId ?? (provider === 'system' ? settings.ttsVoiceId || '' : '')
+            this.voiceId = this.providerConfigs[provider].voiceId || ''
+        } finally { this._loadingSettings = false }
+    }
+
+    persistPreferences() {
+        if (this._loadingSettings) return
+        const manager = this.readerApp?.advancedSettings
+        if (!manager?.config) return
+        const { ttsApiKeyConfigured, ...preferences } = this.getSettings()
+        Object.assign(manager.config, preferences)
+        manager.save()
+        manager.renderUIState()
     }
 
     getSettings() {
         return {
             ttsProvider: this.currentProviderName,
             ttsRate: this.rate,
-            ttsVoiceId: this.voiceId,
+            ttsVoiceId: this.voiceId || '',
+            ttsSystemVoiceId: this.providerConfigs.system.voiceId || '',
+            ttsApiVoiceId: this.providerConfigs.api.voiceId || '',
+            ttsOfflineVoiceId: this.providerConfigs.offline.voiceId || '',
+            ttsApiNoAuth: this.providerConfigs.api.allowUnauthenticated === true,
             ttsApiEndpoint: this.providerConfigs.api?.apiEndpoint || '',
             ttsApiKeyConfigured: Boolean(this.providerConfigs.api?.apiKey),
             ttsApiModel: this.providerConfigs.api?.model || 'tts-1',
@@ -673,7 +727,7 @@ export class TtsPlayer {
         const base = this.providerConfigs[this.currentProviderName] || {}
         return {
             ...base,
-            voiceId: this.voiceId,
+            voiceId: this.voiceId || base.voiceId || '',
             rate: this.rate,
             signal: this.abortController?.signal
         }
@@ -697,6 +751,7 @@ export class TtsPlayer {
 
     attachReaderApp(app) {
         this.readerApp = app
+        this.syncNativeListening().catch(e => console.debug('Listening recovery deferred:', e))
     }
 
     /**
@@ -739,13 +794,18 @@ export class TtsPlayer {
                     const raw = clone.innerText || clone.textContent || ''
                     const cleaned = raw.replace(/\s+/g, ' ').trim()
                     if (cleaned.length >= 2) {
-                        segments.push({
-                            id: `seg_${idx++}`,
-                            index: segments.length,
-                            text: cleaned,
-                            element: el,
-                            format: 'epub'
-                        })
+                        const chunks = splitTextIntoSentences(cleaned, 800)
+                        for (const chunk of chunks) {
+                            if (chunk.length >= 2) {
+                                segments.push({
+                                    id: `seg_${idx++}`,
+                                    index: segments.length,
+                                    text: chunk,
+                                    element: el,
+                                    format: 'epub'
+                                })
+                            }
+                        }
                     }
                 }
             }
@@ -754,18 +814,28 @@ export class TtsPlayer {
         // 2. PDF Viewport
         const pdfViewport = this.readerApp.pdfViewport
         if (!foliateView && pdfViewport) {
-            const textLayer = document.querySelector('.pdf-text-layer') || document.querySelector('#pdf-text-layer')
+            const curPage = pdfViewport.currentPage ?? 0
+            let textLayer = pdfViewport.activeSlots?.get?.(curPage)?.querySelector?.('.pdf-text-layer')
+            if (!textLayer) {
+                textLayer = document.querySelector('.pdf-text-layer') || document.querySelector('#pdf-text-layer')
+            }
             if (textLayer) {
                 const spans = textLayer.querySelectorAll('span')
                 const combined = Array.from(spans).map(s => s.textContent).join(' ').trim()
                 if (combined) {
-                    segments.push({
-                        id: 'seg_pdf_0',
-                        index: 0,
-                        text: combined,
-                        element: textLayer,
-                        format: 'pdf'
-                    })
+                    const chunks = splitTextIntoSentences(combined, 800)
+                    let pdfIdx = 0
+                    for (const chunk of chunks) {
+                        if (chunk.length >= 2) {
+                            segments.push({
+                                id: `seg_pdf_${pdfIdx++}`,
+                                index: segments.length,
+                                text: chunk,
+                                element: textLayer,
+                                format: 'pdf'
+                            })
+                        }
+                    }
                 }
             }
         }
@@ -778,6 +848,7 @@ export class TtsPlayer {
      * Start playing from the given or first segment
      */
     async play(startIndex = null) {
+        this.cancelPreview()
         if (this.state === 'paused' && (startIndex === null || startIndex === this.currentIndex)) {
             this.resume()
             return
@@ -811,12 +882,47 @@ export class TtsPlayer {
         this.sessionBookOwner = {
             bookId: app?.currentBookId || app?.currentBookData?.id || null,
             bookTitle: app?.currentBookData?.title || '未知书籍',
+            bookAuthor: app?.currentBookData?.author || app?.currentBookMeta?.author || '',
             startTimestamp: now
         }
         this.setState('playing')
 
         this.updateMediaSessionMetadata()
+        if (platformBridge.isAndroid && platformBridge.isTauri && this.provider.name === 'system') {
+            await this.playAndroidNativeQueue(myGen)
+            return
+        }
         await this.playbackLoop(myGen)
+    }
+
+    /**
+     * Android native queue driver mode:
+     * Native service runs the playback queue as the single driver, JS acts as controller & observer.
+     */
+    async playAndroidNativeQueue(generation) {
+        this._loopRunning = false
+        const owner = this.sessionBookOwner
+        const jobId = `job_${generation}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+        this._nativeQueue = { jobId, generation }
+        this._lastNativeEventSeq = 0
+        this._currentSegmentStartTime = null
+        this._listenStartTime = null
+        this.setState('preparing')
+        this.highlightSegment(this.segments[this.currentIndex])
+        try {
+            const started = await platformBridge.startBackgroundTtsQueue(owner?.bookTitle || 'Linden Leaf',
+                this.segments, this.currentIndex, this.rate, { jobId, generation, bookId: owner?.bookId || '' })
+            if (this.generation !== generation || this._nativeQueue?.jobId !== jobId) {
+                await platformBridge.stopBackgroundTts({ jobId })
+                return
+            }
+            if (!started) throw new Error('启动系统朗读失败')
+        } catch (e) {
+            if (this.generation === generation && this._nativeQueue?.jobId === jobId) {
+                this.setState('paused')
+                this.readerApp?.showToast?.(e.message || '启动朗读失败', 'warning')
+            }
+        }
     }
 
     /**
@@ -837,6 +943,8 @@ export class TtsPlayer {
                     ...this.getProviderOptions(),
                     utteranceId: segUttId,
                     generation: gen,
+                    queue: this.segments,
+                    startIndex: this.currentIndex,
                     isPaused: () => this.state === 'paused' || this._stopRequested || this.generation !== gen,
                     onPlaybackStarted: () => {
                         if (this.generation === gen) {
@@ -965,6 +1073,7 @@ export class TtsPlayer {
             const bookId = owner?.bookId
             if (bookId && mergedIntervals.length > 0) {
                 const bookTitle = owner?.bookTitle || '未知书籍'
+                const bookAuthor = owner?.bookAuthor || (window.app?.currentBookData?.id === bookId ? window.app?.currentBookData?.author : '') || window.app?.currentBookMeta?.author || ''
                 const firstStart = mergedIntervals[0][0]
                 const baseId = `tts_${firstStart}_${Math.random().toString(36).slice(2, 6)}`
 
@@ -994,10 +1103,11 @@ export class TtsPlayer {
                 const dayGroups = new Map()
                 for (const sl of splitSlices) {
                     if (!dayGroups.has(sl.date)) {
-                        dayGroups.set(sl.date, { date: sl.date, startMs: sl.startMs, endMs: sl.endMs, durationSeconds: 0 })
+                        dayGroups.set(sl.date, { date: sl.date, startMs: sl.startMs, endMs: sl.endMs, durationSeconds: 0, activeIntervals: [] })
                     }
                     const grp = dayGroups.get(sl.date)
                     grp.durationSeconds += sl.durationSeconds
+                    grp.activeIntervals.push([sl.startMs, sl.endMs])
                     grp.startMs = Math.min(grp.startMs, sl.startMs)
                     grp.endMs = Math.max(grp.endMs, sl.endMs)
                 }
@@ -1013,9 +1123,11 @@ export class TtsPlayer {
                             sliceIndex: sliceIdx,
                             bookId,
                             bookTitle,
+                            bookAuthor,
                             startTime: grp.startMs, // Numerical epoch ms (LL-29)
                             endTime: grp.endMs,     // Numerical epoch ms (LL-29)
                             durationSeconds: dur,
+                            activeIntervals: grp.activeIntervals,
                             isListening: true,
                             kind: 'listen',
                             date: grp.date
@@ -1062,57 +1174,77 @@ export class TtsPlayer {
     }
 
     pause(notifyProvider = true) {
-        if (this.state === 'playing' || this.state === 'preparing') {
-            if (this._currentSegmentStartTime) {
-                const now = Date.now()
-                if (now > this._currentSegmentStartTime) {
-                    this.activeListeningIntervals.push([this._currentSegmentStartTime, now])
-                }
-                this._currentSegmentStartTime = null
-            }
+        if (this.state !== 'playing' && this.state !== 'preparing') return
+        if (this._nativeQueue) {
             this.setState('paused')
-            if (notifyProvider) this.provider.pause()
+            if (notifyProvider) platformBridge.pauseBackgroundTts({ jobId: this._nativeQueue.jobId }).catch(() => {})
+            return
         }
+        if (this._currentSegmentStartTime) {
+            const now = Date.now()
+            if (now > this._currentSegmentStartTime) this.activeListeningIntervals.push([this._currentSegmentStartTime, now])
+            this._currentSegmentStartTime = null
+        }
+        this.setState('paused')
+        if (notifyProvider) this.provider.pause()
     }
 
     resume(notifyProvider = true) {
-        if (this.state === 'paused') {
-            const now = Date.now()
-            if (!this.sessionBookOwner) {
-                const app = this.readerApp || (typeof window !== 'undefined' ? window.app : null)
-                this.sessionBookOwner = {
-                    bookId: app?.currentBookId || app?.currentBookData?.id || null,
-                    bookTitle: app?.currentBookData?.title || '未知书籍',
-                    startTimestamp: now
+        if (this.state !== 'paused') return
+        if (this._nativeQueue) {
+            const owner = this._nativeQueue
+            this.setState('preparing')
+            if (notifyProvider) platformBridge.resumeBackgroundTts({ jobId: owner.jobId }).then(started => {
+                if (!started && this._nativeQueue === owner) {
+                    const index = this.currentIndex
+                    this.stop(false)
+                    this.play(index).catch(e => this.readerApp?.showToast?.(e.message, 'warning'))
                 }
-            }
-            this._currentSegmentStartTime = now
-            this.setState('playing')
-            if (this._loopRunning) {
-                if (notifyProvider) this.provider.resume()
-            } else if (this.currentIndex >= 0 && this.currentIndex < this.segments.length) {
-                this.playbackLoop(++this.generation)
-            }
+            }).catch(() => { if (this._nativeQueue === owner) this.setState('paused') })
+            return
+        }
+        const now = Date.now()
+        if (!this.sessionBookOwner) {
+            const app = this.readerApp || window.app
+            this.sessionBookOwner = { bookId: app?.currentBookId || app?.currentBookData?.id || null, bookTitle: app?.currentBookData?.title || '未知书籍', bookAuthor: app?.currentBookData?.author || app?.currentBookMeta?.author || '', startTimestamp: now }
+        }
+        this._currentSegmentStartTime = now
+        this.setState('playing')
+        if (this._loopRunning) {
+            if (notifyProvider) this.provider.resume()
+        } else {
+            if (notifyProvider) this.provider.stop()
+            this._stopRequested = false
+            this.playbackLoop(++this.generation)
         }
     }
 
     stop(resetIndex = true) {
+        const nativeOwner = this._nativeQueue
+        this._nativeQueue = null
+        clearInterval(this.sleepTimerInterval)
+        this.sleepTimerInterval = null
+        this.sleepTimerDurationMinutes = 0
+        this.sleepTimerRemainingSeconds = 0
         this._stopRequested = true
         this.generation++
-        if (this.abortController) {
-            this.abortController.abort()
-            this.abortController = null
-        }
+        this.abortController?.abort()
+        this.abortController = null
         this.flushListeningSession(false)
         this.setState('stopped')
-        this.provider.stop()
+        if (nativeOwner) {
+            platformBridge.stopBackgroundTts({ jobId: nativeOwner.jobId })
+                .then(() => this.syncNativeListening()).catch(e => console.debug('Listening stop sync deferred:', e))
+        } else this.provider.stop()
         this.clearHighlight()
-        if (resetIndex) {
-            this.currentIndex = -1
-        }
+        if (resetIndex) this.currentIndex = -1
     }
 
     next() {
+        if (platformBridge.isAndroid && platformBridge.isTauri && this.provider.name === 'system') {
+            platformBridge.nextBackgroundTts().catch(() => {})
+            return
+        }
         const curr = this.currentIndex >= 0 ? this.currentIndex : 0
         if (curr + 1 < this.segments.length) {
             const targetIdx = curr + 1
@@ -1122,6 +1254,10 @@ export class TtsPlayer {
     }
 
     prev() {
+        if (platformBridge.isAndroid && platformBridge.isTauri && this.provider.name === 'system') {
+            platformBridge.prevBackgroundTts().catch(() => {})
+            return
+        }
         const curr = this.currentIndex >= 0 ? this.currentIndex : 0
         if (curr > 0) {
             const targetIdx = curr - 1
@@ -1132,10 +1268,44 @@ export class TtsPlayer {
 
     setRate(rate) {
         this.rate = Math.max(0.5, Math.min(3.0, Number(rate) || 1.0))
+        this.persistPreferences()
+        if (platformBridge.isAndroid && platformBridge.isTauri) {
+            (this.currentProviderName === 'system' ? platformBridge.setTtsRate(this.rate) : Promise.resolve()).catch(() => {})
+        }
     }
 
     setVoice(voiceId) {
-        this.voiceId = voiceId
+        this.voiceId = String(voiceId || '').trim()
+        this.providerConfigs[this.currentProviderName].voiceId = this.voiceId
+        this.persistPreferences()
+    }
+
+    cancelPreview() {
+        this._previewController?.abort()
+        this._previewProvider?.stop()
+        this._previewController = null
+        this._previewProvider = null
+    }
+
+    async preview(text = '你好，欢迎使用 Linden Leaf。愿你享受阅读的时光。') {
+        this.stop()
+        this.cancelPreview()
+        const controller = new AbortController()
+        const provider = this.currentProviderName === 'api' ? new ApiTtsProvider() : this.currentProviderName === 'offline' ? new OfflineTtsProvider() : new SystemTtsProvider()
+        this._previewController = controller
+        this._previewProvider = provider
+        try { await provider.play({ id: 'preview', text }, { ...this.getProviderOptions(), signal: controller.signal }) }
+        finally {
+            provider.stop()
+            provider.clearCache?.()
+            if (this._previewController === controller) { this._previewController = null; this._previewProvider = null }
+        }
+    }
+
+    clearAudioCache() {
+        this.stop()
+        this.cancelPreview()
+        return this.providers.api.clearCache()
     }
 
     /**
@@ -1144,28 +1314,99 @@ export class TtsPlayer {
     setSleepTimer(minutes) {
         clearInterval(this.sleepTimerInterval)
         this.sleepTimerDurationMinutes = minutes
-
-        if (!minutes || minutes === 0) {
-            this.sleepTimerRemainingSeconds = 0
+        this.sleepTimerRemainingSeconds = minutes === 'end_of_chapter' ? -1 : Math.max(0, Number(minutes) || 0) * 60
+        if (platformBridge.isAndroid && platformBridge.isTauri && this.currentProviderName === 'system') {
+            platformBridge.setTtsSleepTimer(minutes === 'end_of_chapter' ? 0 : Number(minutes) || 0).catch(() => {})
             return
         }
-
-        if (minutes === 'end_of_chapter') {
-            this.sleepTimerRemainingSeconds = -1
-            return
-        }
-
-        this.sleepTimerRemainingSeconds = Number(minutes) * 60
+        if (!this.sleepTimerRemainingSeconds || minutes === 'end_of_chapter') return
         this.sleepTimerInterval = setInterval(() => {
-            if (this.state === 'playing') {
-                this.sleepTimerRemainingSeconds--
-                if (this.sleepTimerRemainingSeconds <= 0) {
-                    clearInterval(this.sleepTimerInterval)
-                    this.pause()
-                    this.readerApp?.showToast?.('定时关闭时间到，朗读已暂停', 'info')
-                }
+            if (this.state === 'playing' && --this.sleepTimerRemainingSeconds <= 0) {
+                clearInterval(this.sleepTimerInterval)
+                this.pause()
+                this.readerApp?.showToast?.('定时关闭时间到，朗读已暂停', 'info')
             }
         }, 1000)
+    }
+
+    async syncNativeListening() {
+        if (!platformBridge.isAndroid || !platformBridge.isTauri) return null
+        this._nativeSyncRequested = true
+        if (this._nativeSync) return this._nativeSync
+        this._nativeSync = (async () => {
+            let snapshot
+            do {
+                this._nativeSyncRequested = false
+                snapshot = await platformBridge.getBackgroundPlaybackState()
+                const intervals = [...(snapshot?.listeningIntervals || [])].sort((a, b) => a.sequence - b.sequence)
+                let through = 0
+                for (const interval of intervals) {
+                    let start = Number(interval.startMs)
+                    const end = Number(interval.endMs)
+                    if (!interval.bookId || !(end > start)) continue
+                    let part = 0
+                    while (start < end) {
+                        const date = new Date(start)
+                        const midnight = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime()
+                        const until = Math.min(end, midnight)
+                        const dateKey = db.toLocalDateKey(date)
+                        const author = interval.bookAuthor || (window.app?.currentBookData?.id === interval.bookId ? window.app?.currentBookData?.author : '') || window.app?.currentBookMeta?.author || ''
+                        await db.recordReadingSession({
+                            id: `android_tts_${interval.jobId}_${interval.sequence}_${part++}`,
+                            bookId: interval.bookId, bookTitle: interval.bookTitle, bookAuthor: author,
+                            startTime: start, endTime: until, durationSeconds: (until - start) / 1000,
+                            activeIntervals: [[start, until]], kind: 'listen', isListening: true, date: dateKey
+                        })
+                        start = until
+                    }
+                    through = interval.sequence
+                }
+                if (through > 0) await platformBridge.acknowledgeTtsListening(through)
+            } while (this._nativeSyncRequested)
+            return snapshot
+        })().finally(() => { this._nativeSync = null })
+        return this._nativeSync
+    }
+
+    handleNativePlaybackEvent(data, synchronize = true) {
+        if (synchronize) this.syncNativeListening().catch(e => console.debug('Listening sync deferred:', e))
+        const owner = this._nativeQueue
+        if (!owner || data.jobId !== owner.jobId || Number(data.generation) !== owner.generation) return
+        const sequence = Number(data.seq ?? data.eventSeq ?? 0)
+        if (sequence && sequence < (this._lastNativeEventSeq || 0)) return
+        this._lastNativeEventSeq = sequence
+        const index = Number(data.queueIndex)
+        if (Number.isInteger(index) && index >= 0 && index < this.segments.length && this.currentIndex !== index) {
+            this.currentIndex = index
+            if (!document.hidden) this.highlightSegment(this.segments[index])
+            this.notifyStateChange()
+        }
+        switch (data.type) {
+            case 'playbackstarted':
+                this.setState('playing')
+                if (!document.hidden) this.highlightSegment(this.segments[this.currentIndex])
+                break
+            case 'playbackpreparing':
+                this.setState('preparing')
+                break
+            case 'playbackpaused':
+                this.setState('paused')
+                break
+            case 'playbackcompleted':
+                this.setState('stopped')
+                this.clearHighlight()
+                this.readerApp?.showToast?.('本章朗读完毕', 'info')
+                break
+            case 'playbackstopped':
+                this.setState('stopped')
+                this.clearHighlight()
+                this._nativeQueue = null
+                break
+            case 'playbackerror':
+                this.setState('paused')
+                this.readerApp?.showToast?.(data.error || '系统朗读未完成，请检查语音设置', 'warning')
+                break
+        }
     }
 
     initMediaSession() {

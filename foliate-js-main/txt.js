@@ -1,6 +1,9 @@
 // txt.js - Intelligent TXT/Markdown book parser with Poetry & Chapter detection for foliate-js
 import { runTxtRulesWorker } from '../js/txt-toc-worker.js'
 
+let mergeSoftBreaks = true
+export const setTxtMergeSoftBreaks = enabled => { mergeSoftBreaks = enabled !== false }
+
 const MIME = {
     XHTML: 'application/xhtml+xml',
     SVG: 'image/svg+xml',
@@ -210,6 +213,8 @@ const renderContentToHTML = (linesWithMeta, isPoetryMode = false, tocLinkMap = n
             // Render as poetic stanza with natural line breaks
             const verseText = blk.map(item => escapeHTML(item.text.trim())).join('<br/>\n')
             htmlParts.push(`<p class="verse-stanza">\n${verseText}\n</p>`)
+        } else if (!mergeSoftBreaks) {
+            for (const item of blk) htmlParts.push(`<p class="prose-p">${escapeHTML(item.text.trim())}</p>`)
         } else {
             // Render as prose paragraph with smart spacing for English/Latin words
             let paraText = ''

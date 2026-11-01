@@ -386,15 +386,52 @@ export class FixedLayout extends HTMLElement {
         if (!this.book?.sections) return
         if (this.spread === 'none') {
             this.#spreads = this.book.sections.map(section => ({ center: section }))
-        } else {
-            this.#spreads = []
-            const sections = this.book.sections
-            for (let i = 0; i < sections.length; i += 2) {
-                this.#spreads.push({
-                    left: sections[i],
-                    right: sections[i + 1] || null
-                })
+            return
+        }
+        this.#spreads = []
+        const sections = this.book.sections
+        let currentSpread = null
+
+        for (let i = 0; i < sections.length; i++) {
+            const section = sections[i]
+            const pageSpread = section.pageSpread || (i === 0 ? 'center' : null)
+
+            if (pageSpread === 'center') {
+                if (currentSpread) {
+                    this.#spreads.push(currentSpread)
+                    currentSpread = null
+                }
+                this.#spreads.push({ center: section })
+            } else if (pageSpread === 'left') {
+                if (currentSpread) {
+                    this.#spreads.push(currentSpread)
+                    currentSpread = null
+                }
+                currentSpread = { left: section, right: null }
+            } else if (pageSpread === 'right') {
+                if (currentSpread && !currentSpread.right) {
+                    currentSpread.right = section
+                    this.#spreads.push(currentSpread)
+                    currentSpread = null
+                } else {
+                    if (currentSpread) {
+                        this.#spreads.push(currentSpread)
+                    }
+                    this.#spreads.push({ left: null, right: section })
+                    currentSpread = null
+                }
+            } else {
+                if (!currentSpread) {
+                    currentSpread = { left: section, right: null }
+                } else {
+                    currentSpread.right = section
+                    this.#spreads.push(currentSpread)
+                    currentSpread = null
+                }
             }
+        }
+        if (currentSpread) {
+            this.#spreads.push(currentSpread)
         }
     }
     open(book) {
@@ -459,10 +496,10 @@ export class FixedLayout extends HTMLElement {
                 if (generation !== this.#navigationGeneration) return
                 committed = await this.#showSpread({ center: { index: idx, src } }, generation)
             } else {
-                const indexL = this.book.sections.indexOf(spread.left)
+                const indexL = spread.left ? this.book.sections.indexOf(spread.left) : -1
                 const indexR = spread.right ? this.book.sections.indexOf(spread.right) : -1
                 const [srcL, srcR] = await Promise.all([
-                    spread.left?.load?.(),
+                    spread.left ? spread.left.load?.() : Promise.resolve(null),
                     spread.right ? spread.right.load?.() : Promise.resolve(null),
                 ])
                 if (generation !== this.#navigationGeneration) return

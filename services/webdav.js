@@ -278,7 +278,7 @@ class WebDAVService {
     /**
      * Save / upload merged sync state JSON with optimistic concurrency
      */
-    static async saveRemoteState({ serverUrl, username, password, remoteDir = 'LindenLeaf', fileName = 'linden_sync_data.json', data, etag = null }) {
+    static async saveRemoteState({ serverUrl, username, password, remoteDir = 'LindenLeaf', fileName = 'linden_sync_data.json', data, etag = null, summaryMarkdown = null }) {
         // Ensure remote directory exists first
         await this.ensureDirectory(serverUrl, username, password, remoteDir)
 
@@ -322,6 +322,22 @@ class WebDAVService {
 
             if (res.status === 200 || res.status === 201 || res.status === 204) {
                 const newEtag = res.headers.get('etag') || null
+                if (summaryMarkdown && typeof summaryMarkdown === 'string') {
+                    try {
+                        const mdUrl = this.normalizeUrl(serverUrl, `${remoteDir}/LindenLeaf_Reading_Notes_and_Stats.md`)
+                        await this.fetchWithRetry(mdUrl, {
+                            method: 'PUT',
+                            headers: {
+                                'Authorization': auth,
+                                'Content-Type': 'text/markdown; charset=utf-8'
+                            },
+                            body: summaryMarkdown,
+                            signal: AbortSignal.timeout(20000)
+                        })
+                    } catch (mdErr) {
+                        console.warn('[WebDAVService] Failed to upload summary markdown (non-blocking):', mdErr)
+                    }
+                }
                 return { success: true, etag: newEtag, updatedAt: Date.now() }
             }
 

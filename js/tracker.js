@@ -13,10 +13,12 @@ export class ReadingTracker {
         this._clock = null
         this.currentBookId = null
         this.currentBookTitle = null
+        this.currentBookAuthor = null
         this.currentSessionId = null
         this.sessionStartTime = null
         this.sessionStartFraction = 0
         this.sessionCumulativeSeconds = 0
+        this.activeIntervals = []
         this.lastFlushTime = 0
         this.lastFlushAttemptTime = 0
         this.lastCommittedTime = 0
@@ -74,10 +76,22 @@ export class ReadingTracker {
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
                 this.isIdle = true
+                if (this.tickerInterval) {
+                    clearInterval(this.tickerInterval)
+                    this.tickerInterval = null
+                }
                 this.backupPendingSession()
                 this.flush().catch(() => {})
             } else {
                 this.resetActivity()
+                if (this.isTracking && !this.tickerInterval) {
+                    const currentToken = this.sessionToken
+                    this.tickerInterval = setInterval(() => {
+                        if (this.sessionToken === currentToken) {
+                            this.tick()
+                        }
+                    }, 1000)
+                }
             }
         })
 
@@ -106,6 +120,7 @@ export class ReadingTracker {
         const targetBookId = sessionSnapshot?.bookId || this.currentBookId
         const targetSessionId = sessionSnapshot?.sessionId || this.currentSessionId
         const targetTitle = sessionSnapshot?.bookTitle || this.currentBookTitle
+        const targetAuthor = sessionSnapshot?.bookAuthor || this.currentBookAuthor || ''
         const targetDuration = sessionSnapshot?.durationSeconds != null ? sessionSnapshot.durationSeconds : this.sessionCumulativeSeconds
         const targetStartTime = sessionSnapshot?.startTime || this.sessionStartTime || this._now()
         const targetStartFrac = sessionSnapshot?.startFraction != null ? sessionSnapshot.startFraction : this.sessionStartFraction
@@ -122,7 +137,9 @@ export class ReadingTracker {
                 sessionId: targetSessionId,
                 bookId: targetBookId,
                 bookTitle: targetTitle,
+                bookAuthor: targetAuthor,
                 durationSeconds: targetDuration,
+                activeIntervals: structuredClone(sessionSnapshot?.activeIntervals || this.activeIntervals || []),
                 startTime: targetStartTime,
                 startProgress: targetStartFrac,
                 endProgress: endProgress != null ? endProgress : targetStartFrac,
@@ -259,10 +276,12 @@ export class ReadingTracker {
                                 id: data.sessionId,
                                 bookId: data.bookId,
                                 bookTitle: data.bookTitle || '已恢复会话',
+                                bookAuthor: data.bookAuthor || '',
                                 date: dateStr,
                                 startTime: data.startTime || this._now(),
                                 endTime: data.timestamp || this._now(),
                                 durationSeconds: data.durationSeconds,
+                                ...(Array.isArray(data.activeIntervals) ? { activeIntervals: data.activeIntervals } : {}),
                                 startProgress: data.startProgress || 0,
                                 endProgress: data.endProgress != null ? data.endProgress : (data.startProgress || 0)
                             }
@@ -300,7 +319,8 @@ export class ReadingTracker {
         }
     }
 
-    async startSession(bookId, bookTitle, startFraction = 0) {
+    async startSession(bookId, bookTitle, startFraction = 0, bookAuthor = '') {
+        this.currentBookAuthor = bookAuthor || ''
         this._startTokenSequence = (this._startTokenSequence || 0) + 1
         const startToken = this._startTokenSequence
 
@@ -335,6 +355,7 @@ export class ReadingTracker {
         this.sessionStartTime = now
         this.sessionStartFraction = startFraction
         this.sessionCumulativeSeconds = 0
+        this.activeIntervals = []
         this.sessionSlices = []
         this._committedHistoricalSeconds = 0
         this._activeFlushPromise = null
@@ -366,36 +387,11 @@ export class ReadingTracker {
         }
 
         if (!this.isIdle && (typeof document === 'undefined' || document.visibilityState === 'visible')) {
-            // Midnight rollover check: if calendar date crossed during active reading,
-            // gracefully record yesterday's slice and start a new slice for today without resetting session accumulation.
-            const todayStr = db.toLocalDateKey(now)
-            const sessionDateStr = db.toLocalDateKey(this.sessionStartTime || now)
-            if (todayStr !== sessionDateStr && this.sessionCumulativeSeconds > 0) {
-                this.sessionSlices = this.sessionSlices || []
-                this.sessionSlices.push({
-                    id: this.currentSessionId,
-                    bookId: this.currentBookId,
-                    bookTitle: this.currentBookTitle,
-                    date: sessionDateStr,
-                    startTime: this.sessionStartTime || now,
-                    endTime: now - 1,
-                    durationSeconds: this.sessionCumulativeSeconds,
-                    startProgress: this.sessionStartFraction,
-                    endProgress: this.sessionStartFraction,
-                    committed: false
-                })
-                this.currentSessionId = `sess_${now}_${Math.random().toString(36).slice(2, 7)}`
-                this.sessionStartTime = now
-                this.sessionCumulativeSeconds = 0
-                this.lastFlushTime = now
+            // Count bounded foreground windows and split them at local midnight.
+            if (this.timeOnCurrentPageSecs < MAX_PAGE_FOREGROUND_SECS) {
+                this.timeOnCurrentPageSecs += this.recordActiveWindow(Math.max(this.sessionStartTime, now - 1000), now)
             }
 
-            // Check Foreground Single Page Clamping (> 300s)
-            if (this.timeOnCurrentPageSecs < MAX_PAGE_FOREGROUND_SECS) {
-                this.sessionCumulativeSeconds++
-                this.timeOnCurrentPageSecs++
-            }
-            
             // Periodic flush every 20 seconds
             // Bounded throttle: only if 20s elapsed since last flush AND no in-flight flush AND at least 5s since last failed attempt
             if (now - this.lastFlushTime >= 20 * 1000) {
@@ -418,6 +414,40 @@ export class ReadingTracker {
                 })
             }
         }
+    }
+
+    recordActiveWindow(start, end) {
+        let duration = 0
+        while (start < end) {
+            const date = new Date(start)
+            const midnight = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime()
+            const partEnd = Math.min(end, midnight)
+            const dateKey = db.toLocalDateKey(start)
+            if (dateKey !== db.toLocalDateKey(this.sessionStartTime)) {
+                if (this.sessionCumulativeSeconds > 0) {
+                    this.sessionSlices.push({ id: this.currentSessionId, bookId: this.currentBookId, bookTitle: this.currentBookTitle,
+            bookAuthor: this.currentBookAuthor || '',
+                        date: db.toLocalDateKey(this.sessionStartTime), startTime: this.sessionStartTime,
+                        endTime: this.activeIntervals.at(-1)?.[1] || start, durationSeconds: this.sessionCumulativeSeconds,
+                        activeIntervals: structuredClone(this.activeIntervals), startProgress: this.sessionStartFraction,
+                        endProgress: this.sessionStartFraction, committed: false })
+                }
+                this.currentSessionId = `sess_${start}_${Math.random().toString(36).slice(2, 7)}`
+                this.sessionStartTime = start
+                this.sessionCumulativeSeconds = 0
+                this.activeIntervals = []
+            }
+            const last = this.activeIntervals.at(-1)
+            const activeStart = Math.max(start, last?.[1] || start)
+            if (partEnd > activeStart) {
+                if (last && activeStart <= last[1]) last[1] = partEnd
+                else this.activeIntervals.push([activeStart, partEnd])
+                this.sessionCumulativeSeconds += (partEnd - activeStart) / 1000
+                duration += (partEnd - activeStart) / 1000
+            }
+            start = partEnd
+        }
+        return duration
     }
 
     // Called on page turn / navigation relocation event
@@ -489,6 +519,7 @@ export class ReadingTracker {
         const targetSessionId = sessionSnapshot?.sessionId || this.currentSessionId
         const targetBookId = sessionSnapshot?.bookId || this.currentBookId
         const targetTitle = sessionSnapshot?.bookTitle || this.currentBookTitle
+        const targetAuthor = sessionSnapshot?.bookAuthor || this.currentBookAuthor || ''
         const targetDuration = sessionSnapshot?.durationSeconds != null ? sessionSnapshot.durationSeconds : this.sessionCumulativeSeconds
         const targetStartTime = sessionSnapshot?.startTime || this.sessionStartTime || now
         const targetStartFrac = sessionSnapshot?.startFraction != null ? sessionSnapshot.startFraction : this.sessionStartFraction
@@ -514,10 +545,12 @@ export class ReadingTracker {
             id: targetSessionId || `sess_${now}_${Math.random().toString(36).slice(2, 7)}`,
             bookId: targetBookId,
             bookTitle: targetTitle,
+            bookAuthor: targetAuthor,
             date: dateStr,
             startTime: sliceStartTime,
             endTime: now,
             durationSeconds: targetDuration,
+            activeIntervals: structuredClone(sessionSnapshot?.activeIntervals || this.activeIntervals || []),
             startProgress: targetStartFrac,
             endProgress: finalFraction != null ? finalFraction : targetStartFrac
         }
@@ -604,7 +637,9 @@ export class ReadingTracker {
             sessionId: this.currentSessionId,
             bookId: this.currentBookId,
             bookTitle: this.currentBookTitle,
+            bookAuthor: this.currentBookAuthor || '',
             durationSeconds: this.sessionCumulativeSeconds,
+            activeIntervals: structuredClone(this.activeIntervals),
             startTime: this.sessionStartTime,
             startFraction: this.sessionStartFraction,
             slices: this.sessionSlices ? [...this.sessionSlices] : [],
@@ -618,8 +653,10 @@ export class ReadingTracker {
             this.isTracking = false
             this.currentBookId = null
             this.currentBookTitle = null
+            this.currentBookAuthor = null
             this.currentSessionId = null
             this.sessionCumulativeSeconds = 0
+            this.activeIntervals = []
             this.sessionSlices = []
             this._committedHistoricalSeconds = 0
             this.timeOnCurrentPageSecs = 0

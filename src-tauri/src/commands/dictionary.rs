@@ -10,6 +10,17 @@ static DB_MUTEX: Mutex<()> = Mutex::new(());
 static CUSTOM_DICT_DIR: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 static DOWNLOAD_CANCEL: AtomicBool = AtomicBool::new(false);
 static DOWNLOAD_PROGRESS: OnceLock<RwLock<DictDownloadProgress>> = OnceLock::new();
+static CACHED_CONN: OnceLock<Mutex<Option<(PathBuf, Connection)>>> = OnceLock::new();
+
+fn get_cached_conn_lock() -> &'static Mutex<Option<(PathBuf, Connection)>> {
+    CACHED_CONN.get_or_init(|| Mutex::new(None))
+}
+
+pub fn invalidate_cached_dict_conn() {
+    if let Ok(mut guard) = get_cached_conn_lock().lock() {
+        *guard = None;
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -186,6 +197,7 @@ fn get_effective_db_path() -> Option<PathBuf> {
     if !user_path.exists() {
         let bak = user_path.with_extension("bak");
         if bak.exists() {
+            invalidate_cached_dict_conn();
             let meta_path = get_dict_meta_path();
             let bak_meta = meta_path.with_extension("bak");
             let _ = fs::rename(&bak, &user_path);
@@ -377,6 +389,7 @@ pub fn dict_get_status() -> DictStatus {
     let meta_path = get_dict_meta_path();
     let mut version = "1.0.28".to_string();
     let mut sha256 = None;
+    let mut meta_word_count: u64 = 0;
     if meta_path.exists() {
         if let Ok(meta_content) = fs::read_to_string(&meta_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&meta_content) {
@@ -385,6 +398,9 @@ pub fn dict_get_status() -> DictStatus {
                 }
                 if let Some(h) = json.get("dbSha256").and_then(|h| h.as_str()) {
                     sha256 = Some(h.to_string());
+                }
+                if let Some(c) = json.get("totalEntries").and_then(|v| v.as_u64()).or_else(|| json.get("wordCount").and_then(|v| v.as_u64())) {
+                    meta_word_count = c;
                 }
             }
         }
@@ -403,24 +419,31 @@ pub fn dict_get_status() -> DictStatus {
         };
     }
 
-    // Verify DB can be opened and queried (read-only SQLite query, non-blocking)
+    // Verify DB can be opened and queried (fast health check without full-table scan)
     match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
         Ok(conn) => {
-            let count_res: Result<u64, _> = conn.query_row(
-                "SELECT count(*) FROM entries;",
+            let health_res: Result<i32, _> = conn.query_row(
+                "SELECT 1 FROM entries LIMIT 1;",
                 [],
                 |row| row.get(0),
             );
-            match count_res {
-                Ok(count) if count > 0 => DictStatus {
-                    status: "installed".to_string(),
-                    word_count: count,
-                    size_bytes: size,
-                    version,
-                    name: "Skywind3000 ECDICT".to_string(),
-                    path: db_path.to_string_lossy().to_string(),
-                    sha256,
-                },
+            match health_res {
+                Ok(_) => {
+                    let word_count = if meta_word_count > 0 {
+                        meta_word_count
+                    } else {
+                        conn.query_row("SELECT count(*) FROM entries;", [], |row| row.get(0)).unwrap_or(0)
+                    };
+                    DictStatus {
+                        status: "installed".to_string(),
+                        word_count,
+                        size_bytes: size,
+                        version,
+                        name: "Skywind3000 ECDICT".to_string(),
+                        path: db_path.to_string_lossy().to_string(),
+                        sha256,
+                    }
+                }
                 _ => DictStatus {
                     status: "corrupted".to_string(),
                     word_count: 0,
@@ -475,10 +498,41 @@ pub fn dict_lookup(word: String) -> DictLookupResult {
         }
     };
 
-    // Read-only SQLite query without taking global DB_MUTEX
-    let conn = match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        Ok(c) => c,
-        Err(_) => {
+    // Read-only SQLite query with cached Connection & prepared statement
+    let mut conn_guard = match get_cached_conn_lock().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+
+    let needs_reopen = match &*conn_guard {
+        Some((ref p, _)) => p != &db_path,
+        None => true,
+    };
+
+    if needs_reopen {
+        match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(c) => {
+                *conn_guard = Some((db_path.clone(), c));
+            }
+            Err(_) => {
+                return DictLookupResult {
+                    found: false,
+                    word,
+                    normalized_word: norm,
+                    phonetic: String::new(),
+                    entries: Vec::new(),
+                    translation_raw: String::new(),
+                    source: "词典文件损坏".to_string(),
+                };
+            }
+        }
+    }
+
+    let (_, ref mut conn) = conn_guard.as_mut().unwrap();
+    let query = "SELECT word, phonetic, translation, exchange FROM entries WHERE word = ?1 COLLATE NOCASE LIMIT 1;";
+    let mut stmt = match conn.prepare_cached(query) {
+        Ok(s) => s,
+        Err(e) => {
             return DictLookupResult {
                 found: false,
                 word,
@@ -486,15 +540,14 @@ pub fn dict_lookup(word: String) -> DictLookupResult {
                 phonetic: String::new(),
                 entries: Vec::new(),
                 translation_raw: String::new(),
-                source: "词典文件损坏".to_string(),
+                source: format!("查询语句编译失败: {}", e),
             };
         }
     };
 
     // 1. Direct match (try raw trimmed first to preserve abbreviations like A.M.D. / etc., then norm)
-    let query = "SELECT word, phonetic, translation, exchange FROM entries WHERE word = ?1 COLLATE NOCASE LIMIT 1;";
     let raw_trimmed = word.trim();
-    let mut direct = conn.query_row(query, params![raw_trimmed], |row| {
+    let mut direct = stmt.query_row(params![raw_trimmed], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -503,7 +556,7 @@ pub fn dict_lookup(word: String) -> DictLookupResult {
         ))
     });
     if direct.is_err() && !norm.is_empty() && norm != raw_trimmed {
-        direct = conn.query_row(query, params![norm], |row| {
+        direct = stmt.query_row(params![norm], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -535,7 +588,7 @@ pub fn dict_lookup(word: String) -> DictLookupResult {
     // 2. Lemmatization candidates
     let candidates = generate_lemma_candidates(&norm);
     for cand in candidates {
-        let found_cand = conn.query_row(query, params![cand], |row| {
+        let found_cand = stmt.query_row(params![cand], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -573,6 +626,7 @@ pub fn dict_lookup(word: String) -> DictLookupResult {
 
 #[tauri::command]
 pub fn dict_uninstall() -> Result<bool, String> {
+    invalidate_cached_dict_conn();
     let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     let db_path = get_dict_db_path();
     let meta_path = get_dict_meta_path();
@@ -822,6 +876,7 @@ pub fn dict_install_from_file(source_path: String) -> Result<DictStatus, String>
     let bak_dest = dest.with_extension("bak");
     let bak_meta = meta_path.with_extension("bak");
     {
+        invalidate_cached_dict_conn();
         let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         // Preserve and restore existing backup if destination db is missing (e.g. from an interrupted install)
         if !dest.exists() && bak_dest.exists() {
@@ -1085,6 +1140,7 @@ pub async fn dict_download_and_install(source_url: Option<String>) -> Result<Dic
     let bak_db = dest_db.with_extension("bak");
     let bak_meta = meta_path.with_extension("bak");
     {
+        invalidate_cached_dict_conn();
         let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         // Preserve and restore existing backup if destination db is missing (e.g. from an interrupted install)
         if !dest_db.exists() && bak_db.exists() {
@@ -1237,6 +1293,7 @@ pub fn dict_migrate_storage(
     fs::write(&test_file, b"ok").map_err(|e| format!("目标目录没有写入权限: {}", e))?;
     let _ = fs::remove_file(&test_file);
 
+    invalidate_cached_dict_conn();
     let src_db = get_dict_db_path();
     let src_meta = get_dict_meta_path();
 

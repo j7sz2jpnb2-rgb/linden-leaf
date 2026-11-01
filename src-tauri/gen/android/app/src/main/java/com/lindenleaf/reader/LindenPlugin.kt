@@ -272,7 +272,42 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
             val utteranceId = args.optString("utteranceId", "")
             val generation = args.optLong("generation", 0L)
 
-            LindenMediaPlaybackService.startSpeaking(activity, bookTitle, text, rate, jobId, utteranceId, generation)
+            (activity as? MainActivity)?.requestListeningNotificationPermission()
+            LindenMediaPlaybackService.startSpeaking(activity, bookTitle, text, rate, jobId, utteranceId, generation, args.optString("bookId", ""))
+            val res = JSObject()
+            res.put("value", true)
+            invoke.resolve(res)
+        } catch (e: Exception) {
+            invoke.reject(e.message ?: e.toString())
+        }
+    }
+
+    @Command
+    fun startBackgroundTtsQueue(invoke: Invoke) {
+        try {
+            val args = invoke.getArgs()
+            val bookTitle = args.optString("bookTitle", "Linden Leaf 朗读")
+            val segmentsArray = args.getJSONArray("segments")
+            val startIndex = args.optInt("startIndex", 0)
+            val rate = args.optDouble("rate", 1.0).toFloat()
+            val jobId = args.optString("jobId", "")
+            val generation = args.optLong("generation", 0L)
+
+            val texts = ArrayList<String>()
+            val utterances = ArrayList<String>()
+            for (i in 0 until segmentsArray.length()) {
+                val seg = segmentsArray.optJSONObject(i)
+                if (seg != null) {
+                    texts.add(seg.optString("text", ""))
+                    utterances.add(seg.optString("utteranceId", "utt_$i"))
+                } else {
+                    texts.add(segmentsArray.optString(i, ""))
+                    utterances.add("utt_$i")
+                }
+            }
+
+            (activity as? MainActivity)?.requestListeningNotificationPermission()
+            LindenMediaPlaybackService.startSpeakingQueue(activity, bookTitle, texts, utterances, startIndex, rate, jobId, generation, args.optString("bookId", ""))
             val res = JSObject()
             res.put("value", true)
             invoke.resolve(res)
@@ -283,35 +318,81 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun pauseBackgroundTts(invoke: Invoke) {
-        try {
-            LindenMediaPlaybackService.pause(activity)
-            val res = JSObject()
-            res.put("value", true)
-            invoke.resolve(res)
-        } catch (e: Exception) {
-            invoke.reject(e.message ?: e.toString())
-        }
+        val res = JSObject()
+        res.put("value", LindenMediaPlaybackService.pause(activity, invoke.getArgs().optString("jobId", "")))
+        invoke.resolve(res)
     }
 
     @Command
     fun resumeBackgroundTts(invoke: Invoke) {
-        try {
-            LindenMediaPlaybackService.resume(activity)
-            val res = JSObject()
-            res.put("value", true)
-            invoke.resolve(res)
-        } catch (e: Exception) {
-            invoke.reject(e.message ?: e.toString())
-        }
+        val res = JSObject()
+        res.put("value", LindenMediaPlaybackService.resume(activity, invoke.getArgs().optString("jobId", "")))
+        invoke.resolve(res)
     }
 
     @Command
     fun stopBackgroundTts(invoke: Invoke) {
+        val res = JSObject()
+        res.put("value", LindenMediaPlaybackService.stop(activity, invoke.getArgs().optString("jobId", "")))
+        invoke.resolve(res)
+    }
+
+    @Command
+    fun setTtsSleepTimer(invoke: Invoke) {
+        LindenMediaPlaybackService.setSleepTimer(invoke.getArgs().optInt("minutes", 0))
+        invoke.resolve(JSObject().put("value", true) as JSObject)
+    }
+
+    @Command
+    fun setTtsRate(invoke: Invoke) {
+        LindenMediaPlaybackService.setRate(invoke.getArgs().optDouble("rate", 1.0).toFloat())
+        invoke.resolve(JSObject().put("value", true) as JSObject)
+    }
+
+    @Command
+    fun nextBackgroundTts(invoke: Invoke) {
+        val res = JSObject()
+        res.put("value", LindenMediaPlaybackService.next(activity))
+        invoke.resolve(res)
+    }
+
+    @Command
+    fun prevBackgroundTts(invoke: Invoke) {
+        val res = JSObject()
+        res.put("value", LindenMediaPlaybackService.previous(activity))
+        invoke.resolve(res)
+    }
+
+    @Command
+    fun acknowledgeTtsListening(invoke: Invoke) {
         try {
-            LindenMediaPlaybackService.stop(activity)
+            LindenMediaPlaybackService.acknowledgeListening(activity, invoke.getArgs().getLong("throughSequence"))
             val res = JSObject()
             res.put("value", true)
             invoke.resolve(res)
+        } catch (e: Exception) { invoke.reject(e.message ?: "听书记录确认失败") }
+    }
+
+    @Command
+    fun exportBookFile(invoke: Invoke) {
+        val main = activity as? MainActivity
+        if (main == null) { invoke.reject("文件导出暂不可用"); return }
+        val args = invoke.getArgs()
+        main.exportBookFile(args.getString("filePath"), args.optString("filename", "book.epub"),
+            args.optBoolean("share", false)) { result -> invoke.resolve(JSObject(result.toString())) }
+    }
+
+    @Command
+    fun getSystemInsets(invoke: Invoke) {
+        try {
+            val insets = JSObject()
+            insets.put("top", MainActivity.lastInsetsTop.toDouble())
+            insets.put("bottom", MainActivity.lastInsetsBottom.toDouble())
+            insets.put("left", MainActivity.lastInsetsLeft.toDouble())
+            insets.put("right", MainActivity.lastInsetsRight.toDouble())
+            insets.put("ime", MainActivity.lastInsetsIme.toDouble())
+            insets.put("keyboardOpen", MainActivity.lastInsetsIme > 50)
+            invoke.resolve(insets)
         } catch (e: Exception) {
             invoke.reject(e.message ?: e.toString())
         }
@@ -333,6 +414,10 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
             res.put("rate", LindenMediaPlaybackService.currentRate.toDouble())
             res.put("eventSeq", LindenMediaPlaybackService.eventSeq)
             res.put("error", LindenMediaPlaybackService.lastError)
+            res.put("queueIndex", LindenMediaPlaybackService.currentQueueIndex)
+            res.put("queueTotal", LindenMediaPlaybackService.queueTotalCount)
+            res.put("listeningIntervals", LindenMediaPlaybackService.listeningIntervals(activity))
+            res.put("sleepTimerDeadlineMs", LindenMediaPlaybackService.sleepTimerDeadlineRealtimeMs)
             invoke.resolve(res)
         } catch (e: Exception) {
             invoke.reject(e.message ?: e.toString())
