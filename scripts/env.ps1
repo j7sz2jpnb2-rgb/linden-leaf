@@ -7,9 +7,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 # Configure PATH with discovered local toolchains (Git, Node, PNPM, Cargo)
 $toolPaths = @(
     "D:\LindenLeaf-Toolchains\cargo\bin",
-    "C:\Users\YONGHU\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd",
-    "C:\Users\YONGHU\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin",
-    "C:\Users\YONGHU\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback"
+    "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd",
+    "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin",
+    "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback"
 )
 
 # Deterministic MSVC v143 Toolset (14.44.35207) and Windows 11 SDK (10.0.22621.0)

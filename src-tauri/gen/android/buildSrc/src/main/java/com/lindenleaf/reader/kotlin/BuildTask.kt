@@ -56,7 +56,7 @@ open class BuildTask : DefaultTask() {
             candidates.addAll(listOf(
                 "pnpm.cmd",
                 "pnpm.exe",
-                "C:/Users/YONGHU/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/pnpm.cmd"
+                File(System.getProperty("user.home"), ".cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/pnpm.cmd").absolutePath
             ))
         }
 

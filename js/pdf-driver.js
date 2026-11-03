@@ -1,5 +1,5 @@
 // PDF backend abstraction.
-// PDF.js is always available; native MuPDF is an optional Tauri acceleration
+// PDF.js is fallback; native Rust PDF engine is default acceleration in Tauri
 // path for local files. Both expose the same viewport-facing surface.
 
 import { platformBridge } from './platformBridge.js'
@@ -143,6 +143,38 @@ export class PdfJsDriver {
     }
 
     getOutline() { return this._loadOutline() }
+
+    async getLinks(pageIndex) {
+        if (!this.pdfDoc || this._destroyed) return []
+        let page = null
+        try {
+            page = await this.pdfDoc.getPage(pageIndex + 1)
+            const annotations = await page.getAnnotations()
+            const links = []
+            for (const annot of annotations || []) {
+                if (annot.subtype !== 'Link') continue
+                let targetPage = null
+                if (annot.dest) {
+                    try {
+                        const dest = typeof annot.dest === 'string'
+                            ? await this.pdfDoc.getDestination(annot.dest)
+                            : annot.dest
+                        if (dest?.[0]) targetPage = await this.pdfDoc.getPageIndex(dest[0])
+                    } catch {}
+                }
+                links.push({
+                    rect: annot.rect || null,
+                    uri: annot.url || annot.unsafeUrl || null,
+                    page: targetPage,
+                })
+            }
+            return links
+        } catch {
+            return []
+        } finally {
+            try { page?.cleanup?.() } catch {}
+        }
+    }
 
     async getPageSizes(start, count, signal) {
         const out = []
@@ -301,9 +333,26 @@ export class MuPdfTauriDriver {
         this.docId = meta.docId
         this.numPages = meta.numPages || 0
         const first = { width: meta.defaultWidth || 595, height: meta.defaultHeight || 842 }
-        const pageSizes = Array.from({ length: this.numPages }, () => ({ ...first }))
+        let pageSizes
+        if (Array.isArray(meta.pageSizes) && meta.pageSizes.length >= this.numPages * 2) {
+            pageSizes = Array.from({ length: this.numPages }, (_, i) => ({
+                width: meta.pageSizes[i * 2] || first.width,
+                height: meta.pageSizes[i * 2 + 1] || first.height,
+            }))
+            this.allPageSizesKnown = true
+        } else {
+            pageSizes = Array.from({ length: this.numPages }, () => ({ ...first }))
+            this.allPageSizesKnown = false
+        }
 
-        return { numPages: this.numPages, pageSizes, toc: [], title: meta.title || 'PDF 文档', author: meta.author || '未知作者' }
+        return {
+            numPages: this.numPages,
+            pageSizes,
+            allPageSizesKnown: this.allPageSizesKnown,
+            toc: [],
+            title: meta.title || 'PDF 文档',
+            author: meta.author || '未知作者',
+        }
     }
 
     async getOutline() {
@@ -322,6 +371,36 @@ export class MuPdfTauriDriver {
             toc = root
         } catch {}
         return this._destroyed ? [] : toc
+    }
+
+    async getLinks(pageIndex) {
+        if (this._destroyed || !this.docId) return []
+        try {
+            const rawLinks = await platformBridge._invokeTauri('mupdf_get_links', {
+                docId: this.docId,
+                pageIndex,
+            })
+            if (!Array.isArray(rawLinks)) return []
+            return rawLinks.map(link => {
+                let rect = null
+                if (Array.isArray(link.rect)) {
+                    rect = link.rect
+                } else if (link.x != null || link.x0 != null) {
+                    const x0 = link.x0 ?? link.x ?? 0
+                    const y0 = link.y0 ?? link.y ?? 0
+                    const x1 = link.x1 ?? (x0 + (link.w ?? link.width ?? 0))
+                    const y1 = link.y1 ?? (y0 + (link.h ?? link.height ?? 0))
+                    rect = [x0, y0, x1, y1]
+                }
+                return {
+                    rect,
+                    uri: link.uri || link.url || null,
+                    page: Number.isInteger(link.page) ? link.page : (Number.isInteger(link.pageIndex) ? link.pageIndex : null),
+                }
+            })
+        } catch {
+            return []
+        }
     }
 
     async getPageSizes(start, count, signal) {
@@ -451,12 +530,77 @@ export class MuPdfTauriDriver {
 
     async getTextLayer(pageIndex) {
         const chars = await this.getTextGeometry(pageIndex)
-        return { spans: chars.map(ch => {
+        if (!chars || !chars.length) return { spans: [], chars: [] }
+
+        // Group consecutive characters on the same line into line-level spans so full-text search
+        // (`span.text.toLowerCase().indexOf(query)` in `app.js`) matches multi-character words and phrases,
+        // while preserving per-character `charOffsets` and `charBoxes` for exact substring highlight rectangles!
+        const spans = []
+        let current = null
+
+        const flushLine = () => {
+            if (!current) return
+            const w = Math.max(0, current.maxX - current.minX)
+            const h = Math.max(0, current.maxY - current.minY)
+            spans.push({
+                text: current.text,
+                x: current.minX,
+                y: current.minY,
+                w,
+                h,
+                size: current.sizeSum / Math.max(1, current.count),
+                line: current.line,
+                quad: [
+                    current.minX, current.minY,
+                    current.maxX, current.minY,
+                    current.minX, current.maxY,
+                    current.maxX, current.maxY,
+                ],
+                charOffsets: current.charOffsets,
+                charBoxes: current.charBoxes,
+            })
+            current = null
+        }
+
+        for (const ch of chars) {
             const q = ch.quad
-            const xs = [q[0], q[2], q[4], q[6]], ys = [q[1], q[3], q[5], q[7]]
-            const x = Math.min(...xs), y = Math.min(...ys)
-            return { text: ch.text, x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y, size: ch.size, line: ch.line, quad: q }
-        }) }
+            const xs = [q[0], q[2], q[4], q[6]]
+            const ys = [q[1], q[3], q[5], q[7]]
+            const x0 = Math.min(...xs), x1 = Math.max(...xs)
+            const y0 = Math.min(...ys), y1 = Math.max(...ys)
+            const chText = ch.text || ''
+
+            if (!current || current.line !== ch.line) {
+                flushLine()
+                current = {
+                    line: ch.line,
+                    text: '',
+                    minX: x0,
+                    minY: y0,
+                    maxX: x1,
+                    maxY: y1,
+                    sizeSum: 0,
+                    count: 0,
+                    charOffsets: [],
+                    charBoxes: [],
+                }
+            } else {
+                current.minX = Math.min(current.minX, x0)
+                current.minY = Math.min(current.minY, y0)
+                current.maxX = Math.max(current.maxX, x1)
+                current.maxY = Math.max(current.maxY, y1)
+            }
+
+            const startOffset = current.text.length
+            current.text += chText
+            current.sizeSum += (ch.size || 12)
+            current.count += 1
+            current.charOffsets.push({ start: startOffset, end: current.text.length })
+            current.charBoxes.push({ x0, y0, x1, y1, quad: q })
+        }
+        flushLine()
+
+        return { spans, chars }
     }
 
     async select(pageIndex, a, b, mode = 'char') {
@@ -523,6 +667,7 @@ export class AdaptivePdfDriver {
     }
 
     get numPages() { return this.backend?.numPages || 0 }
+    get allPageSizesKnown() { return Boolean(this.backend?.allPageSizesKnown) }
     getPageSizes(...args) { return this.backend.getPageSizes(...args) }
     renderPage(...args) { return this.backend.renderPage(...args) }
     renderTextLayer(...args) { return this.backend.renderTextLayer?.(...args) }
@@ -530,6 +675,7 @@ export class AdaptivePdfDriver {
     getTextGeometry(...args) { return this.backend.getTextGeometry?.(...args) }
     select(...args) { return this.backend.select?.(...args) }
     getOutline(...args) { return this.backend.getOutline?.(...args) }
+    getLinks(...args) { return this.backend?.getLinks?.(...args) || Promise.resolve([]) }
     destroy() {
         this._destroyed = true
         this.backend?.destroy?.()
@@ -542,6 +688,7 @@ export function setMuPdfStoreLimit(maxMb) {
     if (typeof localStorage !== 'undefined') {
         localStorage.setItem('linden_pdf_store_mb', String(val))
     }
+    platformBridge?._invokeTauri?.('mupdf_set_store_limit', { maxMb: val }).catch(() => {})
     return val
 }
 

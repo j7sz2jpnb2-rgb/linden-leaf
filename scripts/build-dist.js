@@ -119,7 +119,7 @@ const combinedDigest = hashResources ? crypto.createHash('sha256').update(allFil
 function runGit(args) {
     const candidateGitPaths = [
         'git',
-        'C:\\Users\\YONGHU\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\git\\cmd\\git.exe'
+        ...(process.env.USERPROFILE ? [path.join(process.env.USERPROFILE, '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'native', 'git', 'cmd', 'git.exe')] : [])
     ];
     for (const gitBin of candidateGitPaths) {
         try {

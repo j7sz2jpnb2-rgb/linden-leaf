@@ -125,6 +125,7 @@ class PlatformBridge {
      *   os: string,
      *   isAndroid: boolean,
      *   isWindows: boolean,
+     *   hasNativePdf: boolean,
      *   hasNativeMuPdf: boolean,
      *   hasContentUriSupport: boolean,
      *   hasPersistentUriPermission: boolean,
@@ -146,8 +147,9 @@ class PlatformBridge {
             os,
             isAndroid,
             isWindows,
-            // Native compiled MuPDF only available on Windows desktop in current build
-            hasNativeMuPdf: Boolean(isTauri && isWindows),
+            // Native compiled Rust PDF backend available in Tauri
+            hasNativePdf: Boolean(isTauri),
+            hasNativeMuPdf: Boolean(isTauri),
             // Android SAF (Storage Access Framework) content:// URIs - NOT yet implemented in native layer
             hasContentUriSupport: false,
             // Persistent permissions require Android ContentResolver takePersistableUriPermission - NOT yet implemented
@@ -283,7 +285,7 @@ class PlatformBridge {
 
     /**
      * Stream copy a document source (file, blob, or content URI) into app private snapshot cache.
-     * Contract: Ensures that file-seekable engines like MuPDF have an isolated private file.
+     * Contract: Ensures that file-seekable engines have an isolated private file.
      * @param {object} source
      * @param {string} [source.path]
      * @param {string} [source.contentUri]
@@ -644,6 +646,45 @@ class PlatformBridge {
     }
 
     /**
+     * Open a new independent application window (either a satellite reader window for a specific book
+     * or a full shelf window). If a satellite window for the same bookId is already open, focuses it.
+     * @param {{ bookId?: string|null, windowMode?: string|null, title?: string|null }} [options]
+     */
+    async openNewWindow(options = {}) {
+        const bookId = options?.bookId ? String(options.bookId) : null;
+        const windowMode = options?.windowMode || (bookId ? 'reader' : 'shelf');
+        const title = options?.title ? String(options.title) : null;
+
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('window_open_new', {
+                    bookId,
+                    book_id: bookId,
+                    windowMode,
+                    window_mode: windowMode,
+                    title
+                });
+            } catch (e) {
+                console.warn('[PlatformBridge] Tauri window_open_new failed:', e);
+            }
+        }
+
+        if (typeof window !== 'undefined' && typeof window.open === 'function') {
+            const url = new URL(window.location.href);
+            if (bookId) {
+                url.searchParams.set('windowMode', windowMode);
+                url.searchParams.set('bookId', bookId);
+            } else {
+                url.searchParams.delete('windowMode');
+                url.searchParams.delete('bookId');
+            }
+            window.open(url.toString(), '_blank');
+            return { success: true, alreadyExists: false };
+        }
+        return { success: false };
+    }
+
+    /**
      * Check if window is currently maximized
      * @returns {Promise<boolean>}
      */
@@ -815,6 +856,17 @@ class PlatformBridge {
         if (this.isTauri && window.__TAURI__?.event?.listen) {
             let unlistenFn = null;
             window.__TAURI__.event.listen('app:request-flush', async (event) => {
+                const targetWinLabel = event.payload?.windowLabel || event.payload?.window_label || null;
+                if (targetWinLabel) {
+                    try {
+                        const curLabel = window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow?.()?.label
+                            || window.__TAURI__?.window?.getCurrentWindow?.()?.label
+                            || null;
+                        if (curLabel && curLabel !== targetWinLabel) {
+                            return;
+                        }
+                    } catch (_) {}
+                }
                 const reqId = event.payload?.requestId || event.payload?.request_id || (typeof event.payload === 'string' ? event.payload : null);
                 try {
                     await callback(reqId);

@@ -31,6 +31,15 @@ export class ReadingTracker {
         this.isIdle = false
         this.idleThresholdMs = 180 * 1000 // 180 seconds of no interaction = idle
 
+        // Multi-Window Single Active Reading Lease (1x Wall-Clock Cap) & Soft Blur Grace Period
+        this.windowId = `win_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+        this.hasActiveLease = true
+        this._lastLeaseClaimBroadcastTime = 0
+        this._blurredAt = 0
+        this.blurGracePeriodMs = 60 * 1000 // 60s soft grace period when taking notes in external apps (Obsidian/Word)
+        this._leaseChannel = null
+        this._syncChannel = null
+
         this.tickerInterval = null
         this.onTickCallback = null
         this.sessionToken = 0 // Monotonic token to prevent session race conditions
@@ -95,13 +104,41 @@ export class ReadingTracker {
             }
         })
 
-        // Window blur / focus
+        // Cross-window Single Active Reading Lease bus (1x wall-clock cap across multiple open books)
+        if (typeof BroadcastChannel !== 'undefined') {
+            try {
+                this._leaseChannel = new BroadcastChannel('linden-reading-lease')
+                this._leaseChannel.onmessage = (event) => {
+                    const msg = event?.data
+                    if (!msg || msg.windowId === this.windowId) return
+                    if (msg.type === 'CLAIM_LEASE') {
+                        // Another Linden Leaf window was interacted with -> immediately yield lease!
+                        if (this.hasActiveLease || !this.isIdle) {
+                            this.hasActiveLease = false
+                            this.isIdle = true
+                            this._blurredAt = 0
+                            if (this.isTracking) {
+                                this.backupPendingSession()
+                                this.flush().catch(() => {})
+                            }
+                        }
+                    }
+                }
+            } catch (e) {}
+            try {
+                this._syncChannel = new BroadcastChannel('linden-sync-bus')
+            } catch (e) {}
+        }
+
+        // Window blur / focus with 60s soft grace period for external note-taking (e.g. Obsidian / Word)
         window.addEventListener('blur', () => {
-            this.isIdle = true
+            this._blurredAt = this._now()
             this.backupPendingSession()
             this.flush().catch(() => {})
         })
         window.addEventListener('focus', () => {
+            this._blurredAt = 0
+            this.claimReadingLease(true)
             this.resetActivity()
         })
 
@@ -146,6 +183,7 @@ export class ReadingTracker {
                 slices: targetSlices.filter(s => !s.committed),
                 committedHistoricalSeconds: historicalCommitted,
                 version: this._backupVersion,
+                windowId: this.windowId,
                 timestamp: this._now()
             }
 
@@ -239,10 +277,16 @@ export class ReadingTracker {
                     }
                 } catch (e) {}
 
+                const nowTs = this._now()
                 for (const data of backupsToRecover) {
                     if (!data || !data.bookId || !data.sessionId) {
                         if (data?.sessionId) this.clearPendingSessionBackup(data.sessionId)
                         result.filtered.push({ sessionId: data?.sessionId, reason: 'malformed_data' })
+                        continue
+                    }
+                    // Multi-window isolation: Do not prematurely recover a session that is actively running in another live window
+                    if (data.windowId && data.windowId !== this.windowId && data.timestamp && (nowTs - data.timestamp) < 45 * 1000) {
+                        result.deferred.push({ sessionId: data.sessionId, windowId: data.windowId, reason: 'active_in_another_window' })
                         continue
                     }
 
@@ -308,9 +352,31 @@ export class ReadingTracker {
         return this._recoveryPromise
     }
 
+    claimReadingLease(forceBroadcast = false) {
+        const now = this._now()
+        const wasHolding = this.hasActiveLease
+        this.hasActiveLease = true
+        this._blurredAt = 0
+        if (this._leaseChannel && (forceBroadcast || !wasHolding || (now - this._lastLeaseClaimBroadcastTime > 1500))) {
+            this._lastLeaseClaimBroadcastTime = now
+            try {
+                this._leaseChannel.postMessage({
+                    type: 'CLAIM_LEASE',
+                    windowId: this.windowId,
+                    bookId: this.currentBookId,
+                    timestamp: now
+                })
+            } catch (e) {}
+        }
+    }
+
     // Call this on user interactions (keydown, click, scroll, touch, wheel)
     resetActivity() {
         this.lastActivityTime = Date.now()
+        this._blurredAt = 0
+        if (this.isTracking) {
+            this.claimReadingLease(false)
+        }
         if (this.isIdle) {
             this.isIdle = false
         }
@@ -368,6 +434,7 @@ export class ReadingTracker {
 
         this.isTracking = true
         this.isIdle = false
+        this.claimReadingLease(true)
 
         if (this.tickerInterval) clearInterval(this.tickerInterval)
         this.tickerInterval = setInterval(() => {
@@ -381,12 +448,26 @@ export class ReadingTracker {
         if (!this.isTracking) return
 
         const now = this._now()
-        // Check for overall session idle (> 180s without interaction)
+        // 1. If another Linden Leaf window claimed the reading lease, pause immediately (1x wall-clock cap)
+        if (!this.hasActiveLease) {
+            this.isIdle = true
+            return
+        }
+        // 2. If window is blurred (user switched to external app like Obsidian/Word), allow 60s soft grace period
+        if (this._blurredAt > 0 && (now - this._blurredAt > this.blurGracePeriodMs)) {
+            if (!this.isIdle) {
+                this.isIdle = true
+                this.backupPendingSession()
+                this.flush().catch(() => {})
+            }
+            return
+        }
+        // 3. Check for overall session idle (> 180s without interaction)
         if (now - this.lastActivityTime > this.idleThresholdMs) {
             this.isIdle = true
         }
 
-        if (!this.isIdle && (typeof document === 'undefined' || document.visibilityState === 'visible')) {
+        if (!this.isIdle && this.hasActiveLease && (typeof document === 'undefined' || document.visibilityState === 'visible')) {
             // Count bounded foreground windows and split them at local midnight.
             if (this.timeOnCurrentPageSecs < MAX_PAGE_FOREGROUND_SECS) {
                 this.timeOnCurrentPageSecs += this.recordActiveWindow(Math.max(this.sessionStartTime, now - 1000), now)
@@ -594,6 +675,15 @@ export class ReadingTracker {
                 if (isFinal && targetSessionId) {
                     this.clearPendingSessionBackup(targetSessionId, sessionSnapshot?.version)
                 }
+                try {
+                    this._syncChannel?.postMessage({
+                        type: 'READING_STATS_UPDATED',
+                        bookId: targetBookId,
+                        windowId: this.windowId,
+                        durationSeconds: totalSessionDuration,
+                        timestamp: Date.now()
+                    })
+                } catch (e) {}
                 return { status: 'committed', durationSeconds: totalSessionDuration }
             } catch (err) {
                 console.warn('Failed to record reading session:', err)

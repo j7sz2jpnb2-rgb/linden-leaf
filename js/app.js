@@ -171,26 +171,36 @@ class ObjectUrlPool {
             return ''
         }
     }
-    pruneUnused() {
+    pruneUnused(force = false) {
         // Find keys whose URL is NOT currently referenced by an <img> or element in the active DOM or any registered pending root
-        for (const [key, url] of this.cache.entries()) {
-            if (this.cache.size <= Math.floor(this.maxCapacity * 0.8)) break
-            try {
-                const selector = `img[src="${CSS.escape(url)}"], [data-cover-url="${CSS.escape(url)}"]`
-                let inDom = !!document.querySelector(selector)
-                if (!inDom && this.pendingRoots.size > 0) {
-                    for (const root of this.pendingRoots) {
-                        if (root.querySelector?.(selector)) {
-                            inDom = true
-                            break
-                        }
+        const activeUrls = new Set()
+        try {
+            const domImgs = document.querySelectorAll('img[src^="blob:"], [data-cover-url^="blob:"]')
+            for (const el of domImgs) {
+                if (el.src && el.src.startsWith('blob:')) activeUrls.add(el.src)
+                const dUrl = el.getAttribute?.('data-cover-url')
+                if (dUrl && dUrl.startsWith('blob:')) activeUrls.add(dUrl)
+            }
+        } catch (_) {}
+
+        if (this.pendingRoots.size > 0) {
+            for (const root of this.pendingRoots) {
+                try {
+                    const pendingImgs = root.querySelectorAll?.('img[src^="blob:"], [data-cover-url^="blob:"]') || []
+                    for (const el of pendingImgs) {
+                        if (el.src && el.src.startsWith('blob:')) activeUrls.add(el.src)
+                        const dUrl = el.getAttribute?.('data-cover-url')
+                        if (dUrl && dUrl.startsWith('blob:')) activeUrls.add(dUrl)
                     }
-                }
-                if (!inDom) {
-                    this.revoke(key)
-                }
-            } catch (e) {
-                // If query fails, fall back to safe retention
+                } catch (_) {}
+            }
+        }
+
+        const targetSize = force ? 0 : Math.floor(this.maxCapacity * 0.75)
+        for (const [key, url] of [...this.cache.entries()]) {
+            if (!force && this.cache.size <= targetSize) break
+            if (!activeUrls.has(url)) {
+                this.revoke(key)
             }
         }
     }
@@ -526,7 +536,7 @@ const buildContentCSS = (settings) => {
             margin-bottom: 0.4em;
         }
 
-        /* Elements that must NEVER have 2em text-indent (Center, Right, Headings, Poetry, Captions) */
+        /* Elements that must NEVER have 2em text-indent (Center, Right, Headings, Verse/Short Lines, Captions) */
         p.no-indent, .no-indent,
         [data-align="center"], [data-align="right"],
         [data-reader-heading], [data-poetry-line], [data-has-media], [data-has-dropcap],
@@ -574,7 +584,7 @@ const buildContentCSS = (settings) => {
             clear: both !important;
         }
 
-        /* 3. In-document Subsections & Poem Titles (Generous 3.2em respiratory margin & avoid orphan headings) */
+        /* 3. In-document Subsections & Section Titles (Generous 3.2em respiratory margin & avoid orphan headings) */
         [data-section-heading="true"]:not([data-chapter-heading="true"]) {
             margin-top: 3.2em !important;
             margin-bottom: 1.2em !important;
@@ -822,7 +832,7 @@ const buildContentCSS = (settings) => {
         sup.footnote {
             cursor: pointer !important;
             text-decoration: none !important;
-            color: #8b5cf6 !important;
+            color: var(--accent-primary, #da7756) !important;
             font-weight: 600;
             padding: 0 2px;
             display: inline-block;
@@ -946,6 +956,42 @@ class UniversalReaderApp {
         this.cachedShelfHeight = 0
         this.shelfNotesFilter = { bookId: 'all', color: 'all', query: '' }
         this._shelfNotesInitialized = false
+
+        // Multi-window satellite reader mode detection (?windowMode=reader&bookId=xxx)
+        this.isSatelliteReaderWindow = false
+        this.initialSatelliteBookId = null
+        try {
+            if (typeof window !== 'undefined' && window.location?.search) {
+                const params = new URLSearchParams(window.location.search)
+                const wMode = params.get('windowMode')
+                const bId = params.get('bookId')
+                if (wMode === 'reader' && bId) {
+                    this.isSatelliteReaderWindow = true
+                    this.initialSatelliteBookId = bId
+                }
+            }
+        } catch (e) {}
+
+        // Cross-window live bookshelf synchronization bus
+        this._crossWindowSyncBus = null
+        this._crossWindowRefreshTimer = null
+        if (typeof BroadcastChannel !== 'undefined') {
+            try {
+                this._crossWindowSyncBus = new BroadcastChannel('linden-sync-bus')
+                this._crossWindowSyncBus.onmessage = (event) => {
+                    const msg = event?.data
+                    if (!msg || this.isSatelliteReaderWindow) return
+                    if (msg.type === 'BOOK_PROGRESS_UPDATED' || msg.type === 'READING_STATS_UPDATED') {
+                        if (!this._activeSession) {
+                            clearTimeout(this._crossWindowRefreshTimer)
+                            this._crossWindowRefreshTimer = setTimeout(() => {
+                                this.refreshBookshelf().catch(() => {})
+                            }, 350)
+                        }
+                    }
+                }
+            } catch (e) {}
+        }
 
         // Unified Theme Decision Chain ('system' default for new users, 'manual' if user explicitly picked)
         let themeMode = 'system'
@@ -1171,25 +1217,46 @@ class UniversalReaderApp {
             }
             this.applyTheme(this.settings.theme, false)
             await this.ensureRecoveryBarrier()
-            await this.renderCustomListsSidebar()
-            // R9: Render bookshelf immediately without waiting for font binaries
-            await this.refreshBookshelf()
 
-            // Non-blocking deferred loading of custom fonts & presets
-            setTimeout(async () => {
-                try {
-                    await customFontManager.init(this.settings.font)
-                    await this.renderCustomFontsUI()
-                } catch (e) {
-                    console.warn('[App] Custom fonts init error:', e)
+            if (this.isSatelliteReaderWindow && this.initialSatelliteBookId) {
+                if (this.dom.bookshelfView) {
+                    this.dom.bookshelfView.style.display = 'none'
                 }
-                try {
-                    this.renderReadingPresetsUI()
-                } catch (e) {
-                    console.warn('[App] Presets UI error:', e)
+                if (this.dom.readerView) {
+                    this.dom.readerView.style.display = 'flex'
+                    this.dom.readerView.classList.add('active')
                 }
-                await this.initSyncService()
-            }, 0)
+                setTimeout(async () => {
+                    try {
+                        await customFontManager.init(this.settings.font)
+                        await this.renderCustomFontsUI()
+                    } catch (e) {}
+                    try {
+                        this.renderReadingPresetsUI()
+                    } catch (e) {}
+                }, 0)
+                await this.openBook(this.initialSatelliteBookId)
+            } else {
+                await this.renderCustomListsSidebar()
+                // R9: Render bookshelf immediately without waiting for font binaries
+                await this.refreshBookshelf()
+
+                // Non-blocking deferred loading of custom fonts & presets
+                setTimeout(async () => {
+                    try {
+                        await customFontManager.init(this.settings.font)
+                        await this.renderCustomFontsUI()
+                    } catch (e) {
+                        console.warn('[App] Custom fonts init error:', e)
+                    }
+                    try {
+                        this.renderReadingPresetsUI()
+                    } catch (e) {
+                        console.warn('[App] Presets UI error:', e)
+                    }
+                    await this.initSyncService()
+                }, 0)
+            }
             this.setupAndroidNavigationAndImports()
         }).catch(err => {
             console.error('[App] Critical startup error:', err)
@@ -2026,11 +2093,11 @@ class UniversalReaderApp {
             'success': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#10b981" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>',
             'error': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#ef4444" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>',
             'warning': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#f59e0b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>',
-            'info': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-purple, #da7756)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>',
+            'info': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-primary, #da7756)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>',
             'cloud': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#6a9bcc" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>',
-            'book': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-purple, #da7756)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>',
+            'book': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-primary, #da7756)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>',
             'delete': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#ef4444" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>',
-            'list': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-purple, #da7756)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>'
+            'list': '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-primary, #da7756)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>'
         }
 
         // Automatic mapping from legacy icons
@@ -2730,10 +2797,10 @@ class UniversalReaderApp {
         const isMod = readingPresetsManager.isCurrentModified(this.settings)
         if (active) {
             badge.textContent = active.name + (isMod ? ' (已修改)' : '')
-            badge.style.color = isMod ? '#f59e0b' : 'var(--accent-purple)'
+            badge.style.color = isMod ? '#f59e0b' : 'var(--accent-primary, #da7756)'
         } else {
             badge.textContent = '默认排版'
-            badge.style.color = 'var(--accent-purple)'
+            badge.style.color = 'var(--accent-primary, #da7756)'
         }
     }
 
@@ -6911,6 +6978,10 @@ const select = document.getElementById('setting-pdf-page-appearance')
                 this.closeBookDetailsModal()
                 this.openBook(id)
             },
+            onOpenBookNewWindow: (id) => {
+                this.closeBookDetailsModal()
+                this.openBookInNewWindow(id)
+            },
             onFilterByTag: (tag) => {
                 this.closeBookDetailsModal()
                 this.switchShelfCategory('overview', { tags: [tag], status: 'all' })
@@ -6928,6 +6999,25 @@ const select = document.getElementById('setting-pdf-page-appearance')
             },
             onShelfRefresh: () => this.refreshBookshelf()
         })
+    }
+
+    async openBookInNewWindow(bookId) {
+        if (!bookId) return
+        let book = (this.currentBooksList || []).find(b => b.id === bookId)
+        if (!book) book = await db.getBook(bookId)
+        if (!book) return
+        if (book.isCloudOnly) {
+            this.handleCloudBookClick(book)
+            return
+        }
+        const res = await platformBridge.openNewWindow({
+            bookId: book.id,
+            windowMode: 'reader',
+            title: book.title || 'Linden Leaf'
+        })
+        if (res?.alreadyExists) {
+            this.showToast(`已切换至《${book.title}》阅读窗口`, 'book')
+        }
     }
 
     closeBookDetailsModal() {
@@ -7019,7 +7109,7 @@ const select = document.getElementById('setting-pdf-page-appearance')
             const granLabel = res.granularity === 'paragraph' ? '段落级' : '章级'
             item.innerHTML = `
                 <div class="cross-search-item-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                    <span class="cross-search-section-title" style="font-size: 0.76rem; color: var(--accent-purple); margin-bottom: 0;">${escapeHTML(res.sectionTitle || res.bookTitle)}</span>
+                    <span class="cross-search-section-title" style="font-size: 0.76rem; color: var(--accent-primary, #da7756); margin-bottom: 0;">${escapeHTML(res.sectionTitle || res.bookTitle)}</span>
                     <span class="cross-search-granularity-badge" style="font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; background: var(--bg-hover, rgba(0,0,0,0.06)); color: var(--text-muted);">${granLabel}</span>
                 </div>
                 <div class="cross-search-snippet">${res.snippet}</div>
@@ -9054,6 +9144,9 @@ ${originalText}`
         if (window.mobileShell?.refreshContinueReadingCard) {
             window.mobileShell.refreshContinueReadingCard()
         }
+        if (typeof coverUrlPool !== 'undefined') {
+            coverUrlPool.pruneUnused()
+        }
     }
 
     initShelfDelegatedListeners() {
@@ -9182,7 +9275,7 @@ ${originalText}`
                 return
             }
 
-            // 5. Open book
+            // 5. Open book (Ctrl/Cmd/Shift + Click opens in a new independent window)
             const card = target.closest('.skeuo-book, .jane-book-card, .jane-table-row')
             if (card) {
                 const bookId = card.dataset.id
@@ -9191,6 +9284,8 @@ ${originalText}`
                 if (!book) book = await db.getBook(bookId)
                 if (book?.isCloudOnly) {
                     this.handleCloudBookClick(book)
+                } else if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                    this.openBookInNewWindow(bookId)
                 } else {
                     this.openBook(bookId)
                 }
@@ -9208,6 +9303,20 @@ ${originalText}`
         this.dom.booksShelf?.addEventListener('click', handleShelfClick)
         this.dom.booksGrid?.addEventListener('click', handleShelfClick)
         this.dom.booksTableBody?.addEventListener('click', handleShelfClick)
+
+        const handleShelfAuxClick = e => {
+            if (e.button === 1) {
+                const card = e.target?.closest?.('.skeuo-book, .jane-book-card, .jane-table-row')
+                if (card && card.dataset?.id) {
+                    e.preventDefault()
+                    this.openBookInNewWindow(card.dataset.id)
+                }
+            }
+        }
+
+        this.dom.booksShelf?.addEventListener('auxclick', handleShelfAuxClick)
+        this.dom.booksGrid?.addEventListener('auxclick', handleShelfAuxClick)
+        this.dom.booksTableBody?.addEventListener('auxclick', handleShelfAuxClick)
 
         this.dom.booksShelf?.addEventListener('contextmenu', handleShelfContextMenu)
         this.dom.booksGrid?.addEventListener('contextmenu', handleShelfContextMenu)
@@ -9324,7 +9433,7 @@ ${originalText}`
 
         let coverInner = ''
         if (coverUrl) {
-            coverInner = `<img class="skeuo-cover-img" src="${coverUrl}" alt="${escapeHTML(book.title)}" loading="lazy"/>`
+            coverInner = `<img class="skeuo-cover-img" src="${coverUrl}" alt="${escapeHTML(book.title)}" loading="lazy" decoding="async"/>`
         } else {
             coverInner = `
                 <div class="skeuo-clean-cover" style="background: ${palette.bg}; border-left-color: ${palette.border};">
@@ -9476,7 +9585,7 @@ ${originalText}`
         const displayTitle = resolveBookTitle(book.title || '', book.filename || '')
         let coverInnerHtml = ''
         if (coverUrl) {
-            coverInnerHtml = `<img class="jane-cover-img" src="${coverUrl}" alt="${escapeHTML(displayTitle)}" loading="lazy"/>`
+            coverInnerHtml = `<img class="jane-cover-img" src="${coverUrl}" alt="${escapeHTML(displayTitle)}" loading="lazy" decoding="async"/>`
         } else if (typeof window !== 'undefined' && typeof window.renderBookCoverHTML === 'function') {
             coverInnerHtml = window.renderBookCoverHTML(book, '', true)
         } else {
@@ -9698,7 +9807,7 @@ ${originalText}`
                             <span class="hero-book-badge"><span class="hero-badge-dot"></span>最近在读</span>
                             <div class="hero-book-title" title="${escapeHTML(heroBook.title)}">${escapeHTML(heroBook.title)}</div>
                             <div class="hero-progress-bar-wrap" style="width: 100%; height: 6px; background: rgba(0, 0, 0, 0.12); border-radius: 3px; overflow: hidden; margin-bottom: 0.55rem; position: relative;">
-                                <div class="hero-progress-bar-fill" style="width: ${fillWidth}; max-width: 100%; height: 100%; background: var(--accent-purple, #da7756) !important; display: block; border-radius: 3px;"></div>
+                                <div class="hero-progress-bar-fill" style="width: ${fillWidth}; max-width: 100%; height: 100%; background: var(--accent-primary, #da7756) !important; display: block; border-radius: 3px;"></div>
                             </div>
                             <div class="hero-book-meta">
                                 已读 ${progressPct}% · 累计阅读 ${readDurationStr}
@@ -9752,6 +9861,16 @@ ${originalText}`
     onBooksWorkspaceScroll() {
         if (!this.dom.booksWorkspace) return
         const scrollTop = this.dom.booksWorkspace.scrollTop || 0
+
+        if (!this._isShelfScrolling) {
+            this._isShelfScrolling = true
+            this.dom.booksWorkspace.classList.add('is-scrolling')
+        }
+        clearTimeout(this._shelfScrollIdleTimer)
+        this._shelfScrollIdleTimer = setTimeout(() => {
+            this._isShelfScrolling = false
+            this.dom.booksWorkspace?.classList.remove('is-scrolling')
+        }, 120)
 
         // 1. Dynamic scrollbar class (rAF throttled)
         if (scrollTop > 80) {
@@ -9863,15 +9982,15 @@ ${originalText}`
             const isOverview = this.shelfCategory === 'overview'
             let svgIcon = ''
             if (isFavView) {
-                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`
+                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-primary, #da7756);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`
             } else if (isCustomList) {
-                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`
+                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-primary, #da7756);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`
             } else if (isFinishedView) {
-                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`
+                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-primary, #da7756);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`
             } else if (isOverview) {
-                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`
+                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-primary, #da7756);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`
             } else {
-                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-purple);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`
+                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-primary, #da7756);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`
             }
 
             const hasActiveOverviewFilters = isOverview && (this.overviewSelectedTags.size > 0 || this.overviewRatingFilter !== 'all' || (this.overviewSearchQuery && this.overviewSearchQuery.trim()) || this.overviewStatus !== 'all')
@@ -9990,7 +10109,7 @@ ${originalText}`
                 row.dataset.id = book.id
                 if (this.isBatchMode && this.selectedBookIds.has(book.id)) {
                     row.classList.add('selected')
-                    row.style.background = 'var(--accent-purple-soft, rgba(139,92,246,0.1))'
+                    row.style.background = 'var(--accent-primary-subtle, rgba(218, 119, 86, 0.1))'
                 }
 
                 const fraction = book.progress?.fraction || 0
@@ -10017,7 +10136,7 @@ ${originalText}`
                     <td class="jane-table-cell" style="text-align: center; white-space: nowrap;">
                         <button class="table-cloud-btn" title="坚果云备份/拉取" style="${cloudBtnStyle} padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>${cloudBtnText}</button>
                         <button class="table-list-btn" title="加入与管理书单" style="color: var(--brand-terracotta, #da7756); border: 1px solid rgba(218, 119, 86, 0.25); background: rgba(218, 119, 86, 0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>书单</button>
-                        <button class="table-details-btn" title="查看书籍详情与统计" style="color: var(--accent-purple, #8b5cf6); border: 1px solid rgba(139,92,246,0.25); background: rgba(139,92,246,0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;">详情</button>
+                        <button class="table-details-btn" title="查看书籍详情与统计" style="color: var(--accent-primary, #da7756); border: 1px solid rgba(218, 119, 86, 0.25); background: rgba(218, 119, 86, 0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; display: inline-flex; align-items: center; gap: 4px;">详情</button>
                         <button class="table-delete-btn" title="从书架删除" style="color: #ef4444; border: 1px solid rgba(239,68,68,0.25); background: rgba(239,68,68,0.06); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; transition: all 0.2s;">删除</button>
                     </td>
                 `
@@ -11811,17 +11930,13 @@ this.applyPdfPageAppearance()
             this.dom.btnPdfMarkerGreen?.classList?.remove('active')
             this.dom.btnPdfPenRed?.classList?.remove('active')
             this.dom.btnPdfEraser?.classList?.remove('active')
-            this.shelfViewMode = 'grid'
-            this.shelfCategory = 'all'
-            this.sidebarUserCollapsed = true
-            document.getElementById('bookshelf-view')?.classList.add('sidebar-collapsed')
             this._bookSettingsOverride = null
             this.settings = resolveReaderSettings(this.globalSettings || this.settings, null, READER_OVERRIDE_ALLOWED_KEYS)
             this.updateBookOverrideUI(false)
             this.chapterTranslationManager?.onCloseBook?.().catch?.(() => {})
             this.updateSettingsUI()
-            if (this.dom.booksWorkspace) {
-                this.dom.booksWorkspace.scrollTop = 0
+            if (typeof coverUrlPool !== 'undefined') {
+                coverUrlPool.pruneUnused()
             }
         }
 
@@ -11845,6 +11960,10 @@ this.applyPdfPageAppearance()
             : Promise.resolve()
 
         progressPromise.then(() => {
+            if (this.isSatelliteReaderWindow && !this._activeSession) {
+                platformBridge.windowClose()
+                return
+            }
             if (this._currentBookEpoch === closingEpoch && !this._activeSession) {
                 this.refreshBookshelf().catch(err => {
                     console.warn('Failed to refresh bookshelf after book close:', err)
@@ -11852,6 +11971,10 @@ this.applyPdfPageAppearance()
             }
         }).catch(err => {
             console.warn('Failed to flush final book progress:', err)
+            if (this.isSatelliteReaderWindow && !this._activeSession) {
+                platformBridge.windowClose()
+                return
+            }
             if (this._currentBookEpoch === closingEpoch && !this._activeSession) {
                 this.refreshBookshelf().catch(() => {})
             }
@@ -12348,7 +12471,7 @@ this.applyPdfPageAppearance()
                     else if (alignAttr === 'right' || inlineAlign === 'right') el.dataset.align = 'right'
                 }
 
-                // Poetry line detection (short verse lines in poem collections)
+                // Short verse / standalone line detection based on container class and length heuristics
                 const className = (el.className || '').toLowerCase()
                 if (className.includes('copyright') || className.includes('poetry') || className.includes('verse') || className.includes('poem')) {
                     const txt = (el.textContent || '').trim()
@@ -12504,7 +12627,7 @@ this.applyPdfPageAppearance()
             } catch {}
         }
 
-        // Industrial-grade DOM Normalization (Prune ghost pagebreaks, format headings, normalize poetry)
+        // Industrial-grade DOM Normalization (Prune ghost pagebreaks, format headings, normalize short-line blocks)
         this.normalizeEpubDocument(doc)
         markReaderPaperBackgrounds(doc)
 
@@ -14412,7 +14535,7 @@ this.applyPdfPageAppearance()
             md += `---\n\n`
         }
 
-        const filename = `Astra_划线与笔记_${new Date().toISOString().slice(0, 10)}.md`
+        const filename = `LindenLeaf_划线与笔记_${new Date().toISOString().slice(0, 10)}.md`
         const res = await platformBridge.exportTextFile(filename, md, 'text/markdown;charset=utf-8')
         if (res?.cancelled) {
             return
@@ -14488,10 +14611,42 @@ this.applyPdfPageAppearance()
                             const matchedRects = []
                             for (const { span: s, start: sStart, end: sEnd } of spanOffsets) {
                                 if (sStart < matchEnd && sEnd > foundIdx) {
-                                    const x1 = Math.max(0, Math.min(1, s.x / pageSize.width))
-                                    const y1 = Math.max(0, Math.min(1, s.y / pageSize.height))
-                                    const x2 = Math.max(0, Math.min(1, (s.x + s.w) / pageSize.width))
-                                    const y2 = Math.max(0, Math.min(1, (s.y + s.h) / pageSize.height))
+                                    let rx1 = s.x
+                                    let ry1 = s.y
+                                    let rx2 = s.x + s.w
+                                    let ry2 = s.y + s.h
+
+                                    if (
+                                        Array.isArray(s.charOffsets) &&
+                                        Array.isArray(s.charBoxes) &&
+                                        s.charOffsets.length === s.charBoxes.length &&
+                                        s.charBoxes.length > 0
+                                    ) {
+                                        const localMatchStart = Math.max(0, foundIdx - sStart)
+                                        const localMatchEnd = Math.min(s.text.length, matchEnd - sStart)
+                                        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+                                        for (let ci = 0; ci < s.charOffsets.length; ci++) {
+                                            const co = s.charOffsets[ci]
+                                            if (co.end > localMatchStart && co.start < localMatchEnd) {
+                                                const cb = s.charBoxes[ci]
+                                                minX = Math.min(minX, cb.x0)
+                                                minY = Math.min(minY, cb.y0)
+                                                maxX = Math.max(maxX, cb.x1)
+                                                maxY = Math.max(maxY, cb.y1)
+                                            }
+                                        }
+                                        if (Number.isFinite(minX) && Number.isFinite(maxX)) {
+                                            rx1 = minX
+                                            ry1 = minY
+                                            rx2 = maxX
+                                            ry2 = maxY
+                                        }
+                                    }
+
+                                    const x1 = Math.max(0, Math.min(1, rx1 / pageSize.width))
+                                    const y1 = Math.max(0, Math.min(1, ry1 / pageSize.height))
+                                    const x2 = Math.max(0, Math.min(1, rx2 / pageSize.width))
+                                    const y2 = Math.max(0, Math.min(1, ry2 / pageSize.height))
                                     matchedRects.push([x1, y1, x2, y2])
                                 }
                             }
@@ -14567,7 +14722,7 @@ this.applyPdfPageAppearance()
                 const groupHeader = document.createElement('div')
                 groupHeader.style.fontSize = '0.78rem'
                 groupHeader.style.fontWeight = '700'
-                groupHeader.style.color = 'var(--accent-purple)'
+                groupHeader.style.color = 'var(--accent-primary, #da7756)'
                 groupHeader.style.marginTop = '0.6rem'
                 groupHeader.style.marginBottom = '0.3rem'
                 groupHeader.innerText = group.label
@@ -14828,7 +14983,10 @@ this.applyPdfPageAppearance()
             }
 
             if (this.settings.enableReadingGoals) {
-                const finishedBooks = stats.periodFinishedCount != null ? stats.periodFinishedCount : (stats.finishedCount || 0)
+                // Annual Reading Goal (年度阅读目标): tracks completed books in the current year
+                const finishedBooks = (stats.currentYearFinishedCount != null)
+                    ? stats.currentYearFinishedCount
+                    : (stats.yearFinishedCount != null ? stats.yearFinishedCount : (stats.finishedCount || 0))
                 const yearTarget = this.settings.readingGoalYear || 12
                 const yearPct = Math.min(100, Math.round((finishedBooks / yearTarget) * 100))
                 if (this.dom.goalPctYear) this.dom.goalPctYear.innerText = `${yearPct}%`
@@ -14838,7 +14996,11 @@ this.applyPdfPageAppearance()
                     this.dom.goalRingYear.style.strokeDashoffset = offset
                 }
 
-                const monthHours = (stats.viewTotalSeconds || 0) / 3600
+                // Monthly Progress (月度进度): tracks total reading hours in the current month
+                const monthSecs = (stats.currentMonthSeconds != null)
+                    ? stats.currentMonthSeconds
+                    : (stats.viewMode === 'month' ? (stats.viewTotalSeconds || 0) : 0)
+                const monthHours = monthSecs / 3600
                 const monthTarget = this.settings.readingGoalMonth || 20
                 const rawMonthPct = (monthHours / monthTarget) * 100
                 const monthPct = Math.min(100, Math.round(rawMonthPct))
@@ -14852,6 +15014,7 @@ this.applyPdfPageAppearance()
                     this.dom.goalRingMonth.style.strokeDashoffset = offset
                 }
 
+                // Daily Focus (今日专注): tracks focus minutes today
                 const activeSecs = (tracker && tracker.isTracking) ? (tracker.sessionCumulativeSeconds || 0) : 0
                 const todayMins = Math.round(((stats.todaySeconds || 0) + activeSecs) / 60)
                 const todayTarget = this.settings.readingGoalToday || 45
@@ -14951,7 +15114,7 @@ this.applyPdfPageAppearance()
         // Update Peak Pill
         if (this.dom.statsPeakPill && this.dom.statsPeakText) {
             if (stats.peakInfo && stats.peakInfo.seconds > 0) {
-                this.dom.statsPeakText.innerHTML = `<span style="font-weight: 700; margin-right: 4px; color: var(--accent-purple);">●</span> 峰值 · ${escapeHTML(stats.peakInfo.label)} · ${escapeHTML(stats.peakInfo.timeStr)}`
+                this.dom.statsPeakText.innerHTML = `<span style="font-weight: 700; margin-right: 4px; color: var(--accent-primary, #da7756);">●</span> 峰值 · ${escapeHTML(stats.peakInfo.label)} · ${escapeHTML(stats.peakInfo.timeStr)}`
                 this.dom.statsPeakPill.style.display = 'inline-flex'
             } else {
                 this.dom.statsPeakPill.style.display = 'none'
@@ -15110,7 +15273,7 @@ this.applyPdfPageAppearance()
                             <div style="font-size: 0.92rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(b.title)}</div>
                             <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">${escapeHTML(b.author || '未知作者')} · ${escapeHTML((b.format || 'txt').toUpperCase())}</div>
                             <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
-                                <span style="font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; background: rgba(124, 58, 237, 0.1); color: var(--accent-purple); font-weight: 600;">本期阅读 ${durStr}</span>
+                                <span style="font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; background: var(--accent-primary-subtle, rgba(218, 119, 86, 0.1)); color: var(--accent-primary, #da7756); font-weight: 600;">本期阅读 ${durStr}</span>
                                 <span style="font-size: 0.72rem; color: var(--text-muted);">已读 ${progressPct}%</span>
                             </div>
                         </div>
@@ -15186,8 +15349,8 @@ this.applyPdfPageAppearance()
                     row.style.cssText = 'padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); display: flex; flex-direction: column; gap: 6px;'
 
                     row.innerHTML = `
-                        <div style="font-size: 0.88rem; color: var(--text-main); line-height: 1.5; border-left: 3px solid var(--accent-purple); padding-left: 8px;">“${escapeHTML(n.text || '')}”</div>
-                        ${n.note ? `<div style="font-size: 0.82rem; color: var(--accent-purple); background: var(--bg-tertiary); padding: 4px 8px; border-radius: 4px;">想法：${escapeHTML(n.note)}</div>` : ''}
+                        <div style="font-size: 0.88rem; color: var(--text-main); line-height: 1.5; border-left: 3px solid var(--accent-primary, #da7756); padding-left: 8px;">“${escapeHTML(n.text || '')}”</div>
+                        ${n.note ? `<div style="font-size: 0.82rem; color: var(--accent-primary, #da7756); background: var(--bg-tertiary); padding: 4px 8px; border-radius: 4px;">想法：${escapeHTML(n.note)}</div>` : ''}
                         <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">
                             <span>《${escapeHTML(n.bookTitle || '未命名图书')}》${n.chapterTitle ? ` · ${escapeHTML(n.chapterTitle)}` : ''}</span>
                             <span>${(n.createdAt || n.updatedAt) ? new Date(n.createdAt || n.updatedAt).toLocaleDateString() : ''}</span>

@@ -829,6 +829,13 @@ export const updateBookProgress = async (id, progressData) => {
                 try {
                     clearPendingProgressBackup(id, progressData?.updatedAt, progressData?._backupId)
                 } catch (e) {}
+                try {
+                    if (typeof BroadcastChannel !== 'undefined') {
+                        const bc = new BroadcastChannel('linden-sync-bus')
+                        bc.postMessage({ type: 'BOOK_PROGRESS_UPDATED', bookId: id, timestamp: Date.now() })
+                        bc.close()
+                    }
+                } catch (e) {}
                 resolve(true)
             }
             tx.onerror = () => reject(tx.error || new Error('Failed to update progress'))
@@ -2043,8 +2050,9 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         const isFinished = _resolveReadingState(b) === 'finished'
         if (!isFinished) return false
         if (viewMode === 'total') return true
-        if (b.completedAt) {
-            const d = toLocalDateKey(b.completedAt)
+        const finishTime = b.completedAt || b.lastReadAt || b.updatedAt
+        if (finishTime) {
+            const d = toLocalDateKey(finishTime)
             if (viewMode === 'week') {
                 return d >= mondayKey && d <= sundayKey
             }
@@ -2059,6 +2067,31 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         return false
     }
     const periodFinishedBooks = books.filter(isCompletedInPeriod)
+
+    // Compute finished books in current calendar year (for annual reading goal ring)
+    const curYearPrefix = `${now.getFullYear()}-`
+    const currentYearFinishedBooks = books.filter(b => {
+        if (!b) return false
+        if (_resolveReadingState(b) !== 'finished') return false
+        const finishTime = b.completedAt || b.lastReadAt || b.updatedAt
+        return finishTime ? toLocalDateKey(finishTime).startsWith(curYearPrefix) : false
+    })
+    const currentYearFinishedCount = currentYearFinishedBooks.length
+
+    // Compute finished books in targetYear (if viewing historical year)
+    const targetYearPrefix = `${targetYear}-`
+    const targetYearFinishedBooks = books.filter(b => {
+        if (!b) return false
+        if (_resolveReadingState(b) !== 'finished') return false
+        const finishTime = b.completedAt || b.lastReadAt || b.updatedAt
+        return finishTime ? toLocalDateKey(finishTime).startsWith(targetYearPrefix) : false
+    })
+    const yearFinishedCount = targetYearFinishedBooks.length
+
+    // Active reading duration in current calendar month & year
+    const curMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+    const currentMonthSeconds = monthlyMap[curMonthKey] || 0
+    const currentYearSeconds = yearlyMap[String(now.getFullYear())] || 0
 
     const periodHighlights = highlights.filter(h => {
         if (!h) return false
@@ -2101,6 +2134,12 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         companionDays,
         earliestDateStr: new Date(earliestTime).toLocaleDateString('zh-CN'),
         finishedCount,
+        currentYearFinishedCount,
+        yearFinishedCount,
+        currentMonthSeconds,
+        targetMonthSeconds: monthlyMap[monthPrefix] || 0,
+        currentYearSeconds,
+        targetYearSeconds: yearlyMap[String(targetYear)] || 0,
         totalBooksCount: books.length,
         totalHighlightsCount: highlights.length,
         periodBooks,

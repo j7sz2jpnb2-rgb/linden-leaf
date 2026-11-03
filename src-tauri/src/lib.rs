@@ -31,28 +31,70 @@ pub fn run() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
         use tauri::Emitter;
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.unminimize();
-            let _ = w.show();
-            let _ = w.set_focus();
+        let file_paths = extract_book_paths_from_args_with_cwd(&argv, Some(&_cwd));
+
+        // When launched with no file paths (e.g. user double-clicks desktop shortcut),
+        // only unminimize, show, and focus the existing main bookshelf window
+        // to prevent duplicate bookshelf instances and WebDAV sync race conditions.
+        if file_paths.is_empty() {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            return;
         }
 
-        let file_paths = extract_book_paths_from_args_with_cwd(&argv, Some(&_cwd));
-        if !file_paths.is_empty() {
-            let state = app.state::<AppState>();
-            let is_ready = *state.is_renderer_ready.lock().unwrap();
-            for file_path in file_paths {
-                if is_ready {
-                    match load_open_file_payload(&file_path) {
-                        Ok(payload) => {
+        // When file paths are provided, spawn a dedicated new window for reading.
+        match spawn_new_app_window(app, None, None, None) {
+            Ok((new_label, _already_exists)) => {
+                let state = app.state::<AppState>();
+                let is_win_ready = state
+                    .ready_windows
+                    .lock()
+                    .unwrap()
+                    .get(&new_label)
+                    .copied()
+                    .unwrap_or(false);
+                for file_path in file_paths {
+                    if is_win_ready {
+                        if let Some(w) = app.get_webview_window(&new_label) {
+                            if let Ok(payload) = load_open_file_payload(&file_path) {
+                                let _ = w.emit("app:open-file", payload);
+                            }
+                        }
+                    } else {
+                        state
+                            .pending_files
+                            .lock()
+                            .unwrap()
+                            .push((Some(new_label.clone()), file_path));
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("[single_instance] Fallback to main window ({err})");
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                let state = app.state::<AppState>();
+                let is_ready = state
+                    .ready_windows
+                    .lock()
+                    .unwrap()
+                    .get("main")
+                    .copied()
+                    .unwrap_or(false);
+                for file_path in file_paths {
+                    if is_ready {
+                        if let Ok(payload) = load_open_file_payload(&file_path) {
                             let _ = app.emit("app:open-file", payload);
                         }
-                        Err(e) => {
-                            eprintln!("[single_instance] Error loading file: {}", e);
-                        }
+                    } else {
+                        state.pending_files.lock().unwrap().push((None, file_path));
                     }
-                } else {
-                    state.pending_files.lock().unwrap().push(file_path);
                 }
             }
         }
@@ -79,14 +121,14 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 let mut pending = state.pending_files.lock().unwrap();
                 for file_path in file_paths {
-                    pending.push(file_path);
+                    pending.push((Some("main".to_string()), file_path));
                 }
             }
 
             if let Some(w) = app.get_webview_window("main") {
                 eprintln!("[TAURI SETUP] Main window found: {:?}", w.label());
                 #[cfg(debug_assertions)]
-                {
+                if std::env::var_os("LINDEN_OPEN_DEVTOOLS").is_some() {
                     let _ = w.open_devtools();
                 }
             } else {
@@ -98,18 +140,27 @@ pub fn run() {
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    eprintln!("[WINDOW EVENT] {:?} CloseRequested", window.label());
+                    let win_label = window.label().to_string();
+                    eprintln!("[WINDOW EVENT] {:?} CloseRequested", win_label);
                     let state = window.state::<AppState>();
                     let (should_prevent, req_id) = {
-                        let mut close_state = state.close_state.lock().unwrap();
+                        let mut close_map = state.close_state.lock().unwrap();
+                        let close_state = close_map.entry(win_label.clone()).or_default();
                         if close_state.close_permitted {
-                            eprintln!("[WINDOW EVENT] Close already permitted, closing now.");
+                            eprintln!("[WINDOW EVENT] Close already permitted for {:?}, closing now.", win_label);
                             (false, None)
                         } else if close_state.pending_request_id.is_some() {
-                            eprintln!("[WINDOW EVENT] Flush already in progress for {:?}", close_state.pending_request_id);
+                            eprintln!("[WINDOW EVENT] Flush already in progress for {:?}: {:?}", win_label, close_state.pending_request_id);
                             (true, None)
                         } else {
-                            let id = format!("flush_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                            let id = format!(
+                                "flush_{}_{}",
+                                win_label,
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis()
+                            );
                             close_state.pending_request_id = Some(id.clone());
                             (true, Some(id))
                         }
@@ -118,19 +169,28 @@ pub fn run() {
                     if should_prevent {
                         api.prevent_close();
                     }
+
                     if let Some(id) = req_id {
                         use tauri::Emitter;
-                        let _ = window.emit("app:request-flush", serde_json::json!({ "requestId": id }));
+                        let _ = window.emit(
+                            "app:request-flush",
+                            serde_json::json!({
+                                "requestId": id,
+                                "windowLabel": win_label
+                            }),
+                        );
 
                         let window_clone = window.clone();
                         let id_clone = id.clone();
+                        let label_clone = win_label.clone();
                         tauri::async_runtime::spawn(async move {
                             tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
                             let state = window_clone.state::<AppState>();
                             let should_force_close = {
-                                let mut close_state = state.close_state.lock().unwrap();
+                                let mut close_map = state.close_state.lock().unwrap();
+                                let close_state = close_map.entry(label_clone.clone()).or_default();
                                 if close_state.pending_request_id.as_ref() == Some(&id_clone) {
-                                    eprintln!("[WINDOW EVENT] Flush timeout for {:?}; forcing close fallback", id_clone);
+                                    eprintln!("[WINDOW EVENT] Flush timeout for {:?} on {:?}; forcing close fallback", id_clone, label_clone);
                                     close_state.pending_request_id = None;
                                     close_state.close_permitted = true;
                                     true
@@ -138,7 +198,6 @@ pub fn run() {
                                     false
                                 }
                             };
-
                             if should_force_close {
                                 let _ = window_clone.close();
                             }
@@ -146,7 +205,11 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Destroyed => {
-                    eprintln!("[WINDOW EVENT] {:?} Destroyed", window.label());
+                    let win_label = window.label().to_string();
+                    eprintln!("[WINDOW EVENT] {:?} Destroyed", win_label);
+                    let state = window.state::<AppState>();
+                    let _ = state.close_state.lock().map(|mut m| m.remove(&win_label));
+                    let _ = state.ready_windows.lock().map(|mut m| m.remove(&win_label));
                 }
                 _ => {}
             }
@@ -160,6 +223,7 @@ pub fn run() {
             dialog_save_text_file,
             fs_read_buffer,
             // Window & App
+            window_open_new,
             window_minimize,
             window_maximize,
             window_close,

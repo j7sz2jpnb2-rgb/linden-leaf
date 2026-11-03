@@ -240,6 +240,7 @@ export class BookDetailsModal {
 
                 <footer class="book-details-actions">
                     <button class="btn-primary-action" id="btn-details-read">开始阅读</button>
+                    <button class="btn-secondary-action" id="btn-details-read-new-window" title="在独立新窗口中打开此书（支持多书对照阅读）">新窗口阅读</button>
                     <button class="btn-secondary-action" id="btn-details-manage-lists" title="将此书加入或移出自定义书单">加入书单</button>
                     <button class="btn-secondary-action" id="btn-details-change-cover" title="上传自定义图片作为图书封面">更换封面</button>
                     <button class="btn-secondary-action" id="btn-details-reset-cover" title="恢复文档内置的原始第一页/内嵌封面">恢复默认</button>
@@ -408,6 +409,9 @@ export class BookDetailsModal {
 
         container.querySelector('#btn-details-read')?.addEventListener('click', () => {
             callbacks.onOpenBook?.(bookId)
+        })
+        container.querySelector('#btn-details-read-new-window')?.addEventListener('click', () => {
+            callbacks.onOpenBookNewWindow?.(bookId)
         })
 
         container.querySelector('#btn-details-manage-lists')?.addEventListener('click', () => {
