@@ -185,7 +185,8 @@ export async function regenerateBookCover(bookId) {
         }
 
         if (newCoverBlob) {
-            await db.saveBook({ id: bookId, coverBlob: newCoverBlob })
+            const optimizedBlob = await normalizeCoverBlob(newCoverBlob)
+            await db.saveBook({ id: bookId, coverBlob: optimizedBlob || newCoverBlob })
             return { success: true, hasCover: true }
         }
 
@@ -193,5 +194,92 @@ export async function regenerateBookCover(bookId) {
     } catch (err) {
         console.error('[regenerateBookCover] Error:', err)
         return { success: false, hasCover: false, error: err.message || String(err) }
+    }
+}
+
+
+/**
+ * Downscale and re-encode oversized cover image Blobs (e.g. 2400x3600 publisher PNG/JPEG)
+ * into compact WebP thumbnails so IndexedDB reads and GPU texture uploads stay instant.
+ * @param {Blob|null} blob
+ * @param {{ maxDimension?: number, quality?: number, byteThreshold?: number }} [options]
+ * @returns {Promise<Blob|null>}
+ */
+export async function normalizeCoverBlob(blob, options = {}) {
+    if (!blob || !(blob instanceof Blob)) return blob || null
+    if (blob.type === 'image/svg+xml') return blob
+
+    const maxDimension = options.maxDimension || 560
+    const quality = options.quality || 0.86
+    const byteThreshold = options.byteThreshold || 140 * 1024
+
+    // Fast path: already a compact WebP/JPEG thumbnail
+    if (blob.size <= byteThreshold && (blob.type === 'image/webp' || blob.type === 'image/jpeg')) {
+        return blob
+    }
+
+    if (typeof document === 'undefined' || typeof createImageBitmap !== 'function') {
+        return blob
+    }
+
+    let bitmap = null
+    try {
+        bitmap = await createImageBitmap(blob)
+        const srcW = bitmap.width || 0
+        const srcH = bitmap.height || 0
+        if (!srcW || !srcH) {
+            bitmap.close?.()
+            return blob
+        }
+
+        const maxSide = Math.max(srcW, srcH)
+        if (maxSide <= maxDimension && blob.size <= byteThreshold * 1.5) {
+            bitmap.close?.()
+            return blob
+        }
+
+        const scale = maxSide > maxDimension ? (maxDimension / maxSide) : 1
+        const targetW = Math.max(1, Math.round(srcW * scale))
+        const targetH = Math.max(1, Math.round(srcH * scale))
+
+        const canvas = document.createElement('canvas')
+        canvas.width = targetW
+        canvas.height = targetH
+        const ctx = canvas.getContext('2d', { alpha: false })
+        if (!ctx) {
+            bitmap.close?.()
+            return blob
+        }
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, 0, targetW, targetH)
+        ctx.imageSmoothingEnabled = true
+        ctx.imageSmoothingQuality = 'high'
+        ctx.drawImage(bitmap, 0, 0, targetW, targetH)
+        bitmap.close?.()
+        bitmap = null
+
+        const encoded = await new Promise((resolve) => {
+            canvas.toBlob(
+                (b) => {
+                    if (b) {
+                        resolve(b)
+                    } else {
+                        canvas.toBlob((jb) => resolve(jb || blob), 'image/jpeg', quality)
+                    }
+                },
+                'image/webp',
+                quality
+            )
+        })
+        canvas.width = 0
+        canvas.height = 0
+
+        if (encoded && encoded.size > 0 && encoded.size < blob.size) {
+            return encoded
+        }
+        return blob
+    } catch (e) {
+        try { bitmap?.close?.() } catch (_) {}
+        return blob
     }
 }

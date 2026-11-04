@@ -232,34 +232,99 @@ ipcMain.handle('file:readBuffer', async (_event, filePath) => {
     }
 })
 
-// Window controls
-ipcMain.on('window:minimize', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize()
+// Multi-window registry for satellite reader windows
+const satelliteWindows = new Map()
+
+// Window controls (operate on the calling BrowserWindow, falling back to mainWindow)
+ipcMain.on('window:minimize', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow
+    if (win && !win.isDestroyed()) win.minimize()
 })
 
-ipcMain.on('window:maximize', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        if (mainWindow.isMaximized()) mainWindow.unmaximize()
-        else mainWindow.maximize()
+ipcMain.on('window:maximize', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow
+    if (win && !win.isDestroyed()) {
+        if (win.isMaximized()) win.unmaximize()
+        else win.maximize()
     }
 })
 
-ipcMain.on('window:close', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close()
+ipcMain.on('window:close', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow
+    if (win && !win.isDestroyed()) win.close()
 })
 
-ipcMain.handle('window:isMaximized', () => {
-    return mainWindow && !mainWindow.isDestroyed() ? mainWindow.isMaximized() : false
+ipcMain.handle('window:isMaximized', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow
+    return win && !win.isDestroyed() ? win.isMaximized() : false
 })
 
-ipcMain.on('window:toggleFullscreen', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setFullScreen(!mainWindow.isFullScreen())
+ipcMain.on('window:toggleFullscreen', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow
+    if (win && !win.isDestroyed()) {
+        win.setFullScreen(!win.isFullScreen())
     }
 })
 
-ipcMain.handle('window:isFullscreen', () => {
-    return mainWindow && !mainWindow.isDestroyed() ? mainWindow.isFullScreen() : false
+ipcMain.handle('window:isFullscreen', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow
+    return win && !win.isDestroyed() ? win.isFullScreen() : false
+})
+
+ipcMain.handle('window:openNew', async (_event, options = {}) => {
+    const bookId = options?.bookId ? String(options.bookId) : null
+    const windowMode = options?.windowMode || (bookId ? 'reader' : 'shelf')
+    const rawTitle = options?.title ? String(options.title).trim() : ''
+    const winKey = (windowMode === 'reader' && bookId) ? `reader-${bookId}` : `win-${Date.now()}`
+
+    if (satelliteWindows.has(winKey)) {
+        const existing = satelliteWindows.get(winKey)
+        if (existing && !existing.isDestroyed()) {
+            if (rawTitle) existing.setTitle(`${rawTitle} - Linden Leaf`)
+            if (existing.isMinimized()) existing.restore()
+            existing.show()
+            existing.focus()
+            return { success: true, label: winKey, alreadyExists: true }
+        }
+        satelliteWindows.delete(winKey)
+    }
+
+    const parentBounds = (mainWindow && !mainWindow.isDestroyed()) ? mainWindow.getBounds() : null
+    const offset = (satelliteWindows.size % 6) * 28
+    const childWin = new BrowserWindow({
+        width: 1360,
+        height: 880,
+        x: parentBounds ? parentBounds.x + 36 + offset : undefined,
+        y: parentBounds ? parentBounds.y + 28 + offset : undefined,
+        minWidth: 960,
+        minHeight: 640,
+        title: rawTitle ? `${rawTitle} - Linden Leaf` : 'Linden Leaf - 桌面端电子书阅读器',
+        backgroundColor: '#1E1E1E',
+        show: false,
+        autoHideMenuBar: true,
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+            webSecurity: true,
+            preload: path.join(__dirname, 'preload.js')
+        }
+    })
+
+    satelliteWindows.set(winKey, childWin)
+    childWin.on('closed', () => {
+        satelliteWindows.delete(winKey)
+    })
+
+    const loadQuery = {}
+    if (bookId) {
+        loadQuery.windowMode = windowMode
+        loadQuery.bookId = bookId
+    }
+    await childWin.loadFile(path.join(__dirname, 'index.html'), { query: loadQuery })
+    childWin.show()
+    childWin.focus()
+    return { success: true, label: winKey, alreadyExists: false }
 })
 
 const WebDAVService = require('./services/webdav')

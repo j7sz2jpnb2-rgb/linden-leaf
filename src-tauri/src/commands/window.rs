@@ -50,6 +50,22 @@ pub fn sanitize_window_label(raw: &str) -> String {
     }
 }
 
+pub fn url_encode_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 3);
+    for byte in input.as_bytes() {
+        match *byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            b => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
 pub fn spawn_new_app_window(
     app: &tauri::AppHandle,
     label_override: Option<String>,
@@ -71,6 +87,11 @@ pub fn spawn_new_app_window(
     if let Some(existing) = app.get_webview_window(&label) {
         #[cfg(desktop)]
         {
+            if let Some(ref t) = title_override {
+                if !t.trim().is_empty() {
+                    let _ = existing.set_title(&format!("{} - Linden Leaf", t.trim()));
+                }
+            }
             let _ = existing.unminimize();
             let _ = existing.show();
             let _ = existing.set_focus();
@@ -93,7 +114,9 @@ pub fn spawn_new_app_window(
 
     #[cfg(desktop)]
     {
-        let builder = tauri::WebviewWindowBuilder::new(
+        let seq = WINDOW_SEQ.fetch_add(1, Ordering::Relaxed);
+        let offset_step = ((seq % 6) as i32) * 28;
+        let mut builder = tauri::WebviewWindowBuilder::new(
             app,
             &label,
             tauri::WebviewUrl::App(url_path.into()),
@@ -103,9 +126,24 @@ pub fn spawn_new_app_window(
         .min_inner_size(960.0, 640.0)
         .decorations(true)
         .resizable(true)
-        .center();
+        .visible(true)
+        .focused(true);
+
+        if let Some(main_win) = app.get_webview_window("main") {
+            if let Ok(pos) = main_win.outer_position() {
+                builder = builder.position(
+                    (pos.x + 36 + offset_step) as f64,
+                    (pos.y + 28 + offset_step) as f64,
+                );
+            } else {
+                builder = builder.center();
+            }
+        } else {
+            builder = builder.center();
+        }
 
         let new_win = builder.build().map_err(|e| format!("Failed to create window: {e}"))?;
+        let _ = new_win.unminimize();
         let _ = new_win.show();
         let _ = new_win.set_focus();
     }
@@ -114,7 +152,7 @@ pub fn spawn_new_app_window(
 }
 
 #[tauri::command]
-pub fn window_open_new(
+pub async fn window_open_new(
     app: tauri::AppHandle,
     book_id: Option<String>,
     window_mode: Option<String>,
@@ -132,8 +170,9 @@ pub fn window_open_new(
         let trimmed = bid.trim();
         if !trimmed.is_empty() {
             let lbl = format!("reader-{}", sanitize_window_label(trimmed));
-            let encoded_id = trimmed.replace('&', "%26").replace('=', "%3D").replace('#', "%23");
-            let q = format!("windowMode={mode}&bookId={encoded_id}");
+            let encoded_id = url_encode_component(trimmed);
+            let encoded_mode = url_encode_component(&mode);
+            let q = format!("windowMode={encoded_mode}&bookId={encoded_id}");
             (Some(lbl), Some(q))
         } else {
             (None, None)
@@ -498,6 +537,16 @@ mod tests {
         assert_eq!(close_map.get("reader-1").unwrap().pending_request_id.as_deref(), Some("flush_reader_456"));
         assert!(!close_map.get("main").unwrap().close_permitted);
         assert!(!close_map.get("reader-1").unwrap().close_permitted);
+    }
+
+    #[test]
+    fn test_url_encode_component() {
+        assert_eq!(url_encode_component("simple_id-123.test~"), "simple_id-123.test~");
+        assert_eq!(
+            url_encode_component("book 1?test#foo&bar=baz+special%20char"),
+            "book%201%3Ftest%23foo%26bar%3Dbaz%2Bspecial%2520char"
+        );
+        assert_eq!(url_encode_component("理想国"), "%E7%90%86%E6%83%B3%E5%9B%BD");
     }
 }
 

@@ -14,7 +14,7 @@ import { AdaptivePdfDriver, setMuPdfStoreLimit } from './pdf-driver.js'
 import { buildPdfTocIndex, pdfTocAtPage } from './pdf-toc.js'
 import { platformBridge } from './platformBridge.js'
 import { importQueue } from './import-queue.js'
-import { extractPdfCover, regenerateBookCover } from './pdf-cover.js'
+import { extractPdfCover, regenerateBookCover, normalizeCoverBlob } from './pdf-cover.js'
 import { ocrService, parsePageRange, MAX_OCR_PAGES } from './ocr-service.js'
 import { performWebSearch, SEARCH_ENGINES, validateSearchTemplate } from './search-config.js'
 import { renderCleanBarChart, renderCalendarHeatmap, formatAxisLabel, formatMinutesClean } from './stats-heatmap.js'
@@ -131,11 +131,13 @@ export function decodePdfProgress(savedProgress, totalPages) {
 
 // Object URL Lifecycle Pool with DOM-Aware and Pending-Fragment Protection to prevent premature revocation and memory bloat
 class ObjectUrlPool {
-    constructor(maxCapacity = 120) {
-        this.cache = new Map()
-        this.blobMeta = new Map()
-        this.maxCapacity = maxCapacity
-        this.pendingRoots = new Set()
+    constructor(maxCapacity = 2500, maxWarmImages = 180) {
+        this.maxCapacity = Math.max(1, maxCapacity)
+        this.maxWarmImages = Math.max(1, maxWarmImages)
+        this.cache = new Map()        // key -> objectURL (insertion order = LRU order)
+        this.blobMeta = new Map()     // key -> "${size}:${type}:${lastModified}"
+        this.warmImages = new Map()   // key -> HTMLImageElement (pins decoded bitmap in Blink MemoryCache, LRU bounded)
+        this.pendingRoots = new Set() // DocumentFragments or detached roots currently being built
     }
     registerPendingRoot(root) {
         if (!root) return () => {}
@@ -143,6 +145,35 @@ class ObjectUrlPool {
         return () => {
             this.pendingRoots.delete(root)
         }
+    }
+    _touchWarm(key) {
+        if (this.warmImages.has(key)) {
+            const img = this.warmImages.get(key)
+            this.warmImages.delete(key)
+            this.warmImages.set(key, img)
+            return true
+        }
+        return false
+    }
+    _prewarmBitmap(key, url) {
+        if (typeof Image === 'undefined' || !url) return
+        try {
+            if (this._touchWarm(key)) {
+                return
+            }
+            const img = new Image()
+            img.decoding = 'async'
+            img.src = url
+            if (typeof img.decode === 'function') {
+                img.decode().catch(() => {})
+            }
+            this.warmImages.set(key, img)
+            while (this.warmImages.size > this.maxWarmImages) {
+                const oldestKey = this.warmImages.keys().next().value
+                if (oldestKey === undefined) break
+                this.warmImages.delete(oldestKey)
+            }
+        } catch (_) {}
     }
     get(key, blob) {
         if (!blob) return ''
@@ -153,18 +184,18 @@ class ObjectUrlPool {
                 // Refresh LRU order (delete & re-insert)
                 this.cache.delete(key)
                 this.cache.set(key, existing)
+                if (!this._touchWarm(key)) {
+                    this._prewarmBitmap(key, existing)
+                }
                 return existing
             }
             this.revoke(key)
-        }
-        // Evict oldest unused entry when capacity is reached
-        if (this.cache.size >= this.maxCapacity) {
-            this.pruneUnused()
         }
         try {
             const url = URL.createObjectURL(blob)
             this.cache.set(key, url)
             this.blobMeta.set(key, sig)
+            this._prewarmBitmap(key, url)
             return url
         } catch (e) {
             console.warn('[ObjectUrlPool] Failed creating object URL:', e)
@@ -172,7 +203,7 @@ class ObjectUrlPool {
         }
     }
     pruneUnused(force = false) {
-        // Find keys whose URL is NOT currently referenced by an <img> or element in the active DOM or any registered pending root
+        if (!force && this.cache.size <= this.maxCapacity) return
         const activeUrls = new Set()
         try {
             const domImgs = document.querySelectorAll('img[src^="blob:"], [data-cover-url^="blob:"]')
@@ -196,7 +227,7 @@ class ObjectUrlPool {
             }
         }
 
-        const targetSize = force ? 0 : Math.floor(this.maxCapacity * 0.75)
+        const targetSize = force ? 0 : Math.floor(this.maxCapacity * 0.85)
         for (const [key, url] of [...this.cache.entries()]) {
             if (!force && this.cache.size <= targetSize) break
             if (!activeUrls.has(url)) {
@@ -212,6 +243,7 @@ class ObjectUrlPool {
             this.cache.delete(key)
         }
         this.blobMeta.delete(key)
+        this.warmImages.delete(key)
     }
     clear() {
         for (const url of this.cache.values()) {
@@ -221,10 +253,11 @@ class ObjectUrlPool {
         }
         this.cache.clear()
         this.blobMeta.clear()
+        this.warmImages.clear()
         this.pendingRoots.clear()
     }
 }
-const coverUrlPool = new ObjectUrlPool(120)
+const coverUrlPool = new ObjectUrlPool(2500, 180)
 window.ObjectUrlPool = ObjectUrlPool
 window.coverUrlPool = coverUrlPool
 
@@ -961,18 +994,27 @@ class UniversalReaderApp {
         this.isSatelliteReaderWindow = false
         this.initialSatelliteBookId = null
         try {
-            if (typeof window !== 'undefined' && window.location?.search) {
-                const params = new URLSearchParams(window.location.search)
-                const wMode = params.get('windowMode')
-                const bId = params.get('bookId')
-                if (wMode === 'reader' && bId) {
-                    this.isSatelliteReaderWindow = true
-                    this.initialSatelliteBookId = bId
+            if (typeof window !== 'undefined' && window.location) {
+                let searchStr = window.location.search || ''
+                if (!searchStr && window.location.hash && window.location.hash.indexOf('?') !== -1) {
+                    searchStr = window.location.hash.substring(window.location.hash.indexOf('?'))
+                }
+                if (searchStr) {
+                    const params = new URLSearchParams(searchStr)
+                    const wMode = params.get('windowMode')
+                    const bId = params.get('bookId')
+                    if (wMode === 'reader' && bId) {
+                        this.isSatelliteReaderWindow = true
+                        this.initialSatelliteBookId = bId
+                        if (typeof document !== 'undefined') {
+                            document.documentElement.classList.add('satellite-reader-window')
+                        }
+                    }
                 }
             }
         } catch (e) {}
 
-        // Cross-window live bookshelf synchronization bus
+        // Cross-window live bookshelf & reader synchronization bus
         this._crossWindowSyncBus = null
         this._crossWindowRefreshTimer = null
         if (typeof BroadcastChannel !== 'undefined') {
@@ -980,7 +1022,18 @@ class UniversalReaderApp {
                 this._crossWindowSyncBus = new BroadcastChannel('linden-sync-bus')
                 this._crossWindowSyncBus.onmessage = (event) => {
                     const msg = event?.data
-                    if (!msg || this.isSatelliteReaderWindow) return
+                    if (!msg) return
+                    if (this.isSatelliteReaderWindow) {
+                        if (
+                            msg.type === 'NAVIGATE_BOOK_LOCATION' &&
+                            msg.bookId &&
+                            String(msg.bookId) === String(this.initialSatelliteBookId || this.currentBookId) &&
+                            msg.location
+                        ) {
+                            this.navigateReaderToLocation(msg.location)
+                        }
+                        return
+                    }
                     if (msg.type === 'BOOK_PROGRESS_UPDATED' || msg.type === 'READING_STATS_UPDATED') {
                         if (!this._activeSession) {
                             clearTimeout(this._crossWindowRefreshTimer)
@@ -1235,7 +1288,19 @@ class UniversalReaderApp {
                         this.renderReadingPresetsUI()
                     } catch (e) {}
                 }, 0)
-                await this.openBook(this.initialSatelliteBookId)
+                let pendingLoc = null
+                try {
+                    const pendingKey = `linden_pending_nav_${this.initialSatelliteBookId}`
+                    const rawPending = localStorage.getItem(pendingKey)
+                    if (rawPending) {
+                        localStorage.removeItem(pendingKey)
+                        const parsed = JSON.parse(rawPending)
+                        if (parsed && (!parsed.ts || Date.now() - parsed.ts < 60000)) {
+                            pendingLoc = parsed.location || null
+                        }
+                    }
+                } catch (_) {}
+                await this.openBook(this.initialSatelliteBookId, pendingLoc, { forceInPlace: true })
             } else {
                 await this.renderCustomListsSidebar()
                 // R9: Render bookshelf immediately without waiting for font binaries
@@ -3481,8 +3546,8 @@ class UniversalReaderApp {
                         wheelDeltaAccumulator = 0
                     }
                 } 
-                // Screen 2: At the very top of the shelf
-                else if (scrollTop <= shelfTop + 4) {
+                // Screen 2: At the very top of the shelf (only within 12px of shelfTop)
+                else if (Math.abs(scrollTop - shelfTop) <= 12) {
                     if (e.deltaY < 0) {
                         wheelDeltaAccumulator += e.deltaY
                         clearTimeout(wheelResetTimer)
@@ -7001,22 +7066,93 @@ const select = document.getElementById('setting-pdf-page-appearance')
         })
     }
 
-    async openBookInNewWindow(bookId) {
-        if (!bookId) return
-        let book = (this.currentBooksList || []).find(b => b.id === bookId)
-        if (!book) book = await db.getBook(bookId)
-        if (!book) return
-        if (book.isCloudOnly) {
-            this.handleCloudBookClick(book)
-            return
+    async navigateReaderToLocation(targetLoc) {
+        if (!targetLoc) return
+        try {
+            if (typeof targetLoc === 'object' && targetLoc !== null) {
+                if (targetLoc.type === 'pdf' && typeof targetLoc.page === 'number' && this.pdfViewport) {
+                    this.pdfViewport.scrollToPage(Math.max(1, targetLoc.page) - 1, true)
+                    return
+                }
+                if (typeof targetLoc.page === 'number' && this.pdfViewport) {
+                    this.pdfViewport.scrollToPage(Math.max(1, targetLoc.page) - 1, true)
+                    return
+                }
+                if (targetLoc.cfi && this.foliateView) {
+                    await this.foliateView.goTo(targetLoc.cfi)
+                    return
+                }
+                if (typeof targetLoc.fraction === 'number' && this.foliateView?.goToFraction) {
+                    await this.foliateView.goToFraction(targetLoc.fraction)
+                    return
+                }
+            } else if (typeof targetLoc === 'string' && this.foliateView) {
+                await this.foliateView.goTo(targetLoc)
+            } else if (typeof targetLoc === 'number') {
+                if (this.pdfViewport) {
+                    if (targetLoc <= 1 && targetLoc > 0 && this.pdfDriver?.pageCount > 1) {
+                        const pg = Math.max(0, Math.round(targetLoc * (this.pdfDriver.pageCount - 1)))
+                        this.pdfViewport.scrollToPage(pg, true)
+                    } else {
+                        this.pdfViewport.scrollToPage(Math.max(0, Math.round(targetLoc) - 1), true)
+                    }
+                } else if (this.foliateView?.goToFraction) {
+                    await this.foliateView.goToFraction(targetLoc)
+                }
+            }
+        } catch (e) {
+            console.warn('[navigateReaderToLocation] Navigation warning:', e)
         }
-        const res = await platformBridge.openNewWindow({
-            bookId: book.id,
-            windowMode: 'reader',
-            title: book.title || 'Linden Leaf'
-        })
-        if (res?.alreadyExists) {
-            this.showToast(`已切换至《${book.title}》阅读窗口`, 'book')
+    }
+
+    async openBookInNewWindow(bookId, initialLocation = null) {
+        if (!bookId) return { success: false }
+        if (!this._pendingWindowSpawns) {
+            this._pendingWindowSpawns = new Set()
+        }
+        if (this._pendingWindowSpawns.has(bookId)) {
+            return { success: true, pending: true }
+        }
+        this._pendingWindowSpawns.add(bookId)
+        try {
+            let book = (this.currentBooksList || []).find(b => b.id === bookId)
+            if (!book) book = await db.getBook(bookId)
+            if (!book) {
+                this.showToast('找不到该书籍！', '⚠️')
+                return { success: false }
+            }
+            if (book.isCloudOnly) {
+                this.handleCloudBookClick(book)
+                return { success: true, cloudHandled: true }
+            }
+            if (initialLocation != null) {
+                try {
+                    localStorage.setItem(
+                        `linden_pending_nav_${book.id}`,
+                        JSON.stringify({ location: initialLocation, ts: Date.now() })
+                    )
+                } catch (_) {}
+            }
+            const res = await platformBridge.openNewWindow({
+                bookId: book.id,
+                windowMode: 'reader',
+                title: book.title || 'Linden Leaf'
+            })
+            if (res?.alreadyExists) {
+                if (initialLocation != null) {
+                    try {
+                        this._crossWindowSyncBus?.postMessage({
+                            type: 'NAVIGATE_BOOK_LOCATION',
+                            bookId: book.id,
+                            location: initialLocation
+                        })
+                    } catch (_) {}
+                }
+                this.showToast(`已切换至《${book.title}》阅读窗口`, 'book')
+            }
+            return res || { success: false }
+        } finally {
+            this._pendingWindowSpawns.delete(bookId)
         }
     }
 
@@ -8785,6 +8921,10 @@ ${originalText}`
             return false
         })
 
+        if (coverBlob) {
+            coverBlob = (await normalizeCoverBlob(coverBlob)) || coverBlob
+        }
+
         if (match) {
             console.log(`[processAndSaveBook] Found existing book record: ${match.title} (${match.id})`)
             await db.saveBook({ id: match.id, blob: file, nativePath, nativeSnapshotPath, filename: fileName, isCloudOnly: false, hasLocalFile: true, updatedAt: Date.now() })
@@ -8859,6 +8999,7 @@ ${originalText}`
         }
 
         if (coverBlob) {
+            coverBlob = (await normalizeCoverBlob(coverBlob)) || coverBlob
             book.coverBlob = coverBlob
             await db.saveBook(book)
             coverUrlPool.revoke(book.id)
@@ -8873,7 +9014,7 @@ ${originalText}`
                 } else {
                     const cleanCover = skeuoEl.querySelector('.skeuo-clean-cover')
                     if (cleanCover) {
-                        cleanCover.outerHTML = `<img class="skeuo-cover-img" src="${coverUrl}" alt="${escapeHTML(book.title)}" loading="lazy"/>`
+                        cleanCover.outerHTML = `<img class="skeuo-cover-img" src="${coverUrl}" alt="${escapeHTML(book.title)}" decoding="async"/>`
                     }
                 }
             }
@@ -8883,13 +9024,13 @@ ${originalText}`
                 if (existingImg) {
                     existingImg.src = coverUrl
                 } else {
-                    const cleanText = gridEl.querySelector('div')
+                    const cleanText = gridEl.querySelector('.editorial-cover-fallback, .jane-clean-cover')
                     if (cleanText) {
                         const img = document.createElement('img')
                         img.className = 'jane-cover-img'
                         img.src = coverUrl
                         img.alt = escapeHTML(book.title)
-                        img.loading = 'lazy'
+                        img.decoding = 'async'
                         cleanText.replaceWith(img)
                     }
                 }
@@ -9147,6 +9288,52 @@ ${originalText}`
         if (typeof coverUrlPool !== 'undefined') {
             coverUrlPool.pruneUnused()
         }
+        this.scheduleIdleCoverOptimization(books)
+    }
+
+    scheduleIdleCoverOptimization(books) {
+        if (this._coverOptRunning || !Array.isArray(books) || books.length === 0) return
+        if (!this._optimizedCoverIds) this._optimizedCoverIds = new Set()
+        const oversized = books.filter(b =>
+            b &&
+            b.id &&
+            b.coverBlob instanceof Blob &&
+            b.coverBlob.type !== 'image/svg+xml' &&
+            b.coverBlob.size > 220 * 1024 &&
+            !this._optimizedCoverIds.has(b.id)
+        )
+        if (oversized.length === 0) return
+        this._coverOptRunning = true
+        const runNext = async (idx) => {
+            if (idx >= oversized.length || this._activeSession) {
+                this._coverOptRunning = false
+                return
+            }
+            const item = oversized[idx]
+            this._optimizedCoverIds.add(item.id)
+            try {
+                const compressed = await normalizeCoverBlob(item.coverBlob)
+                if (compressed && compressed !== item.coverBlob && compressed.size < item.coverBlob.size) {
+                    item.coverBlob = compressed
+                    await db.saveBook({ id: item.id, coverBlob: compressed })
+                }
+            } catch (_) {}
+            setTimeout(() => runNext(idx + 1), 60)
+        }
+        setTimeout(() => runNext(0), 1200)
+    }
+
+    _getBookRenderSignature(book) {
+        if (!book) return ''
+        const frac = Math.round((book.progress?.fraction || 0) * 1000)
+        const state = resolveReadingState(book)
+        const fav = book.isFavorite ? 1 : 0
+        const cloud = book.isCloudOnly ? 1 : 0
+        const backup = book.cloudBackup?.hasBackup ? 1 : 0
+        const sel = (this.isBatchMode && this.selectedBookIds.has(book.id)) ? 1 : 0
+        const batch = this.isBatchMode ? 1 : 0
+        const coverSig = book.coverBlob ? `${book.coverBlob.size}:${book.coverBlob.type}` : 'none'
+        return `${book.id}|${book.title || ''}|${book.author || ''}|${frac}|${state}|${fav}|${cloud}|${backup}|${ batch }|${sel}|${coverSig}|${book.rating || 0}|${book.totalReadingSeconds || 0}`
     }
 
     initShelfDelegatedListeners() {
@@ -9326,9 +9513,9 @@ ${originalText}`
     renderBooksShelf(books) {
         if (!this.dom.booksShelf) return
         const container = this.dom.booksShelf
-        container.innerHTML = ''
 
         if (books.length === 0) {
+            container.innerHTML = ''
             const isFavView = this.shelfCategory === 'favorite'
             const isCustomList = this.shelfCategory && this.shelfCategory.startsWith('list_')
             const isFinishedView = this.shelfCategory === 'finished'
@@ -9365,37 +9552,68 @@ ${originalText}`
             rows.push(books.slice(i, i + booksPerRow))
         }
 
-        const shelfFragment = document.createDocumentFragment()
-        for (let r = 0; r < rows.length; r++) {
-            const shelfRow = document.createElement('div')
-            shelfRow.className = 'wood-shelf-row'
-
-            const booksWrap = document.createElement('div')
-            booksWrap.className = 'wood-shelf-books'
-
-            const rowBooks = rows[r] || []
-            const rowOffset = r * booksPerRow
-            rowBooks.forEach((book, idxInRow) => {
-                const bookEl = this.createSkeuomorphicBookElement(book, rowOffset + idxInRow)
-                booksWrap.appendChild(bookEl)
-            })
-
-            // 3D Wood Shelf Plank
-            const plank = document.createElement('div')
-            plank.className = 'wood-shelf-plank'
-            plank.innerHTML = `
-                <div class="wood-shelf-surface"></div>
-                <div class="wood-shelf-front">
-                    <div class="wood-shelf-bevel-highlight"></div>
-                </div>
-                <div class="wood-shelf-shadow"></div>
-            `
-
-            shelfRow.appendChild(booksWrap)
-            shelfRow.appendChild(plank)
-            shelfFragment.appendChild(shelfRow)
+        // Harvest existing .skeuo-book elements so decoded <img class="skeuo-cover-img"> bitmaps are preserved
+        const existingSkeuoCards = new Map()
+        for (const el of container.querySelectorAll('.skeuo-book[data-id]')) {
+            if (el.dataset?.id) {
+                existingSkeuoCards.set(el.dataset.id, el)
+            }
         }
-        container.appendChild(shelfFragment)
+
+        const shelfFragment = document.createDocumentFragment()
+        const unregisterShelf = coverUrlPool.registerPendingRoot(shelfFragment)
+        try {
+            for (let r = 0; r < rows.length; r++) {
+                const shelfRow = document.createElement('div')
+                shelfRow.className = 'wood-shelf-row'
+
+                const booksWrap = document.createElement('div')
+                booksWrap.className = 'wood-shelf-books'
+
+                const rowBooks = rows[r] || []
+                const rowOffset = r * booksPerRow
+                rowBooks.forEach((book, idxInRow) => {
+                    const cardIdx = rowOffset + idxInRow
+                    const nextSig = this._getBookRenderSignature(book)
+                    let bookEl = existingSkeuoCards.get(book.id)
+                    if (bookEl) {
+                        bookEl.classList.add('card-settled')
+                        bookEl.style.setProperty('--card-index', cardIdx)
+                        if (bookEl._renderSig !== nextSig) {
+                            const existingImg = bookEl.querySelector('img.skeuo-cover-img')
+                            const freshEl = this.createSkeuomorphicBookElement(book, cardIdx)
+                            freshEl.classList.add('card-settled')
+                            const freshImg = freshEl.querySelector('img.skeuo-cover-img')
+                            if (existingImg && freshImg && existingImg.src === freshImg.src) {
+                                freshImg.replaceWith(existingImg)
+                            }
+                            bookEl = freshEl
+                        }
+                    } else {
+                        bookEl = this.createSkeuomorphicBookElement(book, cardIdx)
+                    }
+                    booksWrap.appendChild(bookEl)
+                })
+
+                // 3D Wood Shelf Plank
+                const plank = document.createElement('div')
+                plank.className = 'wood-shelf-plank'
+                plank.innerHTML = `
+                    <div class="wood-shelf-surface"></div>
+                    <div class="wood-shelf-front">
+                        <div class="wood-shelf-bevel-highlight"></div>
+                    </div>
+                    <div class="wood-shelf-shadow"></div>
+                `
+
+                shelfRow.appendChild(booksWrap)
+                shelfRow.appendChild(plank)
+                shelfFragment.appendChild(shelfRow)
+            }
+            container.replaceChildren(shelfFragment)
+        } finally {
+            unregisterShelf()
+        }
     }
 
     createSkeuomorphicBookElement(book, cardIndex = 0) {
@@ -9433,7 +9651,7 @@ ${originalText}`
 
         let coverInner = ''
         if (coverUrl) {
-            coverInner = `<img class="skeuo-cover-img" src="${coverUrl}" alt="${escapeHTML(book.title)}" loading="lazy" decoding="async"/>`
+            coverInner = `<img class="skeuo-cover-img" src="${coverUrl}" alt="${escapeHTML(book.title)}" decoding="async"/>`
         } else {
             coverInner = `
                 <div class="skeuo-clean-cover" style="background: ${palette.bg}; border-left-color: ${palette.border};">
@@ -9496,6 +9714,7 @@ ${originalText}`
             </div>
             <div class="skeuo-book-shelf-shadow"></div>
         `
+        card._renderSig = this._getBookRenderSignature(book)
         return card
     }
 
@@ -9585,7 +9804,7 @@ ${originalText}`
         const displayTitle = resolveBookTitle(book.title || '', book.filename || '')
         let coverInnerHtml = ''
         if (coverUrl) {
-            coverInnerHtml = `<img class="jane-cover-img" src="${coverUrl}" alt="${escapeHTML(displayTitle)}" loading="lazy" decoding="async"/>`
+            coverInnerHtml = `<img class="jane-cover-img" src="${coverUrl}" alt="${escapeHTML(displayTitle)}" decoding="async"/>`
         } else if (typeof window !== 'undefined' && typeof window.renderBookCoverHTML === 'function') {
             coverInnerHtml = window.renderBookCoverHTML(book, '', true)
         } else {
@@ -9610,6 +9829,8 @@ ${originalText}`
             <div class="jane-book-meta-row">${metaHtml}</div>
             <div class="jane-book-title" title="${escapeHTML(displayTitle)}">${escapeHTML(displayTitle)}</div>
         `
+        card._renderSig = this._getBookRenderSignature(book)
+        card._coverUrl = coverUrl
         return card
     }
 
@@ -9795,6 +10016,12 @@ ${originalText}`
                     coverUrl = coverUrlPool.get(heroBook.id, heroBook.coverBlob)
                 }
 
+                const heroSig = `${heroBook.id}|${heroBook.title}|${fillWidth}|${progressPct}|${readDurationStr}|${coverUrl}`
+                if (this.dom.heroBookShowcase._heroSig === heroSig && this.dom.heroBookShowcase.querySelector('.hero-book-card')) {
+                    return
+                }
+                this.dom.heroBookShowcase._heroSig = heroSig
+
                 this.dom.heroBookShowcase.innerHTML = `
                     <div class="hero-book-card" data-id="${heroBook.id}" style="cursor: pointer;">
                         <div class="hero-book-cover-box">
@@ -9833,6 +10060,7 @@ ${originalText}`
                     })
                 }
             } else {
+                this.dom.heroBookShowcase._heroSig = 'empty'
                 this.dom.heroBookShowcase.innerHTML = `
                     <div class="hero-book-card" style="flex-direction: column; justify-content: center; gap: 16px; text-align: center; padding: 2rem 1.5rem;">
                         <div style="font-family: var(--font-serif); font-size: 1.15rem; color: var(--text-main);">从第一本书开始</div>
@@ -9862,21 +10090,11 @@ ${originalText}`
         if (!this.dom.booksWorkspace) return
         const scrollTop = this.dom.booksWorkspace.scrollTop || 0
 
-        if (!this._isShelfScrolling) {
-            this._isShelfScrolling = true
-            this.dom.booksWorkspace.classList.add('is-scrolling')
-        }
-        clearTimeout(this._shelfScrollIdleTimer)
-        this._shelfScrollIdleTimer = setTimeout(() => {
-            this._isShelfScrolling = false
-            this.dom.booksWorkspace?.classList.remove('is-scrolling')
-        }, 120)
-
-        // 1. Dynamic scrollbar class (rAF throttled)
-        if (scrollTop > 80) {
-            this.dom.booksWorkspace.classList.add('scrolled-into-shelf')
-        } else {
-            this.dom.booksWorkspace.classList.remove('scrolled-into-shelf')
+        // 1. Dynamic scrollbar class (only mutate classList when crossing threshold)
+        const shouldShowScrollbar = scrollTop > 80
+        if (this._scrolledIntoShelfState !== shouldShowScrollbar) {
+            this._scrolledIntoShelfState = shouldShowScrollbar
+            this.dom.booksWorkspace.classList.toggle('scrolled-into-shelf', shouldShowScrollbar)
         }
 
         if (this.isGliding) return
@@ -9968,9 +10186,8 @@ ${originalText}`
     }
 
     renderBooksGrid(books) {
-        this.dom.booksGrid.innerHTML = ''
-
         if (books.length === 0) {
+            this.dom.booksGrid.innerHTML = ''
             this.dom.booksGrid.classList.add('is-empty')
             this.dom.booksGrid.style.display = 'flex'
             this.dom.booksGrid.style.justifyContent = 'center'
@@ -10031,6 +10248,7 @@ ${originalText}`
 
         // Group by completed year-month if in overview finished status with grouping enabled
         if (this.shelfCategory === 'overview' && this.overviewStatus === 'finished' && this.overviewGroupByYearMonth) {
+            this.dom.booksGrid.innerHTML = ''
             const groupMap = new Map()
             books.forEach(b => {
                 let key = '日期未知'
@@ -10070,14 +10288,53 @@ ${originalText}`
             return
         }
 
+        // Collect existing card elements by book.id so we can reuse them in-place
+        // without destroying decoded <img> bitmaps or re-triggering entrance animations
+        const existingCards = new Map()
+        for (const child of Array.from(this.dom.booksGrid.children)) {
+            if (child.classList?.contains('jane-book-card') && child.dataset?.id) {
+                existingCards.set(child.dataset.id, child)
+            } else {
+                child.remove()
+            }
+        }
+
+        const nextIds = new Set(books.map(b => b.id))
+        for (const [id, el] of existingCards.entries()) {
+            if (!nextIds.has(id)) {
+                el.remove()
+                existingCards.delete(id)
+            }
+        }
+
         const gridFragment = document.createDocumentFragment()
         const unregisterGrid = coverUrlPool.registerPendingRoot(gridFragment)
         try {
             books.forEach((book, idx) => {
-                const card = this.createBookCard(book, idx)
-                gridFragment.appendChild(card)
+                const nextSig = this._getBookRenderSignature(book)
+                let card = existingCards.get(book.id)
+                if (card) {
+                    card.classList.add('card-settled')
+                    card.style.setProperty('--card-index', idx)
+                    if (card._renderSig !== nextSig) {
+                        const existingImg = card.querySelector('img.jane-cover-img')
+                        const freshCard = this.createBookCard(book, idx)
+                        freshCard.classList.add('card-settled')
+                        const freshImg = freshCard.querySelector('img.jane-cover-img')
+                        if (existingImg && freshImg && existingImg.src === freshImg.src) {
+                            freshImg.replaceWith(existingImg)
+                        }
+                        card.replaceWith(freshCard)
+                        card = freshCard
+                    }
+                } else {
+                    card = this.createBookCard(book, idx)
+                }
+                const currentAtIdx = this.dom.booksGrid.children[idx]
+                if (currentAtIdx !== card) {
+                    this.dom.booksGrid.insertBefore(card, currentAtIdx || null)
+                }
             })
-            this.dom.booksGrid.appendChild(gridFragment)
         } finally {
             unregisterGrid()
         }
@@ -10788,10 +11045,24 @@ ${originalText}`
         }
     }
 
-    async openBook(bookOrId) {
-        let initialLocation = arguments[1] || null
+    async openBook(bookOrId, initialLocation = null, options = {}) {
         const bookId = (typeof bookOrId === 'object' && bookOrId !== null) ? bookOrId.id : bookOrId
         if (!bookId) return this.showToast('找不到该书籍！', '⚠️')
+
+        // Desktop Multi-Window Architecture:
+        // When invoked from the main bookshelf window on desktop, always open/focus an
+        // independent satellite reader window so the bookshelf window stays open.
+        if (
+            !this.isSatelliteReaderWindow &&
+            !options?.forceInPlace &&
+            !this.isMobileLayout() &&
+            !platformBridge.isAndroid
+        ) {
+            const winRes = await this.openBookInNewWindow(bookId, initialLocation)
+            if (winRes?.success) {
+                return
+            }
+        }
 
         // 1. Synchronously increment session epoch and clear pending timers
         this._currentBookEpoch = (this._currentBookEpoch || 0) + 1
@@ -11817,6 +12088,10 @@ this.applyPdfPageAppearance()
         this.cancelPendingReaderUIToggle()
         const closingSession = this._activeSession
         if (!closingSession) {
+            if (this.isSatelliteReaderWindow) {
+                platformBridge.windowClose()
+                return
+            }
             this.dom.readerView?.classList.remove('active')
             if (this.dom.bookshelfView) this.dom.bookshelfView.style.display = 'flex'
             return
@@ -11903,22 +12178,24 @@ this.applyPdfPageAppearance()
 
         // 8. Trigger UI transition only if no new session has started
         if (!this._activeSession) {
-            this.dom.readerView.classList.remove('active')
-            this.dom.readerView.classList.add('closing')
-            this.dom.bookshelfView.style.display = 'flex'
-            this.dom.bookshelfView.classList.remove('view-spring-transition')
-            void this.dom.bookshelfView.offsetWidth
-            this.dom.bookshelfView.classList.add('view-spring-transition')
+            if (!this.isSatelliteReaderWindow) {
+                this.dom.readerView.classList.remove('active')
+                this.dom.readerView.classList.add('closing')
+                this.dom.bookshelfView.style.display = 'flex'
+                this.dom.bookshelfView.classList.remove('view-spring-transition')
+                void this.dom.bookshelfView.offsetWidth
+                this.dom.bookshelfView.classList.add('view-spring-transition')
 
-            if (this._closeTimer) clearTimeout(this._closeTimer)
-            this._closeTimer = setTimeout(() => {
-                this._closeTimer = null
-                if (!this._activeSession) {
-                    this.dom.readerView?.classList.remove('closing')
-                    if (this.dom.readerView) this.dom.readerView.style.display = 'none'
-                    this.dom.bookshelfView?.classList.remove('view-spring-transition')
-                }
-            }, 240)
+                if (this._closeTimer) clearTimeout(this._closeTimer)
+                this._closeTimer = setTimeout(() => {
+                    this._closeTimer = null
+                    if (!this._activeSession) {
+                        this.dom.readerView?.classList.remove('closing')
+                        if (this.dom.readerView) this.dom.readerView.style.display = 'none'
+                        this.dom.bookshelfView?.classList.remove('view-spring-transition')
+                    }
+                }, 240)
+            }
 
             // Reset PDF drawing state so the pen tool never leaks into the next book
             this.pdfDrawTool = null

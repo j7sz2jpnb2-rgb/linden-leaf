@@ -655,15 +655,29 @@ class PlatformBridge {
         const windowMode = options?.windowMode || (bookId ? 'reader' : 'shelf');
         const title = options?.title ? String(options.title) : null;
 
+        if (this._getNativeElectron()?.openNewWindow) {
+            try {
+                const res = await this._getNativeElectron().openNewWindow({
+                    bookId,
+                    windowMode,
+                    title
+                });
+                if (res?.success) return res;
+            } catch (e) {
+                console.warn('[PlatformBridge] Electron openNewWindow failed:', e);
+            }
+        }
+
         if (this.isTauri) {
             try {
-                return await this._invokeTauri('window_open_new', {
+                const res = await this._invokeTauri('window_open_new', {
                     bookId,
                     book_id: bookId,
                     windowMode,
                     window_mode: windowMode,
                     title
                 });
+                if (res && typeof res === 'object') return res;
             } catch (e) {
                 console.warn('[PlatformBridge] Tauri window_open_new failed:', e);
             }

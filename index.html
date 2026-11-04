@@ -92,6 +92,20 @@
         if (document.body) document.body.style.backgroundColor = bg;
         var savedView = 'grid';
         document.documentElement.setAttribute('data-shelf-view', savedView);
+
+        // Satellite Reader Window: zero-latency lock before initial render
+        if (window.location) {
+          var searchStr = window.location.search || '';
+          if (!searchStr && window.location.hash && window.location.hash.indexOf('?') !== -1) {
+            searchStr = window.location.hash.substring(window.location.hash.indexOf('?'));
+          }
+          if (searchStr) {
+            var params = new URLSearchParams(searchStr);
+            if (params.get('windowMode') === 'reader') {
+              document.documentElement.classList.add('satellite-reader-window');
+            }
+          }
+        }
       } catch (e) {}
     })();
   </script>

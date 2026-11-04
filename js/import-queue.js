@@ -3,6 +3,7 @@
 // independent low-priority cover generation, cancellability, retry, and crash-resilient cleanup.
 
 import * as db from './db.js'
+import { normalizeCoverBlob } from './pdf-cover.js'
 import { platformBridge } from './platformBridge.js'
 import { extractPdfCover } from './pdf-cover.js'
 import { resolveBookTitle } from './book-title.js'
@@ -530,6 +531,9 @@ const formatContributor = contributor => {
                             const mime = coverEntry.filename.endsWith('.png') ? 'image/png' : coverEntry.filename.endsWith('.webp') ? 'image/webp' : 'image/jpeg'
                             initialCoverBlob = await loader.loadBlob(coverEntry.filename, mime)
                         }
+                    }
+                    if (initialCoverBlob) {
+                        initialCoverBlob = await normalizeCoverBlob(initialCoverBlob)
                     }
                 } catch (metaErr) {
                     console.warn('[ImportQueue] Fast zip metadata extract warning:', metaErr)

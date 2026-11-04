@@ -1473,9 +1473,12 @@ input#file-input[type="file"] {
   will-change: scroll-position;
 }
 
-.jane-content-workspace.is-scrolling .skeuo-book,
-.jane-content-workspace.is-scrolling .jane-book-card {
-  pointer-events: none !important;
+/* Satellite Reader Window: keep bookshelf hidden from frame 0 */
+html.satellite-reader-window #bookshelf-view {
+  display: none !important;
+}
+html.satellite-reader-window #reader-view {
+  display: flex !important;
 }
 
 /* Custom Wood Shelf Scrollbar */
@@ -1517,9 +1520,6 @@ input#file-input[type="file"] {
   min-height: 275px;
   box-sizing: border-box;
   margin-bottom: 1.25rem;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 275px;
-  contain: layout style paint;
 }
 
 /* 4 Books per Row (Evenly spaced & centered) */
@@ -2352,9 +2352,11 @@ input#file-input[type="file"] {
   transition: transform 0.22s cubic-bezier(0.2, 0, 0, 1);
   animation: appleCardFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) backwards;
   animation-delay: min(calc(var(--card-index, 0) * 12ms), 120ms);
-  contain: layout style paint;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 260px;
+}
+
+.jane-book-card.card-settled,
+.skeuo-book.card-settled {
+  animation: none !important;
 }
 
 .jane-book-card:hover {

@@ -5,7 +5,7 @@
 import * as db from './db.js'
 import { formatMinutesClean, aggregateSessions, getSessionDurationSeconds } from './stats-heatmap.js'
 import { STATUS_LABELS, setReadingStatus, updateBookTags, resolveReadingState } from './tags-manager.js'
-import { regenerateBookCover } from './pdf-cover.js'
+import { regenerateBookCover, normalizeCoverBlob } from './pdf-cover.js'
 
 function renderStarIcons(rating) {
     const stars = []
@@ -484,7 +484,8 @@ export class BookDetailsModal {
                     )
                     file = new Blob([buf], { type: inferredMime })
                 }
-                await db.saveBook({ id: bookId, coverBlob: file })
+                const optimizedFile = (await normalizeCoverBlob(file)) || file
+                await db.saveBook({ id: bookId, coverBlob: optimizedFile })
                 window.coverUrlPool?.revoke?.(bookId)
                 if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
                     await this.render(container, bookId, callbacks)
