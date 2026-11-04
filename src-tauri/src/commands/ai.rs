@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
-use crate::commands::sync::{is_allowed_server_url, secure_load_credential, secure_store_credential};
+use crate::commands::sync::{is_allowed_server_url, secure_load_credential};
 
 use std::collections::HashMap;
 
@@ -226,12 +226,14 @@ fn sanitize_error_message(status: u16, raw: &str) -> String {
     }
 
     // Strip HTML if provider returned an HTML page (like Cloudflare 502/503)
-    let text = if trimmed.starts_with('<') {
-        "服务返回错误页面，请检查网络或服务可用性"
-    } else if trimmed.len() > 180 {
-        &trimmed[..180]
+    if trimmed.starts_with('<') {
+        return format!("HTTP {}: 服务返回错误页面，请检查网络或服务可用性", status);
+    }
+    let text: String = if trimmed.chars().count() > 180 {
+        let prefix: String = trimmed.chars().take(180).collect();
+        format!("{}...", prefix)
     } else {
-        trimmed
+        trimmed.to_string()
     };
 
     format!("HTTP {}: {}", status, text)
@@ -403,14 +405,14 @@ pub fn ai_bind_credential(app_handle: tauri::AppHandle, endpoint: String, api_ke
 
     let clean_key = api_key.trim();
     if clean_key.is_empty() {
-        secure_store_credential(app_handle.clone(), "reading_ai_api_key".to_string(), String::new())?;
-        secure_store_credential(app_handle, "reading_ai_credential_origin".to_string(), String::new())?;
+        crate::commands::sync::secure_store_credential_internal(app_handle.clone(), "reading_ai_api_key".to_string(), String::new())?;
+        crate::commands::sync::secure_store_credential_internal(app_handle, "reading_ai_credential_origin".to_string(), String::new())?;
         return Ok(true);
     }
 
     let origin = parsed.origin().ascii_serialization();
-    secure_store_credential(app_handle.clone(), "reading_ai_api_key".to_string(), clean_key.to_string())?;
-    secure_store_credential(app_handle, "reading_ai_credential_origin".to_string(), origin)?;
+    crate::commands::sync::secure_store_credential_internal(app_handle.clone(), "reading_ai_api_key".to_string(), clean_key.to_string())?;
+    crate::commands::sync::secure_store_credential_internal(app_handle, "reading_ai_credential_origin".to_string(), origin)?;
     Ok(true)
 }
 
@@ -724,9 +726,8 @@ pub async fn ai_request_chat_completion(
                         byte_buffer.extend_from_slice(&bytes);
 
                         while let Some(newline_pos) = byte_buffer.iter().position(|&b| b == b'\n') {
-                            let line_bytes = &byte_buffer[..newline_pos];
-                            let line = String::from_utf8_lossy(line_bytes).trim().to_string();
-                            byte_buffer = byte_buffer[newline_pos + 1..].to_vec();
+                            let line = String::from_utf8_lossy(&byte_buffer[..newline_pos]).trim().to_string();
+                            byte_buffer.drain(..=newline_pos);
 
                             if line.is_empty() || line.starts_with(':') {
                                 continue;
@@ -747,8 +748,7 @@ pub async fn ai_request_chat_completion(
                                         let _ = window.emit(
                                             &format!("ai:chunk:{}", req_id),
                                             serde_json::json!({
-                                                "delta": delta,
-                                                "fullText": full_text
+                                                "delta": delta
                                             }),
                                         );
                                     }
@@ -944,6 +944,17 @@ mod tests {
         let json_err = r#"{"error":{"message":"Incorrect API key provided"}}"#;
         let sanitized = sanitize_error_message(401, json_err);
         assert_eq!(sanitized, "HTTP 401: Incorrect API key provided");
+
+        let html_err = "<html><head><title>502 Bad Gateway</title></head><body>502 Bad Gateway</body></html>";
+        let sanitized_html = sanitize_error_message(502, html_err);
+        assert!(sanitized_html.contains("HTTP 502: 服务返回错误页面"));
+        assert!(!sanitized_html.contains("<html"));
+
+        let long_cjk = "这是一段很长的测试错误文本，包含许多中文字符。".repeat(10);
+        assert!(long_cjk.chars().count() > 180);
+        let sanitized_cjk = sanitize_error_message(500, &long_cjk);
+        assert!(sanitized_cjk.ends_with("..."));
+        assert!(sanitized_cjk.starts_with("HTTP 500: "));
     }
 
     #[test]

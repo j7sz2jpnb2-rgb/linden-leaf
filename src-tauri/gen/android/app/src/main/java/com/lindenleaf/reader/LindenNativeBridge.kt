@@ -23,6 +23,9 @@ object LindenNativeBridge {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val KEY_ALIAS_PREFIX = "ll_sec_"
     private const val GCM_TAG_LENGTH = 128
+    private val ALLOWED_BOOK_EXTENSIONS = setOf(
+        "epub", "pdf", "docx", "txt", "md", "mobi", "azw", "azw3", "fb2", "cbz", "djvu"
+    )
 
     @JvmStatic
     fun resolveContentUri(context: Context, uriString: String): String {
@@ -31,6 +34,21 @@ object LindenNativeBridge {
         try {
             val uri = Uri.parse(uriString)
             val contentResolver: ContentResolver = context.contentResolver
+
+            // Guard against file:// URIs or symlinks pointing inside the app private sandbox (dataDir / filesDir)
+            if (uri.scheme == null || uri.scheme.equals("file", ignoreCase = true)) {
+                val rawPath = uri.path ?: uriString.removePrefix("file://")
+                val targetCanon = File(rawPath).canonicalPath
+                val dataCanon = File(context.applicationInfo.dataDir).canonicalPath
+                val filesCanon = context.filesDir.canonicalPath
+                val booksCanon = File(context.filesDir, "books").canonicalPath
+                if ((targetCanon.startsWith("$dataCanon/") || targetCanon == dataCanon ||
+                     targetCanon.startsWith("$filesCanon/") || targetCanon == filesCanon) &&
+                    !targetCanon.startsWith("$booksCanon/")
+                ) {
+                    throw SecurityException("拒绝从应用私有沙盒目录导入内部文件")
+                }
+            }
 
             // 1. Resolve display filename
             var resolvedName: String? = null
@@ -50,9 +68,13 @@ object LindenNativeBridge {
                 resolvedName = uri.lastPathSegment?.substringAfterLast('/') ?: "imported_book"
             }
 
-            // Clean filename to prevent path traversal
+            // Clean filename to prevent path traversal and verify book extension allowlist
             val cleaned = (resolvedName ?: "imported_book").replace(Regex("[/\\\\:*?\"<>|]"), "_").trim()
             val filename: String = if (cleaned.isEmpty()) "imported_book" else cleaned
+            val ext = filename.substringAfterLast('.', "").lowercase()
+            if (ext.isNotEmpty() && !ALLOWED_BOOK_EXTENSIONS.contains(ext)) {
+                throw SecurityException("不支持的图书文件扩展名: .$ext")
+            }
 
             // 2. Prepare staging directory (files/staging/)
             val stagingDir = File(context.filesDir, "staging")

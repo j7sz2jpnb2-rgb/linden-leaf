@@ -9014,7 +9014,7 @@ ${originalText}`
                 } else {
                     const cleanCover = skeuoEl.querySelector('.skeuo-clean-cover')
                     if (cleanCover) {
-                        cleanCover.outerHTML = `<img class="skeuo-cover-img" src="${coverUrl}" alt="${escapeHTML(book.title)}" decoding="async"/>`
+                        cleanCover.outerHTML = `<img class="skeuo-cover-img" src="${escapeHTML(coverUrl)}" alt="${escapeHTML(book.title)}" decoding="async"/>`
                     }
                 }
             }
@@ -9651,7 +9651,7 @@ ${originalText}`
 
         let coverInner = ''
         if (coverUrl) {
-            coverInner = `<img class="skeuo-cover-img" src="${coverUrl}" alt="${escapeHTML(book.title)}" decoding="async"/>`
+            coverInner = `<img class="skeuo-cover-img" src="${escapeHTML(coverUrl)}" alt="${escapeHTML(book.title)}" decoding="async"/>`
         } else {
             coverInner = `
                 <div class="skeuo-clean-cover" style="background: ${palette.bg}; border-left-color: ${palette.border};">
@@ -9804,7 +9804,7 @@ ${originalText}`
         const displayTitle = resolveBookTitle(book.title || '', book.filename || '')
         let coverInnerHtml = ''
         if (coverUrl) {
-            coverInnerHtml = `<img class="jane-cover-img" src="${coverUrl}" alt="${escapeHTML(displayTitle)}" decoding="async"/>`
+            coverInnerHtml = `<img class="jane-cover-img" src="${escapeHTML(coverUrl)}" alt="${escapeHTML(displayTitle)}" decoding="async"/>`
         } else if (typeof window !== 'undefined' && typeof window.renderBookCoverHTML === 'function') {
             coverInnerHtml = window.renderBookCoverHTML(book, '', true)
         } else {
@@ -10023,10 +10023,10 @@ ${originalText}`
                 this.dom.heroBookShowcase._heroSig = heroSig
 
                 this.dom.heroBookShowcase.innerHTML = `
-                    <div class="hero-book-card" data-id="${heroBook.id}" style="cursor: pointer;">
+                    <div class="hero-book-card" data-id="${escapeHTML(String(heroBook.id || ''))}" style="cursor: pointer;">
                         <div class="hero-book-cover-box">
                             ${coverUrl 
-                                ? `<img class="hero-book-cover-img" src="${coverUrl}" alt="${escapeHTML(heroBook.title)}"/>`
+                                ? `<img class="hero-book-cover-img" src="${escapeHTML(coverUrl)}" alt="${escapeHTML(heroBook.title)}"/>`
                                 : `<div class="hero-book-cover-fallback"><span>${escapeHTML(heroBook.title)}</span></div>`
                             }
                         </div>
@@ -10735,7 +10735,7 @@ ${originalText}`
                 const row = document.createElement('label')
                 row.className = 'book-list-check-row'
                 row.innerHTML = `
-                    <input type="checkbox" data-book-id="${b.id}" ${inList ? 'checked' : ''} />
+                    <input type="checkbox" data-book-id="${escapeHTML(String(b.id || ''))}" ${inList ? 'checked' : ''} />
                     <span style="flex: 1; font-size: 0.88rem; font-weight: 500; color: var(--text-main);">${escapeHTML(b.title)}</span>
                     <span style="font-size: 0.75rem; color: var(--text-muted);">${escapeHTML(b.author || '')}</span>
                 `
@@ -15455,7 +15455,7 @@ this.applyPdfPageAppearance()
             item.innerHTML = `
                 <div class="rank-badge ${rankClass}">${rankText}</div>
                 ${coverUrl 
-                    ? `<img class="item-thumb" src="${coverUrl}" alt="${escapeHTML(displayTitle)}"/>`
+                    ? `<img class="item-thumb" src="${escapeHTML(coverUrl)}" alt="${escapeHTML(displayTitle)}"/>`
                     : `<div class="item-thumb" style="display:flex;align-items:center;justify-content:center;font-size:8px;color:#94a3b8;">书</div>`
                 }
                 <div class="item-info">
@@ -15544,7 +15544,7 @@ this.applyPdfPageAppearance()
 
                     row.innerHTML = `
                         <div style="width: 44px; height: 60px; border-radius: 4px; overflow: hidden; background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                            ${coverUrl ? `<img src="${coverUrl}" style="width: 100%; height: 100%; object-fit: cover;" />` : `<span class="ui-empty-icon">${uiSymbol('book')}</span>`}
+                            ${coverUrl ? `<img src="${escapeHTML(coverUrl)}" style="width: 100%; height: 100%; object-fit: cover;" />` : `<span class="ui-empty-icon">${uiSymbol('book')}</span>`}
                         </div>
                         <div style="flex: 1; min-width: 0;">
                             <div style="font-size: 0.92rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(b.title)}</div>
@@ -15595,7 +15595,7 @@ this.applyPdfPageAppearance()
 
                     row.innerHTML = `
                         <div style="width: 44px; height: 60px; border-radius: 4px; overflow: hidden; background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                            ${coverUrl ? `<img src="${coverUrl}" style="width: 100%; height: 100%; object-fit: cover;" />` : `<span class="ui-empty-icon">${uiSymbol('award')}</span>`}
+                            ${coverUrl ? `<img src="${escapeHTML(coverUrl)}" style="width: 100%; height: 100%; object-fit: cover;" />` : `<span class="ui-empty-icon">${uiSymbol('award')}</span>`}
                         </div>
                         <div style="flex: 1; min-width: 0;">
                             <div style="font-size: 0.92rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHTML(b.title)}</div>

@@ -401,6 +401,19 @@ function getResolvedSyncConfig(incomingConfig) {
     const saved = loadSyncConfig(true)
     const finalConfig = { ...saved, ...(incomingConfig || {}) }
     if ((!incomingConfig?.password || incomingConfig.password === '') && saved.password) {
+        // Verify credential origin matches saved serverUrl before attaching stored password
+        const reqUrl = (incomingConfig?.serverUrl || '').trim()
+        if (reqUrl) {
+            try {
+                const reqOrigin = new URL(reqUrl).origin
+                const savedOrigin = new URL((saved.serverUrl || 'https://dav.jianguoyun.com/dav/').trim()).origin
+                if (reqOrigin !== savedOrigin) {
+                    throw new Error(`Target server origin "${reqOrigin}" does not match saved credentials origin "${savedOrigin}"`)
+                }
+            } catch (err) {
+                throw new Error(err.message || 'Invalid WebDAV server URL or origin mismatch')
+            }
+        }
         finalConfig.password = saved.password
     }
     return finalConfig
@@ -408,11 +421,6 @@ function getResolvedSyncConfig(incomingConfig) {
 
 ipcMain.handle('sync:getConfig', () => {
     return loadSyncConfig(false)
-})
-
-ipcMain.handle('sync:revealPassword', () => {
-    const config = loadSyncConfig(true)
-    return config.password || ''
 })
 
 ipcMain.handle('sync:saveConfig', (_event, config) => {

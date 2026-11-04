@@ -237,7 +237,6 @@ pub fn run() {
             // Sync & DPAPI
             sync_get_config,
             sync_save_config,
-            sync_reveal_password,
             sync_test_connection,
             sync_fetch_remote,
             sync_save_remote,

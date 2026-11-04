@@ -196,7 +196,7 @@ int32_t mupdf_bridge_collect_page_sizes(mupdf_doc_t *doc, int32_t *out_wh_buffer
             if (pdf_name_eq(ctx, type, PDF_NAME(Pages))) {
                 pdf_obj *kids = pdf_dict_get(ctx, node, PDF_NAME(Kids));
                 int len = pdf_array_len(ctx, kids);
-                if (len > 0) {
+                if (len > 0 && depth < 256) {
                     stack[depth].node = node;
                     stack[depth].child_len = len;
                     stack[depth].child_idx = 0;

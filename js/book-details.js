@@ -165,7 +165,7 @@ export class BookDetailsModal {
             <div class="book-details-content" data-details-view="${this.mobileDetailsTab || 'reading'}">
                 <header class="book-details-header">
                     <div class="book-details-cover-box" id="details-cover-box">
-                        ${this._activeCoverUrl ? `<img class="book-details-cover-img" src="${this._activeCoverUrl}" alt="Cover" />` : `<div class="book-details-cover-fallback"><span>${safeTitle}</span></div>`}
+                        ${this._activeCoverUrl ? `<img class="book-details-cover-img" src="${escapeHTML(this._activeCoverUrl)}" alt="Cover" />` : `<div class="book-details-cover-fallback"><span>${safeTitle}</span></div>`}
                     </div>
                     <div class="book-details-meta">
                         <h2 class="book-details-title" title="${safeTitle}">${safeTitle}</h2>

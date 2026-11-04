@@ -1366,6 +1366,48 @@ export const applySyncedHighlight = async highlight => {
     })
 }
 
+export const applySyncedHighlightsBatch = async (highlights = []) => {
+    const valid = (highlights || []).filter(h => h && h.id)
+    if (valid.length === 0) return 0
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const hasDeleted = db.objectStoreNames.contains('deleted_records')
+        const storeNames = hasDeleted ? ['highlights', 'deleted_records'] : ['highlights']
+        const tx = db.transaction(storeNames, 'readwrite')
+        const store = tx.objectStore('highlights')
+        const delStore = hasDeleted ? tx.objectStore('deleted_records') : null
+        let applied = 0
+
+        for (const highlight of valid) {
+            const incomingTime = highlight.updatedAt || highlight.createdAt || 0
+            const checkExistingAndPut = () => {
+                const exReq = store.get(highlight.id)
+                exReq.onsuccess = () => {
+                    const ex = exReq.result
+                    const exTime = ex ? (ex.updatedAt || ex.createdAt || 0) : 0
+                    if (ex && exTime > incomingTime) return
+                    store.put(highlight)
+                    applied++
+                }
+            }
+            if (delStore) {
+                const tombReq = delStore.get(highlight.id)
+                tombReq.onsuccess = () => {
+                    const tomb = tombReq.result
+                    if (tomb && (tomb.deletedAt || 0) >= incomingTime) return
+                    checkExistingAndPut()
+                }
+            } else {
+                checkExistingAndPut()
+            }
+        }
+
+        tx.oncomplete = () => resolve(applied)
+        tx.onerror = () => reject(tx.error || new Error('Batch transaction error saving synced highlights'))
+        tx.onabort = () => reject(tx.error || new Error('Batch transaction aborted saving synced highlights'))
+    })
+}
+
 export const getHighlightsByBook = async bookId => {
     if (!bookId) return []
     const db = await openDB()
@@ -1467,6 +1509,48 @@ export const applySyncedBookmark = async bookmark => {
         tx.oncomplete = () => {}
         tx.onerror = () => reject(tx.error || new Error('Transaction error saving synced bookmark'))
         tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving synced bookmark'))
+    })
+}
+
+export const applySyncedBookmarksBatch = async (bookmarks = []) => {
+    const valid = (bookmarks || []).filter(b => b && b.id)
+    if (valid.length === 0) return 0
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const hasDeleted = db.objectStoreNames.contains('deleted_records')
+        const storeNames = hasDeleted ? ['bookmarks', 'deleted_records'] : ['bookmarks']
+        const tx = db.transaction(storeNames, 'readwrite')
+        const store = tx.objectStore('bookmarks')
+        const delStore = hasDeleted ? tx.objectStore('deleted_records') : null
+        let applied = 0
+
+        for (const bookmark of valid) {
+            const incomingTime = bookmark.updatedAt || bookmark.createdAt || 0
+            const checkExistingAndPut = () => {
+                const exReq = store.get(bookmark.id)
+                exReq.onsuccess = () => {
+                    const ex = exReq.result
+                    const exTime = ex ? (ex.updatedAt || ex.createdAt || 0) : 0
+                    if (ex && exTime > incomingTime) return
+                    store.put(bookmark)
+                    applied++
+                }
+            }
+            if (delStore) {
+                const tombReq = delStore.get(bookmark.id)
+                tombReq.onsuccess = () => {
+                    const tomb = tombReq.result
+                    if (tomb && (tomb.deletedAt || 0) >= incomingTime) return
+                    checkExistingAndPut()
+                }
+            } else {
+                checkExistingAndPut()
+            }
+        }
+
+        tx.oncomplete = () => resolve(applied)
+        tx.onerror = () => reject(tx.error || new Error('Batch transaction error saving synced bookmarks'))
+        tx.onabort = () => reject(tx.error || new Error('Batch transaction aborted saving synced bookmarks'))
     })
 }
 
@@ -1593,6 +1677,30 @@ export const recordReadingSession = async (session, updateBookTotal = true) => {
 }
 
 export const saveReadingSession = recordReadingSession
+
+export const saveReadingSessionsBatch = async (sessions = []) => {
+    const valid = (sessions || []).filter(s => s && (s.id || s.bookId)).map(s => {
+        if (!s.id) {
+            return {
+                ...s,
+                id: `${s.bookId}_${s.startTime || Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+            }
+        }
+        return s
+    })
+    if (valid.length === 0) return 0
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(['reading_sessions'], 'readwrite')
+        const sessStore = tx.objectStore('reading_sessions')
+        for (const session of valid) {
+            sessStore.put(session)
+        }
+        tx.oncomplete = () => resolve(valid.length)
+        tx.onerror = () => reject(tx.error || new Error('Failed batch saving reading sessions'))
+        tx.onabort = () => reject(tx.error || new Error('Batch reading sessions transaction aborted'))
+    })
+}
 
 export const getAllReadingSessions = async () => {
     const db = await openDB()

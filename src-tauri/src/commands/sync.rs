@@ -190,8 +190,8 @@ pub fn sync_get_config() -> SyncConfig {
     }
 }
 
-#[tauri::command]
-pub fn sync_reveal_password(#[allow(unused)] app_handle: tauri::AppHandle) -> String {
+// Internal-only helper: never expose raw WebDAV password over IPC to renderer
+pub(crate) fn sync_reveal_password(#[allow(unused)] app_handle: tauri::AppHandle) -> String {
     #[cfg(target_os = "android")]
     {
         if let Ok(Some(secret)) = crate::commands::android::android_keystore_load(app_handle.clone(), "sync_webdav_password".to_string()) {
@@ -1130,27 +1130,27 @@ fn get_credentials_dir() -> PathBuf {
 
 #[allow(dead_code)]
 fn sanitize_credential_key(key: &str) -> String {
-    key.chars()
+    key.trim()
+        .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
         .collect()
 }
 
-#[tauri::command]
-pub fn secure_store_credential(
+pub(crate) fn secure_store_credential_internal(
     #[allow(unused)] app_handle: tauri::AppHandle,
     key: String,
     value: String,
 ) -> Result<bool, String> {
-    if key.trim().is_empty() {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
         return Err("Credential key cannot be empty".to_string());
     }
     #[cfg(target_os = "android")]
     {
-        crate::commands::android::android_keystore_store(app_handle, key, value)
+        crate::commands::android::android_keystore_store(app_handle, sanitized, value)
     }
     #[cfg(not(target_os = "android"))]
     {
-        let sanitized = sanitize_credential_key(&key);
         let mut file_path = get_credentials_dir();
         file_path.push(format!("{}.enc", sanitized));
 
@@ -1161,20 +1161,50 @@ pub fn secure_store_credential(
 }
 
 #[tauri::command]
+pub fn secure_store_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+    value: String,
+) -> Result<bool, String> {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
+        return Err("Credential key cannot be empty".to_string());
+    }
+    // Block renderer from directly overwriting WebDAV keystore secret or AI origin binding
+    if sanitized == "sync_webdav_password" || sanitized == "reading_ai_credential_origin" {
+        return Err(format!("Protected credential key '{}' cannot be modified directly via generic IPC", sanitized));
+    }
+    // If renderer changes tts_api_origin to a different origin, automatically wipe any bound tts_api_key
+    if sanitized == "tts_api_origin" {
+        if let Ok(Some(prev_origin)) = secure_load_credential(app_handle.clone(), "tts_api_origin".to_string()) {
+            let clean_prev = prev_origin.trim();
+            let clean_next = value.trim();
+            if !clean_prev.is_empty() && clean_prev != clean_next {
+                let _ = secure_store_credential_internal(app_handle.clone(), "tts_api_key".to_string(), String::new());
+            }
+        }
+    }
+    secure_store_credential_internal(app_handle, sanitized, value)
+}
+
+#[tauri::command]
 pub fn secure_load_credential(
     #[allow(unused)] app_handle: tauri::AppHandle,
     key: String,
 ) -> Result<Option<String>, String> {
-    if key.trim().is_empty() {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
         return Ok(None);
+    }
+    if sanitized == "sync_webdav_password" {
+        return Err("WebDAV password cannot be read via generic credential IPC".to_string());
     }
     #[cfg(target_os = "android")]
     {
-        crate::commands::android::android_keystore_load(app_handle, key)
+        crate::commands::android::android_keystore_load(app_handle, sanitized)
     }
     #[cfg(not(target_os = "android"))]
     {
-        let sanitized = sanitize_credential_key(&key);
         let mut file_path = get_credentials_dir();
         file_path.push(format!("{}.enc", sanitized));
 
@@ -1363,6 +1393,14 @@ mod tests {
             credential_origin: None,
         };
         assert!(verify_credential_origin(&req_evil, &saved).is_err());
+    }
+
+    #[test]
+    fn test_protected_credential_keys() {
+        assert_eq!(sanitize_credential_key("  sync_webdav_password  "), "sync_webdav_password");
+        assert_eq!(sanitize_credential_key("reading_ai_credential_origin"), "reading_ai_credential_origin");
+        assert_eq!(sanitize_credential_key("tts_api_origin"), "tts_api_origin");
+        assert_eq!(sanitize_credential_key("custom/key!with#specials"), "custom_key_with_specials");
     }
 }
 

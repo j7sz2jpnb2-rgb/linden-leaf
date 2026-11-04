@@ -44,7 +44,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     syncDeleteBookBinary: (config, fileName) => ipcRenderer.invoke('sync:deleteBookBinary', { config, fileName }),
     syncGetConfig: () => ipcRenderer.invoke('sync:getConfig'),
     syncSaveConfig: (config) => ipcRenderer.invoke('sync:saveConfig', config),
-    syncRevealPassword: () => ipcRenderer.invoke('sync:revealPassword'),
 
 
     // System Shell & App Info

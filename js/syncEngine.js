@@ -1177,8 +1177,9 @@ export const applyMergedPayload = async mergedPayload => {
     }
 
 
-    // D. Apply Highlights (with BookId Remapping and Local Tombstone / Edit Protection)
+    // D. Apply Highlights in a single batched transaction (with BookId Remapping and Local Tombstone / Edit Protection)
     if (Array.isArray(mergedPayload.highlights)) {
+        const preparedHighlights = []
         for (const hl of mergedPayload.highlights) {
             if (!hl) continue
             if (hl.bookId && bookIdRemap.has(hl.bookId)) {
@@ -1187,16 +1188,21 @@ export const applyMergedPayload = async mergedPayload => {
             if (hl.bookId && deletedBookIds.includes(hl.bookId)) {
                 continue
             }
-            if (typeof db.applySyncedHighlight === 'function') {
-                await db.applySyncedHighlight(hl)
-            } else {
-                await db.saveHighlight(hl)
+            preparedHighlights.push(hl)
+        }
+        if (typeof db.applySyncedHighlightsBatch === 'function') {
+            await db.applySyncedHighlightsBatch(preparedHighlights)
+        } else {
+            for (const hl of preparedHighlights) {
+                if (typeof db.applySyncedHighlight === 'function') await db.applySyncedHighlight(hl)
+                else await db.saveHighlight(hl)
             }
         }
     }
 
-    // E. Apply Bookmarks (with BookId Remapping and Local Tombstone Protection)
+    // E. Apply Bookmarks in a single batched transaction (with BookId Remapping and Local Tombstone Protection)
     if (Array.isArray(mergedPayload.bookmarks)) {
+        const preparedBookmarks = []
         for (const bm of mergedPayload.bookmarks) {
             if (!bm) continue
             if (bm.bookId && bookIdRemap.has(bm.bookId)) {
@@ -1205,23 +1211,34 @@ export const applyMergedPayload = async mergedPayload => {
             if (bm.bookId && deletedBookIds.includes(bm.bookId)) {
                 continue
             }
-            if (typeof db.applySyncedBookmark === 'function') {
-                await db.applySyncedBookmark(bm)
-            } else {
-                await db.saveBookmark(bm)
+            preparedBookmarks.push(bm)
+        }
+        if (typeof db.applySyncedBookmarksBatch === 'function') {
+            await db.applySyncedBookmarksBatch(preparedBookmarks)
+        } else {
+            for (const bm of preparedBookmarks) {
+                if (typeof db.applySyncedBookmark === 'function') await db.applySyncedBookmark(bm)
+                else await db.saveBookmark(bm)
             }
         }
     }
 
-    // F. Apply Reading Sessions (with BookId Remapping, pass false to prevent duplicate duration addition to books)
+    // F. Apply Reading Sessions in a single batched transaction (with BookId Remapping)
     if (Array.isArray(mergedPayload.readingSessions)) {
+        const preparedSessions = []
         for (const sess of mergedPayload.readingSessions) {
             if (!sess) continue
             if (sess.bookId && bookIdRemap.has(sess.bookId)) {
                 sess.bookId = bookIdRemap.get(sess.bookId)
             }
-            // Reading sessions are permanently retained even if books were deleted
-            await db.saveReadingSession(sess, false)
+            preparedSessions.push(sess)
+        }
+        if (typeof db.saveReadingSessionsBatch === 'function') {
+            await db.saveReadingSessionsBatch(preparedSessions)
+        } else {
+            for (const sess of preparedSessions) {
+                await db.saveReadingSession(sess, false)
+            }
         }
     }
 
@@ -1270,12 +1287,19 @@ export const applyMergedPayload = async mergedPayload => {
         } catch (_) {}
     }
 
-    // G6. Apply Safe Advanced Settings
+    // G6. Apply Safe Advanced Settings (strip sensitive keys and non-loopback offline endpoints from remote payload)
     if (mergedPayload.advancedSettings && typeof localStorage !== 'undefined') {
         try {
             const rawCur = localStorage.getItem('linden_advanced_settings_config') || localStorage.getItem('linden_advanced_settings')
             const curAdv = rawCur ? JSON.parse(rawCur) : {}
-            const mergedAdv = { ...curAdv, ...mergedPayload.advancedSettings }
+            const safeIncoming = { ...mergedPayload.advancedSettings }
+            const blockedKeys = new Set(['ttsapikey', 'apikey', 'secret', 'password', 'token', 'auth', 'privatekey', 'dictstoragepath', 'customdirectory', 'ttsofflineendpoint'])
+            for (const key of Object.keys(safeIncoming)) {
+                if (blockedKeys.has(key.toLowerCase())) {
+                    delete safeIncoming[key]
+                }
+            }
+            const mergedAdv = { ...curAdv, ...safeIncoming }
             localStorage.setItem('linden_advanced_settings_config', JSON.stringify(mergedAdv))
             if (typeof window !== 'undefined') {
                 window.app?.advancedSettings?.load?.()

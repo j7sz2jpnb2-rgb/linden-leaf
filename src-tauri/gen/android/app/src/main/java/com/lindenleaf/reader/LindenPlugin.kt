@@ -162,7 +162,8 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
         try {
             val args = invoke.getArgs()
             val base64Data = args.getString("base64")
-            val filename = args.optString("filename", "linden_report_${System.currentTimeMillis()}.png")
+            val rawFilename = args.optString("filename", "linden_report_${System.currentTimeMillis()}.png")
+            val filename = File(rawFilename).name.replace(Regex("[/\\\\:*?\"<>|]"), "_").ifBlank { "linden_report_${System.currentTimeMillis()}.png" }
 
             val cleanBase64 = if (base64Data.contains(",")) base64Data.substringAfter(",") else base64Data
             val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
@@ -223,7 +224,8 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
         try {
             val args = invoke.getArgs()
             val base64Data = args.getString("base64")
-            val filename = args.optString("filename", "linden_share.png")
+            val rawFilename = args.optString("filename", "linden_share.png")
+            val filename = File(rawFilename).name.replace(Regex("[/\\\\:*?\"<>|]"), "_").ifBlank { "linden_share.png" }
             val title = args.optString("title", "分享图片")
 
             val cleanBase64 = if (base64Data.contains(",")) base64Data.substringAfter(",") else base64Data
@@ -232,6 +234,9 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
             val shareDir = File(activity.cacheDir, "share")
             if (!shareDir.exists()) shareDir.mkdirs()
             val shareFile = File(shareDir, filename)
+            if (!shareFile.canonicalPath.startsWith(shareDir.canonicalPath + File.separator)) {
+                throw SecurityException("Invalid share filename")
+            }
             FileOutputStream(shareFile).use { out ->
                 out.write(bytes)
                 out.flush()

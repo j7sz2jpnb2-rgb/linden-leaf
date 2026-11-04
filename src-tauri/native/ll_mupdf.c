@@ -229,12 +229,13 @@ char *ll_metadata(ll_doc *d, const char *key) {
     fz_var(out);
     fz_try(d->ctx) {
         int needed = fz_lookup_metadata(d->ctx, d->document, key, NULL, 0);
-        if (needed < 1) return NULL;
-        out = malloc((size_t)needed);
-        if (!out) fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
-        if (fz_lookup_metadata(d->ctx, d->document, key, out, (size_t)needed) < 0) {
-            free(out);
-            out = NULL;
+        if (needed >= 1) {
+            out = malloc((size_t)needed);
+            if (!out) fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
+            if (fz_lookup_metadata(d->ctx, d->document, key, out, (size_t)needed) < 0) {
+                free(out);
+                out = NULL;
+            }
         }
     }
     fz_catch(d->ctx) {
@@ -249,18 +250,28 @@ void ll_free_string(char *value) {
     free(value);
 }
 
-static int outline_count(const fz_outline *node) {
+#define LL_MAX_OUTLINE_DEPTH 64
+#define LL_MAX_OUTLINE_ITEMS 20000
+
+static int outline_count_bounded(const fz_outline *node, int level, int *total) {
+    if (!node || level >= LL_MAX_OUTLINE_DEPTH || *total >= LL_MAX_OUTLINE_ITEMS) return 0;
     int count = 0;
     for (const fz_outline *it = node; it; it = it->next) {
+        if (*total >= LL_MAX_OUTLINE_ITEMS) break;
         ++count;
-        count += outline_count(it->down);
+        ++(*total);
+        if (it->down && level + 1 < LL_MAX_OUTLINE_DEPTH) {
+            count += outline_count_bounded(it->down, level + 1, total);
+        }
     }
     return count;
 }
 
 static void outline_fill(ll_doc *d, const fz_outline *node, int level,
-                         ll_outline_item *items, int *offset) {
+                         ll_outline_item *items, int *offset, int capacity) {
+    if (!node || level >= LL_MAX_OUTLINE_DEPTH) return;
     for (const fz_outline *it = node; it; it = it->next) {
+        if (*offset >= capacity) break;
         ll_outline_item *dst = &items[(*offset)++];
         const char *title = it->title ? it->title : "";
         size_t n = strlen(title) + 1;
@@ -271,7 +282,8 @@ static void outline_fill(ll_doc *d, const fz_outline *node, int level,
         dst->page = -1;
         if (it->page.chapter >= 0 && it->page.page >= 0)
             dst->page = fz_page_number_from_location(d->ctx, d->document, it->page);
-        if (it->down) outline_fill(d, it->down, level + 1, items, offset);
+        if (it->down && level + 1 < LL_MAX_OUTLINE_DEPTH && *offset < capacity)
+            outline_fill(d, it->down, level + 1, items, offset, capacity);
     }
 }
 
@@ -285,11 +297,12 @@ int ll_get_outline(ll_doc *d, ll_outline *out) {
     fz_var(filled);
     fz_try(d->ctx) {
         root = fz_load_outline(d->ctx, d->document);
-        int count = outline_count(root);
+        int total_seen = 0;
+        int count = outline_count_bounded(root, 0, &total_seen);
         if (count > 0) {
             out->items = calloc((size_t)count, sizeof(ll_outline_item));
             if (!out->items) fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
-            outline_fill(d, root, 0, out->items, &filled);
+            outline_fill(d, root, 0, out->items, &filled, count);
             out->count = filled;
         }
     }

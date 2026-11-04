@@ -64,6 +64,15 @@ pub async fn android_resolve_content_uri(
 
     let p = PathBuf::from(&clean_path);
     if p.exists() && p.is_file() {
+        let ext_lower = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        if !crate::commands::fs::SUPPORTED_EXTENSIONS.contains(&ext_lower.as_str()) {
+            return Err(format!("Blocked staging unsupported file extension: {}", ext_lower));
+        }
+
         let filename = p
             .file_name()
             .and_then(|n| n.to_str())
@@ -106,10 +115,25 @@ pub async fn android_resolve_content_uri(
                 let unique_name = format!("{}_{}{}", stem, short_hash, ext);
                 dest_path = books_dir.join(unique_name);
             } else {
-                // Same size: check if identical
-                let src_bytes = fs::read(&staging_path).unwrap_or_default();
-                let dest_bytes = fs::read(&dest_path).unwrap_or_default();
-                if src_bytes == dest_bytes {
+                // Same size: stream compare in 64KB chunks instead of loading two full books into RAM
+                let is_identical = (|| -> std::io::Result<bool> {
+                    use std::io::Read;
+                    let mut fa = fs::File::open(&staging_path)?;
+                    let mut fb = fs::File::open(&dest_path)?;
+                    let mut buf_a = [0u8; 65536];
+                    let mut buf_b = [0u8; 65536];
+                    loop {
+                        let na = fa.read(&mut buf_a)?;
+                        let nb = fb.read(&mut buf_b)?;
+                        if na != nb || buf_a[..na] != buf_b[..nb] {
+                            return Ok(false);
+                        }
+                        if na == 0 {
+                            return Ok(true);
+                        }
+                    }
+                })().unwrap_or(false);
+                if is_identical {
                     let _ = fs::remove_file(&staging_path);
                     let snapshot_str = dest_path.to_string_lossy().to_string();
                     return Ok(AndroidContentResolveResult {
@@ -833,6 +857,7 @@ pub fn android_get_system_insets(app_handle: tauri::AppHandle) -> Result<SystemI
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct SetSleepTimerReq {
     minutes: i32,
 }
@@ -862,6 +887,7 @@ pub fn android_set_tts_sleep_timer(app_handle: tauri::AppHandle, minutes: i32) -
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct SetRateReq {
     rate: f32,
 }
@@ -904,9 +930,11 @@ pub struct NativeListeningInterval {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct ListeningAck { through_sequence: i64 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct JobControlReq { job_id: String }
 
 #[tauri::command]
@@ -925,6 +953,7 @@ pub fn android_acknowledge_tts_listening(app_handle: tauri::AppHandle, through_s
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 struct BookExportReq { file_path: String, filename: String, share: bool }
 
 #[tauri::command]
@@ -932,6 +961,11 @@ pub async fn android_export_book_file(app_handle: tauri::AppHandle, file_path: S
     #[cfg(target_os = "android")]
     {
         use tauri::Manager;
+        let p = PathBuf::from(&file_path);
+        let ext_lower = p.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
+        if !crate::commands::fs::SUPPORTED_EXTENSIONS.contains(&ext_lower.as_str()) {
+            return Err("仅允许导出受支持的电子书格式文件".to_string());
+        }
         let bridge = app_handle.try_state::<crate::LindenMobileBridge>()
             .ok_or("Android bridge is unavailable")?;
         bridge.0.run_mobile_plugin::<serde_json::Value>("exportBookFile", BookExportReq { file_path, filename, share })
@@ -961,6 +995,12 @@ pub async fn tts_request_audio(
 ) -> Result<tauri::ipc::Response, String> {
     let url = reqwest::Url::parse(&endpoint).map_err(|_| "朗读接口地址无效")?;
     if !matches!(url.scheme(), "http" | "https") { return Err("朗读接口需要 HTTP 或 HTTPS 地址".into()); }
+    if url.scheme() == "http" {
+        let host = url.host_str().unwrap_or("");
+        if host != "127.0.0.1" && host != "localhost" && host != "::1" && host != "[::1]" {
+            return Err("安全限制：明文 HTTP 朗读接口仅允许连接本地回环地址 (127.0.0.1 / localhost)，远程接口请使用 HTTPS".into());
+        }
+    }
     let (sender, mut cancelled) = tokio::sync::oneshot::channel();
     tts_cancellations().lock().map_err(|_| "语音请求状态暂不可用")?.insert(request_id.clone(), sender);
     let result = tokio::select! {

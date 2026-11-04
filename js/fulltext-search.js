@@ -212,13 +212,21 @@ export class FullTextSearchEngine {
         const format = (book.format || '').toLowerCase()
         if (!this.isFormatSupported(format)) return false
 
+        // 1. Fast-path in-memory index check before opening heavy book_files Blob snapshot transaction
+        const existing = this.index.get(bookId)
+        if (existing?.meta?.extractorVersion === EXTRACTOR_VERSION &&
+            existing?.meta?.blobRevision &&
+            (!book.blobRevision || existing.meta.blobRevision === book.blobRevision)) {
+            this.index.delete(bookId)
+            this.index.set(bookId, existing)
+            return true
+        }
+
         const snapshot = await this.db.getBookFileSnapshot(bookId)
         if (!snapshot?.blob) return false
 
         const authRevision = snapshot.blobRevision || snapshot.nativeSnapshotRevision || book.blobRevision || null
 
-        // 1. Check in-memory index
-        const existing = this.index.get(bookId)
         if (existing?.meta?.extractorVersion === EXTRACTOR_VERSION &&
             existing?.meta?.blobRevision &&
             authRevision &&

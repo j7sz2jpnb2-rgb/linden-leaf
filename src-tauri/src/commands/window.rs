@@ -262,13 +262,12 @@ pub fn load_open_file_payload(file_path: &str) -> Result<OpenFilePayload, String
         .and_then(|n| n.to_str())
         .unwrap_or("book")
         .to_string();
-    let buffer = std::fs::read(path)
-        .map_err(|e| format!("Failed reading file '{}': {}", file_path, e))?;
-
+    // Avoid reading & serializing full book bytes as a 4x-bloated JSON number array over Tauri Event IPC.
+    // Frontend handleOpenFile automatically stages PDFs via mupdf_stage_pdf_source and reads via binary Response IPC (fs_read_buffer).
     Ok(OpenFilePayload {
         file_path: path.to_string_lossy().to_string(),
         filename,
-        buffer,
+        buffer: Vec::new(),
     })
 }
 

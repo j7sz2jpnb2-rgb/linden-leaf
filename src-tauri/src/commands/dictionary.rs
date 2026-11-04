@@ -977,11 +977,23 @@ pub async fn dict_download_and_install(source_url: Option<String>) -> Result<Dic
             return Err("下载已由用户取消".to_string());
         }
 
+        let parsed_url = match reqwest::Url::parse(&url) {
+            Ok(u) if u.scheme() == "https" => u,
+            _ => {
+                last_err = "词典下载源必须为有效的 HTTPS 地址".to_string();
+                continue;
+            }
+        };
+        if let Err(e) = crate::commands::sync::is_allowed_server_url(&parsed_url) {
+            last_err = e;
+            continue;
+        }
+
         update_download_progress(|p| {
             p.message = format!("正在从 {} 请求资源...", url);
         });
 
-        let resp_res = client.get(&url).send().await;
+        let resp_res = client.get(parsed_url).send().await;
         let mut resp = match resp_res {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
@@ -1022,6 +1034,12 @@ pub async fn dict_download_and_install(source_url: Option<String>) -> Result<Dic
 
             match resp.chunk().await {
                 Ok(Some(chunk)) => {
+                    const MAX_DICT_DOWNLOAD_BYTES: u64 = 250 * 1024 * 1024;
+                    if downloaded + (chunk.len() as u64) > MAX_DICT_DOWNLOAD_BYTES {
+                        last_err = "词典下载体积超过 250MB 安全上限，已中止".to_string();
+                        chunk_failed = true;
+                        break;
+                    }
                     if let Err(e) = file.write_all(&chunk) {
                         last_err = format!("写入磁盘失败: {}", e);
                         chunk_failed = true;

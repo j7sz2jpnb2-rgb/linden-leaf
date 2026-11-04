@@ -315,7 +315,14 @@ class MainActivity : TauriActivity() {
     fun exportBookFile(filePath: String, filename: String, share: Boolean, callback: (JSONObject) -> Unit) {
         val source = File(filePath)
         if (!source.isFile) { callback(JSONObject().put("success", false).put("error", "原始图书文件不存在")); return }
-        val name = filename.replace('\\', '/').substringAfterLast('/').ifBlank { "book.epub" }
+        val booksDirCanon = File(filesDir, "books").canonicalPath
+        val snapshotsDirCanon = File(filesDir, "pdf_snapshots").canonicalPath
+        val sourceCanon = try { source.canonicalPath } catch (_: Exception) { "" }
+        if (!sourceCanon.startsWith("$booksDirCanon/") && !sourceCanon.startsWith("$snapshotsDirCanon/")) {
+            callback(JSONObject().put("success", false).put("error", "安全限制：仅允许导出书库内的图书文件"))
+            return
+        }
+        val name = filename.replace('\\', '/').substringAfterLast('/').replace(Regex("[^a-zA-Z0-9._\\-\\u4e00-\\u9fa5 ()\[\]]"), "_").ifBlank { "book.epub" }
         val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
             ?: "application/octet-stream"
         if (share) {

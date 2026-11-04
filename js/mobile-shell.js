@@ -49,7 +49,10 @@ export function getBookCoverUrl(book) {
         return window.coverUrlPool.get(book.id, book.coverBlob)
     }
     if (book.cover && typeof book.cover === 'string' && !book.cover.includes('icon.png')) {
-        return book.cover
+        const trimmed = book.cover.trim()
+        if (/^(blob:|data:image\/|https:\/\/|http:\/\/|\.\/|assets\/)/i.test(trimmed)) {
+            return trimmed
+        }
     }
     return null
 }
@@ -61,7 +64,7 @@ export function renderBookCoverHTML(book, extraClass = '', isThumb = false) {
     const fmt = (book?.format || 'BOOK').toUpperCase()
 
     if (url) {
-        return `<img class="mobile-book-cover-img ${extraClass}" src="${url}" alt="${escapeHTML(title)}" loading="lazy"/>`
+        return `<img class="mobile-book-cover-img ${escapeHTML(extraClass)}" src="${escapeHTML(url)}" alt="${escapeHTML(title)}" loading="lazy"/>`
     }
 
     // Editorial typographic cover fallback (NO app logo!)
@@ -1378,7 +1381,7 @@ export class MobileShellController {
                 </div>
 
                 <!-- Card 2: 正在读主角卡 (Hero Card) -->
-                <div class="home-card home-hero-card" id="home-hero-card" data-book-id="${currentBook.id}">
+                <div class="home-card home-hero-card" id="home-hero-card" data-book-id="${escapeHTML(String(currentBook.id || ''))}">
                     <div class="home-hero-header">
                         <span class="home-hero-label" id="btn-home-hero-reading-link">
                             正在读
@@ -1541,13 +1544,16 @@ export class MobileShellController {
                 const noteTitle = hl.title || ''
                 const fullCopyText = quoteText ? (noteText ? `${quoteText}\n\n想法：${noteText}` : quoteText) : noteText
 
-                const quoteColor = hl.color || '#D8D2C5'
+                const rawColor = String(hl.color || '#D8D2C5').trim()
+                const quoteColor = /^[#a-zA-Z0-9(),.%\s-]+$/.test(rawColor) ? rawColor : '#D8D2C5'
+                const safeHlId = escapeHTML(String(hl.id || ''))
+                const safeBookId = escapeHTML(String(hl.bookId || ''))
 
                 return `
-                    <div class="mobile-note-card" data-hl-id="${hl.id}" data-book-id="${hl.bookId}">
+                    <div class="mobile-note-card" data-hl-id="${safeHlId}" data-book-id="${safeBookId}">
                         ${noteTitle ? `<h3 class="note-card-title">${escapeHTML(noteTitle)}</h3>` : ''}
                         ${quoteText ? `
-                            <div class="note-quote-block" style="border-left-color: ${quoteColor};">
+                            <div class="note-quote-block" style="border-left-color: ${escapeHTML(quoteColor)};">
                                 <div class="note-quote-source"><span class="note-source-title">${sourceCitation}</span></div>
                                 <div class="note-quote-body">${escapeHTML(quoteText)}</div>
                             </div>
@@ -1556,7 +1562,7 @@ export class MobileShellController {
                         <div class="note-card-footer">
                             <span class="note-footer-date">${dateStr}</span>
                             <div class="note-footer-actions">
-                                <button class="note-act-more-btn" title="更多操作" data-hl-id="${hl.id}" data-book-id="${hl.bookId}" data-text="${escapeHTML(fullCopyText)}">
+                                <button class="note-act-more-btn" title="更多操作" data-hl-id="${safeHlId}" data-book-id="${safeBookId}" data-text="${escapeHTML(fullCopyText)}">
                                     <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
                                 </button>
                             </div>
@@ -1732,7 +1738,7 @@ export class MobileShellController {
                     const coverHtml = renderBookCoverHTML(b, 'search-result-cover-img', true)
                     const pct = Math.round(getBookFraction(b) * 100)
                     return `
-                        <div class="search-result-book-item" data-book-id="${b.id}">
+                        <div class="search-result-book-item" data-book-id="${escapeHTML(String(b.id || ''))}">
                             <div class="search-result-thumb">
                                 ${coverHtml}
                             </div>
@@ -1751,7 +1757,7 @@ export class MobileShellController {
                 html += matchedNotes.slice(0, 15).map(hl => {
                     const book = bookMap.get(hl.bookId)
                     return `
-                        <div class="mobile-note-card search-result-note-item" data-book-id="${hl.bookId}" data-hl-id="${hl.id}">
+                        <div class="mobile-note-card search-result-note-item" data-book-id="${escapeHTML(String(hl.bookId || ''))}" data-hl-id="${escapeHTML(String(hl.id || ''))}">
                             <div class="note-card-meta">
                                 <span class="note-source-title">《${escapeHTML(book?.title || '书籍')}》${hl.chapterTitle ? ' · ' + escapeHTML(hl.chapterTitle) : ''}</span>
                             </div>

@@ -249,9 +249,9 @@ mod imp {
     }
 
     static DIAGNOSTICS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    fn diagnostics_store() -> &'static Mutex<Vec<RenderDiagnostics>> {
-        static STORE: OnceLock<Mutex<Vec<RenderDiagnostics>>> = OnceLock::new();
-        STORE.get_or_init(|| Mutex::new(Vec::new()))
+    fn diagnostics_store() -> &'static Mutex<std::collections::VecDeque<RenderDiagnostics>> {
+        static STORE: OnceLock<Mutex<std::collections::VecDeque<RenderDiagnostics>>> = OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(std::collections::VecDeque::with_capacity(200)))
     }
 
     fn session(doc_id: &str) -> Result<DocumentSession, String> {
@@ -466,8 +466,8 @@ mod imp {
 
                     if DIAGNOSTICS_ENABLED.load(Ordering::Relaxed) {
                         if let Ok(mut diag) = diagnostics_store().lock() {
-                            if diag.len() >= 200 { diag.remove(0); }
-                            diag.push(RenderDiagnostics {
+                            if diag.len() >= 200 { diag.pop_front(); }
+                            diag.push_back(RenderDiagnostics {
                                 request_id: request_id.clone(),
                                 queue_wait_us,
                                 c_list_us: c_timings.list_time_us,
@@ -713,7 +713,7 @@ mod imp {
 
     #[tauri::command]
     pub fn mupdf_get_render_diagnostics() -> Vec<RenderDiagnostics> {
-        diagnostics_store().lock().map(|s| s.clone()).unwrap_or_default()
+        diagnostics_store().lock().map(|s| s.iter().cloned().collect()).unwrap_or_default()
     }
 
     #[tauri::command]
