@@ -12,8 +12,62 @@ const quadBounds = q => {
     return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]
 }
 
+function pointToSegmentDistanceSq(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) return (px - x1) * (px - x1) + (py - y1) * (py - y1)
+    let t = ((px - x1) * dx + (py - y1) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    const nx = x1 + t * dx, ny = y1 + t * dy
+    return (px - nx) * (px - nx) + (py - ny) * (py - ny)
+}
+
+function quadArea(q) {
+    if (!q || q.length < 8) return 0
+    for (let i = 0; i < 8; i++) {
+        if (!Number.isFinite(q[i])) return 0
+    }
+    const x0 = q[0], y0 = q[1]
+    const x1 = q[2], y1 = q[3]
+    const x2 = q[6], y2 = q[7]
+    const x3 = q[4], y3 = q[5]
+    return 0.5 * Math.abs((x0*y1 - y0*x1) + (x1*y2 - y1*x2) + (x2*y3 - y2*x3) + (x3*y0 - y3*x0))
+}
+
+function isPointInQuad(px, py, q) {
+    if (!q || q.length < 8) return false
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return false
+    if (quadArea(q) < 1e-4) return false
+
+    const x0 = q[0], y0 = q[1]
+    const x1 = q[2], y1 = q[3]
+    const x2 = q[6], y2 = q[7]
+    const x3 = q[4], y3 = q[5]
+
+    const c0 = (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0)
+    const c1 = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
+    const c2 = (x3 - x2) * (py - y2) - (y3 - y2) * (px - x2)
+    const c3 = (x0 - x3) * (py - y3) - (y0 - y3) * (px - x3)
+    const hasNeg = (c0 < -1e-5 || c1 < -1e-5 || c2 < -1e-5 || c3 < -1e-5)
+    const hasPos = (c0 > 1e-5 || c1 > 1e-5 || c2 > 1e-5 || c3 > 1e-5)
+    return !(hasNeg && hasPos)
+}
+
+function pointToQuadDistanceSq(px, py, q) {
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return Infinity
+    if (quadArea(q) < 1e-4) return Infinity
+    if (isPointInQuad(px, py, q)) return 0
+    const d0 = pointToSegmentDistanceSq(px, py, q[0], q[1], q[2], q[3])
+    const d1 = pointToSegmentDistanceSq(px, py, q[2], q[3], q[6], q[7])
+    const d2 = pointToSegmentDistanceSq(px, py, q[6], q[7], q[4], q[5])
+    const d3 = pointToSegmentDistanceSq(px, py, q[4], q[5], q[0], q[1])
+    return Math.min(d0, d1, d2, d3)
+}
+
+
 export class PdfViewport {
     constructor(container, options = {}) {
+
         this.container = container
         this.options = Object.assign({
             scale: 1.25,
@@ -88,9 +142,15 @@ export class PdfViewport {
         if (typeof ResizeObserver !== 'undefined') {
             this._resizeObserver = new ResizeObserver(() => {
                 if (this._destroyed || !this.pageSizes.length || this._pinch) return
-                this.setZoom(this.zoomMode || this.scale)
+                if (this._layoutViewportWidth === this.scrollArea.clientWidth && this._layoutViewportHeight === this.scrollArea.clientHeight) return
+                if (this._columnReadingEnabled) this._applyColumnFocus()
+                else this.setZoom(this.zoomMode || this.scale)
             })
             this._resizeObserver.observe(this.scrollArea)
+        }
+
+        if (this.options.driver) {
+            this.attachOpenedDriver(this.options.driver, { initialPage: this.options.initialPage ?? 0 })
         }
     }
 
@@ -147,6 +207,7 @@ export class PdfViewport {
         .pdf-viewport-spacer{position:relative;margin:0 auto;box-sizing:border-box;padding:16px 0;min-width:100%}
         .pdf-page-slot{position:absolute;left:50%;transform:translateX(-50%);background:var(--book-bg,#fff);box-shadow:0 4px 18px #00000047;border-radius:2px;overflow:hidden;box-sizing:border-box;touch-action: pan-x pan-y}
         .pdf-img-wrapper{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+        .pdf-page-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#888;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
         .pdf-page-canvas{position:absolute;inset:0;width:100%;height:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none}
         .pdf-page-preview{position:absolute;inset:0;width:100%;height:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none;z-index:1}
         .pdf-clip-canvas{position:absolute;left:0;width:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none;z-index:2}
@@ -162,6 +223,11 @@ export class PdfViewport {
         .pdf-highlight-rect{position:absolute;mix-blend-mode:multiply;border-radius:2px;pointer-events:auto;cursor:pointer;box-sizing:border-box;transition:filter .1s ease}
         .pdf-highlight-rect:hover{filter:brightness(.92)}
         .pdf-highlight-rect.pdf-style-underline,.pdf-highlight-rect.pdf-style-dashed,.pdf-highlight-rect.pdf-style-strikethrough,.pdf-highlight-rect.pdf-style-squiggly{mix-blend-mode:normal!important;background-color:transparent!important}
+        .pdf-highlight-poly{mix-blend-mode:multiply;pointer-events:auto;cursor:pointer;transition:filter .1s ease}
+        .pdf-highlight-poly:hover{filter:brightness(.92)}
+        .pdf-highlight-poly.pdf-style-underline,.pdf-highlight-poly.pdf-style-dashed,.pdf-highlight-poly.pdf-style-strikethrough,.pdf-highlight-poly.pdf-style-squiggly{mix-blend-mode:normal!important}
+        [data-theme="dark"] .pdf-highlight-rect,[data-theme="black"] .pdf-highlight-rect,
+        [data-theme="dark"] .pdf-highlight-poly,[data-theme="black"] .pdf-highlight-poly{mix-blend-mode:screen}
         .pdf-render-error{position:absolute;inset:0;display:grid;place-items:center;padding:24px;text-align:center;color:#64748b;font:13px/1.5 system-ui;z-index:2}
         @keyframes pdfSearchPulse{0%{box-shadow:0 0 0 0 #f97316cc;background:#f97316d9;transform:scale(1)}40%{box-shadow:0 0 0 9px #f9731644;background:#facc15d9;transform:scale(1.03)}100%{box-shadow:none;background:#facc1566;transform:scale(1)}}
         .pdf-search-pulse{position:absolute;pointer-events:none;z-index:10;border-radius:2px;animation:pdfSearchPulse 2.2s cubic-bezier(.25,1,.5,1) forwards}
@@ -180,35 +246,18 @@ export class PdfViewport {
             const dy = Math.abs(curTop - (this._lastScrollEventTop ?? curTop))
             this._lastScrollEventTs = now
             this._lastScrollEventTop = curTop
-            const isRapidScroll = dt > 0 && dt < 55 && dy > 90
-
             if (!ticking) {
                 ticking = true
                 requestAnimationFrame(() => {
                     ticking = false
                     if (this._destroyed) return
                     this._detectCurrentPage()
-                    if (isRapidScroll) {
-                        this._syncVisibleSlotsOnly()
-                    } else {
-                        clearTimeout(this._scrollSettleTimer)
-                        this._scrollSettleTimer = null
-                        this._renderVisibleSlots()
-                        this._pumpRenderQueue()
-                    }
+                    // Always schedule the page under the reader on the next frame.
+                    // Holding a key must not postpone its raster until scrolling stops.
+                    this._renderVisibleSlots()
                 })
             }
 
-            if (isRapidScroll) {
-                clearTimeout(this._scrollSettleTimer)
-                this._scrollSettleTimer = setTimeout(() => {
-                    this._scrollSettleTimer = null
-                    if (this._destroyed) return
-                    this._detectCurrentPage()
-                    this._renderVisibleSlots()
-                    this._pumpRenderQueue()
-                }, 48)
-            }
         }, { passive: true })
 
         this.scrollArea.addEventListener('mouseup', e => {
@@ -311,6 +360,7 @@ export class PdfViewport {
         const resolvedInitialPage = typeof initialPage === 'function' ? initialPage(this.numPages) : initialPage
         const targetPage = clamp(resolvedInitialPage, 0, this.numPages - 1)
         this.currentPage = targetPage
+        this._initialTargetPage = targetPage
         const targetOffset = this.pageOffsets[targetPage]
         if (targetOffset) {
             this.scrollArea.scrollTop = Math.max(0, targetOffset.top + targetOffset.height * clamp(initialYRatio, 0, 1) - (initialYRatio ? this.scrollArea.clientHeight / 3 : 8))
@@ -322,6 +372,84 @@ export class PdfViewport {
             this._enqueueGeometry(targetPage)
         }
         return { numPages: this.numPages, title: info.title || 'PDF 文档', author: info.author || '未知作者', toc: info.toc || [] }
+    }
+
+    async attachOpenedDriver(engineDriver, { initialPage = 0, initialYRatio = 0, snapshot = null } = {}) {
+        if (this._destroyed) return { numPages: 0 }
+        const generation = this._loadGeneration = (this._loadGeneration || 0) + 1
+        this.driver = engineDriver
+        this._outlineRequested = false
+        this._geometryAbort?.abort()
+        this._geometryInFlight = null
+        this._geometryQueue.length = 0
+        this._geometryQueued.clear()
+        this._knownPageGeometry.clear()
+        for (const [page, slot] of [...this.activeSlots]) this._unmountSlot(page, slot)
+        for (const inflight of this._inFlightRenders.values()) inflight.abortController?.abort()
+        this._inFlightRenders.clear()
+        this._renderQueue.length = 0
+        this._bitmapCache.clear()
+        this._bitmapCacheBytes = 0
+        this._lastScrollTop = 0
+        if (snapshot) this.currentSnapshot = snapshot
+
+        this.numPages = engineDriver.numPages || 1
+        this.pageSizes = Array.from({ length: this.numPages }, () => ({ x0: 0, y0: 0, width: 595, height: 842 }))
+
+        // Reuse any existing known page sizes from real driver
+        const existingSizes = engineDriver.realDriver?.pageSizes || engineDriver.pageSizes
+        if (Array.isArray(existingSizes)) {
+            existingSizes.forEach((sz, idx) => {
+                if (sz && idx < this.numPages) {
+                    this.pageSizes[idx] = { x0: 0, y0: 0, ...sz }
+                    this._knownPageGeometry.add(idx)
+                }
+            })
+        }
+
+        const resolvedInitialPage = typeof initialPage === 'function' ? initialPage(this.numPages) : initialPage
+        const targetPage = clamp(resolvedInitialPage, 0, this.numPages - 1)
+        this.currentPage = targetPage
+
+        this._geometryAbort = new AbortController()
+        const batchStart = Math.floor(targetPage / 8) * 8
+        const batchCount = Math.min(8, this.numPages - batchStart)
+        if (typeof engineDriver.getPageSizes === 'function' && !this._knownPageGeometry.has(targetPage)) {
+            try {
+                const res = await engineDriver.getPageSizes(batchStart, batchCount, this._geometryAbort.signal)
+                if (this._destroyed || generation !== this._loadGeneration || this.driver !== engineDriver) return { numPages: 0 }
+                if (Array.isArray(res)) {
+                    for (let i = 0; i < res.length; i++) {
+                        const pIdx = batchStart + i
+                        if (pIdx < this.numPages && res[i]) {
+                            this.pageSizes[pIdx] = { x0: 0, y0: 0, ...res[i] }
+                            this._knownPageGeometry.add(pIdx)
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn('[PDF] Failed to fetch initial secondary page sizes:', err)
+            }
+        }
+
+        if (this._destroyed || generation !== this._loadGeneration || this.driver !== engineDriver) return { numPages: 0 }
+        if (this._knownPageGeometry.size === 0) {
+            this._knownPageGeometry.add(0)
+        }
+
+        this._updateRenderConcurrency()
+        this._recomputeLayout()
+
+        const targetOffset = this.pageOffsets[targetPage]
+        if (targetOffset && this.scrollArea) {
+            this.scrollArea.scrollTop = Math.max(0, targetOffset.top + targetOffset.height * clamp(initialYRatio, 0, 1) - (initialYRatio ? this.scrollArea.clientHeight / 3 : 8))
+        }
+
+        this._renderVisibleSlots(true)
+        if (!engineDriver.allPageSizesKnown) {
+            this._enqueueGeometry(targetPage)
+        }
+        return { numPages: this.numPages }
     }
 
     _enqueueGeometry(page) {
@@ -380,6 +508,7 @@ export class PdfViewport {
                     this._restoreZoomAnchor(anchor)
                     this._syncActiveSlotGeometry()
                     for (const page of changedActive) this._remountPage(page)
+                    if (this._columnReadingEnabled) this._applyColumnFocus()
                     this._renderVisibleSlots(true)
                 }
                 await sleepFrame()
@@ -397,6 +526,12 @@ export class PdfViewport {
     }
 
     _recomputeLayout() {
+        if (!Array.isArray(this.pageSizes) || !this.pageSizes.length) {
+            this.pageOffsets = []
+            this.totalHeight = 0
+            this._layoutWidth = 0
+            return
+        }
         this.pageOffsets = []
         const gap = 16
         let y = 16
@@ -437,9 +572,13 @@ export class PdfViewport {
                 }
             }
         } else {
-            for (const size of this.pageSizes) {
-                const width = Math.max(1, Math.round(size.width * this.scale))
-                const height = Math.max(1, Math.round(size.height * this.scale))
+            for (let i = 0; i < this.pageSizes.length; i++) {
+                const size = this.pageSizes[i]
+                const margins = this._getCropMarginsForPage(i)
+                const cropW = Math.max(1, (1 - (margins.left + margins.right) / 100) * size.width)
+                const cropH = Math.max(1, (1 - (margins.top + margins.bottom) / 100) * size.height)
+                const width = Math.max(1, Math.round(cropW * this.scale))
+                const height = Math.max(1, Math.round(cropH * this.scale))
                 this.pageOffsets.push({ top: y, width, height, left: null })
                 y += height + gap
                 maxWidth = Math.max(maxWidth, width)
@@ -448,6 +587,8 @@ export class PdfViewport {
 
         const lastPage = this.pageOffsets.at(-1)
         const viewportHeight = this.scrollArea.clientHeight || this.container.clientHeight || 0
+        this._layoutViewportWidth = this.scrollArea.clientWidth
+        this._layoutViewportHeight = this.scrollArea.clientHeight
         this.totalHeight = this.zoomMode && lastPage ? Math.max(y, lastPage.top + viewportHeight) : y
         this._layoutWidth = Math.max(maxWidth + 32, this.scrollArea.clientWidth || this.container.clientWidth || 0)
 
@@ -497,6 +638,7 @@ export class PdfViewport {
             }
             slot.style.width = `${p.width}px`
             slot.style.height = `${p.height}px`
+            this._applyCropToSlot(page, slot)
             this.options.onSlotGeometrySync?.(page, slot)
         }
     }
@@ -717,11 +859,17 @@ export class PdfViewport {
         Object.assign(slot.style, slotStyle)
 
         const pixels = document.createElement('div'); pixels.className = 'pdf-img-wrapper'
+        const loading = document.createElement('div')
+        loading.className = 'pdf-page-loading'
+        loading.textContent = '正在显示页面…'
+        loading.setAttribute('role', 'status')
+        pixels.append(loading)
         const highlights = document.createElement('div'); highlights.className = 'pdf-highlight-layer'
         const selection = document.createElement('div'); selection.className = 'pdf-native-selection-layer'
         const text = document.createElement('div'); text.className = 'pdf-text-layer'
         if (this.driver?.kind === 'mupdf') text.style.display = 'none'
         slot.append(pixels, highlights, selection, text)
+        this._applyCropToSlot(page, slot)
         this.spacer.append(slot)
         this.activeSlots.set(page, slot)
         this._renderHighlightsForPage(page, highlights)
@@ -779,6 +927,13 @@ export class PdfViewport {
                 item.tier = 1
                 item.distance = item.page < first ? (first - item.page) : (item.page - last)
             }
+        }
+
+        // An old visible render can become offscreen while the key is held.
+        // Refresh its priority too, so it can yield to the newly visible page.
+        for (const entry of this._inFlightRenders.values()) {
+            entry.tier = entry.page >= first && entry.page <= last ? 0 : 1
+            entry.distance = Math.abs(entry.page - this.currentPage)
         }
 
         // Sort: Tier 0 before Tier 1; then by distance ascending
@@ -1062,36 +1217,13 @@ export class PdfViewport {
                 }
             }
 
-            // CRITICAL CONTINUITY FIX:
-            // If slot has NO full-page preview canvas and this is a clipped render,
-            // immediately fetch and mount a fast full-page base preview (scale 0.5 ~ 1.0)
-            // so that scrolling or partial visibility NEVER exposes blank white slot background!
+            // A new slot needs one complete raster, rather than a serial preview
+            // plus a second high-resolution request. Retained full-page canvases
+            // cover scrolling immediately; later zooms may refine with a clip.
             if (clip && !pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')) {
-                const baseScale = Math.min(1.0, Math.max(0.5, this.scale * 0.5))
-                try {
-                    const baseCanvas = await this.driver.renderPage(page, baseScale, signal, null, 1, generation)
-                    if (isCurrent() && !pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')) {
-                        baseCanvas.classList.add('pdf-page-preview')
-                        baseCanvas.style.position = 'absolute'
-                        baseCanvas.style.inset = '0'
-                        baseCanvas.style.width = '100%'
-                        baseCanvas.style.height = '100%'
-                        baseCanvas.style.zIndex = '1'
-                        baseCanvas.style.filter = 'var(--pdf-page-filter,var(--reader-img-filter,none))'
-                        baseCanvas.style.pointerEvents = 'none'
-                        if (typeof pixels.prepend === 'function') pixels.prepend(baseCanvas)
-                        else if (pixels.children?.unshift) { pixels.children.unshift(baseCanvas); baseCanvas.parentElement = pixels }
-                        else pixels.append(baseCanvas)
-                    }
-                } catch (previewErr) {
-                    // Base preview failed: if slot has no existing canvas backing at all,
-                    // fall back clip to null so we request full page render instead of risking visible gap
-                    if (!pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')) {
-                        console.warn('[PdfViewport] base preview failed, falling back clip to full page:', previewErr)
-                        clip = null
-                        requestedClip = null
-                    }
-                }
+                clip = null
+                requestedClip = null
+                scale = fullPageScale
             }
 
             if (!isCurrent()) return
@@ -1142,6 +1274,7 @@ export class PdfViewport {
 
             if (!clip) {
                 // Full page render
+                pixels.querySelector('.pdf-page-loading')?.remove()
                 canvas.classList.add('pdf-page-canvas')
                 canvas.style.position = 'absolute'
                 canvas.style.inset = '0'
@@ -1151,6 +1284,7 @@ export class PdfViewport {
                 slot._renderedClip = null
             } else {
                 // Clipped render with 2D preview handover
+                pixels.querySelector('.pdf-page-loading')?.remove()
                 canvas.classList.add('pdf-clip-canvas')
                 const cssLeft = (canvas.offsetX ?? 0) / cssToDev
                 const cssTop = (canvas.offsetY ?? 0) / cssToDev
@@ -1209,6 +1343,9 @@ export class PdfViewport {
 
             slot._renderedScale = this.scale
             slot._renderedToken = token
+            if (page === this._initialTargetPage && canvas?.width > 0 && canvas?.height > 0 && isCurrent()) {
+                this.options.onInitialPageRendered?.({ page, canvas, slot })
+            }
 
             // Remove retry badge if previously shown
             slot.querySelector('.pdf-render-retry-badge')?.remove()
@@ -1223,11 +1360,11 @@ export class PdfViewport {
             // geometry immediately on pointerdown; this merely warms it later.
             if (this.driver.kind === 'mupdf' && page === this.currentPage) {
                 const warm = () => { if (isCurrent()) this._ensureNativeGeometry(page).catch(() => {}) }
-                if (typeof window.requestIdleCallback === 'function') {
-                    slot.geometryIdleId = window.requestIdleCallback(warm, { timeout: 500 })
-                } else {
-                    slot.geometryTimer = setTimeout(warm, 0)
-                }
+                clearTimeout(slot.geometryTimer)
+                slot.geometryTimer = setTimeout(() => {
+                    if (performance.now() - (this._lastScrollEventTs || 0) < 160) return
+                    warm()
+                }, 180)
             }
 
             if (this.driver.kind === 'pdfjs' && this.driver.renderTextLayer) {
@@ -1239,7 +1376,7 @@ export class PdfViewport {
                     this._renderLinksForPage(page, slot, links)
                 }).catch(() => {})
             }
-            if (isCurrent() && page === this.currentPage && !this._outlineRequested && this.driver.getOutline) {
+            if (isCurrent() && page === this.currentPage && !this._outlineRequested && this.options.loadOutline !== false && this.driver.getOutline) {
                 this._outlineRequested = true
                 const generation = this._loadGeneration
                 this._outlineTimer = setTimeout(() => {
@@ -1365,26 +1502,115 @@ export class PdfViewport {
 
     _renderHighlightsForPage(page, layer) {
         layer.replaceChildren()
-        for (const hl of this.highlightsByPage.get(page) || []) {
+        const highlights = this.highlightsByPage.get(page) || []
+        if (!highlights.length) return
+
+        const size = this.pageSizes[page] || { width: 595, height: 842, x0: 0, y0: 0 }
+        let svg = null
+        const ensureSvg = () => {
+            if (svg) return svg
+            svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+            const x0 = size.x0 || 0, y0 = size.y0 || 0
+            svg.setAttribute('viewBox', `${x0} ${y0} ${size.width} ${size.height}`)
+            svg.setAttribute('class', 'pdf-highlight-svg')
+            Object.assign(svg.style, {
+                position: 'absolute', left: '0', top: '0', width: '100%', height: '100%', pointerEvents: 'none'
+            })
+            layer.append(svg)
+            return svg
+        }
+
+        for (const hl of highlights) {
             const segment = this._highlightSegment(hl, page)
-            for (const rect of segment?.rects || []) {
-                const [x1, y1, x2, y2] = rect
-                const el = document.createElement('div')
-                const style = hl.style || 'highlight'
-                el.className = `pdf-highlight-rect pdf-style-${style}`
-                el.dataset.id = hl.id
-                Object.assign(el.style, {
-                    left: `${x1 * 100}%`, top: `${y1 * 100}%`,
-                    width: `${Math.max(0, x2 - x1) * 100}%`, height: `${Math.max(0, y2 - y1) * 100}%`,
-                })
-                const color = hl.color || '#facc15'
-                if (style === 'underline') el.style.borderBottom = `2.5px solid ${color}`
-                else if (style === 'dashed') el.style.borderBottom = `2px dashed ${color === '#facc15' ? '#64748b' : color}`
-                else if (style === 'strikethrough') { el.style.borderBottom = `2px solid ${color}`; el.style.height = `${Math.max(0, y2 - y1) * 50}%` }
-                else if (style === 'squiggly') { el.style.borderBottom = `2px dotted ${color}` }
-                else el.style.backgroundColor = this._toRgba(color, .38)
-                el.addEventListener('click', e => { e.stopPropagation(); this.options.onHighlightClick?.(hl, e, el.getBoundingClientRect()) })
-                layer.append(el)
+            if (!segment) continue
+            const color = hl.color || '#facc15'
+            const style = hl.style || 'highlight'
+
+            // Prefer accurate page-space quads when present
+            if (segment.quads && segment.quads.length > 0) {
+                const s = ensureSvg()
+                for (const q of segment.quads) {
+                    const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon')
+                    poly.setAttribute('points', `${q[0]},${q[1]} ${q[2]},${q[3]} ${q[6]},${q[7]} ${q[4]},${q[5]}`)
+                    poly.setAttribute('class', `pdf-highlight-poly pdf-style-${style}`)
+                    poly.dataset.id = hl.id
+                    poly.style.pointerEvents = 'auto'
+                    poly.style.cursor = 'pointer'
+
+                    if (style === 'underline') {
+                        poly.setAttribute('fill', 'transparent')
+                        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+                        line.setAttribute('x1', q[4]); line.setAttribute('y1', q[5])
+                        line.setAttribute('x2', q[6]); line.setAttribute('y2', q[7])
+                        line.setAttribute('stroke', color)
+                        line.setAttribute('stroke-width', '2.5')
+                        line.setAttribute('stroke-linecap', 'round')
+                        line.setAttribute('vector-effect', 'non-scaling-stroke')
+                        line.style.pointerEvents = 'none'
+                        s.append(line)
+                    } else if (style === 'dashed') {
+                        poly.setAttribute('fill', 'transparent')
+                        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+                        line.setAttribute('x1', q[4]); line.setAttribute('y1', q[5])
+                        line.setAttribute('x2', q[6]); line.setAttribute('y2', q[7])
+                        line.setAttribute('stroke', color === '#facc15' ? '#64748b' : color)
+                        line.setAttribute('stroke-width', '2')
+                        line.setAttribute('stroke-dasharray', '4,3')
+                        line.setAttribute('vector-effect', 'non-scaling-stroke')
+                        line.style.pointerEvents = 'none'
+                        s.append(line)
+                    } else if (style === 'strikethrough') {
+                        poly.setAttribute('fill', 'transparent')
+                        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+                        const mx1 = (q[0] + q[4]) / 2, my1 = (q[1] + q[5]) / 2
+                        const mx2 = (q[2] + q[6]) / 2, my2 = (q[3] + q[7]) / 2
+                        line.setAttribute('x1', mx1); line.setAttribute('y1', my1)
+                        line.setAttribute('x2', mx2); line.setAttribute('y2', my2)
+                        line.setAttribute('stroke', color)
+                        line.setAttribute('stroke-width', '2')
+                        line.setAttribute('vector-effect', 'non-scaling-stroke')
+                        line.style.pointerEvents = 'none'
+                        s.append(line)
+                    } else if (style === 'squiggly') {
+                        poly.setAttribute('fill', 'transparent')
+                        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+                        line.setAttribute('x1', q[4]); line.setAttribute('y1', q[5])
+                        line.setAttribute('x2', q[6]); line.setAttribute('y2', q[7])
+                        line.setAttribute('stroke', color)
+                        line.setAttribute('stroke-width', '2')
+                        line.setAttribute('stroke-dasharray', '2,2')
+                        line.setAttribute('vector-effect', 'non-scaling-stroke')
+                        line.style.pointerEvents = 'none'
+                        s.append(line)
+                    } else {
+                        poly.setAttribute('fill', this._toRgba(color, 0.38))
+                    }
+
+                    poly.addEventListener('click', e => {
+                        e.stopPropagation()
+                        this.options.onHighlightClick?.(hl, e, poly.getBoundingClientRect())
+                    })
+                    s.append(poly)
+                }
+            } else if (segment.rects && segment.rects.length > 0) {
+                // Backwards compatibility for legacy rect-only annotations
+                for (const rect of segment.rects) {
+                    const [x1, y1, x2, y2] = rect
+                    const el = document.createElement('div')
+                    el.className = `pdf-highlight-rect pdf-style-${style}`
+                    el.dataset.id = hl.id
+                    Object.assign(el.style, {
+                        left: `${x1 * 100}%`, top: `${y1 * 100}%`,
+                        width: `${Math.max(0, x2 - x1) * 100}%`, height: `${Math.max(0, y2 - y1) * 100}%`,
+                    })
+                    if (style === 'underline') el.style.borderBottom = `2.5px solid ${color}`
+                    else if (style === 'dashed') el.style.borderBottom = `2px dashed ${color === '#facc15' ? '#64748b' : color}`
+                    else if (style === 'strikethrough') { el.style.borderBottom = `2px solid ${color}`; el.style.height = `${Math.max(0, y2 - y1) * 50}%` }
+                    else if (style === 'squiggly') { el.style.borderBottom = `2px dotted ${color}` }
+                    else el.style.backgroundColor = this._toRgba(color, .38)
+                    el.addEventListener('click', e => { e.stopPropagation(); this.options.onHighlightClick?.(hl, e, el.getBoundingClientRect()) })
+                    layer.append(el)
+                }
             }
         }
     }
@@ -1446,6 +1672,9 @@ export class PdfViewport {
             return this._nativeGeometry.get(page)
         }
         const promise = this.driver.getTextGeometry(page).then(chars => {
+            if ((!chars || chars.length === 0) && this._pageOcrData?.has(page)) {
+                chars = this._pageOcrData.get(page) || []
+            }
             const cellSize = 48, grid = new Map()
             const boxes = chars.map((ch, index) => {
                 const b = quadBounds(ch.quad), box = { ...ch, index, bounds: b }
@@ -1469,6 +1698,74 @@ export class PdfViewport {
         return promise
     }
 
+    /**
+     * F11 & M08: Attach OCR synthesized character layer for scanned PDF page
+     * @param {number} page 0-based page index
+     * @param {Array<{ text: string, rect?: number[], x?: number, y?: number, w?: number, h?: number, line?: number }>} ocrSpans
+     */
+    setPageOcrData(page, ocrSpans) {
+        if (!this._pageOcrData) this._pageOcrData = new Map()
+        const chars = []
+        let lineIdx = 0
+        for (const span of ocrSpans || []) {
+            const text = span.text || ''
+            if (!text) continue
+            const [x0, y0, x1, y1] = span.rect || [span.x || 0, span.y || 0, (span.x || 0) + (span.w || 10), (span.y || 0) + (span.h || 10)]
+            const totalW = Math.max(1, x1 - x0)
+            const charW = totalW / Math.max(1, text.length)
+            for (let i = 0; i < text.length; i++) {
+                const cx0 = x0 + i * charW
+                const cx1 = cx0 + charW
+                chars.push({
+                    text: text[i],
+                    line: span.line ?? lineIdx,
+                    size: y1 - y0,
+                    quad: [cx0, y0, cx1, y0, cx0, y1, cx1, y1]
+                })
+            }
+            lineIdx++
+        }
+        this._pageOcrData.set(page, chars)
+        this._nativeGeometry.delete(page)
+        this._nativeGeometryUse.delete(page)
+
+        const slot = this.activeSlots?.get(page)
+        if (slot) {
+            const textLayer = slot.querySelector('.pdf-text-layer')
+            if (textLayer) {
+                textLayer.replaceChildren()
+                textLayer.style.display = 'block'
+                for (const span of ocrSpans || []) {
+                    const spanEl = document.createElement('span')
+                    spanEl.textContent = span.text || ''
+                    const [x0, y0, x1, y1] = span.rect || [span.x || 0, span.y || 0, (span.x || 0) + (span.w || 10), (span.y || 0) + (span.h || 10)]
+                    spanEl.style.position = 'absolute'
+                    spanEl.style.left = `${x0}px`
+                    spanEl.style.top = `${y0}px`
+                    spanEl.style.width = `${Math.max(1, x1 - x0)}px`
+                    spanEl.style.height = `${Math.max(1, y1 - y0)}px`
+                    spanEl.style.fontSize = `${Math.max(8, y1 - y0)}px`
+                    spanEl.style.color = 'transparent'
+                    spanEl.style.userSelect = 'text'
+                    textLayer.appendChild(spanEl)
+                }
+            }
+        }
+    }
+
+    clearPageOcrData(page = null) {
+        if (!this._pageOcrData) return
+        if (page !== null) {
+            this._pageOcrData.delete(page)
+            this._nativeGeometry.delete(page)
+            this._nativeGeometryUse.delete(page)
+        } else {
+            this._pageOcrData.clear()
+            this._nativeGeometry.clear()
+            this._nativeGeometryUse.clear()
+        }
+    }
+
     _slotForPoint(x, y) {
         let nearest = null, best = Infinity
         for (const [page, slot] of this.activeSlots) {
@@ -1481,10 +1778,15 @@ export class PdfViewport {
     }
 
     _clientToPage(hit, x, y) {
-        const size = this.pageSizes[hit.page] || { width:595,height:842,x0:0,y0:0 }
+        const size = this.pageSizes[hit.page] || { width: 595, height: 842, x0: 0, y0: 0 }
+        const margins = this._getCropMarginsForPage(hit.page)
+        const normX = clamp((x - hit.rect.left) / hit.rect.width, 0, 1)
+        const normY = clamp((y - hit.rect.top) / hit.rect.height, 0, 1)
+        const origXFraction = margins.left / 100 + normX * (1 - (margins.left + margins.right) / 100)
+        const origYFraction = margins.top / 100 + normY * (1 - (margins.top + margins.bottom) / 100)
         return [
-            (size.x0 || 0) + clamp((x - hit.rect.left) / hit.rect.width, 0, 1) * size.width,
-            (size.y0 || 0) + clamp((y - hit.rect.top) / hit.rect.height, 0, 1) * size.height,
+            (size.x0 || 0) + origXFraction * size.width,
+            (size.y0 || 0) + origYFraction * size.height,
         ]
     }
 
@@ -1492,20 +1794,25 @@ export class PdfViewport {
         const geom = await this._ensureNativeGeometry(page)
         if (!geom?.chars?.length) return null
         const { chars, grid, cellSize } = geom
+        const effMaxDist = (this.scale && this.scale > 0 && maxDist > 0) ? (maxDist / this.scale) : maxDist
         const gx = Math.floor(point[0] / cellSize), gy = Math.floor(point[1] / cellSize)
+        const cellRadius = Math.ceil(effMaxDist / cellSize) + 1
         const ids = new Set()
-        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++)
-            for (const id of grid.get(`${gx+dx}:${gy+dy}`) || []) ids.add(id)
+        for (let dy = -cellRadius; dy <= cellRadius; dy++) {
+            for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+                for (const id of grid.get(`${gx+dx}:${gy+dy}`) || []) ids.add(id)
+            }
+        }
         if (!ids.size) return null
-        const candidates = [...ids].map(i => chars[i])
+        const candidates = [...ids].map(i => chars[i]).filter(ch => ch && ch.quad && quadArea(ch.quad) >= 1e-4)
         let best = null, dist = Infinity
-        const maxDistSq = maxDist * maxDist
+        const maxDistSq = effMaxDist * effMaxDist
         for (const ch of candidates) {
-            const [x0,y0,x1,y1] = ch.bounds
-            const dx = point[0] < x0 ? x0-point[0] : point[0] > x1 ? point[0]-x1 : 0
-            const dy = point[1] < y0 ? y0-point[1] : point[1] > y1 ? point[1]-y1 : 0
-            const d = dx*dx + dy*dy
-            if (d <= maxDistSq && d < dist) { dist = d; best = ch }
+            const d = pointToQuadDistanceSq(point[0], point[1], ch.quad)
+            if (d <= maxDistSq && d < dist) {
+                dist = d
+                best = ch
+            }
         }
         return best
     }
@@ -1535,6 +1842,11 @@ export class PdfViewport {
             epoch,
             startX: e.clientX,
             startY: e.clientY,
+            lastClientX: e.clientX,
+            lastClientY: e.clientY,
+            moveSeq: 0,
+            appliedMoveSeq: 0,
+            pendingHitPromise: null,
             hasMoved: false,
             anchor: { page: hit.page, index: ch.index, point },
             focus: { page: hit.page, index: ch.index, point }
@@ -1549,6 +1861,10 @@ export class PdfViewport {
             this._cancelNativeDrag()
             return
         }
+        if (e.pointerType === 'mouse' && e.buttons !== 1) {
+            this._cancelNativeDrag()
+            return
+        }
         if (!drag.hasMoved) {
             if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 3) {
                 drag.hasMoved = true
@@ -1557,21 +1873,53 @@ export class PdfViewport {
                 return
             }
         }
+        drag.lastClientX = e.clientX
+        drag.lastClientY = e.clientY
+        const moveSeq = (drag.moveSeq = (drag.moveSeq || 0) + 1)
         const hit = this._slotForPoint(e.clientX, e.clientY)
         if (!hit) return
         const point = this._clientToPage(hit, e.clientX, e.clientY)
-        const ch = await this._hitNativeChar(hit.page, point, 36)
-        if (!ch || this._nativeDrag !== drag || this.interactionMode === 'draw') return
+        const hitPromise = this._hitNativeChar(hit.page, point, 36)
+        drag.pendingHitPromise = hitPromise
+        let ch = null
+        try {
+            ch = await hitPromise
+        } finally {
+            if (drag.pendingHitPromise === hitPromise) drag.pendingHitPromise = null
+        }
+        if (!ch || this._nativeDrag !== drag || drag.epoch !== this._nativeGestureEpoch || this.interactionMode === 'draw') return
+        if (drag.appliedMoveSeq && moveSeq <= drag.appliedMoveSeq) return
+        drag.appliedMoveSeq = moveSeq
         drag.focus = { page: hit.page, index: ch.index, point }
         this._updateNativePreview()
     }
 
     async _nativePointerUp(e) {
-        this._nativeGestureEpoch++
         const drag = this._nativeDrag
         if (!drag || e.pointerId !== drag.pointerId) return
-        this._nativeDrag = null
+        const gestureEpoch = drag.epoch
         try { this.scrollArea.releasePointerCapture?.(e.pointerId) } catch (_) {}
+
+        // Incorporate latest move sample if still pending
+        if (drag.pendingHitPromise) {
+            try { await drag.pendingHitPromise } catch (_) {}
+        }
+        // Always sample final release position if coordinates provided
+        if (e.clientX != null && e.clientY != null && (e.clientX !== drag.lastClientX || e.clientY !== drag.lastClientY)) {
+            const hit = this._slotForPoint(e.clientX, e.clientY)
+            if (hit) {
+                const point = this._clientToPage(hit, e.clientX, e.clientY)
+                const ch = await this._hitNativeChar(hit.page, point, 36).catch(() => null)
+                if (ch && drag.epoch === this._nativeGestureEpoch) {
+                    drag.focus = { page: hit.page, index: ch.index, point }
+                }
+            }
+        }
+
+        if (this._destroyed || this._nativeDrag !== drag || drag.epoch !== this._nativeGestureEpoch) return
+        this._nativeDrag = null
+        this._nativeGestureEpoch++
+
         if (this.interactionMode === 'draw') {
             this._nativePreview = null
             this._redrawNativePreview()
@@ -1585,7 +1933,7 @@ export class PdfViewport {
         const selection = await this._finalizeNativeSelection(drag.anchor, drag.focus, 'char').catch(err => {
             console.warn('[PDF] native selection failed:', err); return null
         })
-        if (selection && this.interactionMode !== 'draw' && drag.epoch === this._nativeGestureEpoch - 1) {
+        if (selection && !this._destroyed && this.interactionMode !== 'draw' && gestureEpoch === this._nativeGestureEpoch - 1) {
             this._emitNativeSelection(selection)
         }
     }
@@ -1602,6 +1950,7 @@ export class PdfViewport {
     clearSelection() {
         if (this._isClearingSelection) return
         this._isClearingSelection = true
+        this._nativeGestureEpoch++
         try {
             const hadSelection = Boolean(this._nativePreview?.length)
             if (hadSelection) {
@@ -1629,7 +1978,9 @@ export class PdfViewport {
         e.preventDefault()
         const selection = await this._finalizeNativeSelection(
             { page: hit.page, index: ch.index, point }, { page: hit.page, index: ch.index, point }, 'word')
-        if (selection && this.interactionMode !== 'draw') this._emitNativeSelection(selection)
+        if (selection && epoch === this._nativeGestureEpoch && this.interactionMode !== 'draw') {
+            this._emitNativeSelection(selection)
+        }
     }
 
     _handleTouchStart(e) {
@@ -1825,24 +2176,129 @@ export class PdfViewport {
             if (!geom?.chars?.length) continue
             const startIndex = page === first.page ? first.index : 0
             const endIndex = page === last.page ? last.index : geom.chars.length - 1
-            const aChar = geom.chars[clamp(startIndex,0,geom.chars.length-1)]
-            const bChar = geom.chars[clamp(endIndex,0,geom.chars.length-1)]
-            const center = ch => [(ch.bounds[0]+ch.bounds[2])/2,(ch.bounds[1]+ch.bounds[3])/2]
-            segments.push({ page, a:center(aChar), b:center(bChar), startIndex, endIndex })
+            const aIdx = clamp(Math.min(startIndex, endIndex), 0, geom.chars.length - 1)
+            const bIdx = clamp(Math.max(startIndex, endIndex), 0, geom.chars.length - 1)
+            const aChar = geom.chars[aIdx]
+            const bChar = geom.chars[bIdx]
+
+            // Directional boundary calculation (5% inset from leading/trailing edge along advance)
+            const boundary = (ch, side) => {
+                const q = ch.quad
+                const lx = (q[0] + q[4]) / 2, ly = (q[1] + q[5]) / 2
+                const tx = (q[2] + q[6]) / 2, ty = (q[3] + q[7]) / 2
+                const frac = (side === 'leading') ? 0.05 : 0.95
+                return [lx + frac * (tx - lx), ly + frac * (ty - ly)]
+            }
+
+            segments.push({
+                page,
+                a: boundary(aChar, 'leading'),
+                b: boundary(bChar, 'trailing'),
+                startIndex: aIdx,
+                endIndex: bIdx,
+            })
         }
         return { forward, segments }
     }
 
+    _buildLineBandQuads(chars) {
+        if (!chars || !chars.length) return []
+        const bands = []
+        let currentRun = []
+
+        const flushRun = () => {
+            if (!currentRun.length) return
+            const first = currentRun[0], last = currentRun[currentRun.length - 1]
+            if (currentRun.length === 1) {
+                bands.push(first.quad)
+                currentRun = []
+                return
+            }
+            const qFirst = first.quad, qLast = last.quad
+            const dx = ((qLast[2] + qLast[6]) - (qFirst[0] + qFirst[4])) / 2
+            const dy = ((qLast[3] + qLast[7]) - (qFirst[1] + qFirst[5])) / 2
+            const len = Math.hypot(dx, dy)
+            if (len <= 1e-4) {
+                for (const c of currentRun) bands.push(c.quad)
+                currentRun = []
+                return
+            }
+            const ux = dx / len, uy = dy / len
+            const vx = -uy, vy = ux
+
+            let low = Infinity, high = -Infinity
+            for (const c of currentRun) {
+                const q = c.quad
+                for (let i = 0; i < 8; i += 2) {
+                    const v = q[i] * vx + q[i + 1] * vy
+                    if (v < low) low = v
+                    if (v > high) high = v
+                }
+            }
+
+            const uStart = Math.min(qFirst[0] * ux + qFirst[1] * uy, qFirst[4] * ux + qFirst[5] * uy)
+            const uEnd = Math.max(qLast[2] * ux + qLast[3] * uy, qLast[6] * ux + qLast[7] * uy)
+
+            const point = (u, v) => [ux * u + vx * v, uy * u + vy * v]
+            const ul = point(uStart, low)
+            const ur = point(uEnd, low)
+            const ll = point(uStart, high)
+            const lr = point(uEnd, high)
+            bands.push([ul[0], ul[1], ur[0], ur[1], ll[0], ll[1], lr[0], lr[1]])
+            currentRun = []
+        }
+
+        for (let i = 0; i < chars.length; i++) {
+            const ch = chars[i]
+            if (!currentRun.length) {
+                currentRun.push(ch)
+                continue
+            }
+            const prev = currentRun[currentRun.length - 1]
+            const sameLine = (ch.line != null && prev.line != null && ch.line === prev.line)
+            const gap = Math.hypot(ch.quad[0] - prev.quad[2], ch.quad[1] - prev.quad[3])
+            const maxGap = Math.max(12, (ch.size || 12) * 2.5)
+            if (sameLine && gap <= maxGap) {
+                currentRun.push(ch)
+            } else {
+                flushRun()
+                currentRun.push(ch)
+            }
+        }
+        flushRun()
+        return bands
+    }
+
     async _finalizeNativeSelection(anchor, focus, mode) {
+        if (this._destroyed) return null
         const { segments } = await this._selectionEndpoints(anchor, focus)
-        if (!segments.length) return null
+        if (!segments.length || this._destroyed) return null
         const output = []
         for (const seg of segments) {
             const result = await this.driver.select(seg.page, seg.a, seg.b, mode)
-            const size = this.pageSizes[seg.page]
+            if (this._destroyed) return null
+            const size = this.pageSizes[seg.page] || { width: 595, height: 842, x0: 0, y0: 0 }
             const pageBounds = [size.x0 || 0, size.y0 || 0, (size.x0 || 0)+size.width, (size.y0 || 0)+size.height]
-            const rects = (result.quads || []).map(q => this._quadToNormalizedRect(q, pageBounds))
-            output.push({ page:seg.page, text:result.text || '', quads:result.quads || [], rects, pageBounds })
+            const geom = await this._ensureNativeGeometry(seg.page)
+            let quads = []
+            let text = result.text || ''
+            if (mode !== 'char' && result.quads && result.quads.length > 0) {
+                quads = result.quads
+            } else {
+                const a = Math.min(seg.startIndex, seg.endIndex), b = Math.max(seg.startIndex, seg.endIndex)
+                const slice = geom?.chars?.slice(a, b + 1) || []
+                const lineBandQuads = slice.length > 0 ? this._buildLineBandQuads(slice) : []
+                quads = lineBandQuads.length > 0 ? lineBandQuads : ((result.quads && result.quads.length > 0) ? result.quads : [])
+                if (!text && slice.length > 0) {
+                    text = slice.map(c => c.text || '').join('')
+                }
+            }
+            const rects = quads.map(q => this._quadToNormalizedRect(q, pageBounds))
+            output.push({ page:seg.page, text, quads, rects, pageBounds })
+        }
+        if (mode !== 'char') {
+            this._nativePreview = output.map(x => ({ page: x.page, quads: x.quads }))
+            this._scheduleRedrawNativePreview()
         }
         return { text:output.map(x=>x.text).filter(Boolean).join('\n'), segments:output }
     }
@@ -1850,24 +2306,44 @@ export class PdfViewport {
     async _updateNativePreview() {
         const drag = this._nativeDrag
         if (!drag) return
+        const previewSeq = (drag.previewSeq = (drag.previewSeq || 0) + 1)
+        const epoch = drag.epoch
         try {
             const { segments } = await this._selectionEndpoints(drag.anchor, drag.focus)
-            if (this._nativeDrag !== drag) return
+            if (this._destroyed || this._nativeDrag !== drag || drag.epoch !== epoch || this._nativeGestureEpoch !== epoch) return
+            if (drag.latestRenderedPreviewSeq && previewSeq < drag.latestRenderedPreviewSeq) return
+
             const preview = await Promise.all(segments.map(async seg => {
                 const geom = await this._ensureNativeGeometry(seg.page)
                 if (!geom) return null
                 const a = Math.min(seg.startIndex, seg.endIndex), b = Math.max(seg.startIndex, seg.endIndex)
-                return { page:seg.page, quads:geom.chars.slice(a,b+1).map(ch=>ch.quad) }
+                const slice = geom.chars.slice(a, b + 1)
+                return { page: seg.page, quads: this._buildLineBandQuads(slice) }
             }))
-            if (this._nativeDrag !== drag) return
+            if (this._destroyed || this._nativeDrag !== drag || drag.epoch !== epoch || this._nativeGestureEpoch !== epoch) return
+            if (drag.latestRenderedPreviewSeq && previewSeq < drag.latestRenderedPreviewSeq) return
+            drag.latestRenderedPreviewSeq = previewSeq
             this._nativePreview = preview.filter(Boolean)
-            this._redrawNativePreview()
+            this._scheduleRedrawNativePreview()
         } catch (err) {
-            if (this._nativeDrag === drag) console.warn('[PDF] native selection preview failed:', err)
+            if (this._nativeDrag === drag && drag.epoch === epoch) console.warn('[PDF] native selection preview failed:', err)
         }
     }
 
+    _scheduleRedrawNativePreview() {
+        if (this._previewRaf) return
+        if (typeof requestAnimationFrame !== 'function') {
+            this._redrawNativePreview()
+            return
+        }
+        this._previewRaf = requestAnimationFrame(() => {
+            this._previewRaf = null
+            this._redrawNativePreview()
+        })
+    }
+
     _redrawNativePreview() {
+        if (typeof document === 'undefined') return
         for (const [page, slot] of this.activeSlots) this._renderNativePreviewForPage(page, slot.querySelector('.pdf-native-selection-layer'))
     }
 
@@ -1876,7 +2352,7 @@ export class PdfViewport {
         layer.replaceChildren()
         const segment = this._nativePreview?.find(x => x.page === page)
         if (!segment?.quads?.length) return
-        const size = this.pageSizes[page]
+        const size = this.pageSizes[page] || { width: 595, height: 842, x0: 0, y0: 0 }
         const x0 = size.x0 || 0, y0 = size.y0 || 0
         const svg = document.createElementNS('http://www.w3.org/2000/svg','svg')
         svg.setAttribute('viewBox', `${x0} ${y0} ${size.width} ${size.height}`)
@@ -1927,6 +2403,7 @@ export class PdfViewport {
     }
 
     setSpreadMode(mode) {
+        if (this._columnReadingEnabled) this.setColumnReadingConfig({ enabled: false })
         const nextMode = (mode === 'dual' || mode === '2' || mode === 'two') ? 'dual' : 'none'
         if (this.spreadMode === nextMode) return
         const curPage = this.currentPage
@@ -1981,13 +2458,16 @@ export class PdfViewport {
 
     getFitScale(mode = 'fit-width', page = this.currentPage) {
         const size = this.pageSizes[page] || { width: 595, height: 842 }
+        const margins = this._getCropMarginsForPage(page)
+        const cropW = Math.max(1, (1 - (margins.left + margins.right) / 100) * size.width)
+        const cropH = Math.max(1, (1 - (margins.top + margins.bottom) / 100) * size.height)
         const width = this.scrollArea.clientWidth || this.container.clientWidth
         const height = this.scrollArea.clientHeight || this.container.clientHeight
         const isMobile = window.innerWidth < 768 || window.mobileShell?.isMobileViewport?.() || window.platformBridge?.isAndroid
         const margin = isMobile ? 24 : 48
         const spreadFactor = (this.spreadMode === 'dual' && page > 0) ? 2.05 : 1
-        const fitWidth = Math.max(1, width - margin) / (size.width * spreadFactor)
-        const fitHeight = Math.max(1, height - 32) / size.height
+        const fitWidth = Math.max(1, width - margin) / (cropW * spreadFactor)
+        const fitHeight = Math.max(1, height - 32) / cropH
         return clamp(mode === 'fit-page' ? Math.min(fitWidth, fitHeight) : fitWidth, this.options.minScale, this.options.maxScale)
     }
 
@@ -2037,20 +2517,28 @@ export class PdfViewport {
         else this.container.style.removeProperty('--pdf-page-filter')
     }
 
-    setZoom(value, { anchor = null } = {}) {
+    setZoom(value, { anchor = null, columnFocus = false } = {}) {
+        if (this._columnReadingEnabled && !columnFocus) this.setColumnReadingConfig({ enabled: false })
         this.zoomMode = value === 'fit-width' || value === 'fit-page' ? value : null
-        const next = clamp(this.zoomMode ? this.getFitScale(value) : Number(value), this.options.minScale, this.options.maxScale)
+        const next = clamp(this.zoomMode ? this.getFitScale(value) : Number(value), this.options.minScale, columnFocus ? Math.max(this.options.maxScale, this.options.maxColumnScale || 8) : this.options.maxScale)
         if (!Number.isFinite(next)) return
+        const scaleChanged = Math.abs(next - this.scale) > 1e-6
         const viewAnchor = anchor || this._captureZoomAnchor()
         this.scale = next
         this._recomputeLayout()
         this._restoreZoomAnchor(viewAnchor)
         this._syncActiveSlotGeometry()
         this.options.onZoomChange?.(this.scale)
-        for (const slot of this.activeSlots.values()) {
+        if (scaleChanged) for (const slot of this.activeSlots.values()) {
             slot._renderedClip = null
+            // Old tile positions are CSS pixels at the previous zoom. The full
+            // page preview scales with its wrapper while a fresh raster is made.
+            slot.querySelectorAll('.pdf-clip-canvas').forEach(canvas => {
+                canvas.remove()
+                canvas.width = canvas.height = 0
+            })
         }
-        this._renderVisibleSlots(true)
+        this._renderVisibleSlots(scaleChanged)
         this._redrawNativePreview()
     }
 
@@ -2068,8 +2556,36 @@ export class PdfViewport {
         this.options.onInteractionModeChange?.(next)
     }
 
+    getAdjacentPage(direction) {
+        const count = this.pageOffsets.length || this.pageSizes.length || this.numPages || 0
+        if (!count) return null
+        const current = Math.max(0, Math.min(count - 1, this.currentPage || 0))
+        const forward = direction === 'next' || direction === 1
+        let target
+        if (this.spreadMode !== 'dual') target = current + (forward ? 1 : -1)
+        else if (current === 0) target = forward ? 1 : -1
+        else {
+            // The cover is single; physical spreads are [1,2], [3,4], ... (zero based).
+            const firstInSpread = 1 + 2 * Math.floor((current - 1) / 2)
+            target = forward ? firstInSpread + 2 : Math.max(0, firstInSpread - 2)
+        }
+        return target >= 0 && target < count ? target : null
+    }
+
     goToPage(page, yRatio = 0) {
         if (page < 0 || page >= this.pageOffsets.length) return
+        if (this._columnReadingEnabled && this._columnState) {
+            if (!this._getRegionsForPage(page).length) {
+                this.setColumnReadingConfig({ enabled: false })
+                this.goToPage(page, yRatio)
+                return
+            }
+            this._columnState = { pageIndex: page, regionIndex: 0, offset: 0 }
+            const metrics = this._getColumnMetrics(page, 0)
+            this._columnState.offset = Math.min(metrics.maxOffset, Math.max(0, (this.pageSizes[page].height * yRatio - metrics.top) * metrics.fitScale))
+            this._applyColumnFocus()
+            return
+        }
         this.currentPage = page
         if (this.zoomMode) this.setZoom(this.zoomMode)
         const p = this.pageOffsets[page]
@@ -2100,6 +2616,24 @@ export class PdfViewport {
 
     _detectCurrentPage() {
         if (!this.pageOffsets.length) return
+        if (this._columnReadingEnabled && this._columnState) {
+            const expected = this._columnScrollTarget
+            if (expected && Math.abs(this.scrollArea.scrollTop - expected.top) < 2 && Math.abs(this.scrollArea.scrollLeft - expected.left) < 2) return
+            const page = this._firstPageAt(this.scrollArea.scrollTop + 16)
+            if (page >= this.numPages || !this.pageOffsets[page] || !this._getRegionsForPage(page).length) return
+            const p = this.pageOffsets[page], scale = this.scale || 1
+            const pageLeft = p.left ?? Math.max(0, (this._layoutWidth - p.width) / 2)
+            const center = this.scrollArea.scrollLeft + this.scrollArea.clientWidth / 2
+            let index = 0, distance = Infinity
+            this._getRegionsForPage(page).forEach((region, i) => {
+                const m = this._getColumnMetrics(page, i), d = Math.abs(center - (pageLeft + (m.left + m.width / 2) * scale))
+                if (d < distance) { distance = d; index = i }
+            })
+            const m = this._getColumnMetrics(page, index)
+            this._columnState = { pageIndex: page, regionIndex: index, offset: clamp(((this.scrollArea.scrollTop + 12 - p.top) / scale - m.top) * m.fitScale, 0, m.maxOffset) }
+            this._applyColumnFocus()
+            return
+        }
         const best = this.getPageAtViewportCenter()
         if (best !== this.currentPage) {
             this.currentPage = best
@@ -2135,12 +2669,446 @@ export class PdfViewport {
         for (const [page, slot] of this.activeSlots) this._renderHighlightsForPage(page, slot.querySelector('.pdf-highlight-layer'))
     }
 
+    _getCropMarginsForPage(page) {
+        if (!this.cropSettings || this.cropSettings.mode === 'none') {
+            return { top: 0, right: 0, bottom: 0, left: 0 }
+        }
+        const mode = this.cropSettings.mode
+        let margins = this.cropSettings.margins || { top: 0, right: 0, bottom: 0, left: 0 }
+        if (mode === 'odd-even') {
+            // page is 0-indexed: page 0 is physical page 1 (odd)
+            const isOdd = ((page + 1) % 2 === 1)
+            const odd = this.cropSettings.oddMargins || this.cropSettings.odd
+            const even = this.cropSettings.evenMargins || this.cropSettings.even
+            margins = isOdd ? (odd || margins) : (even || margins)
+        }
+        const clampMargin = (v) => Math.max(0, Math.min(49, Number(v) || 0))
+        return {
+            top: clampMargin(margins.top),
+            right: clampMargin(margins.right),
+            bottom: clampMargin(margins.bottom),
+            left: clampMargin(margins.left)
+        }
+    }
+
+    _applyCropToSlot(page, slot) {
+        if (!slot) return
+        const margins = this._getCropMarginsForPage(page)
+        const size = (this.pageSizes && this.pageSizes[page]) || { width: 595, height: 842 }
+        const scale = this.scale || 1
+        const uncroppedWidth = Math.max(1, Math.round(size.width * scale))
+        const uncroppedHeight = Math.max(1, Math.round(size.height * scale))
+        const pOffset = this.pageOffsets && this.pageOffsets[page]
+        if (pOffset && slot.style) {
+            slot.style.width = `${pOffset.width}px`
+            slot.style.height = `${pOffset.height}px`
+        }
+        if (slot.style) slot.style.overflow = 'hidden'
+
+        let hasInnerLayers = false
+        if (typeof slot.querySelectorAll === 'function') {
+            const innerLayers = slot.querySelectorAll('.pdf-img-wrapper, .pdf-highlight-layer, .pdf-native-selection-layer, .pdf-text-layer')
+            if (innerLayers.length > 0) {
+                hasInnerLayers = true
+                const offsetX = -Math.round((margins.left / 100) * uncroppedWidth)
+                const offsetY = -Math.round((margins.top / 100) * uncroppedHeight)
+
+                innerLayers.forEach(layer => {
+                    layer.style.width = `${uncroppedWidth}px`
+                    layer.style.height = `${uncroppedHeight}px`
+                    layer.style.transform = (offsetX !== 0 || offsetY !== 0) ? `translate(${offsetX}px, ${offsetY}px)` : ''
+                    layer.style.transformOrigin = '0 0'
+                })
+            }
+        }
+
+        if (slot.style) {
+            if (hasInnerLayers) {
+                slot.style.clipPath = ''
+            } else {
+                const hasMargins = (margins.top > 0 || margins.right > 0 || margins.bottom > 0 || margins.left > 0)
+                slot.style.clipPath = hasMargins ? `inset(${margins.top}% ${margins.right}% ${margins.bottom}% ${margins.left}%)` : ''
+            }
+        }
+    }
+
+    setCropSettings(settings) {
+        this.cropSettings = settings || { mode: 'none' }
+        if (Array.isArray(this.pageSizes) && this.pageSizes.length > 0) {
+            this._recomputeLayout()
+            this._syncActiveSlotGeometry()
+            if (typeof this._renderVisibleSlots === 'function' && Array.isArray(this.pageOffsets) && this.pageOffsets.length > 0) {
+                this._renderVisibleSlots()
+            }
+        }
+        if (this.activeSlots) {
+            for (const [page, slot] of this.activeSlots.entries()) {
+                this._applyCropToSlot(page, slot)
+            }
+        }
+        if (this._columnReadingEnabled) this._applyColumnFocus()
+    }
+
+    getCropSettings() {
+        return this.cropSettings || { mode: 'none' }
+    }
+
+    // ==========================================================
+    // S02: Manual Two-Column / Multi-Region Sequential Reading Mode
+    // ==========================================================
+    setColumnReadingConfig({ enabled = false, defaultRegions = null, pageOverrides = null } = {}) {
+        const wasEnabled = Boolean(this._columnReadingEnabled)
+        if (enabled && !wasEnabled) {
+            this._columnRestoreState = { scale: this.scale || 1, zoomMode: this.zoomMode || null, spreadMode: this.spreadMode || 'none' }
+        }
+        this._columnReadingEnabled = Boolean(enabled)
+        this._columnWheelHandler ||= event => this._handleColumnWheel(event)
+        if (enabled) this.scrollArea?.addEventListener?.('wheel', this._columnWheelHandler, { passive: false })
+        else this.scrollArea?.removeEventListener?.('wheel', this._columnWheelHandler)
+        this._columnDefaultRegions = this._normalizeColumnRegions(defaultRegions || this._columnDefaultRegions || [
+            { x: .04, y: .04, width: .44, height: .92 },
+            { x: .52, y: .04, width: .44, height: .92 }
+        ])
+        this._columnPageOverrides = pageOverrides || this._columnPageOverrides || {}
+        if (enabled) {
+            this._columnLayoutNeedsUpdate = this.spreadMode !== 'none'
+            this.spreadMode = 'none'
+            let page = Math.max(0, Math.min((this.numPages || 1) - 1, this.currentPage || 0))
+            while (page < this.numPages && !this._getRegionsForPage(page).length) page++
+            if (page >= this.numPages) {
+                page = Math.max(0, Math.min((this.numPages || 1) - 1, this.currentPage || 0))
+                while (page > 0 && !this._getRegionsForPage(page).length) page--
+            }
+            if (!this._getRegionsForPage(page).length) {
+                this.setColumnReadingConfig({ enabled: false })
+                return
+            }
+            this._columnState = { pageIndex: page, regionIndex: 0, offset: 0 }
+            this._columnWheelRemainder = 0
+            this._columnBoundaryAt = -Infinity
+            this._applyColumnFocus()
+        } else {
+            const anchor = this.pageSizes?.length ? this._captureZoomAnchor() : null
+            this._columnState = null
+            this._columnLastFit = null
+            this._columnScrollTarget = null
+            const saved = this._columnRestoreState
+            this._columnRestoreState = null
+            if (wasEnabled && saved && this.pageSizes?.length) {
+                this.spreadMode = saved.spreadMode
+                this._updateRenderConcurrency()
+                this.setZoom(saved.zoomMode || saved.scale, { anchor })
+            }
+            this.options?.onColumnReadingChange?.(this.getColumnReadingState())
+        }
+    }
+
+    _normalizeColumnRegions(regions) {
+        const normalized = (Array.isArray(regions) ? regions : []).map(r => {
+            const x = clamp(Number(r?.x) || 0, 0, .99), y = clamp(Number(r?.y) || 0, 0, .99)
+            return { x, y, width: clamp(Number(r?.width ?? r?.w) || 1, .01, 1 - x), height: clamp(Number(r?.height ?? r?.h) || 1, .01, 1 - y) }
+        })
+        return normalized.length ? normalized : [{ x: 0, y: 0, width: 1, height: 1 }]
+    }
+
+    getColumnReadingState() {
+        const page = this._columnState?.pageIndex ?? (this.currentPage || 0)
+        return { enabled: Boolean(this._columnReadingEnabled), pageIndex: page,
+            regionIndex: this._columnState?.regionIndex ?? 0, offset: this._columnState?.offset ?? 0,
+            regionCount: this._getRegionsForPage(page).length }
+    }
+
+    _getRegionsForPage(page) {
+        const override = this._columnPageOverrides?.[page]
+        if (override === 'skip') return []
+        if (override === 'full') return [{ x: 0, y: 0, width: 1, height: 1 }]
+        return this._normalizeColumnRegions(Array.isArray(override) && override.length ? override : this._columnDefaultRegions || [
+            { x: 0, y: 0, width: .5, height: 1 }, { x: .5, y: 0, width: .5, height: 1 }
+        ])
+    }
+
+    _getColumnMetrics(page, index) {
+        const p = this.pageOffsets[page], region = this._getRegionsForPage(page)[index] || { x: 0, y: 0, width: 1, height: 1 }
+        const currentScale = this.scale || 1
+        const size = this.pageSizes?.[page] || { width: (p?.width || 600) / currentScale, height: (p?.height || 800) / currentScale }
+        const m = this.pageSizes?.[page] ? this._getCropMarginsForPage(page) : { left: 0, right: 0, top: 0, bottom: 0 }
+        const cropLeft = size.width * m.left / 100, cropTop = size.height * m.top / 100
+        const cropRight = size.width * (1 - m.right / 100), cropBottom = size.height * (1 - m.bottom / 100)
+        let x0 = Math.max(cropLeft, size.width * region.x), y0 = Math.max(cropTop, size.height * region.y)
+        let x1 = Math.min(cropRight, size.width * (region.x + region.width)), y1 = Math.min(cropBottom, size.height * (region.y + region.height))
+        if (x1 <= x0 || y1 <= y0) { x0 = cropLeft; y0 = cropTop; x1 = cropRight; y1 = cropBottom }
+        const fitScale = this.pageSizes?.[page]
+            ? clamp(Math.max(1, (this.scrollArea.clientWidth || 600) - 32) / Math.max(1, x1 - x0), this.options?.minScale || .1, Math.max(this.options?.maxScale || 3.5, this.options?.maxColumnScale || 8))
+            : currentScale
+        const viewHeight = Math.max(1, (this.scrollArea.clientHeight || 600) - 24)
+        return { left: x0 - cropLeft, top: y0 - cropTop, width: x1 - x0, height: y1 - y0,
+            fitScale, maxOffset: Math.max(0, (y1 - y0) * fitScale - viewHeight) }
+    }
+
+    _moveColumnRegion(direction) {
+        const state = this._columnState
+        if (!state) return false
+        const regions = this._getRegionsForPage(state.pageIndex)
+        const nextIndex = state.regionIndex + direction
+        if (nextIndex >= 0 && nextIndex < regions.length) state.regionIndex = nextIndex
+        else {
+            let page = state.pageIndex + direction
+            while (page >= 0 && page < this.numPages && !this._getRegionsForPage(page).length) page += direction
+            if (page < 0 || page >= this.numPages) return false
+            state.pageIndex = page
+            state.regionIndex = direction > 0 ? 0 : Math.max(0, this._getRegionsForPage(page).length - 1)
+        }
+        state.offset = direction > 0 ? 0 : this._getColumnMetrics(state.pageIndex, state.regionIndex).maxOffset
+        return true
+    }
+
+    nextColumnStep() {
+        if (!this._columnReadingEnabled || !this._columnState) return false
+        const s = this._columnState, max = this._getColumnMetrics(s.pageIndex, s.regionIndex).maxOffset
+        if (s.offset < max - .5) s.offset = Math.min(max, s.offset + Math.max(100, (this.scrollArea.clientHeight || 600) * .85))
+        else if (!this._moveColumnRegion(1)) return false
+        this._applyColumnFocus()
+        return true
+    }
+
+    prevColumnStep() {
+        if (!this._columnReadingEnabled || !this._columnState) return false
+        const s = this._columnState
+        if (s.offset > .5) s.offset = Math.max(0, s.offset - Math.max(100, (this.scrollArea.clientHeight || 600) * .85))
+        else if (!this._moveColumnRegion(-1)) return false
+        this._applyColumnFocus()
+        return true
+    }
+
+    _handleColumnWheel(event) {
+        if (!this._columnReadingEnabled || !this._columnState || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || Math.abs(event.deltaX || 0) > Math.abs(event.deltaY || 0)) return
+        const delta = (event.deltaY || 0) * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? this.scrollArea.clientHeight : 1)
+        if (!delta) return
+        event.preventDefault()
+        event.stopPropagation()
+        const s = this._columnState, max = this._getColumnMetrics(s.pageIndex, s.regionIndex).maxOffset
+        if (delta > 0 && s.offset < max - .5 || delta < 0 && s.offset > .5) {
+            s.offset = clamp(s.offset + delta, 0, max)
+            this._columnWheelRemainder = 0
+        } else {
+            const now = performance.now()
+            if (now - (this._columnBoundaryAt ?? -Infinity) < 220) return
+            if (Math.sign(this._columnWheelRemainder || 0) !== Math.sign(delta)) this._columnWheelRemainder = 0
+            this._columnWheelRemainder = (this._columnWheelRemainder || 0) + delta
+            if (Math.abs(this._columnWheelRemainder) < 40) return
+            if (!this._moveColumnRegion(delta > 0 ? 1 : -1)) return
+            this._columnBoundaryAt = now
+            this._columnWheelRemainder = 0
+        }
+        this._applyColumnFocus()
+    }
+
+    _applyColumnFocus() {
+        if (!this.scrollArea || !this._columnState || this._destroyed) return
+        const state = this._columnState, beforePage = this.currentPage
+        if (!this.pageOffsets[state.pageIndex]) return
+        const metrics = this._getColumnMetrics(state.pageIndex, state.regionIndex)
+        const previousFit = this._columnLastFit
+        if (previousFit && previousFit.page === state.pageIndex && previousFit.index === state.regionIndex && previousFit.scale > 0) {
+            state.offset *= metrics.fitScale / previousFit.scale
+        }
+        this.currentPage = state.pageIndex
+        if (this.pageSizes?.length) {
+            this.spreadMode = 'none'
+            if (this._columnLayoutNeedsUpdate || Math.abs(metrics.fitScale - this.scale) > 1e-6 || this._layoutViewportWidth !== this.scrollArea.clientWidth || this._layoutViewportHeight !== this.scrollArea.clientHeight) {
+                this.setZoom(metrics.fitScale, { columnFocus: true })
+                this._columnLayoutNeedsUpdate = false
+            }
+        }
+        const p = this.pageOffsets[state.pageIndex], scale = this.scale || 1
+        const pageLeft = p.left ?? Math.max(0, ((this._layoutWidth || p.width) - p.width) / 2)
+        state.offset = clamp(Number.isFinite(state.offset) ? state.offset : 0, 0, metrics.maxOffset)
+        this.scrollArea.scrollTop = Math.max(0, p.top + metrics.top * scale + state.offset - 12)
+        this.scrollArea.scrollLeft = Math.max(0, pageLeft + metrics.left * scale - 16)
+        this._columnLastFit = { page: state.pageIndex, index: state.regionIndex, scale: metrics.fitScale }
+        this._columnScrollTarget = { top: this.scrollArea.scrollTop, left: this.scrollArea.scrollLeft }
+        if (beforePage !== state.pageIndex) this.options?.onPageChange?.(state.pageIndex, this.numPages)
+        this.options?.onColumnReadingChange?.(this.getColumnReadingState())
+        this._renderVisibleSlots()
+    }
+
+    // ==========================================================
+    // S03: Scan Enhancement Presets
+    // ==========================================================
+    setScanEnhancementPreset(presetName = 'original', customParams = null) {
+        const presets = {
+            'original': { brightness: 100, contrast: 100, grayscale: false, invert: false, filterStr: 'none' },
+            'gray-boost': { brightness: 115, contrast: 130, grayscale: true, invert: false, filterStr: 'brightness(115%) contrast(130%) grayscale(100%)' },
+            'clean-bg': { brightness: 115, contrast: 130, grayscale: true, invert: false, filterStr: 'brightness(115%) contrast(130%) grayscale(100%)' },
+            'text-darken': { brightness: 90, contrast: 160, grayscale: false, invert: false, filterStr: 'brightness(90%) contrast(160%)' },
+            'deep-ink': { brightness: 90, contrast: 160, grayscale: false, invert: false, filterStr: 'brightness(90%) contrast(160%)' }
+        }
+        const aliases = {
+            'clean_bg': 'clean-bg',
+            'deep_ink': 'deep-ink',
+            '灰底增强': 'gray-boost',
+            '字迹加深': 'text-darken'
+        }
+        const resolvedName = aliases[presetName] || presetName
+        let cfg = presets[resolvedName] || presets.original
+        if (resolvedName === 'custom' && customParams) {
+            const b = Math.max(50, Math.min(200, Number(customParams.brightness) || 100))
+            const c = Math.max(50, Math.min(250, Number(customParams.contrast) || 100))
+            const gray = !!customParams.grayscale
+            const inv = !!customParams.invert
+            let f = `brightness(${b}%) contrast(${c}%)`
+            if (gray) f += ' grayscale(100%)'
+            if (inv) f += ' invert(100%)'
+            cfg = { brightness: b, contrast: c, grayscale: gray, invert: inv, filterStr: f }
+        }
+
+        this._scanEnhanceConfig = { preset: presetName, ...cfg }
+        if (this.container) {
+            this.container.style.setProperty('--reader-img-filter', cfg.filterStr)
+            this.container.style.setProperty('--pdf-page-filter', cfg.filterStr)
+        }
+        return this._scanEnhanceConfig
+    }
+
+    getScanEnhancementState() {
+        return this._scanEnhanceConfig || {
+            preset: 'original',
+            brightness: 100,
+            contrast: 100,
+            grayscale: false,
+            invert: false,
+            filterStr: 'none'
+        }
+    }
+
+    // ==========================================================
+    // S04: Reading Ruler & Controlled Auto-Scroll
+    // ==========================================================
+    setReadingRuler({ enabled = false, height = 40, opacity = 0.25, color = 'rgba(255, 230, 0, 0.3)' } = {}) {
+        if (!enabled) {
+            this.removeReadingRuler()
+            return
+        }
+        if (!this._readingRulerEl) {
+            const doc = typeof document !== 'undefined' ? document : null
+            this._readingRulerEl = doc ? doc.createElement('div') : { style: {}, remove() {} }
+            this._readingRulerEl.className = 'reading-ruler-overlay'
+            this._readingRulerEl.style.cssText = 'position:absolute;left:0;right:0;pointer-events:none;z-index:45;box-shadow:0 -1px 0 rgba(0,0,0,0.15), 0 1px 0 rgba(0,0,0,0.15);transition:top 0.04s ease-out;'
+            this.container?.appendChild(this._readingRulerEl)
+        }
+        this._rulerHeight = Math.max(16, Math.min(200, Number(height) || 40))
+        this._readingRulerEl.style.height = `${this._rulerHeight}px`
+        this._readingRulerEl.style.backgroundColor = color
+        this._readingRulerEl.style.opacity = Math.max(0.05, Math.min(1, Number(opacity) || 0.25))
+
+        if (!this._onRulerMouseMove) {
+            this._onRulerMouseMove = (e) => {
+                if (!this._readingRulerEl || !this.container) return
+                const rect = this.container.getBoundingClientRect()
+                const y = e.clientY - rect.top
+                this._readingRulerEl.style.top = `${Math.max(0, y - this._rulerHeight / 2)}px`
+            }
+            this.container?.addEventListener('mousemove', this._onRulerMouseMove, { passive: true })
+        }
+    }
+
+    removeReadingRuler() {
+        if (this._onRulerMouseMove && this.container) {
+            this.container.removeEventListener('mousemove', this._onRulerMouseMove)
+            this._onRulerMouseMove = null
+        }
+        if (this._readingRulerEl) {
+            this._readingRulerEl.remove()
+            this._readingRulerEl = null
+        }
+    }
+
+    startAutoScroll({ speed = 30 } = {}) {
+        this.stopAutoScroll()
+        this._autoScrollSpeed = Math.max(5, Math.min(200, Number(speed) || 30))
+        this._autoScrollPaused = false
+        let lastTime = performance.now()
+
+        if (!this._autoScrollWheelBound && this.scrollArea && typeof this.scrollArea.addEventListener === 'function') {
+            this._autoScrollWheelBound = true
+            this.scrollArea.addEventListener('wheel', () => {
+                if (this._autoScrollActive && !this._autoScrollPaused) {
+                    this.pauseAutoScroll()
+                    clearTimeout(this._autoScrollResumeTimer)
+                    this._autoScrollResumeTimer = setTimeout(() => {
+                        if (this._autoScrollActive && this._autoScrollPaused) {
+                            this.resumeAutoScroll()
+                        }
+                    }, 2000)
+                }
+            }, { passive: true })
+            this.scrollArea.addEventListener('touchstart', () => {
+                if (this._autoScrollActive && !this._autoScrollPaused) {
+                    this.pauseAutoScroll()
+                }
+            }, { passive: true })
+        }
+
+        const loop = (now) => {
+            if (!this._autoScrollActive) return
+            const deltaSec = Math.min((now - lastTime) / 1000, 0.1)
+            lastTime = now
+
+            const isHidden = typeof document !== 'undefined' && document.hidden
+            const isBlur = typeof document !== 'undefined' && !document.hasFocus()
+            const hasSelection = typeof window !== 'undefined' && (window.getSelection()?.toString().length || 0) > 0
+
+            if (!this._autoScrollPaused && !isHidden && !isBlur && !hasSelection && this.scrollArea) {
+                const maxScroll = this.scrollArea.scrollHeight - this.scrollArea.clientHeight
+                if (this.scrollArea.scrollTop < maxScroll) {
+                    this.scrollArea.scrollTop += this._autoScrollSpeed * deltaSec
+                } else {
+                    this.stopAutoScroll()
+                    return
+                }
+            }
+            const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => setTimeout(() => cb(Date.now()), 16)
+            this._autoScrollRaf = raf(loop)
+        }
+
+        const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => setTimeout(() => cb(Date.now()), 16)
+        this._autoScrollActive = true
+        this._autoScrollRaf = raf(loop)
+    }
+
+    pauseAutoScroll() {
+        this._autoScrollPaused = true
+    }
+
+    resumeAutoScroll() {
+        this._autoScrollPaused = false
+    }
+
+    toggleAutoScrollPause() {
+        this._autoScrollPaused = !this._autoScrollPaused
+        return this._autoScrollPaused
+    }
+
+    stopAutoScroll() {
+        this._autoScrollActive = false
+        this._autoScrollPaused = false
+        if (this._autoScrollRaf) {
+            const caf = typeof cancelAnimationFrame === 'function' ? cancelAnimationFrame : clearTimeout
+            caf(this._autoScrollRaf)
+            this._autoScrollRaf = null
+        }
+    }
+
     destroy() {
         if (this._destroyed) return
         this._destroyed = true
+        if (this._columnWheelHandler) this.scrollArea?.removeEventListener?.('wheel', this._columnWheelHandler)
+        this.removeReadingRuler?.()
+        this.stopAutoScroll?.()
         this._resizeObserver?.disconnect()
         clearTimeout(this._singleTapTimer)
         this._cancelPinch?.()
+        this._nativeGestureEpoch++
         this._loadGeneration = (this._loadGeneration || 0) + 1
         this._geometryAbort?.abort()
         this._geometryQueue.length = 0

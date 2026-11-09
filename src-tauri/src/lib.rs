@@ -15,6 +15,7 @@ pub struct LindenMobileBridge(pub tauri::plugin::PluginHandle<tauri::Wry>);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = commands::window::init_process_start_epoch_ms();
     let builder = tauri::Builder::default();
 
     #[cfg(target_os = "android")]
@@ -29,7 +30,14 @@ pub fn run() {
     );
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+    let builder = if std::env::var_os("LINDEN_SINGLE_INSTANCE_KEY").is_some()
+        || std::env::var_os("LINDEN_DISABLE_SINGLE_INSTANCE").is_some()
+        || std::env::var_os("DISABLE_SINGLE_INSTANCE").is_some()
+    {
+        eprintln!("[single_instance] Single instance plugin bypassed by environment");
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
         use tauri::Emitter;
         let file_paths = extract_book_paths_from_args_with_cwd(&argv, Some(&_cwd));
 
@@ -59,8 +67,9 @@ pub fn run() {
                 for file_path in file_paths {
                     if is_win_ready {
                         if let Some(w) = app.get_webview_window(&new_label) {
-                            if let Ok(payload) = load_open_file_payload(&file_path) {
-                                let _ = w.emit("app:open-file", payload);
+                            let req_id = next_request_id(&format!("req_{}", new_label));
+                            if let Ok(payload) = load_open_file_payload(&file_path, Some(new_label.clone()), Some(req_id)) {
+                                let _ = w.emit_to(&new_label, "app:open-file", payload);
                             }
                         }
                     } else {
@@ -68,7 +77,8 @@ pub fn run() {
                             .pending_files
                             .lock()
                             .unwrap()
-                            .push((Some(new_label.clone()), file_path));
+                            .push((Some(new_label.clone()), file_path.clone()));
+                        state.initial_boot_files.lock().unwrap().push((Some(new_label.clone()), file_path));
                     }
                 }
             }
@@ -89,16 +99,19 @@ pub fn run() {
                     .unwrap_or(false);
                 for file_path in file_paths {
                     if is_ready {
-                        if let Ok(payload) = load_open_file_payload(&file_path) {
-                            let _ = app.emit("app:open-file", payload);
+                        let req_id = next_request_id("req_main");
+                        if let Ok(payload) = load_open_file_payload(&file_path, Some("main".to_string()), Some(req_id)) {
+                            let _ = app.emit_to("main", "app:open-file", payload);
                         }
                     } else {
-                        state.pending_files.lock().unwrap().push((None, file_path));
+                        state.pending_files.lock().unwrap().push((None, file_path.clone()));
+                        state.initial_boot_files.lock().unwrap().push((None, file_path));
                     }
                 }
             }
         }
-    }));
+    }))
+    };
 
     builder
         .setup(|app| {
@@ -121,7 +134,8 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 let mut pending = state.pending_files.lock().unwrap();
                 for file_path in file_paths {
-                    pending.push((Some("main".to_string()), file_path));
+                    pending.push((Some("main".to_string()), file_path.clone()));
+                    state.initial_boot_files.lock().unwrap().push((Some("main".to_string()), file_path));
                 }
             }
 
@@ -210,6 +224,7 @@ pub fn run() {
                     let state = window.state::<AppState>();
                     let _ = state.close_state.lock().map(|mut m| m.remove(&win_label));
                     let _ = state.ready_windows.lock().map(|mut m| m.remove(&win_label));
+                    crate::commands::mupdf::mupdf_close_documents_for_window(&win_label);
                 }
                 _ => {}
             }
@@ -221,7 +236,13 @@ pub fn run() {
             dialog_open_dict_file,
             dialog_pick_folder,
             dialog_save_text_file,
+            dialog_pick_save_path,
+            fs_scan_folder,
+            fs_get_app_paths,
+            fs_open_in_explorer,
             fs_read_buffer,
+            fs_write_file,
+            fs_compute_file_hash,
             // Window & App
             window_open_new,
             window_minimize,
@@ -230,8 +251,11 @@ pub fn run() {
             window_is_maximized,
             window_toggle_fullscreen,
             window_is_fullscreen,
+            window_set_always_on_top,
+            window_is_always_on_top,
             shell_open_external,
             app_get_version,
+            app_get_boot_context,
             app_renderer_ready,
             app_flush_complete,
             // Sync & DPAPI
@@ -240,9 +264,13 @@ pub fn run() {
             sync_test_connection,
             sync_fetch_remote,
             sync_save_remote,
+            sync_read_file,
+            sync_write_file,
             sync_upload_book_binary,
             sync_download_book_binary,
             sync_delete_book_binary,
+            sync_oauth_loopback_listen,
+            sync_oauth_loopback_cancel,
             secure_store_credential,
             secure_load_credential,
             secure_has_credential,
@@ -271,6 +299,7 @@ pub fn run() {
             mupdf_is_available,
             mupdf_set_store_limit,
             mupdf_stage_pdf,
+            mupdf_stage_pdf_bytes,
             mupdf_open_document,
             mupdf_get_page_sizes,
             mupdf_get_page_bounds_range,
@@ -284,6 +313,9 @@ pub fn run() {
             mupdf_get_render_diagnostics,
             mupdf_close_document,
             mupdf_reclaim_snapshot,
+            mupdf_validate_snapshot,
+            mupdf_get_plain_text,
+            mupdf_export_annotated_pdf,
             // Android SAF & Keystore & Media Background Playback
             android_resolve_content_uri,
             android_take_persistable_uri_permission,

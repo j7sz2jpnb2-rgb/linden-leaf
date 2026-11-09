@@ -362,8 +362,11 @@ export class ChapterTranslationManager {
      * Strictly returns pure serializable data (zero DOM element references).
      * Keeps DOM element references in display-layer maps to prevent DataCloneError.
      */
-    extractChapterParagraphs(doc) {
+    extractChapterParagraphs(doc, force = false) {
         if (!doc || typeof doc.querySelectorAll !== 'function') return []
+        if (!force && this._cachedDoc === doc && this._cachedChapterKey === this.currentChapterKey && this._cachedParas) {
+            return this._cachedParas
+        }
         const candidates = doc.querySelectorAll('p, blockquote, h1, h2, h3, h4, h5, h6, li, div, td, th')
         const results = []
         let pIndex = 0
@@ -406,6 +409,9 @@ export class ChapterTranslationManager {
             })
         })
 
+        this._cachedDoc = doc
+        this._cachedChapterKey = this.currentChapterKey
+        this._cachedParas = results
         return results
     }
 
@@ -737,7 +743,8 @@ export class ChapterTranslationManager {
                         this.cachedRecord = archive
                         if (doc && this.viewMode !== 'source') {
                             try {
-                                this.renderDerivedBilingualView(archive, doc)
+                                const changedParaIds = new Set(chunk.map(sc => sc.parentParaId).filter(Boolean))
+                                this.renderDerivedBilingualView(archive, doc, changedParaIds)
                             } catch (renderError) {
                                 console.warn('[ChapterTrans] Could not refresh bilingual view:', renderError)
                                 this.app?.showToast?.('译文已返回，但双语视图刷新失败；可切换原文后再查看', 'warn')
@@ -926,7 +933,7 @@ export class ChapterTranslationManager {
      * Renders or updates inline bilingual reading view without mutating or flattening original document structure.
      * Retains all parent containers, articles, sections, images, tables, formulas, and footnote anchors.
      */
-    renderDerivedBilingualView(record, doc) {
+    renderDerivedBilingualView(record, doc, changedParaIds = null) {
         if (!doc) return
         this.showBilingualBar()
 
@@ -948,8 +955,11 @@ export class ChapterTranslationManager {
         }
 
         const transMap = new Map((record?.paragraphs || []).map(p => [p.id, p]))
+        const targetParas = (changedParaIds && (changedParaIds.size > 0 || (Array.isArray(changedParaIds) && changedParaIds.length > 0)))
+            ? paras.filter(p => changedParaIds.has ? changedParaIds.has(p.id) : changedParaIds.includes(p.id))
+            : paras
 
-        paras.forEach(p => {
+        targetParas.forEach(p => {
             const entry = transMap.get(p.id)
             const transText = (entry && entry.sourceHash === p.sourceHash && (entry.status === 'completed' || entry.translation))
                 ? (entry.translation || '')

@@ -111,8 +111,7 @@ struct DailyUsageRecord {
 }
 
 fn get_ai_storage_dir() -> PathBuf {
-    let mut dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.push("com.lindenleaf.reader");
+    let dir = crate::commands::fs::resolve_app_data_dir();
     let _ = fs::create_dir_all(&dir);
     dir
 }

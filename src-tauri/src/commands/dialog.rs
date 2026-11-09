@@ -181,3 +181,36 @@ pub async fn dialog_save_text_file(
         Ok(None)
     }
 }
+
+
+#[tauri::command]
+pub async fn dialog_pick_save_path(
+    default_name: String,
+    title: Option<String>,
+    filter_name: Option<String>,
+    filter_ext: Option<String>,
+) -> Result<Option<String>, String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let selected_path: Option<PathBuf> = tokio::task::spawn_blocking(move || {
+            let mut dialog = rfd::FileDialog::new();
+            let dialog_title = title.unwrap_or_else(|| "另存为文件".to_string());
+            dialog = dialog.set_title(&dialog_title).set_file_name(&default_name);
+            if let (Some(name), Some(ext)) = (filter_name, filter_ext) {
+                dialog = dialog.add_filter(&name, &[&ext]);
+            }
+            dialog = dialog.add_filter("所有文件 (*.*)", &["*"]);
+            dialog.save_file()
+        })
+        .await
+        .map_err(|e| format!("Dialog save task failed: {}", e))?;
+
+        Ok(selected_path.map(|p| p.to_string_lossy().to_string()))
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        #[allow(unused_variables)]
+        let _ = (default_name, title, filter_name, filter_ext);
+        Ok(None)
+    }
+}

@@ -4,7 +4,7 @@
 
 export class AppUpdater {
     constructor() {
-        this.currentVersion = '2.0.0'
+        this.currentVersion = '1.0.0'
         this.defaultRepo = 'j7sz2jpnb2-rgb/linden-leaf'
         this.lastCheckTime = 0
         this.latestRelease = null
@@ -13,13 +13,13 @@ export class AppUpdater {
     async init() {
         if (typeof platformBridge !== 'undefined' && platformBridge.getAppVersion) {
             try {
-                this.currentVersion = await platformBridge.getAppVersion() || '2.0.0'
+                this.currentVersion = await platformBridge.getAppVersion() || '1.0.0'
                 return
             } catch (e) {}
         }
         if (window.electronAPI?.getVersion) {
             try {
-                this.currentVersion = await window.electronAPI.getVersion() || '2.0.0'
+                this.currentVersion = await window.electronAPI.getVersion() || '1.0.0'
             } catch (e) {
                 console.warn('Failed to get app version from electron:', e)
             }
@@ -46,6 +46,12 @@ export class AppUpdater {
     compareVersions(v1, v2) {
         const [maj1, min1, pat1] = this.parseVersion(v1)
         const [maj2, min2, pat2] = this.parseVersion(v2)
+
+        // Historical dev builds: 2.0.0..2.0.18 were pre-release dev builds before resetting to 1.0.0.
+        // They should be treated as older than 1.0.0. Future 2.0.19+ or 2.1+ are genuine future versions.
+        const isPredecessorDev = (maj, min, pat) => maj === 2 && min === 0 && pat <= 18
+        if (maj1 === 1 && isPredecessorDev(maj2, min2, pat2)) return 1
+        if (isPredecessorDev(maj1, min1, pat1) && maj2 === 1) return -1
 
         if (maj1 !== maj2) return maj1 > maj2 ? 1 : -1
         if (min1 !== min2) return min1 > min2 ? 1 : -1

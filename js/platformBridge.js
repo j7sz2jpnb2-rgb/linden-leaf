@@ -174,13 +174,17 @@ class PlatformBridge {
     setResourceBudget(budget = {}) {
         const isWin = this.getOS() === 'windows';
         const isAndroid = this.isAndroid || this.getOS() === 'android';
+        const isConstrained = Boolean(
+            isAndroid ||
+            (typeof navigator !== 'undefined' && typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 6)
+        );
         this._resourceBudget = {
-            maxMemoryMb: budget.maxMemoryMb || (isWin ? 1024 : 384),
-            maxCacheMb: budget.maxCacheMb || (isWin ? 512 : 128),
-            maxConcurrentTasks: budget.maxConcurrentTasks || (isWin ? 3 : 1),
-            maxConcurrent: budget.maxConcurrent || (isAndroid ? 1 : 2),
+            maxMemoryMb: budget.maxMemoryMb || (isConstrained ? 512 : (isWin ? 1024 : 384)),
+            maxCacheMb: budget.maxCacheMb || (isConstrained ? 64 : (isWin ? 256 : 128)),
+            maxConcurrentTasks: budget.maxConcurrentTasks || (isConstrained ? 1 : (isWin ? 3 : 1)),
+            maxConcurrent: budget.maxConcurrent || (isConstrained ? 1 : (isAndroid ? 1 : 2)),
             coverMaxConcurrent: budget.coverMaxConcurrent || 1,
-            isLowMemoryDevice: isAndroid,
+            isLowMemoryDevice: budget.isLowMemoryDevice !== undefined ? budget.isLowMemoryDevice : isConstrained,
             ...budget
         };
         return this._resourceBudget;
@@ -508,18 +512,19 @@ class PlatformBridge {
      * @returns {Promise<ArrayBuffer | null>}
      */
     async readFileBuffer(filePath, options = {}) {
-        if (!filePath) return null;
+        const pathStr = (typeof filePath === 'object' && filePath) ? (filePath.path || filePath.filePath || String(filePath)) : String(filePath || '');
+        if (!pathStr) return null;
         if (options.signal?.aborted) {
             throw new DOMException('The operation was aborted', 'AbortError');
         }
 
         if (this._getNativeElectron()?.readFileBuffer) {
-            return await this._getNativeElectron().readFileBuffer(filePath);
+            return await this._getNativeElectron().readFileBuffer(pathStr);
         }
 
         if (this.isTauri) {
             try {
-                const raw = await this._invokeTauri('fs_read_buffer', { filePath, file_path: filePath });
+                const raw = await this._invokeTauri('fs_read_buffer', { filePath: pathStr, file_path: pathStr });
                 if (!raw) return null;
                 let data = raw;
                 if (data && typeof data === 'object' && 'body' in data) {
@@ -541,12 +546,12 @@ class PlatformBridge {
                 console.warn('[PlatformBridge] Unexpected binary payload format from fs_read_buffer:', typeof data);
                 return null;
             } catch (err) {
-                console.error('[PlatformBridge] Tauri fs_read_buffer failed:', filePath, err);
+                console.error('[PlatformBridge] Tauri fs_read_buffer failed:', pathStr, err);
                 return null;
             }
         }
 
-        console.warn('[PlatformBridge] Direct filesystem read is unsupported in pure web mode:', filePath);
+        console.warn('[PlatformBridge] Direct filesystem read is unsupported in pure web mode:', pathStr);
         return null;
     }
 
@@ -556,20 +561,53 @@ class PlatformBridge {
         if (!this.isTauri || !filePath || !/\.pdf$/i.test(filePath)) return null;
         try {
             if (!await this._invokeTauri('mupdf_is_available')) return null;
-            return await this._invokeTauri('mupdf_stage_pdf', { filePath });
+            const res = await this._invokeTauri('mupdf_stage_pdf', { filePath });
+            if (!res) return null;
+            let descriptor = null;
+            if (typeof res === 'string') {
+                try {
+                    const parsed = JSON.parse(res);
+                    if (parsed && typeof parsed === 'object' && parsed.path) {
+                        descriptor = parsed;
+                    }
+                } catch (_) {}
+                if (!descriptor) {
+                    descriptor = { path: res, size: 0, revision: null, documentHash: null };
+                }
+            } else if (typeof res === 'object' && res.path) {
+                descriptor = res;
+            }
+            return descriptor;
         } catch (err) {
             console.warn('[PlatformBridge] Native PDF staging unavailable:', err);
             return null;
         }
     }
 
+    async stageSavedPdfBlob(blob) {
+        if (!this.isTauri || this.isAndroid || !(blob instanceof Blob) || !blob.size || blob.size > 128 * 1024 * 1024) return null
+        const bytes = new Uint8Array(await blob.arrayBuffer())
+        const raw = await this._invokeTauri('mupdf_stage_pdf_bytes', bytes)
+        const descriptor = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (!descriptor?.path || descriptor.size !== blob.size) throw new Error('Saved PDF snapshot size mismatch')
+        return descriptor
+    }
+
+    async validatePdfSnapshot(snapshotPath, expectedSize = 0) {
+        if (!this.isTauri || !snapshotPath) return false
+        try {
+            return await this._invokeTauri('mupdf_validate_snapshot', { snapshotPath, expectedSize: Number(expectedSize) || 0 })
+        } catch (_) { return false }
+    }
+
     /** Reclaim an orphaned or obsolete snapshot from native cache. */
     async reclaimSnapshot(snapshotPath) {
-        if (!this.isTauri || !snapshotPath) return false;
+        const pathStr = (typeof snapshotPath === 'object' && snapshotPath) ? (snapshotPath.path || String(snapshotPath)) : String(snapshotPath || '');
+        if (!this.isTauri || !pathStr) return false;
         try {
-            return await this._invokeTauri('mupdf_reclaim_snapshot', { snapshotPath });
+            return await this._invokeTauri('mupdf_reclaim_snapshot', { snapshotPath: pathStr });
         } catch (err) {
-            console.warn('[PlatformBridge] Snapshot reclaim failed:', snapshotPath, err);
+            console.warn('[PlatformBridge] Snapshot reclaim failed:', pathStr, err);
             return false;
         }
     }
@@ -602,6 +640,8 @@ class PlatformBridge {
     /**
      * Maximize or unmaximize window
      */
+
+
     async windowMaximize() {
         if (this._getNativeElectron()?.maximize) {
             this._getNativeElectron().maximize();
@@ -645,6 +685,281 @@ class PlatformBridge {
         }
     }
 
+    async windowSetAlwaysOnTop(alwaysOnTop) {
+        if (this.isTauri) {
+            try {
+                if (window.__TAURI__?.window?.getCurrentWindow) {
+                    await window.__TAURI__.window.getCurrentWindow().setAlwaysOnTop(Boolean(alwaysOnTop));
+                } else {
+                    await this._invokeTauri('window_set_always_on_top', { alwaysOnTop: Boolean(alwaysOnTop) });
+                }
+                return true;
+            } catch (e) {
+                console.warn('[PlatformBridge] Tauri window_set_always_on_top error:', e);
+            }
+        }
+        return false;
+    }
+
+    async windowIsAlwaysOnTop() {
+        if (this.isTauri) {
+            try {
+                if (window.__TAURI__?.window?.getCurrentWindow) {
+                    return await window.__TAURI__.window.getCurrentWindow().isAlwaysOnTop();
+                } else {
+                    return await this._invokeTauri('window_is_always_on_top');
+                }
+            } catch (e) {
+                console.warn('[PlatformBridge] Tauri window_is_always_on_top error:', e);
+            }
+        }
+        return false;
+    }
+
+    async fsScanFolder(folderPath, maxDepth = 5) {
+        if (this.isTauri) {
+            try {
+                const raw = await this._invokeTauri('fs_scan_folder', { folderPath, maxDepth });
+                const rawList = Array.isArray(raw) ? raw : (raw?.files || raw?.items || []);
+                const mapped = (rawList || []).map(item => ({
+                    ...item,
+                    ext: item.ext || item.extension || '',
+                    extension: item.extension || item.ext || '',
+                    size: item.size != null ? item.size : item.fileSize,
+                    fileSize: item.fileSize != null ? item.fileSize : item.size,
+                    mtime: item.mtime != null ? item.mtime : item.modified_time,
+                    modified_time: item.modified_time != null ? item.modified_time : item.mtime,
+                    volumeId: item.volumeId || item.volume_id || null,
+                    fileId: item.fileId || item.file_id || null
+                }));
+                if (raw && !Array.isArray(raw) && typeof raw === 'object') {
+                    Object.defineProperty(mapped, 'complete', { value: raw.complete !== false, enumerable: false, configurable: true });
+                    Object.defineProperty(mapped, 'errors', { value: Array.isArray(raw.errors) ? raw.errors : [], enumerable: false, configurable: true });
+                    Object.defineProperty(mapped, 'failedDirs', { value: Array.isArray(raw.failed_dirs || raw.failedDirs) ? (raw.failed_dirs || raw.failedDirs) : [], enumerable: false, configurable: true });
+                } else {
+                    Object.defineProperty(mapped, 'complete', { value: true, enumerable: false, configurable: true });
+                    Object.defineProperty(mapped, 'errors', { value: [], enumerable: false, configurable: true });
+                    Object.defineProperty(mapped, 'failedDirs', { value: [], enumerable: false, configurable: true });
+                }
+                return mapped;
+            } catch (e) {
+                console.warn('[PlatformBridge] fs_scan_folder failed:', e);
+                throw e;
+            }
+        }
+        return [];
+    }
+
+    async computeNativeFileHash(filePath) {
+        if (this.isTauri && filePath) {
+            try {
+                return await this._invokeTauri('fs_compute_file_hash', { filePath: String(filePath) });
+            } catch (e) {
+                console.warn('[PlatformBridge] fs_compute_file_hash failed:', e);
+                return null;
+            }
+        }
+        return null;
+    }
+
+    async fsComputeFileHash(filePath) {
+        return await this.computeNativeFileHash(filePath);
+    }
+
+    async fsGetAppPaths() {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('fs_get_app_paths');
+            } catch (e) {
+                console.warn('[PlatformBridge] fs_get_app_paths failed:', e);
+            }
+        }
+        return {
+            config_dir: '',
+            data_dir: '',
+            cache_dir: '',
+            snapshot_dir: '',
+            documents_dir: '',
+            webview_profile_dir: '',
+            indexeddb_dir: ''
+        };
+    }
+
+    async fsOpenInExplorer(path) {
+        if (this.isTauri) {
+            try {
+                await this._invokeTauri('fs_open_in_explorer', { path });
+                return true;
+            } catch (e) {
+                console.warn('[PlatformBridge] fs_open_in_explorer failed:', e);
+            }
+        }
+        return false;
+    }
+
+    async dialogPickSavePath(options) {
+        if (this.isTauri) {
+            try {
+                return await this._invokeTauri('dialog_pick_save_path', {
+                    defaultName: options?.defaultName || 'untitled.pdf',
+                    title: options?.title || '另存为',
+                    filterName: options?.filterName || 'PDF 文档 (*.pdf)',
+                    filterExt: options?.filterExt || 'pdf'
+                });
+            } catch (e) {
+                console.warn('[PlatformBridge] dialog_pick_save_path failed:', e);
+            }
+        }
+        return null;
+    }
+
+    async mupdfExportAnnotatedPdf(docId, outputPath, annotationsJson) {
+        if (this.isTauri) {
+            try {
+                const jsonPayload = typeof annotationsJson === 'string' ? annotationsJson : JSON.stringify(annotationsJson || []);
+                return await this._invokeTauri('mupdf_export_annotated_pdf', {
+                    docId,
+                    outputPath,
+                    annotationsJson: jsonPayload
+                });
+            } catch (e) {
+                console.warn('[PlatformBridge] mupdf_export_annotated_pdf failed:', e);
+                throw e;
+            }
+        }
+        return false;
+    }
+
+    async writeFileText(filePath, content) {
+        if (this.isTauri) {
+            try {
+                await this._invokeTauri('fs_write_file', {
+                    filePath,
+                    content: typeof content === 'string' ? content : String(content)
+                });
+                return true;
+            } catch (e) {
+                console.warn('[PlatformBridge] fs_write_file failed:', e);
+                throw e;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Native atomic CAS sync file read
+     * @param {string} filePath
+     * @returns {Promise<{ content?: string, etag?: string, missing?: boolean, status: string }>}
+     */
+    async readSyncFile(filePath) {
+        if (this.isTauri) {
+            try {
+                const res = await this._invokeTauri('sync_read_file', { filePath, file_path: filePath });
+                if (res) {
+                    if (res.exists === false || res.missing === true || res.status === 'missing') {
+                        return { status: 'missing', missing: true, content: '', etag: null, error: null };
+                    }
+                    if (res.error && (res.error.includes('Corrupted') || res.error.includes('Invalid sync JSON') || res.error.includes('Failed to read'))) {
+                        return { status: 'invalid', missing: false, content: null, etag: res.etag || null, error: res.error };
+                    }
+                    const rawContent = res.content !== undefined ? res.content : (res.data !== undefined ? (typeof res.data === 'string' ? res.data : JSON.stringify(res.data)) : null);
+                    let status = res.status;
+                    if (!status) {
+                        if (res.error) {
+                            if (res.error.includes('auth')) status = 'auth';
+                            else if (res.error.includes('offline')) status = 'offline';
+                            else status = 'invalid';
+                        } else {
+                            status = 'found';
+                        }
+                    }
+                    return {
+                        status,
+                        content: rawContent,
+                        etag: res.etag || null,
+                        missing: false,
+                        conflict: !!(res.conflict || res.isConflict),
+                        error: res.error || null
+                    };
+                }
+            } catch (e) {
+                const msg = String(e?.message || e);
+                if (/corrupted|invalid|failed to parse/i.test(msg)) {
+                    return { status: 'invalid', missing: false, content: null, etag: null, error: msg };
+                }
+                if (/auth/i.test(msg)) {
+                    return { status: 'auth', missing: false, content: null, etag: null, error: msg };
+                }
+                if (/offline/i.test(msg)) {
+                    return { status: 'offline', missing: false, content: null, etag: null, error: msg };
+                }
+                if (/not found|cannot find|no such file/i.test(msg)) {
+                    return { status: 'missing', missing: true, content: '', etag: null, error: null };
+                }
+                console.warn('[PlatformBridge] sync_read_file failed, falling back:', e);
+            }
+        }
+        try {
+            const buf = await this.readFileBuffer(filePath);
+            if (!buf) {
+                return { content: '', etag: null, missing: true, status: 'missing', error: null };
+            }
+            const arr = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+            const text = new TextDecoder('utf-8').decode(arr);
+            let hash = 5381;
+            for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash) + text.charCodeAt(i) | 0;
+            const etag = `etag_${Math.abs(hash).toString(16)}_${text.length}`;
+            return { content: text, etag, status: 'found', missing: false, error: null };
+        } catch (err) {
+            const msg = String(err?.message || err);
+            if (/not found|cannot find|no such file/i.test(msg)) {
+                return { content: '', etag: null, missing: true, status: 'missing', error: null };
+            }
+            throw err;
+        }
+    }
+
+    /**
+     * Native atomic CAS sync file write with cross-process file lock and atomic rename
+     * @param {string} filePath
+     * @param {string} content
+     * @param {string|null} expectedEtag
+     * @returns {Promise<{ success: boolean, conflict?: boolean, etag?: string, error?: string }>}
+     */
+    async writeSyncFile(filePath, content, expectedEtag = null) {
+        if (this.isTauri) {
+            try {
+                const res = await this._invokeTauri('sync_write_file', {
+                    filePath,
+                    file_path: filePath,
+                    content,
+                    expectedEtag,
+                    expected_etag: expectedEtag
+                });
+                if (res) {
+                    return {
+                        success: !!res.success,
+                        conflict: !!(res.conflict || res.isConflict),
+                        etag: res.etag || null,
+                        error: res.error || null
+                    };
+                }
+            } catch (e) {
+                console.warn('[PlatformBridge] sync_write_file failed:', e);
+                // "原生 CAS 错误禁止降级无条件 writeFileText"
+                return { success: false, conflict: false, error: e.message || String(e) };
+            }
+        }
+        if (typeof this.writeFileText === 'function') {
+            const ok = await this.writeFileText(filePath, content);
+            if (!ok) return { success: false, error: '写入失败' };
+            let hash = 5381;
+            for (let i = 0; i < content.length; i++) hash = ((hash << 5) + hash) + content.charCodeAt(i) | 0;
+            return { success: true, etag: `etag_${Math.abs(hash).toString(16)}_${content.length}` };
+        }
+        return { success: false, error: 'Platform bridge file writing not available' };
+    }
+
     /**
      * Open a new independent application window (either a satellite reader window for a specific book
      * or a full shelf window). If a satellite window for the same bookId is already open, focuses it.
@@ -678,8 +993,10 @@ class PlatformBridge {
                     title
                 });
                 if (res && typeof res === 'object') return res;
+                return { success: false, error: 'window_open_new returned empty response' };
             } catch (e) {
                 console.warn('[PlatformBridge] Tauri window_open_new failed:', e);
+                return { success: false, error: e?.message || String(e) };
             }
         }
 
@@ -692,10 +1009,27 @@ class PlatformBridge {
                 url.searchParams.delete('windowMode');
                 url.searchParams.delete('bookId');
             }
-            window.open(url.toString(), '_blank');
-            return { success: true, alreadyExists: false };
+            const win = window.open(url.toString(), '_blank');
+            if (win) {
+                return { success: true, alreadyExists: false };
+            }
+            return { success: false, error: 'Window.open blocked or returned null' };
         }
-        return { success: false };
+        return { success: false, error: 'No supported window opening mechanism' };
+    }
+
+    /**
+     * Get current window label (Tauri only, returns null otherwise)
+     * @returns {string|null}
+     */
+    getCurrentWindowLabel() {
+        try {
+            return window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow?.()?.label
+                || window.__TAURI__?.window?.getCurrentWindow?.()?.label
+                || null;
+        } catch (_) {
+            return null;
+        }
     }
 
     /**
@@ -1103,30 +1437,10 @@ class PlatformBridge {
     }
 
     /**
-     * Reveal plaintext password for user verification
+     * Reveal plaintext password for user verification (deprecated; credentials are secure)
      * @returns {Promise<string>}
      */
     async revealSyncPassword() {
-        if (this._getNativeElectron()?.syncRevealPassword) {
-            return await this._getNativeElectron().syncRevealPassword();
-        }
-
-        if (this.isTauri) {
-            try {
-                return await this._invokeTauri('sync_reveal_password');
-            } catch (e) {
-                return '';
-            }
-        }
-
-        // Web fallback
-        try {
-            const raw = localStorage.getItem('linden_sync_config');
-            if (raw) {
-                const parsed = JSON.parse(raw);
-                return parsed.password || '';
-            }
-        } catch (e) {}
         return '';
     }
 
@@ -1931,6 +2245,61 @@ class PlatformBridge {
                 error: err.message || String(err)
             };
         }
+    }
+
+    async waitOAuthCallback(port = 18520, timeoutSecs = 180, onReady = null, sessionId = '', signal = null) {
+        if (!this.isTauri || !sessionId || !window.__TAURI__?.event?.listen) {
+            return { success: false, error: '本地授权监听器不可用' }
+        }
+        let unlisten = null
+        let started = false
+        let ready = false
+        const cancel = () => { if (started && ready) this._invokeTauri('sync_oauth_loopback_cancel', { sessionId }).catch(() => {}) }
+        try {
+            unlisten = await window.__TAURI__.event.listen('oauth:listener-ready', event => {
+                if (event.payload?.sessionId !== sessionId || event.payload?.port !== port) return
+                ready = true
+                if (signal?.aborted) { cancel(); return }
+                if (typeof onReady === 'function') onReady(event.payload)
+            })
+            if (signal?.aborted) return { success:false, cancelled:true }
+            signal?.addEventListener('abort', cancel, { once:true })
+            started = true
+            return await this._invokeTauri('sync_oauth_loopback_listen', { port, timeoutSecs, sessionId })
+        } catch (err) {
+            return { success: false, error: err?.message || String(err) }
+        } finally {
+            signal?.removeEventListener('abort', cancel)
+            if (unlisten) { try { unlisten() } catch (_) {} }
+        }
+    }
+
+    async cancelOAuthCallback(sessionId = '') {
+        if (!this.isTauri || !sessionId) return false;
+        try {
+            return await this._invokeTauri('sync_oauth_loopback_cancel', { sessionId });
+        } catch (_) {
+            return false;
+        }
+    }
+
+    async getBootContext() {
+        if (this.isTauri) {
+            try {
+                const ctx = await this._invokeTauri('app_get_boot_context', {});
+                if (ctx && typeof ctx === 'object') return ctx;
+            } catch (_) {}
+        }
+        const originMs = (typeof performance !== 'undefined' && Number.isFinite(performance.timeOrigin))
+            ? Math.round(performance.timeOrigin)
+            : Date.now();
+        return {
+            bootId: `web_boot_${originMs}`,
+            processStartEpochMs: originMs,
+            launchMode: 'shelf',
+            windowLabel: this.getCurrentWindowLabel(),
+            pendingFiles: []
+        };
     }
 
     // ==========================================

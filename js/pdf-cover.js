@@ -213,12 +213,10 @@ export async function normalizeCoverBlob(blob, options = {}) {
     const quality = options.quality || 0.86
     const byteThreshold = options.byteThreshold || 140 * 1024
 
-    // Fast path: already a compact WebP/JPEG thumbnail
-    if (blob.size <= byteThreshold && (blob.type === 'image/webp' || blob.type === 'image/jpeg')) {
-        return blob
-    }
-
     if (typeof document === 'undefined' || typeof createImageBitmap !== 'function') {
+        if (blob.size <= byteThreshold && (blob.type === 'image/webp' || blob.type === 'image/jpeg')) {
+            return blob
+        }
         return blob
     }
 
@@ -233,7 +231,7 @@ export async function normalizeCoverBlob(blob, options = {}) {
         }
 
         const maxSide = Math.max(srcW, srcH)
-        if (maxSide <= maxDimension && blob.size <= byteThreshold * 1.5) {
+        if (maxSide <= maxDimension && blob.size <= byteThreshold) {
             bitmap.close?.()
             return blob
         }
@@ -274,7 +272,7 @@ export async function normalizeCoverBlob(blob, options = {}) {
         canvas.width = 0
         canvas.height = 0
 
-        if (encoded && encoded.size > 0 && encoded.size < blob.size) {
+        if (encoded && encoded.size > 0 && (encoded.size < blob.size || maxSide > maxDimension)) {
             return encoded
         }
         return blob

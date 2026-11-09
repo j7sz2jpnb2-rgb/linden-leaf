@@ -1,8 +1,18 @@
-// run-syntax-checks.mjs
-// Sequentially run node --check on all key JS modules
-import { execFileSync } from 'node:child_process';
-import process from 'node:process';
+// run-syntax-checks.mjs - Single-process syntax verification using vm.SourceTextModule
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
+if (!vm.SourceTextModule) {
+  const result = spawnSync(process.execPath, ['--experimental-vm-modules', fileURLToPath(import.meta.url)], {
+    stdio: 'inherit'
+  });
+  process.exit(result.status ?? 0);
+}
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const files = [
   'js/translation-job-core.js',
   'js/chapter-translation-manager.js',
@@ -21,26 +31,37 @@ const files = [
   'js/custom-font-manager.js',
   'js/theme-customizer.js',
   'js/reading-presets.js',
+  'js/pdf-driver.js',
+  'js/pdf-viewport.js',
+  'js/pdf-cover.js',
+  'js/pdf-toc.js',
+  'js/fulltext-search.js',
+  'js/import-queue.js',
+  'js/updater.js',
+  'js/storage-providers.js',
+  'js/ocr-service.js',
   'js/app.js',
   'foliate-js-main/txt.js'
 ];
 
-console.log('--- Sequential Node Syntax Checks ---');
+console.log('--- Single-Process Node Syntax Checks (vm.SourceTextModule) ---');
 let allPassed = true;
 
 for (const file of files) {
   try {
-    execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+    const fullPath = path.join(root, file);
+    const code = fs.readFileSync(fullPath, 'utf8');
+    new vm.SourceTextModule(code, { identifier: file });
     console.log(`[PASS] ${file}`);
   } catch (err) {
     allPassed = false;
     console.error(`[FAIL] ${file}`);
-    console.error(err.stderr ? err.stderr.toString() : err.message);
+    console.error(err.message);
   }
 }
 
 if (!allPassed) {
   process.exit(1);
 } else {
-  console.log(`\nAll ${files.length} JS files passed individual syntax checks cleanly.`);
+  console.log(`\nAll ${files.length} JS files passed single-process syntax checks cleanly.`);
 }

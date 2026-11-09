@@ -7,6 +7,16 @@ use tauri::{Manager, Window};
 use crate::commands::fs::SUPPORTED_EXTENSIONS;
 
 static WINDOW_SEQ: AtomicU64 = AtomicU64::new(1);
+static REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_request_id(prefix: &str) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let seq = REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}_{now_ms}_{seq}")
+}
 
 #[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -14,6 +24,8 @@ pub struct OpenFilePayload {
     pub file_path: String,
     pub filename: String,
     pub buffer: Vec<u8>,
+    pub target_window: Option<String>,
+    pub request_id: Option<String>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -26,6 +38,7 @@ pub struct CloseState {
 pub struct AppState {
     /// Pending files queued for opening: (target_window_label, file_path)
     pub pending_files: Mutex<Vec<(Option<String>, String)>>,
+    pub initial_boot_files: Mutex<Vec<(Option<String>, String)>>,
     /// Per-window renderer readiness state keyed by window label
     pub ready_windows: Mutex<HashMap<String, bool>>,
     /// Legacy fallback flag so any existing check remains compatible
@@ -248,7 +261,11 @@ where
     results
 }
 
-pub fn load_open_file_payload(file_path: &str) -> Result<OpenFilePayload, String> {
+pub fn load_open_file_payload(
+    file_path: &str,
+    target_window: Option<String>,
+    request_id: Option<String>,
+) -> Result<OpenFilePayload, String> {
     let clean = file_path.trim().trim_matches('"').trim_matches('\'');
     let raw_path = std::path::Path::new(clean);
     let abs_path = std::path::absolute(raw_path).unwrap_or_else(|_| raw_path.to_path_buf());
@@ -268,6 +285,8 @@ pub fn load_open_file_payload(file_path: &str) -> Result<OpenFilePayload, String
         file_path: path.to_string_lossy().to_string(),
         filename,
         buffer: Vec::new(),
+        target_window,
+        request_id,
     })
 }
 
@@ -343,6 +362,16 @@ pub fn window_is_fullscreen(window: Window) -> bool {
 }
 
 #[tauri::command]
+pub fn window_set_always_on_top(window: Window, always_on_top: bool) -> Result<(), String> {
+    window.set_always_on_top(always_on_top).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn window_is_always_on_top(window: Window) -> bool {
+    window.is_always_on_top().unwrap_or(false)
+}
+
+#[tauri::command]
 pub async fn shell_open_external(url: String) -> Result<bool, String> {
     if !url.starts_with("http://") && !url.starts_with("https://") && !url.starts_with("mailto:") {
         return Ok(false);
@@ -380,6 +409,82 @@ pub fn app_get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+static PROCESS_START_EPOCH_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+pub fn init_process_start_epoch_ms() -> u64 {
+    *PROCESS_START_EPOCH_MS.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    })
+}
+
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BootContextResponse {
+    pub boot_id: String,
+    pub process_start_epoch_ms: u64,
+    pub launch_mode: String,
+    pub window_label: String,
+    pub pending_files: Vec<String>,
+}
+
+#[tauri::command]
+pub fn app_get_boot_context(
+    window: Window,
+    state: tauri::State<AppState>,
+) -> BootContextResponse {
+    let start_ms = init_process_start_epoch_ms();
+    let win_label = window.label().to_string();
+    let initial_for_window: Vec<String> = {
+        let initial = state.initial_boot_files.lock().unwrap();
+        initial
+            .iter()
+            .filter_map(|(target_lbl, path)| match target_lbl {
+                Some(lbl) if lbl == &win_label => Some(path.clone()),
+                None if win_label == "main" => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let pending_for_window: Vec<String> = {
+        let queue = state.pending_files.lock().unwrap();
+        queue
+            .iter()
+            .filter_map(|(target_lbl, path)| match target_lbl {
+                Some(lbl) if lbl == &win_label => Some(path.clone()),
+                None if win_label == "main" => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let effective_files = if !initial_for_window.is_empty() {
+        initial_for_window
+    } else {
+        pending_for_window
+    };
+    let launch_mode = if !effective_files.is_empty() {
+        "external-file".to_string()
+    } else if win_label != "main" {
+        "satellite".to_string()
+    } else {
+        "shelf".to_string()
+    };
+    BootContextResponse {
+        boot_id: format!("boot_{}_{}", start_ms, std::process::id()),
+        process_start_epoch_ms: start_ms,
+        launch_mode,
+        window_label: win_label,
+        pending_files: effective_files,
+    }
+}
+
+#[allow(dead_code)]
+fn _app_get_version_compat() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[tauri::command]
 pub fn app_renderer_ready(
     window: Window,
@@ -413,9 +518,10 @@ pub fn app_renderer_ready(
     };
 
     for file_path in files_to_emit {
-        match load_open_file_payload(&file_path) {
+        let req_id = format!("req_{}_{}", win_label, SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis());
+        match load_open_file_payload(&file_path, Some(win_label.clone()), Some(req_id)) {
             Ok(payload) => {
-                let _ = window.emit("app:open-file", payload);
+                let _ = window.emit_to(&win_label, "app:open-file", payload);
             }
             Err(e) => {
                 eprintln!("[app_renderer_ready] Error loading pending file: {}", e);

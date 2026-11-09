@@ -3,7 +3,6 @@
 // without fabricating unverified word counts or reading speeds.
 
 import * as db from './db.js'
-import { formatMinutesClean, aggregateSessions, getSessionDurationSeconds } from './stats-heatmap.js'
 import { STATUS_LABELS, setReadingStatus, updateBookTags, resolveReadingState } from './tags-manager.js'
 import { regenerateBookCover, normalizeCoverBlob } from './pdf-cover.js'
 
@@ -89,6 +88,7 @@ export class BookDetailsModal {
         if (!book) return null
 
         const allSessions = (await db.getAllReadingSessions?.()) || []
+        const { aggregateSessions, getSessionDurationSeconds } = await import('./stats-heatmap.js')
         const aggregated = aggregateSessions(allSessions, { bookId })
         const bookSessions = allSessions.filter(s => s && s.bookId === bookId && getSessionDurationSeconds(s) > 0)
 
@@ -143,6 +143,7 @@ export class BookDetailsModal {
             return
         }
 
+        const { formatMinutesClean } = await import('./stats-heatmap.js')
         const b = stats.book
         const progressPct = b.progress?.fraction != null ? Math.round(b.progress.fraction * 100) : 0
         // Respect explicit user reading status; never force finished solely on progress >= 99%

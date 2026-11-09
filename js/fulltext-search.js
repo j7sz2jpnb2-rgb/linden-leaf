@@ -23,10 +23,15 @@ export function tokenizeText(text) {
         if (w.length >= 2) tokens.add(w)
     }
 
-    // 2. Extract CJK bi-grams
-    const cjkChars = clean.match(/[\u4e00-\u9fa5\u3040-\u30ff]/g) || []
-    for (let i = 0; i < cjkChars.length - 1; i++) {
-        tokens.add(cjkChars[i] + cjkChars[i + 1])
+    // 2. Extract CJK unigrams and bi-grams within contiguous CJK runs
+    const cjkRuns = clean.match(/[\u4e00-\u9fa5\u3040-\u30ff]+/g) || []
+    for (const run of cjkRuns) {
+        for (let i = 0; i < run.length; i++) {
+            tokens.add(run[i])
+            if (i < run.length - 1) {
+                tokens.add(run[i] + run[i + 1])
+            }
+        }
     }
 
     return tokens
@@ -216,7 +221,8 @@ export class FullTextSearchEngine {
         const existing = this.index.get(bookId)
         if (existing?.meta?.extractorVersion === EXTRACTOR_VERSION &&
             existing?.meta?.blobRevision &&
-            (!book.blobRevision || existing.meta.blobRevision === book.blobRevision)) {
+            book.blobRevision &&
+            existing.meta.blobRevision === book.blobRevision) {
             this.index.delete(bookId)
             this.index.set(bookId, existing)
             return true
@@ -280,7 +286,7 @@ export class FullTextSearchEngine {
         if (format === 'epub') {
             let epub = null
             try {
-                const { makeZipLoader } = await import('../foliate-js-main/view.js?v=20260914_rel_v1')
+                const { makeZipLoader } = await import('../foliate-js-main/view.js')
                 const loader = await makeZipLoader(snapshot.blob)
                 const { EPUB } = await import('../foliate-js-main/epub.js')
                 epub = await new EPUB(loader).init()
@@ -400,7 +406,7 @@ export class FullTextSearchEngine {
         } else if (format === 'docx') {
             let docxBook = null
             try {
-                const { makeZipLoader } = await import('../foliate-js-main/view.js?v=20260914_rel_v1')
+                const { makeZipLoader } = await import('../foliate-js-main/view.js')
                 const loader = await makeZipLoader(snapshot.blob)
                 const { makeDOCX } = await import('../foliate-js-main/docx.js')
                 docxBook = await makeDOCX(loader, snapshot.blob)
@@ -516,6 +522,8 @@ export class FullTextSearchEngine {
                 format,
                 extractorVersion: EXTRACTOR_VERSION,
                 blobRevision: authRevision,
+                documentHash: snapshot.documentHash || book.documentHash || null,
+                size: snapshot.blob?.size || book.size || null,
                 indexedAt: Date.now()
             }
 
@@ -561,7 +569,7 @@ export class FullTextSearchEngine {
      * @returns {Array<{ bookId: string, bookTitle: string, sectionTitle: string, granularity: string, location: object, snippet: string, matchCount: number }>}
      */
     search(query, options = {}) {
-        const { limit = 40, bookIds = null } = options
+        const { limit = 40, bookIds = null, previewLimit = null } = options
         const rawQ = (query || '').trim()
         if (!rawQ || rawQ.length < 1) return []
 
@@ -571,7 +579,9 @@ export class FullTextSearchEngine {
         if (!q) return []
 
         const results = []
+        let totalHits = 0
         const queryTokens = isExactPhrase ? null : tokenizeText(q)
+        const maxSnippetsToKeep = (previewLimit !== null && previewLimit !== undefined) ? Math.max(1, previewLimit) : ((limit === Infinity) ? Infinity : Math.max(1, limit))
 
         for (const [bookId, entry] of this.index.entries()) {
             if (bookIds && !bookIds.includes(bookId)) continue
@@ -579,43 +589,72 @@ export class FullTextSearchEngine {
 
             for (const section of entry.sections) {
                 // Item 1: Token Inverted-Set Pre-filtering
-                // When query has extracted tokens and section has tokens, verify all query tokens exist in O(1) set
+                // When query has extracted tokens and section has tokens, verify all query tokens exist in section
                 if (queryTokens && queryTokens.size > 0 && section.tokens?.size > 0) {
                     let hasAll = true
                     for (const tok of queryTokens) {
-                        if (!section.tokens.has(tok)) {
-                            hasAll = false
-                            break
+                        if (section.tokens.has(tok)) continue
+                        const isAlpha = /^[a-z0-9_]+$/.test(tok)
+                        if (isAlpha) {
+                            let matchAlpha = false
+                            for (const sTok of section.tokens) {
+                                if (sTok.includes(tok)) {
+                                    matchAlpha = true
+                                    break
+                                }
+                            }
+                            if (matchAlpha) continue
                         }
+                        const isCjk = /[\u4e00-\u9fa5\u3040-\u30ff]/.test(tok)
+                        if (isCjk) {
+                            // Support legacy indexes that only stored bi-grams without unigrams
+                            let matchCjk = false
+                            for (const sTok of section.tokens) {
+                                if (sTok.includes(tok)) {
+                                    matchCjk = true
+                                    break
+                                }
+                            }
+                            if (matchCjk) continue
+                        }
+                        hasAll = false
+                        break
                     }
                     if (!hasAll) continue
                 }
 
                 const secLower = (section.text || '').toLowerCase()
-                const matchPositions = []
+                let sectionMatchCount = 0
+                const neededSnippets = []
 
                 let searchIdx = 0
                 while (searchIdx <= secLower.length - q.length) {
                     const pos = secLower.indexOf(q, searchIdx)
                     if (pos === -1) break
-                    matchPositions.push({ pos, len: q.length, query: q })
+                    sectionMatchCount++
+                    if (neededSnippets.length < maxSnippetsToKeep) {
+                        neededSnippets.push({ pos, len: q.length, query: q })
+                    }
                     searchIdx = pos + Math.max(1, q.length)
                 }
 
                 // If not found and not an exact quote, and query contains whitespace-separated words:
-                if (matchPositions.length === 0 && !isExactPhrase && q.includes(' ')) {
+                if (sectionMatchCount === 0 && !isExactPhrase && q.includes(' ')) {
                     const words = q.split(/\s+/).filter(Boolean)
                     if (words.length > 1 && words.every(w => secLower.includes(w))) {
                         const firstPos = secLower.indexOf(words[0])
                         if (firstPos !== -1) {
-                            matchPositions.push({ pos: firstPos, len: words[0].length, query: words[0] })
+                            sectionMatchCount++
+                            neededSnippets.push({ pos: firstPos, len: words[0].length, query: words[0] })
                         }
                     }
                 }
 
-                if (matchPositions.length > 0) {
-                    for (let mIdx = 0; mIdx < matchPositions.length; mIdx++) {
-                        const m = matchPositions[mIdx]
+                if (sectionMatchCount > 0) {
+                    totalHits += sectionMatchCount
+                    const snippetsNeededForThisSection = Math.max(0, maxSnippetsToKeep - results.length)
+                    for (let mIdx = 0; mIdx < Math.min(neededSnippets.length, snippetsNeededForThisSection); mIdx++) {
+                        const m = neededSnippets[mIdx]
                         const snippet = createExcerptSnippet(section.text, m.query, 36, m.pos)
                         results.push({
                             bookId,
@@ -631,15 +670,19 @@ export class FullTextSearchEngine {
                             query: q,
                             snippet,
                             excerpt: snippet,
-                            matchCount: matchPositions.length
+                            matchCount: sectionMatchCount
                         })
+                    }
 
-                        if (results.length >= limit) return results
+                    if (previewLimit === null && results.length >= limit) {
+                        results.totalHits = totalHits
+                        return results
                     }
                 }
             }
         }
 
+        results.totalHits = totalHits
         return results
     }
 
@@ -659,8 +702,9 @@ export class FullTextSearchEngine {
                 try {
                     if (await this.indexBook(book.id, signal)) {
                         if (signal?.aborted) return
-                        const matches = this.search(query, { bookIds: [book.id], limit: Infinity })
-                        if (matches && matches.length > 0) {
+                        const matches = this.search(query, { bookIds: [book.id], previewLimit: 3 })
+                        const totalHits = matches.totalHits != null ? matches.totalHits : matches.length
+                        if (totalHits > 0) {
                             for (let i = 0; i < matches.length; i++) {
                                 results.push(matches[i])
                             }
@@ -669,7 +713,7 @@ export class FullTextSearchEngine {
                                 bookTitle: book.title || matches[0]?.bookTitle || '未命名书籍',
                                 cover: book.cover || null,
                                 format: book.format || '',
-                                totalHits: matches.length,
+                                totalHits: totalHits,
                                 previewMatches: matches.slice(0, 3)
                             }
                             bookGroups.push(bookResult)
@@ -691,39 +735,304 @@ export class FullTextSearchEngine {
         return { results, bookGroups, searched, failed, supported: supported.length, unsupported: books.length - supported.length, limited: false }
     }
 
-    async searchBookFull(bookId, query) {
-        if (!bookId || !query) return []
+    async _ensureBookIndexFresh(bookId, expectedRevision = null) {
+        if (!bookId) return false
+        if (this.index.has(bookId)) {
+            try {
+                const book = await this.db?.getBook?.(bookId)
+                if (!book) {
+                    await this.invalidate(bookId)
+                    return false
+                }
+                const snapshot = await this.db?.getBookFileSnapshot?.(bookId)
+                if (!snapshot?.blob) {
+                    await this.invalidate(bookId)
+                    return false
+                }
+                const currentRev = expectedRevision || snapshot?.blobRevision || snapshot?.nativeSnapshotRevision || book?.blobRevision || null
+                const currentHash = snapshot?.documentHash || book?.documentHash || null
+                const currentSize = snapshot?.blob?.size != null ? snapshot.blob.size : book?.size
+                const cachedMeta = this.index.get(bookId)?.meta
+                const cachedRev = cachedMeta?.blobRevision || null
+                const cachedHash = cachedMeta?.documentHash || null
+                const cachedSize = cachedMeta?.size || null
+
+                const isStale = (currentRev && cachedRev !== currentRev) ||
+                                (currentHash && cachedHash !== currentHash) ||
+                                (currentSize != null && cachedSize != null && currentSize !== cachedSize)
+                if (isStale) {
+                    await this.invalidate(bookId)
+                }
+            } catch (_) {}
+        }
         if (!this.index.has(bookId)) {
             let hydrated = false
             try {
                 if (this.db?.getBookSearchIndex) {
                     const persisted = await this.db.getBookSearchIndex(bookId)
                     if (persisted && persisted.sections && persisted.extractorVersion === EXTRACTOR_VERSION) {
-                        const sections = persisted.sections.map(s => ({
-                            id: s.id,
-                            sectionIndex: s.sectionIndex,
-                            sectionTitle: s.sectionTitle,
-                            granularity: s.granularity || 'chapter',
-                            location: s.location,
-                            text: s.text,
-                            tokens: Array.isArray(s.tokens) ? new Set(s.tokens) : (s.tokens instanceof Set ? s.tokens : tokenizeText(s.text))
-                        }))
-                        this.index.set(bookId, {
-                            meta: persisted,
-                            sections
-                        })
-                        this._trimCache()
-                        hydrated = true
+                        const book = await this.db?.getBook?.(bookId)
+                        const snapshot = await this.db?.getBookFileSnapshot?.(bookId)
+                        const currentRev = expectedRevision || snapshot?.blobRevision || snapshot?.nativeSnapshotRevision || book?.blobRevision || null
+                        const currentHash = snapshot?.documentHash || book?.documentHash || null
+                        const revMatch = !currentRev || persisted.blobRevision === currentRev
+                        const hashMatch = !currentHash || !persisted.documentHash || persisted.documentHash === currentHash
+                        if (revMatch && hashMatch) {
+                            const sections = persisted.sections.map(s => ({
+                                id: s.id,
+                                sectionIndex: s.sectionIndex,
+                                sectionTitle: s.sectionTitle,
+                                granularity: s.granularity || 'chapter',
+                                location: s.location,
+                                text: s.text,
+                                tokens: Array.isArray(s.tokens) ? new Set(s.tokens) : (s.tokens instanceof Set ? s.tokens : tokenizeText(s.text))
+                            }))
+                            this.index.set(bookId, {
+                                meta: persisted,
+                                sections
+                            })
+                            this._trimCache()
+                            hydrated = true
+                        }
                     }
                 }
             } catch (err) {
-                console.warn('[FullTextSearch] searchBookFull index rehydration notice:', err)
+                console.warn('[FullTextSearch] index rehydration notice:', err)
             }
             if (!hydrated) {
                 await this.indexBook(bookId)
             }
         }
-        return this.search(query, { bookIds: [bookId], limit: Infinity })
+        return this.index.has(bookId)
+    }
+
+    /**
+     * Paged search API returning bounded snippet items with cursor support
+     * @param {string} bookId
+     * @param {string} query
+     * @param {object} [options]
+     * @param {object|null} [options.cursor]
+     * @param {number} [options.pageSize=30]
+     * @param {AbortSignal} [options.signal]
+     * @param {string} [options.expectedRevision]
+     * @returns {Promise<{ totalHits: number, items: Array<object>, nextCursor: object|null, indexRevision: string|null }>}
+     */
+    async searchBookPage(bookId, query, { cursor = null, pageSize = 30, signal = null, expectedRevision = null } = {}) {
+        if (!bookId || !query) return { totalHits: 0, items: [], nextCursor: null, indexRevision: null }
+        await this._ensureBookIndexFresh(bookId, expectedRevision)
+        const entry = this.index.get(bookId)
+        if (!entry || !entry.sections) return { totalHits: 0, items: [], nextCursor: null, indexRevision: null }
+
+        const indexRevision = entry.meta?.blobRevision || entry.meta?.documentHash || 'v1'
+        const rawQ = (query || '').trim()
+        if (!rawQ) return { totalHits: 0, items: [], nextCursor: null, indexRevision }
+
+        const isExactPhrase = (rawQ.startsWith('"') && rawQ.endsWith('"') && rawQ.length >= 2) ||
+                              (rawQ.startsWith('“') && rawQ.endsWith('”') && rawQ.length >= 2)
+        const q = (isExactPhrase ? rawQ.slice(1, -1) : rawQ).trim().toLowerCase()
+        if (!q) return { totalHits: 0, items: [], nextCursor: null, indexRevision }
+
+        const queryTokens = isExactPhrase ? null : tokenizeText(q)
+        const mode = isExactPhrase ? 'exact' : 'fuzzy'
+
+        let targetSecIdx = 0
+        let targetMatchOffset = 0
+        let targetCharOffset = 0
+        let isCursorValid = true
+        if (cursor && typeof cursor === 'object') {
+            const isRevMatch = !cursor.revision || cursor.revision === indexRevision
+            const isQueryMatch = cursor.query === q
+            const isBookMatch = cursor.bookId === bookId
+            const isModeMatch = !cursor.mode || cursor.mode === mode
+            if (isRevMatch && isQueryMatch && isBookMatch && isModeMatch) {
+                targetSecIdx = Math.max(0, Number(cursor.sectionIndex) || 0)
+                targetMatchOffset = Math.max(0, Number(cursor.matchOffset) || 0)
+                targetCharOffset = Math.max(0, Number(cursor.charOffset) || 0)
+            } else {
+                isCursorValid = false
+            }
+        }
+
+        if (cursor && !isCursorValid) {
+            return {
+                totalHits: 0,
+                items: [],
+                nextCursor: null,
+                cursorInvalid: true,
+                indexRevision
+            }
+        }
+
+        // Cache total hits count per (bookId, q, mode, revision)
+        const countCacheKey = `${bookId}:${q}:${mode}:${indexRevision}`
+        if (!this._matchCountCache) this._matchCountCache = new Map()
+        let totalHits = 0
+        let countCached = false
+        if (this._matchCountCache.has(countCacheKey)) {
+            totalHits = this._matchCountCache.get(countCacheKey)
+            countCached = true
+        }
+
+        const items = []
+        let nextCursor = null
+        const bookTitle = entry.meta?.title || '未命名书籍'
+
+        // Helper to check token pre-filtering
+        const passesFilter = (section) => {
+            if (queryTokens && queryTokens.size > 0 && section.tokens?.size > 0) {
+                for (const tok of queryTokens) {
+                    if (section.tokens.has(tok)) continue
+                    const isAlpha = /^[a-z0-9_]+$/.test(tok)
+                    if (isAlpha) {
+                        let matchAlpha = false
+                        for (const sTok of section.tokens) {
+                            if (sTok.includes(tok)) { matchAlpha = true; break }
+                        }
+                        if (matchAlpha) continue
+                    }
+                    const isCjk = /[\u4e00-\u9fa5\u3040-\u30ff]/.test(tok)
+                    if (isCjk) {
+                        let matchCjk = false
+                        for (const sTok of section.tokens) {
+                            if (sTok.includes(tok)) { matchCjk = true; break }
+                        }
+                        if (matchCjk) continue
+                    }
+                    return false
+                }
+            }
+            return true
+        }
+
+        let lastYield = Date.now()
+
+        if (!countCached) {
+            let computedTotal = 0
+            for (let sIdx = 0; sIdx < entry.sections.length; sIdx++) {
+                if (signal?.aborted) break
+                const section = entry.sections[sIdx]
+                if (!passesFilter(section)) continue
+                const secLower = (section.text || '').toLowerCase()
+                let searchIdx = 0
+                let secCount = 0
+                while (searchIdx <= secLower.length - q.length) {
+                    if (signal?.aborted) break
+                    const pos = secLower.indexOf(q, searchIdx)
+                    if (pos === -1) break
+                    secCount++
+                    searchIdx = pos + Math.max(1, q.length)
+                    if (Date.now() - lastYield >= 6) {
+                        await new Promise(r => setTimeout(r, 0))
+                        lastYield = Date.now()
+                        if (signal?.aborted) break
+                    }
+                }
+                computedTotal += secCount
+                if (signal?.aborted) break
+            }
+            if (signal?.aborted) {
+                return { totalHits: computedTotal, items: [], nextCursor: null, indexRevision, aborted: true }
+            }
+            totalHits = computedTotal
+            if (this._matchCountCache.size > 200) {
+                const oldest = this._matchCountCache.keys().next().value
+                this._matchCountCache.delete(oldest)
+            }
+            this._matchCountCache.set(countCacheKey, totalHits)
+        }
+
+        // Incremental paging: only collect needed page matches without building unbounded arrays
+        for (let sIdx = targetSecIdx; sIdx < entry.sections.length; sIdx++) {
+            if (signal?.aborted || items.length >= pageSize) break
+            const section = entry.sections[sIdx]
+            if (!passesFilter(section)) continue
+
+            const secLower = (section.text || '').toLowerCase()
+            const isTargetSec = (sIdx === targetSecIdx)
+            const startOffset = isTargetSec ? targetMatchOffset : 0
+            let currentOffset = isTargetSec && targetCharOffset > 0 ? targetMatchOffset : 0
+            let searchIdx = isTargetSec && targetCharOffset > 0 ? targetCharOffset : 0
+
+            while (searchIdx <= secLower.length - q.length) {
+                if (signal?.aborted) break
+                if (Date.now() - lastYield >= 6) {
+                    await new Promise(r => setTimeout(r, 0))
+                    lastYield = Date.now()
+                }
+                const pos = secLower.indexOf(q, searchIdx)
+                if (pos === -1) break
+                const matchPos = pos
+                searchIdx = pos + Math.max(1, q.length)
+
+                if (currentOffset >= startOffset) {
+                    if (items.length < pageSize) {
+                        const snippet = createExcerptSnippet(section.text, q, 36, matchPos)
+                        items.push({
+                            bookId,
+                            bookTitle,
+                            sectionTitle: section.sectionTitle,
+                            granularity: section.granularity || 'chapter',
+                            location: {
+                                ...section.location,
+                                matchIndex: currentOffset,
+                                matchPos,
+                                query: q
+                            },
+                            query: q,
+                            snippet,
+                            excerpt: snippet,
+                            matchCount: totalHits
+                        })
+                    } else {
+                        // We found the next item after this page: set nextCursor with character checkpoint
+                        nextCursor = { sectionIndex: sIdx, matchOffset: currentOffset, charOffset: matchPos, query: q, bookId, revision: indexRevision, mode }
+                        break
+                    }
+                }
+                currentOffset++
+            }
+
+            if (items.length >= pageSize && !nextCursor) {
+                // If section had no more matches but items filled, nextCursor starts at next section
+                if (sIdx + 1 < entry.sections.length) {
+                    nextCursor = { sectionIndex: sIdx + 1, matchOffset: 0, charOffset: 0, query: q, bookId, revision: indexRevision, mode }
+                }
+            }
+
+            if (Date.now() - lastYield >= 6) {
+                await new Promise(r => setTimeout(r, 0))
+                lastYield = Date.now()
+            }
+        }
+
+        return {
+            totalHits,
+            items,
+            nextCursor,
+            indexRevision
+        }
+    }
+
+    async searchBookFull(bookId, query, options = {}) {
+        if (!bookId || !query) return []
+        await this._ensureBookIndexFresh(bookId, options?.expectedRevision)
+        if (options && (options.cursor || (options.pageSize && options.pageSize !== Infinity))) {
+            const pageRes = await this.searchBookPage(bookId, query, {
+                cursor: options.cursor,
+                pageSize: options.pageSize,
+                signal: options.signal,
+                expectedRevision: options.expectedRevision
+            })
+            const arr = pageRes.items || []
+            arr.totalHits = pageRes.totalHits
+            arr.nextCursor = pageRes.nextCursor
+            arr.indexRevision = pageRes.indexRevision
+            return arr
+        }
+        const res = this.search(query, { bookIds: [bookId], limit: options?.limit ?? Infinity })
+        res.totalHits = res.totalHits != null ? res.totalHits : res.length
+        res.nextCursor = (res.length < res.totalHits) ? { sectionIndex: 0, matchOffset: res.length, query, bookId } : null
+        return res
     }
 
     /**
@@ -803,6 +1112,22 @@ export class FullTextSearchEngine {
      * Remove index for a deleted book
      * @param {string} bookId
      */
+    /**
+     * Invalidate cached index in-memory and in persistent storage
+     * @param {string} bookId
+     */
+    async invalidate(bookId) {
+        if (!bookId) return
+        this.index.delete(bookId)
+        try {
+            if (this.db?.deleteBookSearchIndex) {
+                await this.db.deleteBookSearchIndex(bookId)
+            }
+        } catch (e) {
+            console.warn('[FullTextSearch] Invalidate index error:', e)
+        }
+    }
+
     async removeBookIndex(bookId) {
         if (!bookId) return
         this.index.delete(bookId)

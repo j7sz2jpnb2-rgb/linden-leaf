@@ -1,14 +1,180 @@
+
+/**
+ * F02: Reader Location History Manager (Back / Forward navigation)
+ */
+export class ReaderLocationHistory {
+    constructor(app) {
+        this.app = app
+        this.undoStack = []
+        this.redoStack = []
+        this.currentLocation = null
+        this.isNavigating = false
+    }
+
+    reset() {
+        this.undoStack = []
+        this.redoStack = []
+        this.currentLocation = null
+        this.isNavigating = false
+        this.updateUI()
+    }
+
+    getCurrentLocation() {
+        const fmt = this.app?.currentFormat
+        if (fmt === 'pdf') {
+            const page = (this.app?.pdfViewport?.currentPage ?? 0) + 1
+            return { type: 'pdf', page }
+        } else if (fmt === 'epub') {
+            const cfi = this.app.currentCfi || this.app.currentLocation?.cfi || null
+            return { type: 'epub', cfi }
+        } else {
+            const charOffset = this.app?.currentLocation?.charOffset || 0
+            return { type: fmt || 'txt', charOffset }
+        }
+    }
+
+    isEqual(locA, locB) {
+        if (!locA || !locB || locA.type !== locB.type) return false
+        if (locA.type === 'pdf') return locA.page === locB.page
+        if (locA.type === 'epub') return locA.cfi === locB.cfi
+        return locA.charOffset === locB.charOffset
+    }
+
+    pushLocation(loc = null) {
+        if (this.isNavigating) return
+        const newLoc = loc || this.getCurrentLocation()
+        if (!newLoc) return
+        if (this.currentLocation && this.isEqual(this.currentLocation, newLoc)) return
+        if (this.currentLocation) {
+            this.undoStack.push(this.currentLocation)
+            if (this.undoStack.length > 50) this.undoStack.shift()
+        }
+        this.currentLocation = newLoc
+        this.redoStack = []
+        this.updateUI()
+    }
+
+    canGoBack() {
+        return this.undoStack.length > 0
+    }
+
+    canGoForward() {
+        return this.redoStack.length > 0
+    }
+
+    async back() {
+        if (!this.canGoBack()) return false
+        const target = this.undoStack.pop()
+        if (this.currentLocation) this.redoStack.push(this.currentLocation)
+        this.currentLocation = target
+        this.updateUI()
+        await this._goToLocation(target)
+        return true
+    }
+
+    async forward() {
+        if (!this.canGoForward()) return false
+        const target = this.redoStack.pop()
+        if (this.currentLocation) this.undoStack.push(this.currentLocation)
+        this.currentLocation = target
+        this.updateUI()
+        await this._goToLocation(target)
+        return true
+    }
+
+    async _goToLocation(loc) {
+        if (!loc) return
+        this.isNavigating = true
+        try {
+            await this.app?.navigateReaderToLocation?.(loc)
+        } catch (e) {
+            console.warn('[LocationHistory] Navigation error:', e)
+        } finally {
+            setTimeout(() => { this.isNavigating = false }, 250)
+        }
+    }
+
+    updateUI() {
+        if (typeof document === 'undefined') return
+        const btnBack = document.getElementById('btn-nav-history-back')
+        const btnForward = document.getElementById('btn-nav-history-forward')
+        if (btnBack) btnBack.disabled = !this.canGoBack()
+        if (btnForward) btnForward.disabled = !this.canGoForward()
+    }
+}
+
 // app.js - Linden Leaf Core Application
 
 export const APP_BUILD_VER = '20260914_rel_v1'
 
-import '../foliate-js-main/view.js?v=20260914_rel_v1'
-import { Overlayer } from '../foliate-js-main/overlayer.js?v=20260914_rel_v1'
-import * as db from './db.js?v=20260914_rel_v1'
-import { tracker } from './tracker.js?v=20260914_rel_v1'
-import { quoteCard, THEMES } from './quote-card.js?v=20260914_rel_v1'
-import * as syncEngine from './syncEngine.js?v=20260914_rel_v1'
-import { updater } from './updater.js?v=20260914_rel_v1'
+export function normalizeNavigationTarget(target) {
+    if (target == null) return null
+    if (typeof target === 'number') {
+        const pageIndex = Math.max(0, Math.floor(target))
+        return {
+            type: 'pdf',
+            page: pageIndex + 1,
+            pageIndex: pageIndex,
+            yRatio: 0
+        }
+    }
+    if (typeof target === 'string') {
+        if (/^\d+$/.test(target.trim())) {
+            const pageNum = Math.max(1, parseInt(target.trim(), 10))
+            return {
+                type: 'pdf',
+                page: pageNum,
+                pageIndex: pageNum - 1,
+                yRatio: 0
+            }
+        }
+        return {
+            type: 'epub',
+            cfi: target
+        }
+    }
+    if (typeof target === 'object') {
+        const res = { ...target }
+        if (res.cfi) {
+            res.type = 'epub'
+            return res
+        }
+        if (res.charOffset !== undefined) {
+            res.type = res.type || 'txt'
+            return res
+        }
+        if (res.page !== undefined || res.pageIndex !== undefined) {
+            res.type = 'pdf'
+            if (res.page !== undefined && res.pageIndex === undefined) {
+                res.page = Math.max(1, Math.floor(res.page))
+                res.pageIndex = res.page - 1
+            } else if (res.pageIndex !== undefined && res.page === undefined) {
+                res.pageIndex = Math.max(0, Math.floor(res.pageIndex))
+                res.page = res.pageIndex + 1
+            } else if (res.page !== undefined && res.pageIndex !== undefined) {
+                res.page = Math.max(1, Math.floor(res.page))
+                res.pageIndex = Math.max(0, Math.floor(res.pageIndex))
+            }
+            if (res.yRatio !== undefined && typeof res.yRatio === 'number') {
+                res.yRatio = Math.max(0, Math.min(1, res.yRatio))
+            } else {
+                res.yRatio = 0
+            }
+            return res
+        }
+        return res
+    }
+    return null
+}
+
+
+import '../foliate-js-main/view.js'
+import { Overlayer } from '../foliate-js-main/overlayer.js'
+import * as db from './db.js'
+import { tracker } from './tracker.js'
+import { quoteCard, THEMES } from './quote-card.js'
+import * as syncEngine from './syncEngine.js'
+import { updater } from './updater.js'
 import { PdfViewport } from './pdf-viewport.js'
 import { AdaptivePdfDriver, setMuPdfStoreLimit } from './pdf-driver.js'
 import { buildPdfTocIndex, pdfTocAtPage } from './pdf-toc.js'
@@ -17,20 +183,135 @@ import { importQueue } from './import-queue.js'
 import { extractPdfCover, regenerateBookCover, normalizeCoverBlob } from './pdf-cover.js'
 import { ocrService, parsePageRange, MAX_OCR_PAGES } from './ocr-service.js'
 import { performWebSearch, SEARCH_ENGINES, validateSearchTemplate } from './search-config.js'
-import { renderCleanBarChart, renderCalendarHeatmap, formatAxisLabel, formatMinutesClean } from './stats-heatmap.js'
 import { bookDetailsModal } from './book-details.js'
 import { fullTextSearchEngine } from './fulltext-search.js'
 import { isAiReady, getAiConfig, saveAiConfig, getAiApiKey, requestAiCompletion, createTranslationPrompt, createExplainPrompt, createQuestionPrompt, renderSafeMarkdown, SYSTEM_PROMPTS } from './reading-ai-assistant.js'
 import { batchAddTag, batchRemoveTag, normalizeTag, resolveReadingState, getAllTagsWithCounts, renameTagGlobally, deleteTagGlobally, STATUS_LABELS, setReadingStatus } from './tags-manager.js'
 import { PageTurnController, FoliatePageTurnAdapter, PdfPageTurnAdapter } from './page-turn-controller.js'
-import { AiSidebarController } from './ai-sidebar-controller.js'
 import { dictionaryService } from './dictionary-service.js'
-import { advancedSettings } from './advanced-settings.js'
 import { readingPresetsManager, MAX_READING_PRESETS } from './reading-presets.js'
 import { customFontManager } from './custom-font-manager.js'
 import { themeCustomizer, DEFAULT_SEMANTIC_PALETTE } from './theme-customizer.js'
-import { chapterTranslationManager } from './chapter-translation-manager.js'
 import { resolveReaderSettings, READER_OVERRIDE_ALLOWED_KEYS } from './translation-job-core.js'
+
+// Lazy dynamic module loaders for non-critical startup paths (Group 6)
+let _statsHeatmapMod = null
+let _statsHeatmapPromise = null
+const ensureStatsHeatmapModule = () => {
+    if (_statsHeatmapMod) return Promise.resolve(_statsHeatmapMod)
+    if (!_statsHeatmapPromise) {
+        _statsHeatmapPromise = import('./stats-heatmap.js').then(mod => {
+            _statsHeatmapMod = mod
+            return mod
+        })
+    }
+    return _statsHeatmapPromise
+}
+const formatMinutesClean = (mins) => {
+    if (_statsHeatmapMod?.formatMinutesClean) return _statsHeatmapMod.formatMinutesClean(mins)
+    const m = Math.max(0, Math.round(Number(mins) || 0))
+    if (m < 60) return `${m} 分钟`
+    const h = Math.floor(m / 60)
+    const rem = m % 60
+    return rem > 0 ? `${h} 小时 ${rem} 分钟` : `${h} 小时`
+}
+const formatAxisLabel = (mins) => {
+    if (_statsHeatmapMod?.formatAxisLabel) return _statsHeatmapMod.formatAxisLabel(mins)
+    const m = Math.max(0, Math.round(Number(mins) || 0))
+    return m >= 60 ? `${(m / 60).toFixed(1).replace(/\.0$/, '')}h` : `${m}m`
+}
+const renderCleanBarChart = (container, data) => {
+    if (_statsHeatmapMod?.renderCleanBarChart) return _statsHeatmapMod.renderCleanBarChart(container, data)
+    ensureStatsHeatmapModule().then(mod => mod?.renderCleanBarChart?.(container, data)).catch(() => {})
+}
+const renderCalendarHeatmap = (container, targetYear, onSelectDay) => {
+    if (_statsHeatmapMod?.renderCalendarHeatmap) return _statsHeatmapMod.renderCalendarHeatmap(container, targetYear, onSelectDay)
+    ensureStatsHeatmapModule().then(mod => mod?.renderCalendarHeatmap?.(container, targetYear, onSelectDay)).catch(() => {})
+}
+
+let _advancedSettingsModPromise = null
+const ensureAdvancedSettingsLoaded = (appInstance) => {
+    if (appInstance?.advancedSettings?._isRealInstance) return Promise.resolve(appInstance.advancedSettings)
+    if (!_advancedSettingsModPromise) {
+        _advancedSettingsModPromise = import('./advanced-settings.js')
+    }
+    return _advancedSettingsModPromise.then(({ advancedSettings }) => {
+        advancedSettings._isRealInstance = true
+        if (appInstance) {
+            appInstance.advancedSettings = advancedSettings
+            advancedSettings.app = appInstance
+            if (appInstance.dom) {
+                advancedSettings.bindUI({
+                    badgeAdvancedStatus: appInstance.dom.badgeAdvancedStatus,
+                    hintAdvancedTrigger: appInstance.dom.hintAdvancedTrigger,
+                    advancedSettingsContainer: appInstance.dom.advancedSettingsContainer,
+                    settingAiContextBudget: appInstance.dom.settingAiContextBudget,
+                    labelAiContextBudget: appInstance.dom.labelAiContextBudget,
+                    settingInplaceParaTrans: appInstance.dom.settingInplaceParaTrans,
+                    settingModelTokenizer: appInstance.dom.settingModelTokenizer,
+                    settingAiMaxTokens: appInstance.dom.settingAiMaxTokens,
+                    settingAiCooldown: appInstance.dom.settingAiCooldown,
+                    settingAiDailyLimit: appInstance.dom.settingAiDailyLimit,
+                    settingDictSaveHistory: appInstance.dom.settingDictSaveHistory,
+                    btnPopupTranslatePara: appInstance.dom.popupTranslatePara,
+                    rowAdvancedSettingsTrigger: appInstance.dom.rowAdvancedSettingsTrigger,
+                    modalAdvancedSettingsConfirm: appInstance.dom.modalAdvancedSettingsConfirm,
+                    btnCloseAdvancedConfirm: appInstance.dom.btnCloseAdvancedConfirm,
+                    btnCancelAdvancedUnlock: appInstance.dom.btnCancelAdvancedUnlock,
+                    btnConfirmAdvancedUnlock: appInstance.dom.btnConfirmAdvancedUnlock,
+                    btnResetAdvancedSettings: appInstance.dom.btnResetAdvancedSettings
+                })
+            }
+        }
+        return advancedSettings
+    })
+}
+
+let _aiSidebarModPromise = null
+const ensureAiSidebarLoaded = (appInstance) => {
+    if (appInstance?.aiSidebar?._isRealInstance) return Promise.resolve(appInstance.aiSidebar)
+    if (!_aiSidebarModPromise) {
+        _aiSidebarModPromise = import('./ai-sidebar-controller.js')
+    }
+    return _aiSidebarModPromise.then(({ AiSidebarController }) => {
+        if (appInstance && !appInstance.aiSidebar?._isRealInstance) {
+            const ctrl = new AiSidebarController(appInstance)
+            ctrl._isRealInstance = true
+            appInstance.aiSidebar = ctrl
+        }
+        return appInstance?.aiSidebar
+    })
+}
+
+let _chapterTransModPromise = null
+const ensureChapterTranslationLoaded = (appInstance) => {
+    if (appInstance?.chapterTranslationManager?._isRealInstance) return Promise.resolve(appInstance.chapterTranslationManager)
+    if (!_chapterTransModPromise) {
+        _chapterTransModPromise = import('./chapter-translation-manager.js')
+    }
+    return _chapterTransModPromise.then(({ chapterTranslationManager }) => {
+        chapterTranslationManager._isRealInstance = true
+        if (appInstance) {
+            appInstance.chapterTranslationManager = chapterTranslationManager
+            chapterTranslationManager.app = appInstance
+            if (typeof document !== 'undefined') {
+                chapterTranslationManager.init({
+                    btnChapterTranslate: document.getElementById('btn-chapter-translate'),
+                    modalChapterTransConfirm: document.getElementById('modal-chapter-trans-confirm'),
+                    btnCancelChapterTransModal: document.getElementById('btn-cancel-chapter-trans-modal'),
+                    btnConfirmChapterTransStart: document.getElementById('btn-confirm-chapter-trans-start'),
+                    btnChapterTransStop: document.getElementById('btn-chapter-trans-stop'),
+                    btnChapterTransClear: document.getElementById('btn-chapter-trans-clear'),
+                    btnTransModeSource: document.getElementById('btn-trans-mode-source'),
+                    btnTransModeBilingual: document.getElementById('btn-trans-mode-bilingual'),
+                    btnTransModeTarget: document.getElementById('btn-trans-mode-target'),
+                    chapterTransBar: document.getElementById('chapter-translation-bar')
+                })
+            }
+        }
+        return chapterTranslationManager
+    })
+}
 import { resolveExcerptSource } from './excerpt-source-resolver.js'
 import { ttsPlayer } from './tts-player.js'
 import { mobileShell } from './mobile-shell.js'
@@ -138,6 +419,7 @@ class ObjectUrlPool {
         this.blobMeta = new Map()     // key -> "${size}:${type}:${lastModified}"
         this.warmImages = new Map()   // key -> HTMLImageElement (pins decoded bitmap in Blink MemoryCache, LRU bounded)
         this.pendingRoots = new Set() // DocumentFragments or detached roots currently being built
+        this.retiredUrls = new Set() // Superseded URLs still referenced by a mounted view
     }
     registerPendingRoot(root) {
         if (!root) return () => {}
@@ -156,28 +438,15 @@ class ObjectUrlPool {
         return false
     }
     _prewarmBitmap(key, url) {
-        if (typeof Image === 'undefined' || !url) return
-        try {
-            if (this._touchWarm(key)) {
-                return
-            }
-            const img = new Image()
-            img.decoding = 'async'
-            img.src = url
-            if (typeof img.decode === 'function') {
-                img.decode().catch(() => {})
-            }
-            this.warmImages.set(key, img)
-            while (this.warmImages.size > this.maxWarmImages) {
-                const oldestKey = this.warmImages.keys().next().value
-                if (oldestKey === undefined) break
-                this.warmImages.delete(oldestKey)
-            }
-        } catch (_) {}
+        // Modern bookshelf: do NOT eagerly create offscreen Image instances to decode whole library
     }
-    get(key, blob) {
+    getForBook(book) {
+        return this.get(book.id, book.coverBlob, book.coverRevision ?? book.coverBlob?._revision ?? 0)
+    }
+    get(key, blob, revision = null) {
         if (!blob) return ''
-        const sig = `${blob.size ?? 0}:${blob.type ?? ''}:${blob.lastModified ?? 0}`
+        const rev = revision ?? blob.coverRevision ?? blob._revision ?? blob.lastModified ?? 0
+        const sig = `${blob.size ?? 0}:${blob.type ?? ''}:${rev}`
         if (this.cache.has(key)) {
             if (this.blobMeta.get(key) === sig) {
                 const existing = this.cache.get(key)
@@ -203,7 +472,7 @@ class ObjectUrlPool {
         }
     }
     pruneUnused(force = false) {
-        if (!force && this.cache.size <= this.maxCapacity) return
+        if (!force && this.cache.size <= this.maxCapacity && this.retiredUrls.size === 0) return
         const activeUrls = new Set()
         try {
             const domImgs = document.querySelectorAll('img[src^="blob:"], [data-cover-url^="blob:"]')
@@ -228,6 +497,12 @@ class ObjectUrlPool {
         }
 
         const targetSize = force ? 0 : Math.floor(this.maxCapacity * 0.85)
+        for (const url of this.retiredUrls) {
+            if (!activeUrls.has(url)) {
+                URL.revokeObjectURL(url)
+                this.retiredUrls.delete(url)
+            }
+        }
         for (const [key, url] of [...this.cache.entries()]) {
             if (!force && this.cache.size <= targetSize) break
             if (!activeUrls.has(url)) {
@@ -238,7 +513,11 @@ class ObjectUrlPool {
     revoke(key) {
         if (this.cache.has(key)) {
             try {
-                URL.revokeObjectURL(this.cache.get(key))
+                const url = this.cache.get(key)
+                const roots = [document, ...this.pendingRoots]
+                const inUse = roots.some(root => Array.from(root.querySelectorAll?.('img[src^="blob:"]') || []).some(img => img.src === url))
+                if (inUse) this.retiredUrls.add(url)
+                else URL.revokeObjectURL(url)
             } catch (e) {}
             this.cache.delete(key)
         }
@@ -246,7 +525,7 @@ class ObjectUrlPool {
         this.warmImages.delete(key)
     }
     clear() {
-        for (const url of this.cache.values()) {
+        for (const url of [...this.cache.values(), ...this.retiredUrls]) {
             try {
                 URL.revokeObjectURL(url)
             } catch (e) {}
@@ -255,11 +534,14 @@ class ObjectUrlPool {
         this.blobMeta.clear()
         this.warmImages.clear()
         this.pendingRoots.clear()
+        this.retiredUrls.clear()
     }
 }
 const coverUrlPool = new ObjectUrlPool(2500, 180)
-window.ObjectUrlPool = ObjectUrlPool
-window.coverUrlPool = coverUrlPool
+if (typeof window !== 'undefined') {
+    window.ObjectUrlPool = ObjectUrlPool
+    window.coverUrlPool = coverUrlPool
+}
 
 const formatFontWeight = w => {
     const num = parseInt(w, 10) || 400
@@ -1028,7 +1310,7 @@ class UniversalReaderApp {
                             msg.type === 'NAVIGATE_BOOK_LOCATION' &&
                             msg.bookId &&
                             String(msg.bookId) === String(this.initialSatelliteBookId || this.currentBookId) &&
-                            msg.location
+                            msg.location != null
                         ) {
                             this.navigateReaderToLocation(msg.location)
                         }
@@ -1036,10 +1318,13 @@ class UniversalReaderApp {
                     }
                     if (msg.type === 'BOOK_PROGRESS_UPDATED' || msg.type === 'READING_STATS_UPDATED') {
                         if (!this._activeSession) {
+                            if (msg.bookId) {
+                                this.updateBookCardLocally(msg.bookId, msg)
+                            }
                             clearTimeout(this._crossWindowRefreshTimer)
                             this._crossWindowRefreshTimer = setTimeout(() => {
                                 this.refreshBookshelf().catch(() => {})
-                            }, 350)
+                            }, 1200)
                         }
                     }
                 }
@@ -1122,7 +1407,7 @@ class UniversalReaderApp {
         }
         this.importQueue.onBatchComplete = (summary) => {
             if (summary.total > 1) {
-                this.showToast(`导入完成: 成功 ${summary.succeeded} 本，失败 ${summary.failed} 本`, summary.failed > 0 ? '⚠️' : '✓')
+                this.showToast(`导入完成: 成功 ${summary.succeeded} 本，失败 ${summary.failed} 本`, summary.failed > 0 ? 'warning' : 'success')
             }
             this.refreshBookshelf()
         }
@@ -1177,29 +1462,10 @@ class UniversalReaderApp {
 
         this.dictionaryService = dictionaryService
         this.dictionaryService.app = this
-        this.advancedSettings = advancedSettings
-        this.advancedSettings.app = this
-        this.aiSidebar = new AiSidebarController(this)
-        this.advancedSettings.bindUI({
-            badgeAdvancedStatus: this.dom.badgeAdvancedStatus,
-            hintAdvancedTrigger: this.dom.hintAdvancedTrigger,
-            advancedSettingsContainer: this.dom.advancedSettingsContainer,
-            settingAiContextBudget: this.dom.settingAiContextBudget,
-            labelAiContextBudget: this.dom.labelAiContextBudget,
-            settingInplaceParaTrans: this.dom.settingInplaceParaTrans,
-            settingModelTokenizer: this.dom.settingModelTokenizer,
-            settingAiMaxTokens: this.dom.settingAiMaxTokens,
-            settingAiCooldown: this.dom.settingAiCooldown,
-            settingAiDailyLimit: this.dom.settingAiDailyLimit,
-            settingDictSaveHistory: this.dom.settingDictSaveHistory,
-            btnPopupTranslatePara: this.dom.popupTranslatePara,
-            rowAdvancedSettingsTrigger: this.dom.rowAdvancedSettingsTrigger,
-            modalAdvancedSettingsConfirm: this.dom.modalAdvancedSettingsConfirm,
-            btnCloseAdvancedConfirm: this.dom.btnCloseAdvancedConfirm,
-            btnCancelAdvancedUnlock: this.dom.btnCancelAdvancedUnlock,
-            btnConfirmAdvancedUnlock: this.dom.btnConfirmAdvancedUnlock,
-            btnResetAdvancedSettings: this.dom.btnResetAdvancedSettings
-        })
+        this.advancedSettings = { config: {} }
+        this.aiSidebar = null
+        this.chapterTranslationManager = null
+        this.navHistory = new ReaderLocationHistory(this)
 
         // Unified Page Turn Controller
         const isMobileDevice = (window.mobileShell?.isMobileViewport?.() ?? false) || Boolean(platformBridge?.isAndroid)
@@ -1227,26 +1493,11 @@ class UniversalReaderApp {
             window.__TAURI__?.core?.invoke?.('mupdf_set_store_limit', { maxMb: initialPdfStoreMb }).catch(() => {})
         } catch (e) {}
 
-        // Chapter Bilingual Reading Engine Wireup
-        this.chapterTranslationManager = chapterTranslationManager
-        chapterTranslationManager.app = this
-        chapterTranslationManager.init({
-            btnChapterTranslate: document.getElementById('btn-chapter-translate'),
-            modalChapterTransConfirm: document.getElementById('modal-chapter-trans-confirm'),
-            btnCancelChapterTransModal: document.getElementById('btn-cancel-chapter-trans-modal'),
-            btnConfirmChapterTransStart: document.getElementById('btn-confirm-chapter-trans-start'),
-            btnChapterTransStop: document.getElementById('btn-chapter-trans-stop'),
-            btnChapterTransClear: document.getElementById('btn-chapter-trans-clear'),
-            btnTransModeSource: document.getElementById('btn-trans-mode-source'),
-            btnTransModeBilingual: document.getElementById('btn-trans-mode-bilingual'),
-            btnTransModeTarget: document.getElementById('btn-trans-mode-target'),
-            chapterTransBar: document.getElementById('chapter-translation-bar')
-        })
         document.getElementById('btn-cancel-chapter-trans')?.addEventListener('click', () => {
-            chapterTranslationManager.closeConfirmModal()
+            this.chapterTranslationManager?.closeConfirmModal?.()
         })
         document.getElementById('btn-chapter-trans-close')?.addEventListener('click', () => {
-            chapterTranslationManager.hideBilingualBar()
+            this.chapterTranslationManager?.hideBilingualBar?.()
         })
         this.initBookOverrideUI()
 
@@ -1256,22 +1507,62 @@ class UniversalReaderApp {
 
         this.checkFirstTimeUser()
         platformBridge.syncSystemInsets?.().catch?.(() => {})
-        window.addEventListener('focus', () => platformBridge.syncSystemInsets?.().catch?.(() => {}))
+        window.addEventListener('focus', () => {
+            platformBridge.syncSystemInsets?.().catch?.(() => {})
+            this.debouncedRescanLinkedRoots?.()
+        })
         window.addEventListener('resize', () => platformBridge.syncSystemInsets?.().catch?.(() => {}))
         window.addEventListener('orientationchange', () => platformBridge.syncSystemInsets?.().catch?.(() => {}))
 
+        const fallbackProcessOrigin = (typeof performance !== 'undefined' && Number.isFinite(performance.timeOrigin))
+            ? Math.round(performance.timeOrigin)
+            : Date.now()
+        this.bootStageTimings = {
+            processStartEpochMs: fallbackProcessOrigin,
+            webviewReady: Date.now(),
+            entry: Date.now()
+        }
         const initialBudget = platformBridge.setResourceBudget()
         this.importQueue.setResourceBudget(initialBudget)
         fullTextSearchEngine?.setResourceBudget?.(initialBudget)
+        const bootContextPromise = Promise.resolve().then(() => platformBridge.getBootContext?.()).catch(() => null)
         this.loadSettings().then(async () => {
             if (this.themeMode === 'system') {
                 const isDark = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : false
                 this.settings.theme = isDark ? 'black' : 'light'
             }
             this.applyTheme(this.settings.theme, false)
+            const bootCtx = (await bootContextPromise) || null
+            if (bootCtx?.processStartEpochMs) {
+                this.bootStageTimings.processStartEpochMs = bootCtx.processStartEpochMs
+                this.bootStageTimings.bootId = bootCtx.bootId
+                this.bootStageTimings.launchMode = bootCtx.launchMode
+            }
+            if (bootCtx?.launchMode === 'external-file' || bootCtx?.pendingFiles?.length || this.isSatelliteReaderWindow || this._hasPendingExternalFileLaunch) {
+                this.publishStartupView('reader')
+            }
             await this.ensureRecoveryBarrier()
+            this.markBootStage('dbReady')
+            this.bootStageTimings['DB-ready'] = this.bootStageTimings.dbReady
 
-            if (this.isSatelliteReaderWindow && this.initialSatelliteBookId) {
+            const isExternalFileColdStart = Boolean(
+                bootCtx?.launchMode === 'external-file' ||
+                (Array.isArray(bootCtx?.pendingFiles) && bootCtx.pendingFiles.length > 0) ||
+                this._hasPendingExternalFileLaunch
+            )
+
+            if (isExternalFileColdStart) {
+                if (this.bootStageTimings) {
+                    this.bootStageTimings.launchMode = 'external-file'
+                }
+                if (this.dom.bookshelfView) {
+                    this.dom.bookshelfView.style.display = 'none'
+                }
+                if (this.dom.readerView) {
+                    this.dom.readerView.style.display = 'flex'
+                    this.dom.readerView.classList.add('active')
+                }
+            } else if (this.isSatelliteReaderWindow && this.initialSatelliteBookId) {
                 if (this.dom.bookshelfView) {
                     this.dom.bookshelfView.style.display = 'none'
                 }
@@ -1287,6 +1578,9 @@ class UniversalReaderApp {
                     try {
                         this.renderReadingPresetsUI()
                     } catch (e) {}
+                    ensureAdvancedSettingsLoaded(this).catch(() => {})
+                    ensureAiSidebarLoaded(this).catch(() => {})
+                    ensureChapterTranslationLoaded(this).catch(() => {})
                 }, 0)
                 let pendingLoc = null
                 try {
@@ -1296,7 +1590,7 @@ class UniversalReaderApp {
                         localStorage.removeItem(pendingKey)
                         const parsed = JSON.parse(rawPending)
                         if (parsed && (!parsed.ts || Date.now() - parsed.ts < 60000)) {
-                            pendingLoc = parsed.location || null
+                            pendingLoc = (parsed.location != null) ? parsed.location : null
                         }
                     }
                 } catch (_) {}
@@ -1306,8 +1600,13 @@ class UniversalReaderApp {
                 // R9: Render bookshelf immediately without waiting for font binaries
                 await this.refreshBookshelf()
 
-                // Non-blocking deferred loading of custom fonts & presets
+                // Non-blocking deferred loading of custom fonts, presets, and non-critical services
                 setTimeout(async () => {
+                    try {
+                        await ensureAdvancedSettingsLoaded(this)
+                        await ensureAiSidebarLoaded(this)
+                        await ensureChapterTranslationLoaded(this)
+                    } catch (_) {}
                     try {
                         await customFontManager.init(this.settings.font)
                         await this.renderCustomFontsUI()
@@ -1323,9 +1622,89 @@ class UniversalReaderApp {
                 }, 0)
             }
             this.setupAndroidNavigationAndImports()
+            // An external-file event may have opened a reader while startup awaited DB work.
+            if (document.documentElement.dataset.startupView === 'pending') {
+                this.publishStartupView(this.currentBookId || isExternalFileColdStart || this.isSatelliteReaderWindow ? 'reader' : 'shelf')
+            }
         }).catch(err => {
             console.error('[App] Critical startup error:', err)
+            document.documentElement.dataset.startupView = 'error'
+            const label = document.getElementById('startup-loading-label')
+            if (label) label.textContent = '打开失败，请重新打开应用。'
+            const retry = document.getElementById('startup-retry')
+            if (retry) retry.hidden = false
         })
+    }
+
+    publishStartupView(destination) {
+        if (destination === 'reader') {
+            if (this.dom.bookshelfView) this.dom.bookshelfView.style.display = 'none'
+            if (this.dom.readerView) {
+                this.dom.readerView.style.display = 'flex'
+                this.dom.readerView.classList.add('active')
+            }
+        } else {
+            if (this.dom.readerView) this.dom.readerView.style.display = 'none'
+            if (this.dom.bookshelfView) this.dom.bookshelfView.style.display = 'flex'
+        }
+        document.documentElement.dataset.startupView = 'ready'
+    }
+
+    reportInitialPdfFrame(readerSession, viewport, page, canvas) {
+        if (this._firstReadableFrameReported || !readerSession?.isCurrent() || page !== viewport?._initialTargetPage) return
+        this._initialFrameCleanup?.()
+        let observer = null
+        const signal = readerSession.abortController?.signal
+        const cleanup = () => {
+            observer?.disconnect()
+            signal?.removeEventListener('abort', cleanup)
+            if (this._initialFrameCleanup === cleanup) this._initialFrameCleanup = null
+        }
+        this._initialFrameCleanup = cleanup
+        const record = () => {
+            if (this._firstReadableFrameReported || !readerSession.isCurrent() || !canvas?.isConnected || !viewport.container.contains(canvas)) { cleanup(); return }
+            const rect = canvas.getBoundingClientRect()
+            const view = viewport.scrollArea.getBoundingClientRect()
+            const style = getComputedStyle(canvas)
+            if (style.visibility === 'hidden' || style.display === 'none' || !rect.width || !rect.height || rect.right <= view.left || rect.left >= view.right || rect.bottom <= view.top || rect.top >= view.bottom) return
+            this._firstReadableFrameReported = true
+            this.markBootStage?.('firstReadableFrame')
+            cleanup()
+        }
+        signal?.addEventListener('abort', cleanup, { once:true })
+        if (typeof IntersectionObserver === 'function') {
+            observer = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) requestAnimationFrame(record) }, { root:viewport.scrollArea })
+            observer.observe(canvas)
+        }
+        requestAnimationFrame(record)
+    }
+
+    markBootStage(stageName, explicitEpochMs = null) {
+        if (!this.bootStageTimings) this.bootStageTimings = {}
+        const isColdBootStage = ['entry', 'webviewReady', 'dbReady', 'stage', 'driverOpen', 'firstReadableFrame'].includes(stageName)
+        if (isColdBootStage && this.bootStageTimings[stageName] && this._bootStagesSealed) {
+            return this.bootStageTimings[stageName]
+        }
+        const nowEpoch = explicitEpochMs != null ? Number(explicitEpochMs) : Date.now()
+        const nowRel = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+            ? Number(performance.now().toFixed(3))
+            : nowEpoch
+        this.bootStageTimings[stageName] = nowEpoch
+        if (!this.bootStageRelativeTimings) this.bootStageRelativeTimings = {}
+        this.bootStageRelativeTimings[stageName] = nowRel
+        if (stageName === 'firstReadableFrame' || stageName === 'shelfReady') {
+            this._bootStagesSealed = true
+        }
+        return nowEpoch
+    }
+
+    exportBootSessionLogs() {
+        return {
+            bootId: this.bootStageTimings?.bootId || null,
+            launchMode: this.bootStageTimings?.launchMode || 'shelf',
+            bootStageTimings: { ...(this.bootStageTimings || {}) },
+            bootStageRelativeTimings: { ...(this.bootStageRelativeTimings || {}) }
+        }
     }
 
     setThemeMode(mode) {
@@ -1475,12 +1854,12 @@ class UniversalReaderApp {
                             name: item.filename,
                             size: 0
                         }
-                        this.showToast(`正在导入：${item.filename}`, '⏳')
+                        this.showToast(`正在导入：${item.filename}`, 'info')
                         const results = await this.importFilesAndWait([fileObj])
                         const job = results?.[0]
                         if (job && job.status === 'succeeded') {
                             await platformBridge.consumePendingImport(item.id)
-                            this.showToast(`导入成功：${item.filename}`, '✓')
+                            this.showToast(`导入成功：${item.filename}`, 'success')
                         } else {
                             console.warn(`[Android Import] Job for ${item.filename} status: ${job?.status}, deferring consume`, job?.error)
                         }
@@ -1508,6 +1887,15 @@ class UniversalReaderApp {
                 let progressResult = null
                 let trackerResult = null
                 try {
+                    if (typeof db.recoverPendingRestoreOperations === 'function') {
+                        await db.recoverPendingRestoreOperations()
+                    }
+                } catch (e) {
+                    console.warn('[App] Error recovering pending restore operations:', e)
+                    this.showToast?.(`恢复记录尚未处理：${e.message}`, 'warning')
+                    throw e
+                }
+                try {
                     progressResult = await db.recoverPendingProgressBackup()
                 } catch (e) {
                     console.warn('[App] Error recovering progress backup:', e)
@@ -1519,10 +1907,12 @@ class UniversalReaderApp {
                     console.warn('[App] Error recovering tracker backup:', e)
                     trackerResult = { recovered: [], filtered: [], failed: [{ error: e }], deferred: [] }
                 }
-                try {
-                    await db.recoverInterruptedAiMessages()
-                } catch (e) {
-                    console.warn('[App] Error recovering interrupted AI messages:', e)
+                if (!this.isSatelliteReaderWindow) {
+                    try {
+                        await db.recoverInterruptedAiMessages()
+                    } catch (e) {
+                        console.warn('[App] Error recovering interrupted AI messages:', e)
+                    }
                 }
                 const failedProgressBooks = new Set((progressResult?.failed || []).map(f => f.bookId || f.data?.bookId).filter(Boolean))
                 return {
@@ -1667,6 +2057,21 @@ class UniversalReaderApp {
             readerLiveTimer: document.getElementById('reader-live-timer'),
             readerEtaBadge: document.getElementById('reader-eta-badge'),
             btnBackToShelf: document.getElementById('btn-back-to-shelf'),
+            btnAddToShelf: document.getElementById('btn-add-to-shelf'),
+            btnOcrPage: document.getElementById('btn-ocr-page'),
+            btnNavHistoryBack: document.getElementById('btn-nav-history-back'),
+            btnNavHistoryForward: document.getElementById('btn-nav-history-forward'),
+            btnTogglePinWindow: document.getElementById('btn-toggle-pin-window'),
+            btnLinkFolder: document.getElementById('btn-link-folder'),
+            btnExportAnnotatedPdf: document.getElementById('btn-export-annotated-pdf'),
+            btnPinRefPage: document.getElementById('btn-pin-ref-page'),
+            readerPinnedReferencePanel: document.getElementById('reader-pinned-reference-panel'),
+            pinnedRefCanvas: document.getElementById('pinned-ref-canvas'),
+            pinnedRefPageBadge: document.getElementById('pinned-ref-page-badge'),
+            pinnedRefTitleText: document.getElementById('pinned-ref-title-text'),
+            btnClosePinnedRef: document.getElementById('btn-close-pinned-ref'),
+            btnPinnedRefPrev: document.getElementById('btn-pinned-ref-prev'),
+            btnPinnedRefNext: document.getElementById('btn-pinned-ref-next'),
             btnShelfSettings: document.getElementById('btn-shelf-settings'),
             btnNavLeft: document.getElementById('btn-nav-left'),
             btnNavRight: document.getElementById('btn-nav-right'),
@@ -3241,7 +3646,7 @@ class UniversalReaderApp {
                     }
                 } catch (dialogErr) {
                     console.error('[Import] Dialog error:', dialogErr)
-                    this.showToast('打开文件选择对话框失败', '⚠️')
+                    this.showToast('打开文件选择对话框失败', 'warning')
                 }
             } else {
                 this.dom.fileInput?.click()
@@ -3260,29 +3665,61 @@ class UniversalReaderApp {
         // OS File Association Listener with complete UI & lifecycle tear-down and serialized queue
         this._fileOpenQueue = Promise.resolve()
         const handleOpenFile = (fileInfo) => {
+            this._hasPendingExternalFileLaunch = true
+            if (this.bootStageTimings) {
+                this.bootStageTimings.launchMode = 'external-file'
+            }
             this._fileOpenQueue = this._fileOpenQueue.then(async () => {
                 if (!fileInfo) return
+
+                const curWinLabel = platformBridge.getCurrentWindowLabel ? platformBridge.getCurrentWindowLabel() : null
+                if (fileInfo.targetWindow && curWinLabel && fileInfo.targetWindow !== curWinLabel) {
+                    return
+                }
+
+                if (fileInfo.requestId) {
+                    this._handledOpenFileRequests = this._handledOpenFileRequests || new Set()
+                    if (this._handledOpenFileRequests.has(fileInfo.requestId)) return
+                    this._handledOpenFileRequests.add(fileInfo.requestId)
+                    if (this._handledOpenFileRequests.size > 100) {
+                        const oldest = this._handledOpenFileRequests.values().next().value
+                        this._handledOpenFileRequests.delete(oldest)
+                    }
+                }
+
                 let nativeSnapshotPath = null
+                let savedBookId = null
                 try {
-                    nativeSnapshotPath = await platformBridge.stagePdfSource(fileInfo.filePath)
-                    let buf = nativeSnapshotPath ? await platformBridge.readFileBuffer(nativeSnapshotPath) : fileInfo.buffer
-                    if (!buf || buf.byteLength === 0 || buf.length === 0) {
-                        if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
-                            platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
+                    const ext = (fileInfo.filename || '').split('.').pop()?.toLowerCase() || ''
+                    if (ext === 'pdf' && fileInfo.filePath) {
+                        let canReuseSnapshot = false
+                        try {
+                            const allBooks = await (db.getAllBooks ? db.getAllBooks().catch(() => []) : [])
+                            const normPathKey = p => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+                            const targetKey = normPathKey(fileInfo.filePath)
+                            const candidates = (allBooks || []).filter(b =>
+                                b.nativeSnapshotPath && b.documentHash &&
+                                (normPathKey(b.nativePath) === targetKey || normPathKey(b.filePath) === targetKey)
+                            )
+                            const hashFn = platformBridge.fsComputeFileHash || platformBridge.computeNativeFileHash
+                            if (candidates.length && typeof hashFn === 'function') {
+                                const currentHash = await hashFn.call(platformBridge, fileInfo.filePath)
+                                for (const candidate of candidates.filter(b => currentHash && currentHash === b.documentHash)) {
+                                    const size = candidate.nativeSnapshotSize || candidate.size || 0
+                                    const valid = typeof platformBridge.validatePdfSnapshot === 'function' && await platformBridge.validatePdfSnapshot(candidate.nativeSnapshotPath, size)
+                                    if (!valid) continue
+                                    nativeSnapshotPath = { path: candidate.nativeSnapshotPath, size, documentHash: candidate.documentHash, revision: candidate.blobRevision || null }
+                                    canReuseSnapshot = true
+                                    break
+                                }
+                            }
+                        } catch (_) {}
+
+                        if (!canReuseSnapshot) {
+                            nativeSnapshotPath = await platformBridge.stagePdfSource(fileInfo.filePath)
                         }
-                        nativeSnapshotPath = null
                     }
-                    if ((!buf || buf.byteLength === 0 || buf.length === 0) && fileInfo.filePath && platformBridge.readFileBuffer) {
-                        buf = await platformBridge.readFileBuffer(fileInfo.filePath)
-                    }
-                    if (!buf || (buf.byteLength === 0 && buf.length === 0)) return
-                    if (Array.isArray(buf)) {
-                        buf = new Uint8Array(buf).buffer
-                    } else if (ArrayBuffer.isView(buf) && !(buf instanceof ArrayBuffer)) {
-                        buf = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
-                    } else if (typeof buf.arrayBuffer === 'function') {
-                        buf = await buf.arrayBuffer()
-                    }
+
                     // 1. Close any active modal dialogs
                     const modals = [
                         this.dom.globalModalBackdrop,
@@ -3312,13 +3749,144 @@ class UniversalReaderApp {
                         await this.closeReader()
                     }
 
-                    const fileObj = new File([buf], fileInfo.filename)
-                    const bookId = await this.processAndSaveBook(fileObj, undefined, fileInfo.filePath, nativeSnapshotPath)
-                    if (bookId) {
-                        await this.openBook(bookId)
+                    // Check if book with this path or snapshot already exists in DB (filter all same-path candidates independent of lastReadAt sort order)
+                    const allBooks = await (db.getAllBooks ? db.getAllBooks().catch(() => []) : [])
+                    const stagedDesc = (nativeSnapshotPath && typeof nativeSnapshotPath === 'object') ? nativeSnapshotPath : null
+                    const snapshotPath = stagedDesc ? stagedDesc.path : String(nativeSnapshotPath || '')
+                    this.markBootStage?.('stage')
+                    if (this.bootStageTimings && stagedDesc) {
+                        if (stagedDesc.copyHashMs != null) this.bootStageTimings.stageCopyHashMs = stagedDesc.copyHashMs
+                        if (stagedDesc.flushMs != null) this.bootStageTimings.stageFlushMs = stagedDesc.flushMs
+                        if (stagedDesc.stageTotalMs != null) this.bootStageTimings.stageTotalMs = stagedDesc.stageTotalMs
+                    }
+
+                    const normPathKey = p => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+                    const targetPathKey = fileInfo.filePath ? normPathKey(fileInfo.filePath) : ''
+                    const snapshotPathKey = snapshotPath ? normPathKey(snapshotPath) : ''
+
+                    const pathCandidates = (allBooks || []).filter(b =>
+                        (targetPathKey && (normPathKey(b.nativePath) === targetPathKey || normPathKey(b.filePath) === targetPathKey)) ||
+                        (snapshotPathKey && normPathKey(b.nativeSnapshotPath) === snapshotPathKey)
+                    )
+
+                    let existingBook = null
+                    if (stagedDesc?.documentHash) {
+                        existingBook = pathCandidates.find(b => b.documentHash && b.documentHash === stagedDesc.documentHash) || null
+                        if (!existingBook) {
+                            existingBook = (allBooks || []).find(b => b.documentHash && b.documentHash === stagedDesc.documentHash) || null
+                        }
+                        if (!existingBook) {
+                            existingBook = pathCandidates.find(b =>
+                                !b.documentHash &&
+                                !b.isOffline &&
+                                (!stagedDesc.size || !b.size || b.size === stagedDesc.size)
+                            ) || null
+                        }
+                    } else if (pathCandidates.length > 0) {
+                        existingBook = pathCandidates.find(b =>
+                            !b.isOffline &&
+                            b.hasLocalFile !== false &&
+                            (!stagedDesc?.size || !b.size || b.size === stagedDesc.size)
+                        ) || pathCandidates.find(b =>
+                            !stagedDesc?.size || !b.size || b.size === stagedDesc.size
+                        ) || null
+                    }
+
+                    if (existingBook) {
+                        const hasHashMismatch = Boolean(stagedDesc?.documentHash && existingBook.documentHash && existingBook.documentHash !== stagedDesc.documentHash)
+                        const hasSizeMismatch = Boolean(stagedDesc?.size && existingBook.size && stagedDesc.size !== existingBook.size)
+
+                        if (hasHashMismatch || hasSizeMismatch) {
+                            // Content at this path has changed! Do NOT overwrite existingBook or attach its old notes/progress.
+                            existingBook = null
+                        } else {
+                            const isConfirmedSameHash = Boolean(stagedDesc?.documentHash && existingBook.documentHash && stagedDesc.documentHash === existingBook.documentHash)
+                            if (isConfirmedSameHash && existingBook.nativeSnapshotPath && snapshotPath && snapshotPath !== existingBook.nativeSnapshotPath) {
+                                // Redundant stage of identical content: reclaim the new duplicate snapshot and keep existing snapshot
+                                if (platformBridge.reclaimSnapshot) {
+                                    platformBridge.reclaimSnapshot(snapshotPath).catch(() => {})
+                                }
+                                if (fileInfo.filePath && existingBook.nativePath !== fileInfo.filePath) {
+                                    existingBook.nativePath = fileInfo.filePath
+                                    existingBook.filePath = fileInfo.filePath
+                                    existingBook.updatedAt = Date.now()
+                                    await db.saveBook(existingBook)
+                                }
+                            } else {
+                                const hasRevMismatch = Boolean(stagedDesc?.revision && existingBook.blobRevision && existingBook.blobRevision !== stagedDesc.revision)
+                                const hasPathMismatch = Boolean(snapshotPath && existingBook.nativeSnapshotPath && snapshotPath !== existingBook.nativeSnapshotPath)
+                                if (hasRevMismatch || hasPathMismatch || (!existingBook.nativeSnapshotPath && snapshotPath)) {
+                                    if (stagedDesc?.documentHash) existingBook.documentHash = stagedDesc.documentHash
+                                    if (stagedDesc?.revision) existingBook.blobRevision = stagedDesc.revision
+                                    if (snapshotPath) existingBook.nativeSnapshotPath = snapshotPath
+                                    if (stagedDesc?.size) {
+                                        existingBook.size = stagedDesc.size
+                                        existingBook.nativeSnapshotSize = stagedDesc.size
+                                    }
+                                    existingBook.updatedAt = Date.now()
+                                    await db.saveBook(existingBook)
+                                }
+                            }
+                            savedBookId = existingBook.id
+                        }
+                    }
+
+                    if (!existingBook && ext === 'pdf' && nativeSnapshotPath) {
+                        // PDF Fast Path: directly create lightweight book record without reading full bytes into JS
+                        const cleanTitle = fileInfo.filename.replace(/\.[^/.]+$/, '')
+                        const id = 'ext_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6)
+                        const extBook = {
+                            id,
+                            title: cleanTitle,
+                            format: 'pdf',
+                            size: stagedDesc?.size || 0,
+                            fileSize: stagedDesc?.size || 0,
+                            nativeSnapshotSize: stagedDesc?.size || 0,
+                            nativeSnapshotOnly: true,
+                            documentHash: stagedDesc?.documentHash || null,
+                            blobRevision: stagedDesc?.revision || null,
+                            hasLocalFile: true,
+                            isRecentOnly: true,
+                            nativeSnapshotPath: snapshotPath,
+                            nativePath: fileInfo.filePath,
+                            filePath: fileInfo.filePath,
+                            addedAt: Date.now(),
+                            updatedAt: Date.now(),
+                            progress: { fraction: 0, updatedAt: Date.now() }
+                        }
+                        await db.saveBook(extBook)
+                        savedBookId = id
+                    } else if (!existingBook) {
+                        // Non-PDF or non-staged: read buffer via binary IPC and process
+                        let buf = fileInfo.buffer
+                        if ((!buf || buf.byteLength === 0 || buf.length === 0) && fileInfo.filePath && platformBridge.readFileBuffer) {
+                            buf = await platformBridge.readFileBuffer(fileInfo.filePath)
+                        }
+                        if (!buf || (buf.byteLength === 0 && buf.length === 0)) return
+                        if (Array.isArray(buf)) {
+                            buf = new Uint8Array(buf).buffer
+                        } else if (ArrayBuffer.isView(buf) && !(buf instanceof ArrayBuffer)) {
+                            buf = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+                        } else if (typeof buf.arrayBuffer === 'function') {
+                            buf = await buf.arrayBuffer()
+                        }
+                        const fileObj = new File([buf], fileInfo.filename)
+                        savedBookId = await this.processAndSaveBook(fileObj, undefined, fileInfo.filePath, nativeSnapshotPath)
+                        if (savedBookId && db.getBook && db.saveBook) {
+                            const b = await db.getBook(savedBookId)
+                            if (b) {
+                                b.isRecentOnly = true
+                                await db.saveBook(b)
+                            }
+                        }
+                    }
+
+                    if (savedBookId) {
+                        const shouldOpenInPlace = !this.currentBookId
+                        await this.openBook(savedBookId, null, { forceInPlace: shouldOpenInPlace })
                     }
                 } catch (err) {
-                    if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
+                    if (!savedBookId && nativeSnapshotPath && platformBridge.reclaimSnapshot) {
                         platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
                     }
                     console.error('Failed to open file from OS event:', err)
@@ -3441,6 +4009,8 @@ class UniversalReaderApp {
             resizeTimer = setTimeout(() => {
                 if (this.shelfViewMode === 'shelf' && this.dom.bookshelfView?.style.display !== 'none') {
                     if (this.currentBooksList) this.renderBooksShelf(this.currentBooksList)
+                } else if (this.shelfViewMode === 'grid' && this._isGridVirtualized && this._virtualBooks) {
+                    this._renderVirtualizedBooksGrid(this._virtualBooks)
                 } else if (this.currentBookId && (this.foliateView?.isFixedLayout || this.currentBookData?.format === 'pdf')) {
                     this.renderPdfDrawingOverlayForCurrentPage()
                 }
@@ -3455,26 +4025,7 @@ class UniversalReaderApp {
         })
 
         // Sidebar Collapse & Expand Toggle (Interactive user toggle)
-        let savedSidebarState = null
-        try { savedSidebarState = localStorage.getItem('linden_leaf_sidebar_collapsed') } catch (e) {}
-        this.sidebarUserCollapsed = savedSidebarState !== '0' // Default to collapsed ('1') on first launch (null), but respect '0' (expanded)
-
-        this.dom.btnSidebarCollapse?.addEventListener('click', () => {
-            this.sidebarUserCollapsed = true
-            document.getElementById('bookshelf-view')?.classList.add('sidebar-collapsed')
-            try { localStorage.setItem('linden_leaf_sidebar_collapsed', '1') } catch (e) {}
-        })
-        this.dom.btnHeaderExpandSidebar?.addEventListener('click', () => {
-            this.sidebarUserCollapsed = false
-            document.getElementById('bookshelf-view')?.classList.remove('sidebar-collapsed')
-            try { localStorage.setItem('linden_leaf_sidebar_collapsed', '0') } catch (e) {}
-        })
-
-        if (this.sidebarUserCollapsed) {
-            document.getElementById('bookshelf-view')?.classList.add('sidebar-collapsed')
-        } else {
-            document.getElementById('bookshelf-view')?.classList.remove('sidebar-collapsed')
-        }
+        this.initShelfSidebar()
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 document.getElementById('bookshelf-view')?.classList.remove('notransition')
@@ -3511,60 +4062,7 @@ class UniversalReaderApp {
                 }
             }, { passive: true })
 
-            // Intentional Wheel Detection between Screen 1 (Hero Lounge) and Screen 2 (Book Shelf Grid)
-            // Eliminates "首屏下滑进入第二屏的速度快的离谱" by replacing instant snap with 800ms velvety glide
-            let wheelDeltaAccumulator = 0
-            let wheelResetTimer = null
-
-            this.dom.booksWorkspace.addEventListener('wheel', (e) => {
-                if (this.shelfCategory !== 'all' || this.shelfViewMode !== 'grid') return
-                if (!this.dom.modernHeroThreshold || this.dom.modernHeroThreshold.style.display === 'none') return
-
-                if (this.isGliding) {
-                    e.preventDefault()
-                    return
-                }
-
-                const scrollTop = this.dom.booksWorkspace.scrollTop
-                const shelfTop = this.cachedShelfHeight || (window.innerHeight - 52)
-
-                // Screen 1: Hero Lounge (top)
-                if (scrollTop < 40) {
-                    if (e.deltaY > 0) {
-                        wheelDeltaAccumulator += e.deltaY
-                        clearTimeout(wheelResetTimer)
-                        wheelResetTimer = setTimeout(() => {
-                            wheelDeltaAccumulator = 0
-                        }, 240)
-
-                        if (wheelDeltaAccumulator > 38) {
-                            e.preventDefault()
-                            wheelDeltaAccumulator = 0
-                            this.glideToShelf()
-                        }
-                    } else {
-                        wheelDeltaAccumulator = 0
-                    }
-                } 
-                // Screen 2: At the very top of the shelf (only within 12px of shelfTop)
-                else if (Math.abs(scrollTop - shelfTop) <= 12) {
-                    if (e.deltaY < 0) {
-                        wheelDeltaAccumulator += e.deltaY
-                        clearTimeout(wheelResetTimer)
-                        wheelResetTimer = setTimeout(() => {
-                            wheelDeltaAccumulator = 0
-                        }, 240)
-
-                        if (wheelDeltaAccumulator < -38) {
-                            e.preventDefault()
-                            wheelDeltaAccumulator = 0
-                            this.glideToHero()
-                        }
-                    } else {
-                        wheelDeltaAccumulator = 0
-                    }
-                }
-            }, { passive: false })
+            // Modern bookshelf uses native CSS smooth scrolling; 800ms wheel hijacking removed for responsive hand-feel
         }
 
 
@@ -3839,6 +4337,335 @@ class UniversalReaderApp {
         this.dom.btnBackToShelf?.addEventListener('click', () => this.closeReader())
         this.dom.btnNavLeft?.addEventListener('click', () => this.turnPagePrev())
         this.dom.btnNavRight?.addEventListener('click', () => this.turnPageNext())
+        this.dom.btnNavHistoryBack?.addEventListener('click', () => this.navHistory?.back())
+        this.dom.btnNavHistoryForward?.addEventListener('click', () => this.navHistory?.forward())
+
+        // F04: Window Always On Top toggle
+        this._isPinnedWindow = false
+        this.dom.btnTogglePinWindow?.addEventListener('click', async () => {
+            this._isPinnedWindow = !this._isPinnedWindow
+            if (window.platformBridge?.windowSetAlwaysOnTop) {
+                await window.platformBridge.windowSetAlwaysOnTop(this._isPinnedWindow)
+            }
+            this.dom.btnTogglePinWindow.classList.toggle('active', this._isPinnedWindow)
+            this.dom.btnTogglePinWindow.title = this._isPinnedWindow ? '取消置顶 (已置顶)' : '窗口置顶 (F04)'
+        })
+
+        // F01: Add to Shelf for external/recent files
+        this.dom.btnAddToShelf?.addEventListener('click', async () => {
+            if (!this.currentBookId || !this.currentBookData) return
+            this.currentBookData.isRecentOnly = false
+            await db.saveBook(this.currentBookData)
+            this.dom.btnAddToShelf.style.display = 'none'
+            this.showToast('已正式加入书架', 'success')
+            await this.refreshBookshelf()
+        })
+
+        // F11: OCR recognize current page
+        this.dom.btnOcrPage?.addEventListener('click', async () => {
+            if (!this.currentBookId || this.currentBookData?.format !== 'pdf') return
+            if (this._isPageOcrRunning) {
+                this.showToast('正在识别当前页，请稍候...', 'info')
+                return
+            }
+            this._isPageOcrRunning = true
+
+            // Cancel any prior in-flight page OCR task
+            if (this._pageOcrAbortController) {
+                this._pageOcrAbortController.abort()
+            }
+            this._pageOcrAbortController = new AbortController()
+            const signal = this._pageOcrAbortController.signal
+
+            // Capture session snapshot
+            const targetBookId = this.currentBookId
+            const targetViewport = this.pdfViewport
+            const targetDriver = this.pdfDriver || this.pdfViewport?.driver
+            const targetDocHash = this.currentBookData?.documentHash || null
+            const targetEpoch = this._currentBookEpoch ?? this._readerEpoch ?? 0
+            const isOcrSessionStale = () => {
+                const curEpoch = this._currentBookEpoch ?? this._readerEpoch ?? 0
+                return Boolean(
+                    signal.aborted ||
+                    this.currentBookId !== targetBookId ||
+                    this.pdfViewport !== targetViewport ||
+                    curEpoch !== targetEpoch ||
+                    targetViewport?._destroyed ||
+                    targetViewport?.destroyed
+                )
+            }
+            // currentPage is 0-indexed in pdfViewport
+            const pageIndex = targetViewport?.currentPage ?? 0
+
+            // Check persistent DB cache first
+            const cacheKey = `linden_ocr_${targetDocHash || targetBookId}_p${pageIndex}`
+            try {
+                if (typeof db.getSetting === 'function') {
+                    const cachedSpans = await db.getSetting(cacheKey)
+                    if (isOcrSessionStale()) {
+                        this._isPageOcrRunning = false
+                        return
+                    }
+                    if (Array.isArray(cachedSpans) && cachedSpans.length > 0) {
+                        targetViewport.setPageOcrData(pageIndex, cachedSpans)
+                        this.showToast(`第 ${pageIndex + 1} 页已恢复文字层（缓存）`, 'info')
+                        this._isPageOcrRunning = false
+                        return
+                    }
+                }
+            } catch (_) {
+                if (isOcrSessionStale()) {
+                    this._isPageOcrRunning = false
+                    return
+                }
+            }
+
+            if (isOcrSessionStale()) {
+                this._isPageOcrRunning = false
+                return
+            }
+            this.showToast(`正在 OCR 识别第 ${pageIndex + 1} 页...`, 'info')
+            let canvas = null
+            try {
+                const ocrMod = await import('./ocr-service.js')
+                const activeOcr = ocrMod?.ocrService || (typeof ocrMod?.OcrService === 'function' ? new ocrMod.OcrService() : null) || ocrMod?.default || ocrMod
+                const scale = 1.5
+                const driver = targetDriver || this.pdfDriver || this.pdfViewport?.driver
+                if (typeof driver?.renderPageBitmap === 'function') {
+                    const bmp = await driver.renderPageBitmap(pageIndex, scale)
+                    canvas = bmp?.canvas || (bmp?.tagName === 'CANVAS' ? bmp : null)
+                } else if (typeof driver?.renderPage === 'function') {
+                    const res = await driver.renderPage(pageIndex, scale)
+                    canvas = (res?.tagName === 'CANVAS') ? res : (res?.canvas || res)
+                }
+                if (isOcrSessionStale()) {
+                    return
+                }
+                if (canvas && activeOcr?.recognizeCanvas) {
+                    const result = await activeOcr.recognizeCanvas(canvas, signal, scale)
+                    // Post-await verification: check book, viewport, epoch, and destroy state
+                    if (isOcrSessionStale()) {
+                        return
+                    }
+                    if (result?.spans?.length > 0) {
+                        targetViewport?.setPageOcrData?.(pageIndex, result.spans)
+                        if (typeof db.setSetting === 'function') {
+                            await db.setSetting(cacheKey, result.spans).catch(() => {})
+                        }
+                        this.showToast(`第 ${pageIndex + 1} 页已生成可划选文本层`, 'success')
+                    } else {
+                        this.showToast(`第 ${pageIndex + 1} 页未识别到文字`, 'info')
+                    }
+                }
+            } catch (err) {
+                if (signal.aborted || this.currentBookId !== targetBookId) return
+                console.warn('[OCR] page recognition failed:', err)
+                this.showToast('OCR 识别失败: ' + (err.message || String(err)), 'warning')
+            } finally {
+                this._isPageOcrRunning = false
+                if (canvas) {
+                    if (typeof canvas.remove === 'function') canvas.remove()
+                    canvas.width = 0
+                    canvas.height = 0
+                }
+            }
+        })
+
+        // F07: Link local folder
+        this.dom.btnLinkFolder?.addEventListener('click', () => this.linkLocalFolder())
+
+        // F12: Export annotated PDF
+        this.dom.btnExportAnnotatedPdf?.addEventListener('click', () => this.exportAnnotatedPdf())
+
+        // F06: Pinned Reference Panel actions
+        this.dom.btnPinRefPage?.addEventListener('click', () => {
+            if (!this.currentBookId || this.currentBookData?.format !== 'pdf') return
+            const curPage = (this.pdfViewport?.currentPage ?? 0) + 1
+            this.pinReferencePage(curPage)
+        })
+        this.dom.btnClosePinnedRef?.addEventListener('click', () => {
+            if (this.dom.readerPinnedReferencePanel) this.dom.readerPinnedReferencePanel.style.display = 'none'
+        })
+        this.dom.btnPinnedRefPrev?.addEventListener('click', () => {
+            if (this._pinnedRefPageIndex > 1) this.pinReferencePage(this._pinnedRefPageIndex - 1)
+        })
+        this.dom.btnPinnedRefNext?.addEventListener('click', () => {
+            this.pinReferencePage((this._pinnedRefPageIndex || 1) + 1)
+        })
+
+        // S01: Manual TOC actions
+        document.getElementById('btn-add-page-to-toc')?.addEventListener('click', async () => {
+            if (!this.currentBookId) {
+                this.showToast('请先打开图书', 'info')
+                return
+            }
+            await this.addCurrentPageToToc()
+            if (this.currentPdfTOC) this.renderTOC(this.currentPdfTOC)
+        })
+
+        document.getElementById('btn-ocr-page-to-toc')?.addEventListener('click', async () => {
+            if (!this.currentBookId || this.currentBookData?.format !== 'pdf') {
+                this.showToast('仅支持 PDF 格式使用 OCR 辅助目录', 'info')
+                return
+            }
+            const expectedBookId = this.currentBookId
+            const expectedBookData = this.currentBookData
+            const expectedEpoch = this._currentBookEpoch
+            const targetViewport = this.pdfViewport
+            const pageIndex = targetViewport?.currentPage ?? 0
+            this.showToast(`正在提取第 ${pageIndex + 1} 页文本生成目录候选项...`, 'info')
+            let canvas = null
+            try {
+                const ocrMod = await import('./ocr-service.js')
+                const activeOcr = ocrMod?.ocrService || ocrMod?.default || ocrMod
+                const driver = this.pdfDriver || targetViewport?.driver
+                if (typeof driver?.renderPageBitmap === 'function') {
+                    const bmp = await driver.renderPageBitmap(pageIndex, 1.5)
+                    canvas = bmp?.canvas || bmp
+                }
+                if (canvas && activeOcr?.recognizeCanvas) {
+                    const result = await activeOcr.recognizeCanvas(canvas, null, 1.5)
+                    if (this.currentBookId !== expectedBookId || this.currentBookData !== expectedBookData || (expectedEpoch != null && this._currentBookEpoch !== expectedEpoch)) {
+                        return
+                    }
+                    if (result?.text) {
+                        const lines = result.text.split('\n')
+                        await this.parseOcrTocAndApply(lines, 0, { interactiveConfirm: true })
+                        if (this.currentPdfTOC) this.renderTOC(this.currentPdfTOC)
+                    }
+                }
+            } catch (err) {
+                this.showToast(`OCR 辅助目录识别失败: ${err.message || err}`, 'warning')
+            } finally {
+                if (canvas) {
+                    canvas.width = 0
+                    canvas.height = 0
+                    canvas = null
+                }
+            }
+        })
+
+        document.getElementById('btn-export-toc-json')?.addEventListener('click', async () => {
+            if (!this.currentBookId) return
+            try {
+                const json = await this.exportManualToc('json')
+                const filename = `${this.currentBookData?.title || 'book'}_toc.json`
+                if (window.platformBridge?.exportTextFile) {
+                    await window.platformBridge.exportTextFile(filename, json, 'application/json')
+                }
+                this.showToast('目录 JSON 已导出', 'success')
+            } catch (err) {
+                this.showToast(`导出失败: ${err.message || err}`, 'warning')
+            }
+        })
+
+        document.getElementById('btn-export-toc-md')?.addEventListener('click', async () => {
+            if (!this.currentBookId) return
+            try {
+                const md = await this.exportManualToc('markdown')
+                const filename = `${this.currentBookData?.title || 'book'}_toc.md`
+                if (window.platformBridge?.exportTextFile) {
+                    await window.platformBridge.exportTextFile(filename, md, 'text/markdown')
+                }
+                this.showToast('目录 Markdown 已导出', 'success')
+            } catch (err) {
+                this.showToast(`导出失败: ${err.message || err}`, 'warning')
+            }
+        })
+
+        // F05: PDF Crop non-destructive white margin trimming
+        const cropModeSelect = document.getElementById('setting-pdf-crop-mode')
+        const cropWrap = document.getElementById('pdf-crop-controls-wrap')
+        const cropTb = document.getElementById('setting-pdf-crop-tb')
+        const cropLr = document.getElementById('setting-pdf-crop-lr')
+        const cropTbVal = document.getElementById('setting-pdf-crop-tb-val')
+        const cropLrVal = document.getElementById('setting-pdf-crop-lr-val')
+
+        const updateCropSettings = () => {
+            const mode = cropModeSelect?.value || 'none'
+            if (cropWrap) cropWrap.style.display = mode === 'none' ? 'none' : 'flex'
+            const tb = parseInt(cropTb?.value || '0', 10)
+            const lr = parseInt(cropLr?.value || '0', 10)
+            if (cropTbVal) cropTbVal.textContent = `${tb}%`
+            if (cropLrVal) cropLrVal.textContent = `${lr}%`
+            const settings = {
+                mode,
+                margins: { top: tb, bottom: tb, left: lr, right: lr },
+                oddMargins: { top: tb, bottom: tb, left: lr, right: Math.max(0, lr - 2) },
+                evenMargins: { top: tb, bottom: tb, left: Math.max(0, lr - 2), right: lr }
+            }
+            this.pdfViewport?.setCropSettings?.(settings)
+            if (this.currentBookId) {
+                db.updateBook(this.currentBookId, { cropSettings: settings }).catch(() => {})
+                if (this.currentBookData) this.currentBookData.cropSettings = settings
+            }
+        }
+        cropModeSelect?.addEventListener('change', updateCropSettings)
+        cropTb?.addEventListener('input', updateCropSettings)
+        cropLr?.addEventListener('input', updateCropSettings)
+
+        // F13: Data location and backup management
+        const populateStoragePaths = async () => {
+            try {
+                const paths = await window.platformBridge?.fsGetAppPaths?.()
+                if (paths) {
+                    const booksEl = document.getElementById('storage-path-books')
+                    const dataEl = document.getElementById('storage-path-data')
+                    const cacheEl = document.getElementById('storage-path-cache')
+                    const linkedRoots = (await db.getSetting('linkedFolderRoots', [])) || []
+                    if (booksEl) {
+                        booksEl.textContent = linkedRoots.length > 0
+                            ? linkedRoots.join('; ')
+                            : (paths.documents_dir || '未链接外部目录（原书保存在其打开位置）')
+                    }
+                    if (dataEl) {
+                        dataEl.textContent = paths.indexeddb_dir || paths.webview_profile_dir || paths.data_dir || '本地数据库目录'
+                    }
+                    if (cacheEl) {
+                        cacheEl.textContent = paths.snapshot_dir || paths.cache_dir || '本地快照目录'
+                    }
+                }
+            } catch (err) {
+                console.warn('[F13] populateStoragePaths failed:', err)
+            }
+        }
+        populateStoragePaths()
+
+        document.getElementById('btn-open-books-folder')?.addEventListener('click', async () => {
+            const paths = await window.platformBridge?.fsGetAppPaths?.()
+            const linkedRoots = (await db.getSetting('linkedFolderRoots', [])) || []
+            const target = (linkedRoots.length > 0 ? linkedRoots[0] : null) || paths?.documents_dir || paths?.data_dir
+            if (target) window.platformBridge?.fsOpenInExplorer?.(target)
+        })
+        document.getElementById('btn-open-data-folder')?.addEventListener('click', async () => {
+            const paths = await window.platformBridge?.fsGetAppPaths?.()
+            const target = paths?.indexeddb_dir || paths?.webview_profile_dir || paths?.data_dir
+            if (target) window.platformBridge?.fsOpenInExplorer?.(target)
+        })
+        document.getElementById('btn-open-cache-folder')?.addEventListener('click', async () => {
+            const paths = await window.platformBridge?.fsGetAppPaths?.()
+            const target = paths?.snapshot_dir || paths?.cache_dir
+            if (target) window.platformBridge?.fsOpenInExplorer?.(target)
+        })
+        document.getElementById('btn-f13-export-backup')?.addEventListener('click', () => {
+            document.getElementById('btn-export-full-data-backup')?.click()
+        })
+        document.getElementById('btn-f13-restore-backup')?.addEventListener('click', () => {
+            document.getElementById('btn-restore-full-data-backup')?.click()
+        })
+
+        // Mouse side-buttons (button 3: Back, button 4: Forward) for reader location history
+        window.addEventListener('mouseup', e => {
+            if (this.dom.bookshelfView?.style.display === 'none') {
+                if (e.button === 3) {
+                    e.preventDefault()
+                    this.navHistory?.back()
+                } else if (e.button === 4) {
+                    e.preventDefault()
+                    this.navHistory?.forward()
+                }
+            }
+        })
 
         let contentAreaHadActiveSelectionOnDown = false
         this.dom.readerContentArea?.addEventListener('pointerdown', e => {
@@ -4729,7 +5556,7 @@ class UniversalReaderApp {
                     }, 4000)
                 }
             } else {
-                this.showToast(`复制失败: ${res.error || '剪贴板权限受限，请使用保存图片下载'}`, '⚠️')
+                this.showToast(`复制失败: ${res.error || '剪贴板权限受限，请使用保存图片下载'}`, 'warning')
             }
         })
 
@@ -4959,6 +5786,18 @@ class UniversalReaderApp {
             })
         })
 
+        // S01-S05 Reader Toolbar & Sync Controls
+        this.initPdfMoreTools()
+        document.getElementById('btn-toggle-reading-ruler')?.addEventListener('click', () => this.toggleReadingRuler())
+        document.getElementById('btn-toggle-auto-scroll')?.addEventListener('click', () => this.toggleAutoScroll())
+        document.getElementById('btn-toggle-column-reading')?.addEventListener('click', () => this.toggleColumnReading())
+        document.getElementById('btn-config-column-regions')?.addEventListener('click', () => this.configureColumnRegionsUI())
+        document.getElementById('btn-pdf-split-viewport')?.addEventListener('click', () => this.toggleSecondaryPdfViewport())
+        document.getElementById('btn-scan-gray-boost')?.addEventListener('click', () => this.toggleScanPreset('gray-boost'))
+        document.getElementById('btn-scan-text-darken')?.addEventListener('click', () => this.toggleScanPreset('text-darken'))
+        document.getElementById('btn-oauth-login')?.addEventListener('click', () => this.handleOAuthLogin())
+        document.getElementById('btn-browse-cloud-books')?.addEventListener('click', () => this.openCloudBookPickerUI())
+
         // Single Book Details Modal
         this.dom.btnCloseBookDetails?.addEventListener('click', () => this.closeBookDetailsModal())
         this.dom.modalBookDetails?.addEventListener('click', e => {
@@ -4990,7 +5829,7 @@ class UniversalReaderApp {
             if (text) {
                 this.runAiRequest(createTranslationPrompt(text), SYSTEM_PROMPTS.translate)
             } else {
-                this.showToast('请先选取需要翻译的文本', 'ℹ️')
+                this.showToast('请先选取需要翻译的文本', 'info')
             }
         })
         this.dom.btnAiExplain?.addEventListener('click', () => {
@@ -4998,7 +5837,7 @@ class UniversalReaderApp {
             if (text) {
                 this.runAiRequest(createExplainPrompt(text), SYSTEM_PROMPTS.explain)
             } else {
-                this.showToast('请先选取需要解析的文本', 'ℹ️')
+                this.showToast('请先选取需要解析的文本', 'info')
             }
         })
         this.dom.btnAiAsk?.addEventListener('click', () => {
@@ -5139,7 +5978,7 @@ class UniversalReaderApp {
                         }
                     }
                 } else {
-                    this.showToast(isPercentageMode ? '请输入有效的进度百分比 (0 ~ 100)' : '请输入有效的页码数字或百分比', '⚠️')
+                    this.showToast(isPercentageMode ? '请输入有效的进度百分比 (0 ~ 100)' : '请输入有效的页码数字或百分比', 'warning')
                 }
             }
         })
@@ -5480,6 +6319,22 @@ class UniversalReaderApp {
         })
     }
 
+    initShelfSidebar() {
+        // Each launch starts collapsed, including profiles with a legacy '0'.
+        this.sidebarUserCollapsed = true
+        const view = document.getElementById('bookshelf-view')
+        view?.classList.add('sidebar-collapsed')
+        this._shelfSidebarController?.abort()
+        const controller = new AbortController()
+        this._shelfSidebarController = controller
+        const setCollapsed = collapsed => {
+            this.sidebarUserCollapsed = collapsed
+            view?.classList.toggle('sidebar-collapsed', collapsed)
+        }
+        this.dom.btnSidebarCollapse?.addEventListener('click', () => setCollapsed(true), { signal: controller.signal })
+        this.dom.btnHeaderExpandSidebar?.addEventListener('click', () => setCollapsed(false), { signal: controller.signal })
+    }
+
     async switchShelfCategory(cat, options = {}) {
         // Support 'finished' navigation alias -> map to overview with finished status
         if (cat === 'finished') {
@@ -5527,6 +6382,7 @@ class UniversalReaderApp {
         // Update header category title
         const titles = {
             all: '全部图书',
+            recent: '最近打开',
             favorite: '收藏的书',
             overview: '阅读总览',
             stats: '阅读统计',
@@ -5955,7 +6811,7 @@ class UniversalReaderApp {
                     if (newName && newName.trim() && newName.trim() !== t.name) {
                         const res = await renameTagGlobally(t.name, newName.trim())
                         if (res && res.success) {
-                            this.showToast(`已重命名标签，影响 ${res.updatedCount} 本书`, '✓')
+                            this.showToast(`已重命名标签，影响 ${res.updatedCount} 本书`, 'success')
                             if (this.overviewSelectedTags.has(t.name)) {
                                 this.overviewSelectedTags.delete(t.name)
                                 this.overviewSelectedTags.add(normalizeTag(newName.trim()))
@@ -5977,7 +6833,7 @@ class UniversalReaderApp {
                     if (confirmed) {
                         const res = await deleteTagGlobally(t.name)
                         if (res && res.success) {
-                            this.showToast(`已删除标签「${t.name}」，影响 ${res.updatedCount} 本书`, '✓')
+                            this.showToast(`已删除标签「${t.name}」，影响 ${res.updatedCount} 本书`, 'success')
                             if (this.overviewSelectedTags.has(t.name)) {
                                 this.overviewSelectedTags.delete(t.name)
                                 this.updateOverviewActiveFiltersBar()
@@ -7067,15 +7923,18 @@ const select = document.getElementById('setting-pdf-page-appearance')
     }
 
     async navigateReaderToLocation(targetLoc) {
-        if (!targetLoc) return
+        if (targetLoc == null) return
         try {
             if (typeof targetLoc === 'object' && targetLoc !== null) {
-                if (targetLoc.type === 'pdf' && typeof targetLoc.page === 'number' && this.pdfViewport) {
-                    this.pdfViewport.scrollToPage(Math.max(1, targetLoc.page) - 1, true)
-                    return
+                const yRatio = typeof targetLoc.yRatio === 'number' ? targetLoc.yRatio : 0
+                let targetPage0 = null
+                if (typeof targetLoc.pageIndex === 'number') {
+                    targetPage0 = Math.max(0, targetLoc.pageIndex)
+                } else if (typeof targetLoc.page === 'number') {
+                    targetPage0 = Math.max(0, targetLoc.page - 1)
                 }
-                if (typeof targetLoc.page === 'number' && this.pdfViewport) {
-                    this.pdfViewport.scrollToPage(Math.max(1, targetLoc.page) - 1, true)
+                if (targetPage0 != null && this.pdfViewport) {
+                    this.pdfViewport.scrollToPage(targetPage0, yRatio)
                     return
                 }
                 if (targetLoc.cfi && this.foliateView) {
@@ -7090,11 +7949,12 @@ const select = document.getElementById('setting-pdf-page-appearance')
                 await this.foliateView.goTo(targetLoc)
             } else if (typeof targetLoc === 'number') {
                 if (this.pdfViewport) {
-                    if (targetLoc <= 1 && targetLoc > 0 && this.pdfDriver?.pageCount > 1) {
-                        const pg = Math.max(0, Math.round(targetLoc * (this.pdfDriver.pageCount - 1)))
-                        this.pdfViewport.scrollToPage(pg, true)
+                    const totalPages = this.pdfDriver?.numPages || this.pdfViewport?.pageCount || 1
+                    if (targetLoc <= 1 && targetLoc > 0 && totalPages > 1) {
+                        const pg = Math.max(0, Math.round(targetLoc * (totalPages - 1)))
+                        this.pdfViewport.scrollToPage(pg, 0)
                     } else {
-                        this.pdfViewport.scrollToPage(Math.max(0, Math.round(targetLoc) - 1), true)
+                        this.pdfViewport.scrollToPage(Math.max(0, Math.round(targetLoc) - 1), 0)
                     }
                 } else if (this.foliateView?.goToFraction) {
                     await this.foliateView.goToFraction(targetLoc)
@@ -7118,7 +7978,7 @@ const select = document.getElementById('setting-pdf-page-appearance')
             let book = (this.currentBooksList || []).find(b => b.id === bookId)
             if (!book) book = await db.getBook(bookId)
             if (!book) {
-                this.showToast('找不到该书籍！', '⚠️')
+                this.showToast('找不到该书籍！', 'warning')
                 return { success: false }
             }
             if (book.isCloudOnly) {
@@ -7302,30 +8162,63 @@ const select = document.getElementById('setting-pdf-page-appearance')
             // Expand all matches incrementally (30 at a time)
             if (expandBtn) {
                 let renderedCount = initialMatches.length
-                let cachedMatches = null
+                const totalHits = bookResult.totalHits || initialMatches.length
+                let searchCursor = null
+                let isFirstExpansion = true
 
                 const loadAndRenderMore = async () => {
                     expandBtn.disabled = true
                     expandBtn.innerText = '正在加载更多匹配...'
-                    if (!cachedMatches) {
-                        try {
-                            cachedMatches = await fullTextSearchEngine.searchBookFull(bookResult.bookId, query.trim())
-                        } catch (err) {
-                            console.warn('Failed to load full matches for book:', bookResult.bookId, err)
-                            cachedMatches = initialMatches
+                    try {
+                        const pageSize = 30
+                        let newItems = []
+                        if (fullTextSearchEngine.searchBookPage) {
+                            let pageRes = await fullTextSearchEngine.searchBookPage(bookResult.bookId, query.trim(), {
+                                cursor: searchCursor,
+                                pageSize: isFirstExpansion ? (pageSize + renderedCount) : pageSize,
+                                signal
+                            })
+                            if (pageRes?.cursorInvalid) {
+                                // Stale cursor detected: clear old results and restart from page 1
+                                listEl.innerHTML = ''
+                                renderedCount = 0
+                                searchCursor = null
+                                isFirstExpansion = false
+                                pageRes = await fullTextSearchEngine.searchBookPage(bookResult.bookId, query.trim(), {
+                                    cursor: null,
+                                    pageSize: pageSize,
+                                    signal
+                                })
+                            }
+                            searchCursor = pageRes.nextCursor
+                            const fetchedItems = pageRes.items || []
+                            if (isFirstExpansion) {
+                                newItems = fetchedItems.slice(renderedCount)
+                                isFirstExpansion = false
+                            } else {
+                                newItems = fetchedItems
+                            }
+                        } else {
+                            if (!cachedMatches) {
+                                cachedMatches = await fullTextSearchEngine.searchBookFull(bookResult.bookId, query.trim())
+                            }
+                            newItems = (cachedMatches || []).slice(renderedCount, renderedCount + pageSize)
                         }
-                    }
-                    const batchSize = 30
-                    const nextBatch = (cachedMatches || []).slice(renderedCount, renderedCount + batchSize)
-                    nextBatch.forEach(res => listEl.appendChild(renderSnippetItem(res)))
-                    renderedCount += nextBatch.length
 
-                    if (cachedMatches && renderedCount < cachedMatches.length) {
+                        newItems.forEach(res => listEl.appendChild(renderSnippetItem(res)))
+                        renderedCount += newItems.length
+
+                        if ((searchCursor || (cachedMatches && renderedCount < cachedMatches.length)) && renderedCount < totalHits) {
+                            expandBtn.disabled = false
+                            const remaining = Math.max(0, totalHits - renderedCount)
+                            expandBtn.innerText = `加载更多（已显示 ${renderedCount}/${totalHits} 处，剩余 ${remaining} 处） ▾`
+                        } else {
+                            footerEl.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 6px;">已显示全部 ${renderedCount} 处匹配</div>`
+                        }
+                    } catch (err) {
+                        console.warn('Failed to load more matches for book:', bookResult.bookId, err)
                         expandBtn.disabled = false
-                        const remaining = cachedMatches.length - renderedCount
-                        expandBtn.innerText = `加载更多（剩余 ${remaining} 条） ▾`
-                    } else {
-                        footerEl?.remove()
+                        expandBtn.innerText = '加载重试 ▾'
                     }
                 }
 
@@ -8135,11 +9028,8 @@ ${originalText}`
             return
         }
         if (this.pdfViewport) {
-            const total = this.pdfViewport.pageOffsets?.length || this.pdfViewport.pageSizes?.length || 1
-            const cur = this.pdfViewport.currentPage ?? 0
-            if (cur < total - 1) {
-                this.pdfViewport.goToPage(cur + 1)
-            }
+            const target = this.pdfViewport.getAdjacentPage('next')
+            if (target != null) this.pdfViewport.goToPage(target)
             return
         }
         if (!this.foliateView) return
@@ -8158,10 +9048,8 @@ ${originalText}`
             return
         }
         if (this.pdfViewport) {
-            const cur = this.pdfViewport.currentPage ?? 0
-            if (cur > 0) {
-                this.pdfViewport.goToPage(cur - 1)
-            }
+            const target = this.pdfViewport.getAdjacentPage('prev')
+            if (target != null) this.pdfViewport.goToPage(target)
             return
         }
         if (!this.foliateView) return
@@ -8176,6 +9064,17 @@ ${originalText}`
         if (e.defaultPrevented) return
         const editing = e.target?.isContentEditable || e.target?.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="slider"], [role="combobox"], [role="tab"], [role="menuitem"]')
         if (editing && e.key !== 'Escape') return
+
+        if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+            e.preventDefault()
+            if (e.key === 'ArrowLeft') {
+                this.navHistory?.back?.()
+            } else {
+                this.navHistory?.forward?.()
+            }
+            return
+        }
+
         const action = e.target?.closest?.('button, a[href], [role="button"]')
         const pagingKey = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown'].includes(e.key)
         if (action && !pagingKey && e.key !== 'Escape') return
@@ -8269,6 +9168,18 @@ ${originalText}`
                 return
             }
 
+            // Alt+ArrowLeft / Alt+ArrowRight: History Back / Forward navigation
+            if (e.altKey && e.key === 'ArrowLeft') {
+                e.preventDefault()
+                this.navHistory?.back()
+                return
+            }
+            if (e.altKey && e.key === 'ArrowRight') {
+                e.preventDefault()
+                this.navHistory?.forward()
+                return
+            }
+
             // Ctrl+C / Cmd+C: Intercept multi-selection copying when more than 1 selection range is active
             if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
                 if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
@@ -8281,8 +9192,14 @@ ${originalText}`
             switch (e.key) {
                 case 'ArrowUp': {
                     e.preventDefault()
-                    if (this.pdfViewport?.scrollArea) {
-                        this.pdfViewport.scrollArea.scrollBy({ top: -90, behavior: 'smooth' })
+                    if (this.pdfViewport?.getColumnReadingState?.().enabled) {
+                        this.pdfViewport.prevColumnStep()
+                        break
+                    }
+                    if (this.pdfViewport?.spreadMode === 'dual') {
+                        this.turnPagePrev()
+                    } else if (this.pdfViewport?.scrollArea) {
+                        this.pdfViewport.scrollArea.scrollBy({ top: -90, behavior: 'auto' })
                     } else {
                         const container = this.foliateView?.renderer?.shadowRoot?.host || this.foliateView?.renderer || this.foliateView
                         if (container && container.scrollHeight > container.clientHeight + 10) {
@@ -8295,8 +9212,14 @@ ${originalText}`
                 }
                 case 'ArrowDown': {
                     e.preventDefault()
-                    if (this.pdfViewport?.scrollArea) {
-                        this.pdfViewport.scrollArea.scrollBy({ top: 90, behavior: 'smooth' })
+                    if (this.pdfViewport?.getColumnReadingState?.().enabled) {
+                        this.pdfViewport.nextColumnStep()
+                        break
+                    }
+                    if (this.pdfViewport?.spreadMode === 'dual') {
+                        this.turnPageNext()
+                    } else if (this.pdfViewport?.scrollArea) {
+                        this.pdfViewport.scrollArea.scrollBy({ top: 90, behavior: 'auto' })
                     } else {
                         const container = this.foliateView?.renderer?.shadowRoot?.host || this.foliateView?.renderer || this.foliateView
                         if (container && container.scrollHeight > container.clientHeight + 10) {
@@ -8310,6 +9233,10 @@ ${originalText}`
                 case 'ArrowLeft': {
                     if (e.altKey) return
                     e.preventDefault()
+                    if (this.pdfViewport?.getColumnReadingState?.().enabled) {
+                        this.pdfViewport.prevColumnStep()
+                        break
+                    }
                     this.turnPagePrev()
                     break
                 }
@@ -8320,12 +9247,20 @@ ${originalText}`
                 case 'K': {
                     if (e.ctrlKey || e.metaKey || e.altKey) return
                     e.preventDefault()
+                    if (this.pdfViewport?.getColumnReadingState?.().enabled) {
+                        this.pdfViewport.prevColumnStep()
+                        break
+                    }
                     this.turnPagePrev()
                     break
                 }
                 case 'ArrowRight': {
                     if (e.altKey) return
                     e.preventDefault()
+                    if (this.pdfViewport?.getColumnReadingState?.().enabled) {
+                        this.pdfViewport.nextColumnStep()
+                        break
+                    }
                     this.turnPageNext()
                     break
                 }
@@ -8337,7 +9272,16 @@ ${originalText}`
                 case 'J':
                 case 'Enter': {
                     if (e.ctrlKey || e.metaKey || e.altKey) return
+                    if (e.key === ' ' && this._autoScrollRunning) {
+                        e.preventDefault()
+                        this.toggleAutoScrollPause()
+                        break
+                    }
                     e.preventDefault()
+                    if (this.pdfViewport?.getColumnReadingState?.().enabled) {
+                        this.pdfViewport.nextColumnStep()
+                        break
+                    }
                     this.turnPageNext()
                     break
                 }
@@ -8357,6 +9301,10 @@ ${originalText}`
                     }
                     break
                 case 'Escape':
+                    if (this._autoScrollRunning) {
+                        this.stopAutoScroll()
+                        break
+                    }
                     if (this.dom.quoteCardBackdrop && this.dom.quoteCardBackdrop.style.display !== 'none') {
                         this.closeQuoteCardModal()
                         return
@@ -8839,7 +9787,7 @@ ${originalText}`
         let coverBlob = null
 
         try {
-            const { makeBook } = await import('../foliate-js-main/view.js?v=20260914_rel_v1')
+            const { makeBook } = await import('../foliate-js-main/view.js')
             const tempBook = await makeBook(file)
             if (tempBook.metadata) {
                 const bookTitle = formatLanguageMap(tempBook.metadata.title)
@@ -8869,7 +9817,7 @@ ${originalText}`
         // Secondary robust fallback for EPUB / CBZ files
         if (!coverBlob && (format === 'epub' || format === 'cbz' || file.name?.endsWith('.epub') || file.name?.endsWith('.cbz'))) {
             try {
-                const { makeZipLoader } = await import('../foliate-js-main/view.js?v=20260914_rel_v1')
+                const { makeZipLoader } = await import('../foliate-js-main/view.js')
                 const loader = await makeZipLoader(file)
                 const imgEntries = loader.entries.filter(e => /\.(jpe?g|png|webp)$/i.test(e.filename))
                 const coverEntry = imgEntries.find(e => /cover/i.test(e.filename)) || imgEntries[0]
@@ -8882,6 +9830,8 @@ ${originalText}`
             }
         }
 
+        const incomingHash = await db.computeContentHash(file)
+
         // Check for existing book to prevent duplicates and preserve reading progress
         const GENERIC_TITLES = ['未命名', '未命名书籍', '未命名电子书', 'pdf 文档', 'document', 'untitled', '新文件', '文档']
         const rawTitle = (metadata.title || '').trim().toLowerCase()
@@ -8889,37 +9839,53 @@ ${originalText}`
         const isGenericTitle = !rawTitle || GENERIC_TITLES.includes(rawTitle) || GENERIC_TITLES.includes(rawBase)
 
         const existingBooks = await db.getAllBooks()
-        const match = isGenericTitle ? null : existingBooks.find(b => {
-            if (b.format !== format) return false
-            const bTitle = (b.title || '').trim().toLowerCase()
-            const titleMatches = bTitle === rawTitle || bTitle === rawBase
-            if (!titleMatches) return false
-            
-            const bAuthor = (b.author || '').trim().toLowerCase()
-            const metaAuthor = (metadata.author || '').trim().toLowerCase()
-            const isKnownAuthor = metaAuthor && !metaAuthor.includes('未知') && !metaAuthor.includes('unknown')
-            const isKnownBAuthor = bAuthor && !bAuthor.includes('未知') && !bAuthor.includes('unknown')
+        const effectiveNativePath = nativePath || file.path || file.nativePath || null
 
-            // If both books have distinct, known authors, they are definitely different books!
-            if (isKnownAuthor && isKnownBAuthor && bAuthor !== metaAuthor) {
+        // 1. Same disk path check takes precedence: same file location on disk
+        let match = null
+        if (effectiveNativePath) {
+            match = existingBooks.find(b => b.filePath === effectiveNativePath || b.nativePath === effectiveNativePath)
+        }
+
+        // 2. If not matched by path and not generic title, search by title & format
+        if (!match && !isGenericTitle) {
+            match = existingBooks.find(b => {
+                if (b.format !== format) return false
+                const bTitle = (b.title || '').trim().toLowerCase()
+                const titleMatches = bTitle === rawTitle || bTitle === rawBase
+                if (!titleMatches) return false
+                
+                const bAuthor = (b.author || '').trim().toLowerCase()
+                const metaAuthor = (metadata.author || '').trim().toLowerCase()
+                const isKnownAuthor = metaAuthor && !metaAuthor.includes('未知') && !metaAuthor.includes('unknown')
+                const isKnownBAuthor = bAuthor && !bAuthor.includes('未知') && !bAuthor.includes('unknown')
+
+                // If both books have distinct, known authors, they are definitely different books!
+                if (isKnownAuthor && isKnownBAuthor && bAuthor !== metaAuthor) {
+                    return false
+                }
+
+                // Different bytes: must NOT silently replace existing book unless it is a cloud placeholder (isCloudOnly)
+                if (!b.isCloudOnly && b.size && file.size && b.size !== file.size) {
+                    return false
+                }
+
+                // Accurate match: match by identifier, size, author, or exact filename
+                if (metadata.identifier && b.identifier && metadata.identifier === b.identifier) {
+                    return true
+                }
+                if (b.size && file.size && b.size === file.size) {
+                    return true
+                }
+                if (isKnownAuthor && bAuthor && bAuthor === metaAuthor) {
+                    return true
+                }
+                if (b.filename && fileName && b.filename.toLowerCase() === fileName.toLowerCase()) {
+                    return true
+                }
                 return false
-            }
-
-            // Accurate match: match by identifier, size, author, or exact filename
-            if (metadata.identifier && b.identifier && metadata.identifier === b.identifier) {
-                return true
-            }
-            if (b.size && file.size && b.size === file.size) {
-                return true
-            }
-            if (isKnownAuthor && bAuthor && bAuthor === metaAuthor) {
-                return true
-            }
-            if (b.filename && fileName && b.filename.toLowerCase() === fileName.toLowerCase()) {
-                return true
-            }
-            return false
-        })
+            })
+        }
 
         if (coverBlob) {
             coverBlob = (await normalizeCoverBlob(coverBlob)) || coverBlob
@@ -8927,11 +9893,61 @@ ${originalText}`
 
         if (match) {
             console.log(`[processAndSaveBook] Found existing book record: ${match.title} (${match.id})`)
-            await db.saveBook({ id: match.id, blob: file, nativePath, nativeSnapshotPath, filename: fileName, isCloudOnly: false, hasLocalFile: true, updatedAt: Date.now() })
-            if (!match.coverBlob && coverBlob) {
-                await db.saveBook({ id: match.id, coverBlob })
+            const isSameDiskPath = effectiveNativePath && (match.filePath === effectiveNativePath || match.nativePath === effectiveNativePath)
+            if (match.isCloudOnly) {
+                await db.saveBook({
+                    id: match.id,
+                    blob: file,
+                    documentHash: incomingHash,
+                    nativePath: effectiveNativePath,
+                    nativeSnapshotPath,
+                    filename: fileName,
+                    isCloudOnly: false,
+                    hasLocalFile: true,
+                    updatedAt: Date.now()
+                })
+                if (!match.coverBlob && coverBlob) {
+                    await db.saveBook({ id: match.id, coverBlob })
+                }
+                return match.id
+            } else if (isSameDiskPath) {
+                let isContentIdentical = true
+                try {
+                    const snap = await db.getBookFileSnapshot(match.id).catch(() => null)
+                    const existingHash = match.documentHash || snap?.documentHash || (snap?.blob ? await db.computeContentHash(snap.blob) : null)
+                    if (incomingHash && existingHash) {
+                        isContentIdentical = (incomingHash === existingHash)
+                    } else if (snap && snap.blob && snap.blob.size !== file.size) {
+                        isContentIdentical = false
+                    } else if (match.size && file.size && match.size !== file.size) {
+                        isContentIdentical = false
+                    }
+                } catch (_) {}
+                if (isContentIdentical) {
+                    return match.id
+                } else {
+                    // Content changed at same disk path: preserve old book record/notes/progress and create a new book identity
+                    match.hasLocalFile = false
+                    match.isOffline = true
+                    match.updatedAt = Date.now()
+                    await db.saveBook(match).catch(() => {})
+                    match = null
+                }
+            } else {
+                let isContentIdentical = false
+                try {
+                    const snap = await db.getBookFileSnapshot(match.id).catch(() => null)
+                    const existingHash = snap?.documentHash || (snap?.blob ? await db.computeContentHash(snap.blob) : null)
+                    if (incomingHash && existingHash) {
+                        isContentIdentical = (incomingHash === existingHash)
+                    } else if (snap && snap.blob && snap.blob.size === file.size) {
+                        isContentIdentical = (match.filename === fileName && (!match.identifier || match.identifier === metadata.identifier))
+                    }
+                } catch (_) {}
+                if (isContentIdentical) {
+                    return match.id
+                }
             }
-            return match.id
         }
 
         const rawIdent = metadata.identifier
@@ -8950,6 +9966,7 @@ ${originalText}`
             filename: fileName,
             size: file.size,
             blob: file,
+            documentHash: incomingHash,
             nativePath,
             nativeSnapshotPath,
             coverBlob: coverBlob,
@@ -8972,7 +9989,7 @@ ${originalText}`
 
         let coverBlob = null
         try {
-            const { makeBook } = await import('../foliate-js-main/view.js?v=20260914_rel_v1')
+            const { makeBook } = await import('../foliate-js-main/view.js')
             const tempBook = await makeBook(fileBlob)
             if (typeof tempBook.getCover === 'function') {
                 coverBlob = await tempBook.getCover()
@@ -8985,7 +10002,7 @@ ${originalText}`
         // Secondary robust fallback for EPUB / CBZ files
         if (!coverBlob && (book.format === 'epub' || book.format === 'cbz' || fileBlob?.type?.includes('zip') || fileBlob?.type?.includes('epub') || book.title?.endsWith('.epub') || book.title?.endsWith('.cbz'))) {
             try {
-                const { makeZipLoader } = await import('../foliate-js-main/view.js?v=20260914_rel_v1')
+                const { makeZipLoader } = await import('../foliate-js-main/view.js')
                 const loader = await makeZipLoader(fileBlob)
                 const imgEntries = loader.entries.filter(e => /\.(jpe?g|png|webp)$/i.test(e.filename))
                 const coverEntry = imgEntries.find(e => /cover/i.test(e.filename)) || imgEntries[0]
@@ -9003,7 +10020,7 @@ ${originalText}`
             book.coverBlob = coverBlob
             await db.saveBook(book)
             coverUrlPool.revoke(book.id)
-            const coverUrl = coverUrlPool.get(book.id, coverBlob)
+            const coverUrl = coverUrlPool.get(book.id, coverBlob, book.coverRevision ?? 0)
             
             // Dynamically update DOM if present on shelf
             const skeuoEl = document.querySelector(`.skeuo-book[data-id="${book.id}"] .skeuo-book-cover`)
@@ -9182,6 +10199,10 @@ ${originalText}`
                 const oq = this.overviewSearchQuery.trim().toLowerCase()
                 books = books.filter(b => (b.title && b.title.toLowerCase().includes(oq)) || (b.author && b.author.toLowerCase().includes(oq)))
             }
+        } else if (this.shelfCategory === 'recent') {
+            books = books.filter(b => b.isRecentOnly)
+        } else if (this.shelfCategory === 'all') {
+            books = books.filter(b => !b.isRecentOnly)
         } else if (this.shelfCategory === 'favorite') {
             books = books.filter(b => b.isFavorite)
         } else if (this.shelfCategory === 'unread' || this.shelfCategory === 'list_unread') {
@@ -9207,8 +10228,19 @@ ${originalText}`
             books = books.filter(b => (b.title && b.title.toLowerCase().includes(q)) || (b.author && b.author.toLowerCase().includes(q)))
         }
 
-        // 3. Sort books
+        const recentNote = document.getElementById('recent-files-note')
+        if (recentNote) recentNote.hidden = this.shelfCategory !== 'recent'
+        if (this.shelfCategory === 'recent' && this.dom.currentCategoryTitle) {
+            this.dom.currentCategoryTitle.innerText = '最近打开'
+            this.dom.currentCategoryTitle.style.display = 'block'
+        }
+
+        // 3. Sort books. Quick-open records always follow most recently opened order.
         books.sort((a, b) => {
+            if (this.shelfCategory === 'recent') {
+                const openedAt = book => book.lastReadAt || book.progress?.updatedAt || book.addedAt || book.createdAt || 0
+                return openedAt(b) - openedAt(a)
+            }
             let valA = a[this.sortField]
             let valB = b[this.sortField]
 
@@ -9299,7 +10331,7 @@ ${originalText}`
             b.id &&
             b.coverBlob instanceof Blob &&
             b.coverBlob.type !== 'image/svg+xml' &&
-            b.coverBlob.size > 220 * 1024 &&
+            (b.coverBlob.size > 140 * 1024 || b._coverNeedsOptimization || (b.coverRevision === undefined && b.coverBlob.size > 10 * 1024)) &&
             !this._optimizedCoverIds.has(b.id)
         )
         if (oversized.length === 0) return
@@ -9313,9 +10345,11 @@ ${originalText}`
             this._optimizedCoverIds.add(item.id)
             try {
                 const compressed = await normalizeCoverBlob(item.coverBlob)
-                if (compressed && compressed !== item.coverBlob && compressed.size < item.coverBlob.size) {
+                if (compressed && compressed !== item.coverBlob) {
+                    const newRev = (item.coverRevision || 0) + 1
                     item.coverBlob = compressed
-                    await db.saveBook({ id: item.id, coverBlob: compressed })
+                    item.coverRevision = newRev
+                    await db.saveBook({ id: item.id, coverBlob: compressed, coverRevision: newRev })
                 }
             } catch (_) {}
             setTimeout(() => runNext(idx + 1), 60)
@@ -9332,7 +10366,7 @@ ${originalText}`
         const backup = book.cloudBackup?.hasBackup ? 1 : 0
         const sel = (this.isBatchMode && this.selectedBookIds.has(book.id)) ? 1 : 0
         const batch = this.isBatchMode ? 1 : 0
-        const coverSig = book.coverBlob ? `${book.coverBlob.size}:${book.coverBlob.type}` : 'none'
+        const coverSig = book.coverBlob ? `${book.coverRevision || book.coverBlob._revision || ''}:${book.coverBlob.size}:${book.coverBlob.type}:${book.updatedAt || 0}` : 'none'
         return `${book.id}|${book.title || ''}|${book.author || ''}|${frac}|${state}|${fav}|${cloud}|${backup}|${ batch }|${sel}|${coverSig}|${book.rating || 0}|${book.totalReadingSeconds || 0}`
     }
 
@@ -9508,6 +10542,58 @@ ${originalText}`
         this.dom.booksShelf?.addEventListener('contextmenu', handleShelfContextMenu)
         this.dom.booksGrid?.addEventListener('contextmenu', handleShelfContextMenu)
         this.dom.booksTableBody?.addEventListener('contextmenu', handleShelfContextMenu)
+
+        const handleShelfKeydown = async e => {
+            const card = e.target?.closest?.('.jane-book-card')
+            if (!card) return
+            const bookId = card.dataset?.id
+            if (!bookId) return
+
+            if (e.key === ' ' || e.code === 'Space') {
+                e.preventDefault()
+                if (!this.isBatchMode) {
+                    this.toggleBatchMode(true)
+                }
+                this.toggleBookSelection(bookId)
+                return
+            }
+
+            if (e.key === 'Enter') {
+                e.preventDefault()
+                let book = (this.currentBooksList || []).find(b => b.id === bookId)
+                if (!book) book = await db.getBook(bookId)
+                if (book?.isCloudOnly) {
+                    this.handleCloudBookClick(book)
+                } else if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                    this.openBookInNewWindow(bookId)
+                } else {
+                    this.openBook(bookId)
+                }
+                return
+            }
+
+            const cards = Array.from(this.dom.booksGrid?.querySelectorAll('.jane-book-card') || [])
+            const curIdx = cards.indexOf(card)
+            if (curIdx === -1) return
+            const cols = this._virtualCols || 4
+
+            let nextIdx = -1
+            if (e.key === 'ArrowRight') {
+                nextIdx = curIdx + 1
+            } else if (e.key === 'ArrowLeft') {
+                nextIdx = curIdx - 1
+            } else if (e.key === 'ArrowDown') {
+                nextIdx = curIdx + cols
+            } else if (e.key === 'ArrowUp') {
+                nextIdx = curIdx - cols
+            }
+
+            if (nextIdx >= 0 && nextIdx < cards.length) {
+                e.preventDefault()
+                cards[nextIdx].focus()
+            }
+        }
+        this.dom.booksGrid?.addEventListener('keydown', handleShelfKeydown)
     }
 
     renderBooksShelf(books) {
@@ -9629,7 +10715,7 @@ ${originalText}`
         let coverUrl = ''
         const isRealImageCover = book.coverBlob && book.coverBlob.type !== 'image/svg+xml'
         if (isRealImageCover) {
-            coverUrl = coverUrlPool.get(book.id, book.coverBlob)
+            coverUrl = coverUrlPool.getForBook(book)
         }
 
         const COVER_PALETTES = [
@@ -9723,6 +10809,9 @@ ${originalText}`
         card.className = 'jane-book-card'
         card.dataset.id = book.id
         card.style.setProperty('--card-index', cardIndex)
+        card.setAttribute('tabindex', '0')
+        card.setAttribute('role', 'button')
+        card.setAttribute('aria-label', `打开图书: ${book.title || '未命名'}`)
 
         const fraction = book.progress?.fraction || 0
         const rawPct = fraction * 100
@@ -9730,7 +10819,9 @@ ${originalText}`
         
         let coverUrl = ''
         if (book.coverBlob && typeof coverUrlPool !== 'undefined') {
-            coverUrl = coverUrlPool.get(book.id, book.coverBlob)
+            // Object URLs are cheap; native lazy loading controls actual image
+            // decode. Do not leave all cards after #28 dependent on a second map.
+            coverUrl = coverUrlPool.getForBook(book)
         } else if (book.cover && typeof book.cover === 'string' && !book.cover.includes('icon.png')) {
             coverUrl = book.cover
         }
@@ -9804,7 +10895,9 @@ ${originalText}`
         const displayTitle = resolveBookTitle(book.title || '', book.filename || '')
         let coverInnerHtml = ''
         if (coverUrl) {
-            coverInnerHtml = `<img class="jane-cover-img" src="${escapeHTML(coverUrl)}" alt="${escapeHTML(displayTitle)}" decoding="async"/>`
+            coverInnerHtml = `<img class="jane-cover-img" src="${escapeHTML(coverUrl)}" alt="${escapeHTML(displayTitle)}" decoding="async" loading="lazy"/>`
+        } else if (book.coverBlob) {
+            coverInnerHtml = `<img class="jane-cover-img lazy-cover" data-book-id="${escapeHTML(book.id)}" alt="${escapeHTML(displayTitle)}" decoding="async" loading="lazy" style="opacity: 0; transition: opacity 0.2s;"/>`
         } else if (typeof window !== 'undefined' && typeof window.renderBookCoverHTML === 'function') {
             coverInnerHtml = window.renderBookCoverHTML(book, '', true)
         } else {
@@ -9831,7 +10924,104 @@ ${originalText}`
         `
         card._renderSig = this._getBookRenderSignature(book)
         card._coverUrl = coverUrl
+        if (!coverUrl && book.coverBlob) {
+            this._observeLazyCover(card)
+        }
         return card
+    }
+
+    _observeLazyCover(card) {
+        if (!card) return
+        if (!this._shelfCoverObserver && typeof IntersectionObserver !== 'undefined') {
+            this._shelfCoverObserver = new IntersectionObserver((entries) => {
+                for (const entry of entries) {
+                    if (entry.isIntersecting) {
+                        const target = entry.target
+                        const img = target.querySelector('img.lazy-cover')
+                        if (img) {
+                            const bookId = img.dataset?.bookId || target.dataset?.id
+                            if (bookId) {
+                                const book = this._booksMap?.get(bookId) || this.currentBooksList?.find(b => b.id === bookId)
+                                if (book?.coverBlob) {
+                                    const url = coverUrlPool.getForBook(book)
+                                    if (url) {
+                                        img.src = url
+                                        img.onload = () => { img.style.opacity = '1' }
+                                        img.onerror = () => { img.style.opacity = '1' }
+                                    }
+                                }
+                            }
+                            img.classList.remove('lazy-cover')
+                        }
+                        this._shelfCoverObserver.unobserve(target)
+                    }
+                }
+            }, {
+                root: this.dom.booksWorkspace || null,
+                rootMargin: '400px 0px 400px 0px'
+            })
+        }
+        if (this._shelfCoverObserver) {
+            this._shelfCoverObserver.observe(card)
+        }
+    }
+
+    updateBookCardLocally(bookId, patch = {}) {
+        if (!bookId) return false
+        const book = this._booksMap?.get(bookId) || this.currentBooksList?.find(b => b.id === bookId)
+        if (book) {
+            Object.assign(book, patch)
+        }
+        const card = document.querySelector(`.jane-book-card[data-id="${bookId}"]`)
+        if (card && book) {
+            const nextSig = this._getBookRenderSignature(book)
+            if (card._renderSig === nextSig) return true
+            const metaRow = card.querySelector('.jane-book-meta-row')
+            if (metaRow) {
+                const fraction = book.progress?.fraction || 0
+                const rawPct = fraction * 100
+                const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
+                const readTimeStr = (book.totalReadingSeconds && book.totalReadingSeconds >= 60 && tracker?.formatDuration)
+                    ? tracker.formatDuration(book.totalReadingSeconds)
+                    : null
+                const readingState = resolveReadingState(book)
+                let metaHtml = ''
+                if (readingState === 'finished') {
+                    metaHtml = `<span class="jane-meta-badge-finished">已读完</span>`
+                    if (readTimeStr) metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
+                } else if (readingState === 'want_to_read') {
+                    metaHtml = `<span class="jane-meta-badge-want">想读</span>`
+                    if (readTimeStr) metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
+                } else if (readingState === 'on_hold') {
+                    metaHtml = `<span class="jane-meta-badge-hold">搁置</span>`
+                    if (readTimeStr) metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
+                } else if (readingState === 'unread') {
+                    metaHtml = `<span class="jane-meta-badge-new">新</span><span class="jane-meta-text">未读</span>`
+                    if (readTimeStr) metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
+                } else {
+                    metaHtml = `<span class="jane-meta-progress">${progressPct}%</span>`
+                    if (readTimeStr) metaHtml += `<span class="jane-meta-dot">·</span><span class="jane-meta-time">${readTimeStr}</span>`
+                }
+                if (typeof book.rating === 'number' && book.rating > 0) {
+                    metaHtml += `<span class="jane-meta-dot">·</span><span style="color: #f59e0b; font-weight: 600;">★${Number(book.rating).toFixed(1)}</span>`
+                }
+                metaRow.innerHTML = metaHtml
+            }
+            if (patch.isFavorite !== undefined) {
+                const favBtn = card.querySelector('.grid-fav-btn')
+                const coverBox = card.querySelector('.jane-cover-box')
+                if (favBtn) {
+                    favBtn.classList.toggle('active', !!book.isFavorite)
+                    favBtn.title = book.isFavorite ? '取消收藏' : '加入收藏'
+                }
+                if (coverBox) {
+                    coverBox.classList.toggle('is-favorite', !!book.isFavorite)
+                }
+            }
+            card._renderSig = nextSig
+            return true
+        }
+        return false
     }
 
     getDynamicGreeting() {
@@ -10013,7 +11203,7 @@ ${originalText}`
                 const readDurationStr = tracker && tracker.formatDuration ? tracker.formatDuration(totalSec) : `${Math.round(totalSec / 60)}分钟`
                 let coverUrl = ''
                 if (heroBook.coverBlob) {
-                    coverUrl = coverUrlPool.get(heroBook.id, heroBook.coverBlob)
+                    coverUrl = coverUrlPool.getForBook(heroBook)
                 }
 
                 const heroSig = `${heroBook.id}|${heroBook.title}|${fillWidth}|${progressPct}|${readDurationStr}|${coverUrl}`
@@ -10088,6 +11278,14 @@ ${originalText}`
 
     onBooksWorkspaceScroll() {
         if (!this.dom.booksWorkspace) return
+        this._isScrolling = true
+        this.dom.booksWorkspace.classList.add('shelf-is-scrolling')
+        if (this._scrollEndTimer) clearTimeout(this._scrollEndTimer)
+        this._scrollEndTimer = setTimeout(() => {
+            this._isScrolling = false
+            this.dom.booksWorkspace?.classList.remove('shelf-is-scrolling')
+        }, 150)
+
         const scrollTop = this.dom.booksWorkspace.scrollTop || 0
 
         // 1. Dynamic scrollbar class (only mutate classList when crossing threshold)
@@ -10097,24 +11295,39 @@ ${originalText}`
             this.dom.booksWorkspace.classList.toggle('scrolled-into-shelf', shouldShowScrollbar)
         }
 
-        if (this.isGliding) return
-        if (this.shelfCategory !== 'all' || this.shelfViewMode !== 'grid') return
-        if (!this.dom.modernHeroThreshold || this.dom.modernHeroThreshold.style.display === 'none') return
-
-        const shelfTop = this.cachedShelfHeight || (window.innerHeight - 52)
-
-        const isShelf = scrollTop >= shelfTop * 0.6
-        if (isShelf) {
-            if (this.dom.currentCategoryTitle) {
-                if (this.dom.currentCategoryTitle.innerText !== '全部图书') {
-                    this.dom.currentCategoryTitle.innerText = '全部图书'
-                    this.dom.currentCategoryTitle.style.display = 'block'
+        if (!this.isGliding && this.shelfCategory === 'all' && this.shelfViewMode === 'grid' &&
+            this.dom.modernHeroThreshold && this.dom.modernHeroThreshold.style.display !== 'none') {
+            const shelfTop = this.cachedShelfHeight || (window.innerHeight - 52)
+            const isShelf = scrollTop >= shelfTop * 0.6
+            if (isShelf) {
+                if (this.dom.currentCategoryTitle) {
+                    if (this.dom.currentCategoryTitle.innerText !== '全部图书') {
+                        this.dom.currentCategoryTitle.innerText = '全部图书'
+                        this.dom.currentCategoryTitle.style.display = 'block'
+                    }
+                }
+            } else {
+                if (this.dom.currentCategoryTitle) {
+                    this.dom.currentCategoryTitle.innerText = ''
+                    this.dom.currentCategoryTitle.style.display = 'none'
                 }
             }
-        } else {
-            if (this.dom.currentCategoryTitle) {
-                this.dom.currentCategoryTitle.innerText = ''
-                this.dom.currentCategoryTitle.style.display = 'none'
+        }
+
+        if (this._isGridVirtualized && this._virtualBooks) {
+            const gridOffsetTop = Math.max(0, (this.dom.booksGrid?.offsetTop || 0) - (this.dom.booksWorkspace.offsetTop || 0))
+            const relativeScroll = Math.max(0, scrollTop - gridOffsetTop)
+            const rowHeight = this._virtualRowHeight || 321
+            const bufferRows = 2
+            const currentStartRow = Math.max(0, Math.floor(relativeScroll / rowHeight) - bufferRows)
+            const currentEndRow = Math.min(this._virtualTotalRows, Math.ceil((relativeScroll + (this.dom.booksWorkspace.clientHeight || 800)) / rowHeight) + bufferRows)
+            if (currentStartRow !== this._virtualStartRow || currentEndRow !== this._virtualEndRow) {
+                if (!this._virtualScrollRaf) {
+                    this._virtualScrollRaf = requestAnimationFrame(() => {
+                        this._virtualScrollRaf = null
+                        this._renderVirtualizedSlice()
+                    })
+                }
             }
         }
     }
@@ -10168,7 +11381,7 @@ ${originalText}`
             this.dom.currentCategoryTitle.innerText = '全部图书'
             this.dom.currentCategoryTitle.style.display = 'block'
         }
-        this.smoothGlideTo(shelfTop, 800)
+        this.dom.booksWorkspace.scrollTo({ top: shelfTop, behavior: 'smooth' })
     }
 
     glideToHero() {
@@ -10177,7 +11390,7 @@ ${originalText}`
             this.dom.currentCategoryTitle.innerText = ''
             this.dom.currentCategoryTitle.style.display = 'none'
         }
-        this.smoothGlideTo(0, 800)
+        this.dom.booksWorkspace.scrollTo({ top: 0, behavior: 'smooth' })
     }
 
     glideScrollTo(targetTop) {
@@ -10288,6 +11501,19 @@ ${originalText}`
             return
         }
 
+        this._booksMap = new Map(books.map(b => [b.id, b]))
+        if (books.length > 80 && !(this.shelfCategory === 'overview' && this.overviewStatus === 'finished' && this.overviewGroupByYearMonth)) {
+            return this._renderVirtualizedBooksGrid(books)
+        }
+
+        // If not virtualized, clean up any virtual spacers
+        const topSpacer = this.dom.booksGrid.querySelector('.grid-virtual-spacer-top')
+        if (topSpacer) topSpacer.remove()
+        const bottomSpacer = this.dom.booksGrid.querySelector('.grid-virtual-spacer-bottom')
+        if (bottomSpacer) bottomSpacer.remove()
+        this._isGridVirtualized = false
+        this._virtualBooks = null
+
         // Collect existing card elements by book.id so we can reuse them in-place
         // without destroying decoded <img> bitmaps or re-triggering entrance animations
         const existingCards = new Map()
@@ -10335,6 +11561,208 @@ ${originalText}`
                     this.dom.booksGrid.insertBefore(card, currentAtIdx || null)
                 }
             })
+        } finally {
+            unregisterGrid()
+        }
+    }
+
+    _renderVirtualizedBooksGrid(books) {
+        this._isGridVirtualized = true
+        this._virtualBooks = books
+        // Rebuild _booksMap to prevent retaining stale books when category/item content changes with same count
+        this._booksMap = new Map(books.map(b => [b.id, b]))
+
+        const grid = this.dom.booksGrid
+        let padX = 80 // CSS: padding 0 2.5rem 3.5rem (40px + 40px)
+        let rowGap = 36
+        if (typeof window !== 'undefined' && grid) {
+            try {
+                const comp = window.getComputedStyle(grid)
+                const pl = parseFloat(comp.paddingLeft)
+                const pr = parseFloat(comp.paddingRight)
+                if (Number.isFinite(pl) && Number.isFinite(pr)) {
+                    padX = pl + pr
+                }
+                const rg = parseFloat(comp.rowGap)
+                if (Number.isFinite(rg)) {
+                    rowGap = rg
+                }
+            } catch (_) {}
+        }
+
+        const rawWidth = grid?.clientWidth || (this.dom.booksWorkspace ? this.dom.booksWorkspace.clientWidth : 800) || 800
+        const availableWidth = Math.max(140, rawWidth - padX)
+        const cardMinWidth = 140
+        const gapX = 26.4
+        let cols = Math.max(1, Math.floor((availableWidth + gapX) / (cardMinWidth + gapX)))
+        let cardColWidth = null
+        if (typeof window !== 'undefined' && grid) {
+            try {
+                const comp = window.getComputedStyle(grid)
+                const tCols = comp.gridTemplateColumns
+                if (tCols && tCols !== 'none') {
+                    const parsed = tCols.trim().split(/\s+/).filter(Boolean)
+                    if (parsed.length > 0) {
+                        cols = parsed.length
+                        const firstCol = parseFloat(parsed[0])
+                        if (Number.isFinite(firstCol) && firstCol > 0) {
+                            cardColWidth = firstCol
+                        }
+                    }
+                }
+            } catch (_) {}
+        }
+        const gapY = rowGap
+        const actualCardWidth = Math.min(170, Math.max(140, cardColWidth !== null ? cardColWidth : ((availableWidth - (cols - 1) * gapX) / cols)))
+        // In desktop UI: cover aspect 1/1.414, meta row 1.8rem (~29px), title ~43px (2 lines + padding)
+        const cardHeight = Math.round(actualCardWidth * 1.414) + 72
+        const rowHeight = cardHeight + Math.round(gapY)
+        const totalRows = Math.ceil(books.length / cols)
+
+        // Preserve visible book anchor on resize
+        const ws = this.dom.booksWorkspace
+        const prevScrollTop = ws ? ws.scrollTop : 0
+        const prevCols = this._virtualCols || 0
+        const prevRowHeight = this._virtualRowHeight || 0
+
+        this._virtualCols = cols
+        this._virtualRowHeight = rowHeight
+        this._virtualRowGap = gapY
+        this._virtualTotalRows = totalRows
+
+        if (ws && prevScrollTop > 0 && prevCols > 0 && prevRowHeight > 0 && prevCols !== cols) {
+            const wsOffset = ws.offsetTop || 0
+            const gridOffset = this.dom.booksGrid?.offsetTop || 0
+            const gridOffsetTop = Math.max(0, gridOffset - wsOffset)
+            const relativePrevScroll = Math.max(0, prevScrollTop - gridOffsetTop)
+            const anchorRow = Math.floor(relativePrevScroll / prevRowHeight)
+            const anchorOffset = relativePrevScroll - (anchorRow * prevRowHeight)
+            const anchorBookIndex = Math.min(books.length - 1, anchorRow * prevCols)
+            const newRow = Math.floor(anchorBookIndex / cols)
+            ws.scrollTop = gridOffsetTop + (newRow * rowHeight) + anchorOffset
+        }
+
+        this._renderVirtualizedSlice()
+    }
+
+    _renderVirtualizedSlice() {
+        if (!this._isGridVirtualized || !this._virtualBooks) return
+        const books = this._virtualBooks
+        const cols = this._virtualCols || 4
+        const rowHeight = this._virtualRowHeight || 330
+        const totalRows = this._virtualTotalRows || Math.ceil(books.length / cols)
+
+        const scrollTop = this.dom.booksWorkspace ? this.dom.booksWorkspace.scrollTop : 0
+        const wsOffset = this.dom.booksWorkspace?.offsetTop || 0
+        const gridOffset = this.dom.booksGrid?.offsetTop || 0
+        const gridOffsetTop = Math.max(0, gridOffset - wsOffset)
+        const relativeScroll = Math.max(0, scrollTop - gridOffsetTop)
+        const viewportHeight = this.dom.booksWorkspace ? this.dom.booksWorkspace.clientHeight : window.innerHeight
+
+        const bufferRows = 2
+        const startRow = Math.max(0, Math.floor(relativeScroll / rowHeight) - bufferRows)
+        const endRow = Math.min(totalRows, Math.ceil((relativeScroll + viewportHeight) / rowHeight) + bufferRows)
+
+        this._virtualStartRow = startRow
+        this._virtualEndRow = endRow
+
+        const startIndex = startRow * cols
+        const endIndex = Math.min(books.length, endRow * cols)
+        const sliceBooks = books.slice(startIndex, endIndex)
+        const sliceIds = new Set(sliceBooks.map(b => b.id))
+
+        const gapY = this._virtualRowGap ?? 36
+        let topSpacer = this.dom.booksGrid.querySelector('.grid-virtual-spacer-top')
+        if (!topSpacer) {
+            topSpacer = document.createElement('div')
+            topSpacer.className = 'grid-virtual-spacer-top'
+            topSpacer.style.cssText = 'grid-column: 1 / -1; width: 100%; pointer-events: none; margin: 0; padding: 0;'
+            this.dom.booksGrid.prepend(topSpacer)
+        }
+        if (startRow > 0) {
+            topSpacer.style.display = 'block'
+            topSpacer.style.height = `${Math.max(0, (startRow * rowHeight) - gapY)}px`
+        } else {
+            topSpacer.style.display = 'none'
+            topSpacer.style.height = '0px'
+        }
+
+        let bottomSpacer = this.dom.booksGrid.querySelector('.grid-virtual-spacer-bottom')
+        if (!bottomSpacer) {
+            bottomSpacer = document.createElement('div')
+            bottomSpacer.className = 'grid-virtual-spacer-bottom'
+            bottomSpacer.style.cssText = 'grid-column: 1 / -1; width: 100%; pointer-events: none; margin: 0; padding: 0;'
+            this.dom.booksGrid.appendChild(bottomSpacer)
+        }
+        if (endRow < totalRows) {
+            bottomSpacer.style.display = 'block'
+            bottomSpacer.style.height = `${Math.max(0, ((totalRows - endRow) * rowHeight) - gapY)}px`
+        } else {
+            bottomSpacer.style.display = 'none'
+            bottomSpacer.style.height = '0px'
+        }
+
+        const existingCards = new Map()
+        for (const child of Array.from(this.dom.booksGrid.children)) {
+            if (child === topSpacer || child === bottomSpacer) continue
+            if (child.classList?.contains('jane-book-card') && child.dataset?.id) {
+                if (!sliceIds.has(child.dataset.id)) {
+                    child.remove()
+                } else {
+                    existingCards.set(child.dataset.id, child)
+                }
+            } else {
+                child.remove()
+            }
+        }
+
+        const unregisterGrid = coverUrlPool.registerPendingRoot(this.dom.booksGrid)
+        try {
+            sliceBooks.forEach((book, i) => {
+                const globalIdx = startIndex + i
+                const nextSig = this._getBookRenderSignature(book)
+                let card = existingCards.get(book.id)
+                if (card) {
+                    card.classList.add('card-settled')
+                    card.style.setProperty('--card-index', globalIdx)
+                    if (card._renderSig !== nextSig) {
+                        const existingImg = card.querySelector('img.jane-cover-img')
+                        const freshCard = this.createBookCard(book, globalIdx)
+                        freshCard.classList.add('card-settled')
+                        const freshImg = freshCard.querySelector('img.jane-cover-img')
+                        if (existingImg && freshImg && existingImg.src === freshImg.src) {
+                            freshImg.replaceWith(existingImg)
+                        }
+                        card.replaceWith(freshCard)
+                        card = freshCard
+                    }
+                } else {
+                    card = this.createBookCard(book, globalIdx)
+                }
+                const atPosition = this.dom.booksGrid.children[i + 1] || bottomSpacer
+                if (atPosition !== card) this.dom.booksGrid.insertBefore(card, atPosition)
+            })
+
+            // Layout calibration after cards are mounted (avoiding forced layout on pure scroll frames)
+            if (!this._isScrolling && this.dom.booksGrid && sliceBooks.length > cols) {
+                try {
+                    const mountedCards = this.dom.booksGrid.querySelectorAll('.jane-book-card')
+                    if (mountedCards.length > cols) {
+                        const top0 = mountedCards[0].getBoundingClientRect().top
+                        const top1 = mountedCards[cols].getBoundingClientRect().top
+                        const actualStride = Math.round(top1 - top0)
+                        if (actualStride > 100 && Math.abs(actualStride - this._virtualRowHeight) >= 1) {
+                            this._virtualRowHeight = actualStride
+                            if (startRow > 0 && topSpacer) {
+                                topSpacer.style.height = `${Math.max(0, (startRow * actualStride) - gapY)}px`
+                            }
+                            if (endRow < totalRows && bottomSpacer) {
+                                bottomSpacer.style.height = `${Math.max(0, ((totalRows - endRow) * actualStride) - gapY)}px`
+                            }
+                        }
+                    }
+                } catch (_) {}
+            }
         } finally {
             unregisterGrid()
         }
@@ -10458,11 +11886,11 @@ ${originalText}`
                         if (delRes?.success) {
                             console.log(`[CloudSync] Deleted remote book binary: ${fileName}`)
                         } else {
-                            this.showToast('云端备份文件删除未完成，可在坚果云网页端确认清理', '⚠️')
+                            this.showToast('云端备份文件删除未完成，可在坚果云网页端确认清理', 'warning')
                         }
                     } catch (delErr) {
                         console.warn('[CloudSync] Failed deleting remote book binary:', delErr)
-                        this.showToast('网络离线，云端文件未即时清除', '⚠️')
+                        this.showToast('网络离线，云端文件未即时清除', 'warning')
                     }
                 }
             }
@@ -10480,7 +11908,7 @@ ${originalText}`
             }
         } catch (err) {
             console.error('Delete book error:', err)
-            this.showToast(`删除失败: ${err.message}`, '⚠️')
+            this.showToast(`删除失败: ${err.message}`, 'warning')
             await this.refreshBookshelf()
         }
     }
@@ -10797,7 +12225,7 @@ ${originalText}`
     async handleCloudBookClick(book) {
         if (!book) return
         if (this._activeTransfers?.has(book.id)) {
-            return this.showToast(`《${book.title}》正在传输中，请稍候...`, '⏳')
+            return this.showToast(`《${book.title}》正在传输中，请稍候...`, 'info')
         }
 
         const format = (book.format || '').toLowerCase()
@@ -10815,13 +12243,13 @@ ${originalText}`
         }
 
         if (!this.syncConfig?.enabled || (!this.syncConfig?.password && !this.syncConfig?.hasPassword)) {
-            this.showToast('请先在「设置 - 云端同步」中配置坚果云并保存授权密码', '⚠️')
+            this.showToast('请先在「设置 - 云端同步」中配置坚果云并保存授权密码', 'warning')
             return this.openWebdavSyncModal()
         }
 
         this._activeTransfers?.add(book.id)
         const fileName = book.cloudBackup?.fileName || `${book.stableKey || book.id}.${book.format}`
-        this.showToast(`正在从坚果云下载《${book.title}》...`, '☁️')
+        this.showToast(`正在从坚果云下载《${book.title}》...`, 'cloud')
 
         try {
             const res = await window.electronAPI.syncDownloadBookBinary(this.syncConfig, fileName)
@@ -10870,7 +12298,7 @@ ${originalText}`
         }
 
         if (this._activeTransfers?.has(book.id)) {
-            return this.showToast(`《${book.title}》正在上传传输中，请稍候...`, '⏳')
+            return this.showToast(`《${book.title}》正在上传传输中，请稍候...`, 'info')
         }
 
         // Prevent unintentional quota wastage: confirm before re-uploading an already backed-up book
@@ -10885,7 +12313,7 @@ ${originalText}`
         }
 
         if (!this.syncConfig?.enabled || (!this.syncConfig?.password && !this.syncConfig?.hasPassword)) {
-            this.showToast('请先在「设置 - 云端同步」中配置坚果云并保存授权密码', '⚠️')
+            this.showToast('请先在「设置 - 云端同步」中配置坚果云并保存授权密码', 'warning')
             return this.openWebdavSyncModal()
         }
 
@@ -10904,28 +12332,49 @@ ${originalText}`
         try {
             const fileBlob = await db.getBookFileBlob(book.id)
             if (!fileBlob || fileBlob.size === 0) {
-                return this.showToast('本地未找到该书籍的物理文件或内容为空', '⚠️')
+                return this.showToast('本地未找到该书籍的物理文件或内容为空', 'warning')
             }
 
-            this.showToast(`正在上传《${book.title}》至坚果云...`, '☁️')
+            this.showToast(`正在上传《${book.title}》至坚果云...`, 'cloud')
+            const initialSnapshot = await db.getBookFileSnapshot(book.id).catch(() => null)
+            const initialRevision = initialSnapshot?.blobRevision || 'rev_' + Date.now()
+            const initialHash = initialSnapshot?.documentHash || (await db.computeContentHash(fileBlob))
+            const initialSize = fileBlob.size
             const arrayBuffer = await fileBlob.arrayBuffer()
-            const fileName = `${book.stableKey || book.id}.${book.format}`
+            const fileName = this.getSafeCloudFileName(book)
 
             const res = await window.electronAPI.syncUploadBookBinary(this.syncConfig, fileName, arrayBuffer)
             if (!res || !res.success) {
                 throw new Error(res?.error || '上传失败')
             }
 
-            const uploadedFileName = res.fileName || fileName
-            book.cloudBackup = {
-                hasBackup: true,
-                fileName: uploadedFileName,
-                size: book.size || arrayBuffer.byteLength,
-                format: book.format,
-                uploadedAt: Date.now()
+            const latestSnapshot = await db.getBookFileSnapshot(book.id).catch(() => null)
+            const latestRev = latestSnapshot?.blobRevision || null
+            const latestHash = latestSnapshot?.documentHash || null
+            const latestSize = latestSnapshot?.blob?.size || latestSnapshot?.nativeSnapshotSize || 0
+            const contentChanged = !latestRev ||
+                                  latestRev !== initialRevision ||
+                                  (initialHash && latestHash && latestHash !== initialHash) ||
+                                  (latestSize > 0 && latestSize !== initialSize)
+            if (contentChanged) {
+                console.warn(`[handleUploadBookToCloud] Book content changed during upload for ${book.id}; skipping cloudBackup state update.`)
+                this.showToast(`《${book.title}》上传期间检测到文件内容变更，请重新备份`, 'warning')
+                return
             }
-            book.cloudBackupState = 'synced'
-            await db.saveBook(book)
+
+            const uploadedFileName = res.fileName || fileName
+            await db.saveBook({
+                id: book.id,
+                cloudBackup: {
+                    hasBackup: true,
+                    fileName: uploadedFileName,
+                    size: book.size || arrayBuffer.byteLength,
+                    format: book.format,
+                    uploadedAt: Date.now()
+                },
+                cloudBackupState: 'synced',
+                updatedAt: Date.now()
+            })
 
             this.showToast(`《${book.title}》已成功备份至坚果云`, 'cloud')
             await this.refreshBookshelf()
@@ -11045,9 +12494,92 @@ ${originalText}`
         }
     }
 
+    isMobileLayout() {
+        if (platformBridge?.isAndroid) return true
+        if (window.mobileShell?.isMobileViewport) {
+            return window.mobileShell.isMobileViewport()
+        }
+        if (typeof window !== 'undefined') {
+            return window.innerWidth <= 768 || window.matchMedia('(max-width: 768px)').matches
+        }
+        return false
+    }
+
+    async promptPasswordModal(title = '输入文档密码') {
+        return new Promise(resolve => {
+            if (typeof document === 'undefined') return resolve(null)
+            const overlay = document.createElement('div')
+            overlay.className = 'modal-backdrop'
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:99999;'
+
+            const card = document.createElement('div')
+            card.style.cssText = 'background:var(--bg-card, #ffffff);color:var(--text-main, #333333);padding:24px;border-radius:12px;width:340px;box-shadow:0 8px 24px rgba(0,0,0,0.25);display:flex;flex-direction:column;gap:16px;'
+
+            const heading = document.createElement('h3')
+            heading.style.cssText = 'margin:0;font-size:1.1rem;font-weight:600;'
+            heading.innerText = title
+
+            const input = document.createElement('input')
+            input.type = 'password'
+            input.placeholder = '请输入 PDF 打开密码'
+            input.style.cssText = 'padding:10px 12px;border:1px solid var(--border-color, #ccc);border-radius:6px;font-size:0.95rem;background:var(--bg-input, #fff);color:inherit;'
+
+            const btnRow = document.createElement('div')
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;'
+
+            const cancelBtn = document.createElement('button')
+            cancelBtn.type = 'button'
+            cancelBtn.innerText = '取消'
+            cancelBtn.style.cssText = 'padding:8px 16px;border:1px solid var(--border-color, #ccc);background:transparent;border-radius:6px;cursor:pointer;'
+
+            const confirmBtn = document.createElement('button')
+            confirmBtn.type = 'button'
+            confirmBtn.innerText = '确定'
+            confirmBtn.style.cssText = 'padding:8px 16px;border:none;background:var(--accent-purple, #8b5cf6);color:#fff;border-radius:6px;cursor:pointer;'
+
+            const cleanup = (val) => {
+                try { document.body.removeChild(overlay) } catch (_) {}
+                resolve(val)
+            }
+
+            cancelBtn.onclick = () => cleanup(null)
+            confirmBtn.onclick = () => cleanup(input.value !== '' ? input.value : '')
+            input.onkeydown = (e) => {
+                if (e.key === 'Enter') cleanup(input.value !== '' ? input.value : '')
+                if (e.key === 'Escape') cleanup(null)
+            }
+
+            btnRow.appendChild(cancelBtn)
+            btnRow.appendChild(confirmBtn)
+            card.appendChild(heading)
+            card.appendChild(input)
+            card.appendChild(btnRow)
+            overlay.appendChild(card)
+            document.body.appendChild(overlay)
+            input.focus()
+        })
+    }
+
+    getSafeCloudFileName(book) {
+        if (!book) return 'book.epub'
+        if (book.cloudBackup?.fileName) {
+            const savedName = String(book.cloudBackup.fileName).trim()
+            if (savedName && !/[\\/%?#\0:*"><|]/.test(savedName) && !savedName.startsWith('.')) {
+                return savedName
+            }
+        }
+        const fmt = (book.format || 'epub').toLowerCase().replace(/[^a-z0-9]/g, '') || 'epub'
+        const safeId = (book.id || 'book').replace(/[^a-zA-Z0-9_-]/g, '_')
+        let rawKey = (book.stableKey || '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5.-]/g, '_').trim()
+        if (rawKey.startsWith('.')) rawKey = rawKey.replace(/^\.+/, '')
+        if (rawKey.length > 50) rawKey = rawKey.slice(0, 50)
+        const baseName = (rawKey && rawKey !== safeId) ? `${rawKey}_${safeId}` : safeId
+        return `${baseName}.${fmt}`
+    }
+
     async openBook(bookOrId, initialLocation = null, options = {}) {
         const bookId = (typeof bookOrId === 'object' && bookOrId !== null) ? bookOrId.id : bookOrId
-        if (!bookId) return this.showToast('找不到该书籍！', '⚠️')
+        if (!bookId) return this.showToast('找不到该书籍！', 'warning')
 
         // Desktop Multi-Window Architecture:
         // When invoked from the main bookshelf window on desktop, always open/focus an
@@ -11058,15 +12590,20 @@ ${originalText}`
             !this.isMobileLayout() &&
             !platformBridge.isAndroid
         ) {
-            const winRes = await this.openBookInNewWindow(bookId, initialLocation)
-            if (winRes?.success) {
-                return
+            try {
+                const winRes = await this.openBookInNewWindow(bookId, initialLocation)
+                if (winRes?.success) {
+                    return
+                }
+            } catch (err) {
+                console.warn('[openBook] Failed to open satellite window, falling back in-place:', err)
             }
         }
 
         // 1. Synchronously increment session epoch and clear pending timers
         this._currentBookEpoch = (this._currentBookEpoch || 0) + 1
         const currentEpoch = this._currentBookEpoch
+        this.closeSecondaryPdfViewport()
         this.currentPdfPageIndex = 0
 
         if (this.currentBookId && this.currentBookId !== bookId) {
@@ -11114,7 +12651,7 @@ ${originalText}`
             ocrService.abort().catch(() => {})
             this.closePdfOcrModal?.()
             this.closeAiAssistantModal?.()
-            chapterTranslationManager.stop()
+            this.chapterTranslationManager?.stop?.()
             ttsPlayer.stop()
             if (prevSession.view) {
                 try { prevSession.view.close?.() } catch (e) {}
@@ -11159,7 +12696,7 @@ ${originalText}`
             if (!readerSession.isCurrent()) return
 
             if (barrierResult?.canProceedSafely && !barrierResult.canProceedSafely(bookId)) {
-                this.showToast('上次阅读进度恢复未完成，保留备份待重试', '⚠️')
+                this.showToast('上次阅读进度恢复未完成，保留备份待重试', 'warning')
             }
 
             // 4. Fetch snapshot with content identity
@@ -11179,13 +12716,13 @@ ${originalText}`
             }
 
             if (!snapshot || !snapshot.blob) {
-                this.showToast('无法读取书籍文件数据', '⚠️')
+                this.showToast('无法读取书籍文件数据', 'warning')
                 return this.closeReader()
             }
 
             const targetBlob = snapshot.blob
             if (!targetBlob) {
-                this.showToast('无法读取书籍文件数据', '⚠️')
+                this.showToast('无法读取书籍文件数据', 'warning')
                 return this.closeReader()
             }
 
@@ -11213,9 +12750,11 @@ ${originalText}`
             const isPdf = safeFormat === 'pdf' || safeFileName.toLowerCase().endsWith('.pdf')
             const safeFileType = isPdf ? 'application/pdf' : (safeFormat === 'epub' ? 'application/epub+zip' : (targetBlob.type || ''))
 
-            const fileObj = (targetBlob instanceof File && targetBlob.name && !targetBlob.name.toLowerCase().endsWith('.pdf') && !isPdf)
+            const fileObj = (targetBlob?.isLazySnapshot || targetBlob?.nativeSnapshotOnly || snapshot?.nativeSnapshotOnly)
                 ? targetBlob
-                : new File([targetBlob], safeFileName, { type: safeFileType })
+                : ((targetBlob instanceof File && targetBlob.name && !targetBlob.name.toLowerCase().endsWith('.pdf') && !isPdf)
+                    ? targetBlob
+                    : new File([targetBlob], safeFileName, { type: safeFileType }))
 
             if (bookData && !bookData.format && safeFormat) bookData.format = safeFormat;
             this.currentBookFormat = safeFormat;
@@ -11233,9 +12772,22 @@ ${originalText}`
             this.dom.bookshelfView.style.display = 'none'
             this.dom.readerView.style.display = 'block'
             this.dom.readerView.classList.add('active')
+            document.documentElement.dataset.startupView = 'ready'
             this.minimizeImportPanel()
             const resolvedBookTitle = bookData.title || snapshot.title || '阅读'
             this.dom.readerBookTitle.innerText = resolvedBookTitle
+            if (this.dom.btnAddToShelf) {
+                this.dom.btnAddToShelf.style.display = bookData.isRecentOnly ? 'inline-flex' : 'none'
+            }
+            if (this.dom.btnOcrPage) {
+                this.dom.btnOcrPage.style.display = (bookData.format === 'pdf') ? 'inline-flex' : 'none'
+            }
+            if (this.dom.btnExportAnnotatedPdf) {
+                this.dom.btnExportAnnotatedPdf.style.display = (bookData.format === 'pdf') ? 'inline-flex' : 'none'
+            }
+            if (this.dom.btnPinRefPage) {
+                this.dom.btnPinRefPage.style.display = (bookData.format === 'pdf') ? 'inline-flex' : 'none'
+            }
             if (this.dom.btnChapterTranslate) {
                 const supported = ['epub', 'txt'].includes(bookData.format)
                 this.dom.btnChapterTranslate.disabled = !supported
@@ -11271,9 +12823,24 @@ ${originalText}`
                 const sessionDriver = new AdaptivePdfDriver({ nativePath, snapshot })
                 const sessionViewport = new PdfViewport(this.dom.readerContentArea, {
                     spreadMode: this.settings.pdfSpreadMode || 'none',
+                    onColumnReadingChange: state => {
+                        if (!readerSession.isCurrent()) return
+                        this.syncColumnReadingUI(state)
+                        if (readerSession.columnReadingEnabled !== state.enabled) {
+                            readerSession.columnReadingEnabled = state.enabled
+                            try {
+                                const key = `linden_col_cfg_${readerSession.bookId}`
+                                const cfg = JSON.parse(localStorage.getItem(key) || '{}')
+                                localStorage.setItem(key, JSON.stringify({ ...cfg, enabled: state.enabled }))
+                            } catch (_) {}
+                        }
+                    },
                     scale: isMobile ? 1.0 : 1.25,
                     minScale: 0.1,
                     snapshot,
+                    onInitialPageRendered: ({ page, canvas }) => {
+                        this.reportInitialPdfFrame(readerSession, sessionViewport, page, canvas)
+                    },
                     onSlotMount: (pageIdx, slot) => {
                         if (!readerSession.isCurrent()) return
                         this.mountPdfOverlayForSlot(pageIdx, slot, readerSession)
@@ -11423,7 +12990,7 @@ ${originalText}`
                         if (!readerSession.isCurrent()) return
                         sessionViewport.setHighlights(allHls, snapshot)
                         this.loadNotesList()
-                        this.showToast('已添加高亮笔记', '✓')
+                        this.showToast('已添加高亮笔记', 'success')
                     },
                     onHighlightClick: (hl, event, customRect) => {
                         if (!readerSession.isCurrent() || this.pdfDrawTool) return
@@ -11471,11 +13038,29 @@ this.applyPdfPageAppearance()
                     this.dom.btnPdfSpreadToggle.classList.toggle('active', spMode === 'dual')
                     this.dom.btnPdfSpreadToggle.setAttribute('title', spMode === 'dual' ? '切换为单页展示' : '切换为双页展开')
                 }
+                if (bookData?.cropSettings) {
+                    sessionViewport.setCropSettings(bookData.cropSettings)
+                    const cropModeSelect = document.getElementById('setting-pdf-crop-mode')
+                    const cropWrap = document.getElementById('pdf-crop-controls-wrap')
+                    const cropTb = document.getElementById('setting-pdf-crop-tb')
+                    const cropLr = document.getElementById('setting-pdf-crop-lr')
+                    const cropTbVal = document.getElementById('setting-pdf-crop-tb-val')
+                    const cropLrVal = document.getElementById('setting-pdf-crop-lr-val')
+                    if (cropModeSelect) cropModeSelect.value = bookData.cropSettings.mode || 'none'
+                    if (cropWrap) cropWrap.style.display = (bookData.cropSettings.mode && bookData.cropSettings.mode !== 'none') ? 'flex' : 'none'
+                    const tbVal = bookData.cropSettings.margins?.top || 0
+                    const lrVal = bookData.cropSettings.margins?.left || 0
+                    if (cropTb) cropTb.value = String(tbVal)
+                    if (cropLr) cropLr.value = String(lrVal)
+                    if (cropTbVal) cropTbVal.textContent = `${tbVal}%`
+                    if (cropLrVal) cropLrVal.textContent = `${lrVal}%`
+                }
                 const docInfo = await sessionViewport.load(
                     sessionDriver,
-                    { blob: fileObj, nativePath },
+                    { blob: fileObj, nativePath, password: options?.password || null },
                     { initialPage: initialPageFn, snapshot }
                 )
+                this.markBootStage?.('driverOpen')
                 if (!readerSession.isCurrent()) {
                     sessionViewport.destroy()
                     sessionDriver.destroy()
@@ -11510,10 +13095,41 @@ this.applyPdfPageAppearance()
 
                 // Apply platform resource budget & connect PageTurnController
                 const currentBudget = platformBridge.getResourceBudget()
+                const isConstrained = Boolean(
+                    currentBudget.isLowMemoryDevice ||
+                    !platformBridge.getCapabilities().isWindows ||
+                    (typeof navigator !== 'undefined' && typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 6)
+                )
+                const normalCacheBytes = isConstrained
+                    ? 32 * 1024 * 1024
+                    : Math.round(currentBudget.maxCacheMb * 1024 * 1024 / 2)
                 sessionViewport.setResourceBudget({
-                    isLowMemoryDevice: !platformBridge.getCapabilities().isWindows,
-                    bitmapCacheLimitBytes: Math.round(currentBudget.maxCacheMb * 1024 * 1024 / 2)
+                    isLowMemoryDevice: isConstrained,
+                    bitmapCacheLimitBytes: normalCacheBytes,
+                    bufferPages: isConstrained ? 1 : 2,
+                    renderConcurrency: isConstrained ? 1 : (currentBudget.maxConcurrent || 2)
                 })
+
+                // P03: Background / minimized window memory throttling
+                if (typeof document !== 'undefined') {
+                    if (this._pdfVisibilityHandler) {
+                        document.removeEventListener('visibilitychange', this._pdfVisibilityHandler)
+                    }
+                    this._pdfVisibilityHandler = () => {
+                        if (document.hidden) {
+                            sessionViewport.setResourceBudget({
+                                bufferPages: 0,
+                                bitmapCacheLimitBytes: 16 * 1024 * 1024
+                            })
+                        } else {
+                            sessionViewport.setResourceBudget({
+                                bufferPages: isConstrained ? 1 : 2,
+                                bitmapCacheLimitBytes: normalCacheBytes
+                            })
+                        }
+                    }
+                    document.addEventListener('visibilitychange', this._pdfVisibilityHandler)
+                }
                 this.pageTurnController?.setAdapter(new PdfPageTurnAdapter(sessionViewport))
                 if (isMobile) {
                     sessionViewport.setZoom('fit-width')
@@ -11557,8 +13173,16 @@ this.applyPdfPageAppearance()
                     console.warn('Failed to record book opened for PDF:', err)
                 })
 
-                setTimeout(() => {
+                setTimeout(async () => {
                     if (readerSession.isCurrent() && this.currentBookId === bookId) {
+                        this.restoreBookScanEnhancement?.(bookId)
+                        this.restoreBookColumnReading?.(bookId)
+                        try {
+                            const savedToc = await db.getSetting?.(`linden_manual_toc_${bookId}`)
+                            this._currentManualToc = Array.isArray(savedToc) ? savedToc : []
+                        } catch (_) {
+                            this._currentManualToc = []
+                        }
                         this.renderTOC(this.currentPdfTOC)
                         this.loadNotesList()
                         const activeItem = pdfTocAtPage(readerSession.tocIndex, displayPage - 1)
@@ -11897,9 +13521,18 @@ this.applyPdfPageAppearance()
             }, 20)
 
         } catch (err) {
+            const msg = String(err?.message || err).toLowerCase()
+            const isPasswordError = err?.name === 'PasswordException' || msg.includes('password') || msg.includes('needs_password')
+            if (isPasswordError && readerSession.isCurrent()) {
+                const promptTitle = options?.password ? '密码错误，请重新输入' : '文档受密码保护'
+                const userPassword = await this.promptPasswordModal(promptTitle)
+                if (userPassword) {
+                    return this.openBook(bookOrId, initialLocation, { ...options, password: userPassword })
+                }
+            }
             if (readerSession.isCurrent()) {
                 console.error('Failed to open book in reader:', err)
-                this.showToast(`打开书籍失败: ${err.message}`, '⚠️')
+                this.showToast(isPasswordError ? '需要密码才能打开该文档' : `打开书籍失败: ${err.message}`, 'warning')
                 this.closeReader()
             } else {
                 try { readerSession.view?.close?.() } catch (e) {}
@@ -11930,7 +13563,7 @@ this.applyPdfPageAppearance()
 
             // 1. Synchronous capture and pre-await backup
             try {
-                chapterTranslationManager.stop()
+                this.chapterTranslationManager?.stop?.()
                 ttsPlayer.stop()
             } catch (_) {}
             try {
@@ -12052,6 +13685,21 @@ this.applyPdfPageAppearance()
                 trackerBackupSaved
             }
 
+            try {
+                this.pdfViewport?.destroy?.()
+                this.pdfDriver?.destroy?.()
+                if (activeSession?.viewport) activeSession.viewport.destroy?.()
+                if (activeSession?.driver) activeSession.driver.destroy?.()
+            } catch (dErr) {
+                console.warn('flushReaderStateOnExit: pdf driver cleanup error:', dErr)
+            }
+
+            try {
+                await Promise.race([await Promise.race([this.aiSidebar?.flushActiveStreamingMessage?.(), new Promise(r => setTimeout(r, 600))]), new Promise(r => setTimeout(r, 600))])
+            } catch (aErr) {
+                console.warn('flushReaderStateOnExit: aiSidebar flush error:', aErr)
+            }
+
             // 4. Close handshake completion: Only call if requestId is a non-empty string
             if (typeof requestId === 'string' && requestId.length > 0) {
                 try {
@@ -12085,6 +13733,8 @@ this.applyPdfPageAppearance()
     }
 
     async closeReader() {
+        document.documentElement.dataset.startupView = 'ready'
+        this.setPdfMoreToolsOpen?.(false)
         this.cancelPendingReaderUIToggle()
         const closingSession = this._activeSession
         if (!closingSession) {
@@ -12102,6 +13752,22 @@ this.applyPdfPageAppearance()
         this.pageTurnController?.setAdapter(null)
         closingSession.abortController?.abort()
         ocrService.abort().catch(() => {})
+        if (this._pageOcrAbortController) {
+            this._pageOcrAbortController.abort()
+            this._pageOcrAbortController = null
+        }
+        this._isPageOcrRunning = false
+        if (this._pinnedRefAbortController) {
+            this._pinnedRefAbortController.abort()
+            this._pinnedRefAbortController = null
+        }
+        if (this.dom.readerPinnedReferencePanel) {
+            this.dom.readerPinnedReferencePanel.style.display = 'none'
+        }
+        this.closeSecondaryPdfViewport?.()
+        this.removeReadingRuler?.()
+        this.stopAutoScroll?.()
+        this._currentManualToc = null
         this.closePdfOcrModal?.()
         this.closeAiAssistantModal?.()
         if (ttsPlayer.state !== 'playing' && ttsPlayer.state !== 'paused') {
@@ -12125,6 +13791,10 @@ this.applyPdfPageAppearance()
         if (this.pdfViewport === closingPdfViewport) this.pdfViewport = null
         if (this.pdfDriver === closingPdfDriver) this.pdfDriver = null
         if (this._activeSession === closingSession) this.currentPdfTOC = null
+        if (this._pdfVisibilityHandler && typeof document !== 'undefined') {
+            document.removeEventListener('visibilitychange', this._pdfVisibilityHandler)
+            this._pdfVisibilityHandler = null
+        }
         this.pageTurnController?.cancelCurrent()
         this.pageTurnController?.setAdapter(null)
 
@@ -12157,6 +13827,19 @@ this.applyPdfPageAppearance()
 
         if (this.dom.pdfZoomBar) {
             this.dom.pdfZoomBar.style.display = 'none'
+        }
+        if (this._pinnedRefAbortController) {
+            this._pinnedRefAbortController.abort()
+            this._pinnedRefAbortController = null
+        }
+        if (this.dom.pinnedRefCanvas) {
+            const pCtx = this.dom.pinnedRefCanvas.getContext('2d')
+            pCtx?.clearRect(0, 0, this.dom.pinnedRefCanvas.width, this.dom.pinnedRefCanvas.height)
+            this.dom.pinnedRefCanvas.width = 0
+            this.dom.pinnedRefCanvas.height = 0
+        }
+        if (this.dom.readerPinnedReferencePanel) {
+            this.dom.readerPinnedReferencePanel.style.display = 'none'
         }
         this.clearSearchState(true)
         this.closeDrawer()
@@ -12242,7 +13925,12 @@ this.applyPdfPageAppearance()
                 return
             }
             if (this._currentBookEpoch === closingEpoch && !this._activeSession) {
-                this.refreshBookshelf().catch(err => {
+                this.refreshBookshelf().then(() => {
+                    if (closingBookId) {
+                        this._lastOpenedBookId = closingBookId
+                        this._scrollToBookAnchor(closingBookId)
+                    }
+                }).catch(err => {
                     console.warn('Failed to refresh bookshelf after book close:', err)
                 })
             }
@@ -12259,6 +13947,746 @@ this.applyPdfPageAppearance()
 
         if (this.syncConfig?.enabled && this.syncConfig?.autoSyncOnBookClose) {
             this.triggerSilentBackgroundSync()
+        }
+    }
+
+    _scrollToBookAnchor(bookId) {
+        if (!bookId) return
+        const books = this._virtualBooks || this._lastRenderedBooks || []
+        const idx = books.findIndex(b => b.id === bookId)
+        if (idx === -1) return
+        if (this._isGridVirtualized) {
+            const cols = this._virtualCols || 4
+            const rowHeight = this._virtualRowHeight || 321
+            const row = Math.floor(idx / cols)
+            const gridOffsetTop = this.dom.booksGrid?.offsetTop || 0
+            const targetScrollTop = gridOffsetTop + (row * rowHeight)
+            if (this.dom.booksWorkspace) {
+                this.dom.booksWorkspace.scrollTop = targetScrollTop
+                this._renderVirtualizedSlice()
+            }
+        } else {
+            const card = this.dom.booksGrid?.querySelector(`[data-id="${bookId}"]`) ||
+                         this.dom.booksShelf?.querySelector(`[data-id="${bookId}"]`)
+            card?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+            card?.focus?.()
+        }
+    }
+
+    debouncedRescanLinkedRoots() {
+        const now = Date.now()
+        if (this._lastLinkedRescan && (now - this._lastLinkedRescan < 5000)) return
+        this._lastLinkedRescan = now
+        if (this._linkedRescanTimer) clearTimeout(this._linkedRescanTimer)
+        this._linkedRescanTimer = setTimeout(async () => {
+            try {
+                if (!window.platformBridge?.fsScanFolder) return
+                const linkedRoots = (await db.getSetting?.('linkedFolderRoots', [])) || []
+                for (const root of linkedRoots) {
+                    await this.linkLocalFolder(root, { isSilent: true })
+                }
+            } catch (_) {}
+        }, 500)
+    }
+
+    async linkLocalFolder(targetFolder = null, { isSilent = false } = {}) {
+        if (!window.platformBridge?.dialogPickFolder || !window.platformBridge?.fsScanFolder) {
+            if (!isSilent) this.showToast('当前环境不支持文件夹扫描', 'warning')
+            return
+        }
+        let folder = targetFolder
+        if (!folder) {
+            folder = await window.platformBridge.dialogPickFolder({ title: '选择要链接的书库文件夹' })
+        }
+        if (!folder) return
+        if (!isSilent) this.showToast(`正在扫描文件夹: ${folder}...`, 'info')
+
+        const normalizePath = p => (p || '').replace(/\\/g, '/').replace(/\/+$/, '')
+        const splitPathSegments = p => (p || '').replace(/\\/g, '/').split('/').filter(Boolean).map(s => s.toLowerCase())
+        const isUnderFolder = (filePath, folderPath) => {
+            const fileParts = splitPathSegments(filePath)
+            const rootParts = splitPathSegments(folderPath)
+            if (fileParts.length < rootParts.length) return false
+            for (let i = 0; i < rootParts.length; i++) {
+                if (fileParts[i] !== rootParts[i]) return false
+            }
+            return true
+        }
+        const getRelativePath = (filePath, folderPath) => {
+            const normF = normalizePath(filePath)
+            const normRoot = normalizePath(folderPath)
+            if (normF.toLowerCase().startsWith(normRoot.toLowerCase() + '/')) {
+                return normF.slice(normRoot.length + 1)
+            }
+            return normF
+        }
+
+        let scanRes = null
+        try {
+            scanRes = await window.platformBridge.fsScanFolder(folder, 5)
+        } catch (scanErr) {
+            if (!isSilent) this.showToast(`扫描文件夹失败: ${scanErr?.message || scanErr}`, 'error')
+            // Root offline / scan failure / permission denied: do NOT treat as deleting all books, only mark offline
+            try {
+                const existing = await (db.getAllBooks ? db.getAllBooks().catch(() => []) : [])
+                for (const b of existing) {
+                    if (b.isLinked && isUnderFolder(b.nativePath || b.filePath, folder)) {
+                        b.hasLocalFile = false
+                        b.isOffline = true
+                        await db.saveBook?.(b)
+                    }
+                }
+            } catch (_) {}
+            return
+        }
+
+        const files = Array.isArray(scanRes) ? scanRes : (scanRes?.files || scanRes?.items || [])
+        const scanComplete = (scanRes && typeof scanRes === 'object' && 'complete' in scanRes) ? Boolean(scanRes.complete) : true
+        const scanErrors = (scanRes && typeof scanRes === 'object' && Array.isArray(scanRes.errors)) ? scanRes.errors : []
+
+        if (!files || files.length === 0) {
+            if (scanComplete && scanErrors.length === 0) {
+                try {
+                    const existing = await (db.getAllBooks ? db.getAllBooks().catch(() => []) : [])
+                    for (const b of existing) {
+                        if (b.isLinked && isUnderFolder(b.nativePath || b.filePath, folder)) {
+                            b.hasLocalFile = false
+                            b.isOffline = true
+                            await db.saveBook?.(b)
+                        }
+                    }
+                } catch (_) {}
+                if (!isSilent) this.showToast('未在选定目录中发现支持的电子书', 'info')
+            } else if (!isSilent) {
+                this.showToast(`部分目录扫描受限 (${scanErrors.length} 处错误)，已保留现有书架状态`, 'warning')
+            }
+            return
+        }
+
+        const existingBooks = await (db.getAllBooks ? db.getAllBooks().catch(() => []) : [])
+        const scannedPathSet = new Set(files.map(f => normalizePath(f.path).toLowerCase()))
+        const matchedExistingIds = new Set()
+        let added = 0
+        let updated = 0
+
+        // Find existing linked books under this folder that are missing from the current scan
+        const missingInFolder = existingBooks.filter(b => 
+            b.isLinked && 
+            isUnderFolder(b.nativePath || b.filePath, folder) && 
+            !scannedPathSet.has(normalizePath(b.nativePath || b.filePath).toLowerCase())
+        )
+
+        for (const file of files) {
+            const normFilePath = normalizePath(file.path)
+            const relPath = getRelativePath(file.path, folder)
+            const format = (file.ext || file.extension || '').toLowerCase()
+            const size = Number(file.size ?? file.fileSize ?? 0)
+            const title = file.name.replace(/\.[^/.]+$/, '')
+            const stableKey = `${title}_${size}_${format}`
+            const fid = file.fileId || file.file_id || file.inode || file.id || null
+            const volId = file.volumeId || file.volume_id || null
+            const fileMtime = Number(file.modified_time ?? file.mtime ?? 0)
+
+            // 1. Collect all existing candidates at this exact path (case-insensitive), independent of getAllBooks() reading sort order
+            const samePathCandidates = existingBooks.filter(b =>
+                !matchedExistingIds.has(b.id) &&
+                (normalizePath(b.nativePath).toLowerCase() === normFilePath.toLowerCase() ||
+                 normalizePath(b.filePath).toLowerCase() === normFilePath.toLowerCase())
+            )
+
+            let matchedBook = null
+            if (samePathCandidates.length > 0) {
+                let effectiveFileHash = file.documentHash || file.document_hash || null
+                const needsOnDemandHash = !effectiveFileHash && samePathCandidates.some(cand => {
+                    const candFid = cand.fileId || cand.file_id || cand.inode || null
+                    const candMtime = Number(cand.mtime ?? cand.modified_time ?? 0)
+                    const sizeMatch = !cand.size || !size || Math.abs(cand.size - size) === 0
+                    const idDiff = Boolean(fid && candFid && fid !== candFid)
+                    const mtimeDiff = Boolean(fileMtime > 0 && candMtime > 0 && fileMtime !== candMtime)
+                    return sizeMatch && (idDiff || mtimeDiff) && Boolean(cand.documentHash)
+                })
+                if (needsOnDemandHash && typeof window !== 'undefined' && typeof window.platformBridge?.computeNativeFileHash === 'function') {
+                    try {
+                        effectiveFileHash = await window.platformBridge.computeNativeFileHash(file.path)
+                        if (effectiveFileHash) file.documentHash = effectiveFileHash
+                    } catch (_) {}
+                }
+
+                // Prefer active/non-offline candidate first when comparing versions at the same path
+                const orderedCandidates = [...samePathCandidates].sort((a, b) => Number(Boolean(a.isOffline)) - Number(Boolean(b.isOffline)))
+                for (const cand of orderedCandidates) {
+                    const candFid = cand.fileId || cand.file_id || cand.inode || null
+                    const candMtime = Number(cand.mtime ?? cand.modified_time ?? 0)
+                    const hasSizeMismatch = Boolean(cand.size && size > 0 && Math.abs(cand.size - size) > 0)
+                    const hasFileIdMismatch = Boolean(fid && candFid && fid !== candFid)
+                    const hasMtimeMismatch = Boolean(fileMtime > 0 && candMtime > 0 && fileMtime !== candMtime)
+                    const hasHashMismatch = Boolean(effectiveFileHash && cand.documentHash && effectiveFileHash !== cand.documentHash)
+                    const isConfirmedSameHash = Boolean(effectiveFileHash && cand.documentHash && effectiveFileHash === cand.documentHash)
+
+                    if (!hasHashMismatch && !hasSizeMismatch && (isConfirmedSameHash || (!hasFileIdMismatch && !hasMtimeMismatch))) {
+                        matchedBook = cand
+                        break
+                    }
+                }
+
+                // Mark all non-matching historical versions at this path as offline & consumed so they are not re-matched
+                for (const cand of samePathCandidates) {
+                    if (cand !== matchedBook) {
+                        matchedExistingIds.add(cand.id)
+                        if (!cand.isOffline || cand.hasLocalFile !== false) {
+                            cand.isOffline = true
+                            cand.hasLocalFile = false
+                            await db.saveBook(cand)
+                        }
+                    }
+                }
+            }
+
+            // 2. Candidate rename/move match from missing books in this folder
+            if (!matchedBook && size > 0) {
+                // 2a. Stable file identifier if available (also require same size and no mtime/hash conflict)
+                if (fid) {
+                    matchedBook = missingInFolder.find(b => {
+                        if (matchedExistingIds.has(b.id)) return false
+                        const bFid = b.fileId || b.file_id || b.inode || null
+                        if (bFid !== fid) return false
+                        if (b.size && size > 0 && b.size !== size) return false
+                        const bMtime = Number(b.mtime ?? b.modified_time ?? 0)
+                        if (!file.documentHash && fileMtime > 0 && bMtime > 0 && fileMtime !== bMtime) return false
+                        if (file.documentHash && b.documentHash && file.documentHash !== b.documentHash) return false
+                        return true
+                    })
+                }
+                // 2b. Exact content/document hash match
+                if (!matchedBook && (file.documentHash || file.hash)) {
+                    const h = file.documentHash || file.hash
+                    matchedBook = missingInFolder.find(b => !matchedExistingIds.has(b.id) && b.documentHash === h)
+                }
+                // 2c. Relative path match
+                if (!matchedBook && relPath) {
+                    matchedBook = missingInFolder.find(b => {
+                        if (matchedExistingIds.has(b.id)) return false
+                        if (b.relativePath !== relPath || b.size !== size || b.format !== format) return false
+                        const bMtime = Number(b.mtime ?? b.modified_time ?? 0)
+                        if (!file.documentHash && fileMtime > 0 && bMtime > 0 && fileMtime !== bMtime) return false
+                        if (file.documentHash && b.documentHash && file.documentHash !== b.documentHash) return false
+                        return true
+                    })
+                }
+            }
+
+            const inferredMime = format === 'pdf' ? 'application/pdf' : (format === 'txt' ? 'text/plain' : (format === 'epub' ? 'application/epub+zip' : `application/${format}`))
+
+            if (matchedBook) {
+                matchedExistingIds.add(matchedBook.id)
+                // Preserved identity: update path and state without modifying notes or rolling back progress
+                matchedBook.nativePath = file.path
+                matchedBook.filePath = file.path
+                matchedBook.rootId = folder
+                matchedBook.relativePath = relPath
+                matchedBook.title = title
+                matchedBook.format = format
+                matchedBook.size = size
+                matchedBook.fileSize = size
+                matchedBook.mtime = fileMtime
+                matchedBook.modified_time = fileMtime
+                matchedBook.hasLocalFile = true
+                matchedBook.isOffline = false
+                matchedBook.stableKey = stableKey
+                if (volId) matchedBook.volumeId = volId
+                if (fid) matchedBook.fileId = fid
+                if (file.documentHash) matchedBook.documentHash = file.documentHash
+                if (format !== 'pdf' && typeof db.createLazySnapshotBlob === 'function' && !matchedBook.blob) {
+                    matchedBook.blob = db.createLazySnapshotBlob(file.path, size, inferredMime)
+                }
+                await db.saveBook(matchedBook)
+                updated++
+            } else {
+                let hash = 0
+                for (let i = 0; i < file.path.length; i++) hash = ((hash << 5) - hash) + file.path.charCodeAt(i) | 0
+                const id = 'linked_' + Math.abs(hash).toString(36) + '_' + Math.random().toString(36).slice(2, 6)
+                const newBook = {
+                    id,
+                    title,
+                    author: '未知作者',
+                    format,
+                    size,
+                    fileSize: size,
+                    mtime: fileMtime,
+                    modified_time: fileMtime,
+                    volumeId: volId,
+                    fileId: fid,
+                    filePath: file.path,
+                    nativePath: file.path,
+                    rootId: folder,
+                    relativePath: relPath,
+                    documentHash: file.documentHash || null,
+                    stableKey,
+                    isLinked: true,
+                    hasLocalFile: true,
+                    isOffline: false,
+                    addedAt: Date.now(),
+                    updatedAt: Date.now(),
+                    progress: { fraction: 0, updatedAt: Date.now() }
+                }
+                if (format !== 'pdf' && typeof db.createLazySnapshotBlob === 'function') {
+                    newBook.blob = db.createLazySnapshotBlob(file.path, size, inferredMime)
+                }
+                await db.saveBook(newBook)
+                added++
+            }
+        }
+
+        // Mark missing linked books as offline ONLY when the folder scan was complete without directory errors
+        if (scanComplete && scanErrors.length === 0) {
+            for (const b of existingBooks) {
+                if (b.isLinked && isUnderFolder(b.nativePath || b.filePath, folder) && !matchedExistingIds.has(b.id) && !scannedPathSet.has(normalizePath(b.nativePath || b.filePath).toLowerCase())) {
+                    b.hasLocalFile = false
+                    b.isOffline = true
+                    await db.saveBook(b)
+                }
+            }
+        }
+
+        // Save linked folder root to settings
+        try {
+            if (db.getSetting && db.setSetting) {
+                const roots = (await db.getSetting('linkedFolderRoots', [])) || []
+                if (!roots.includes(folder)) {
+                    roots.push(folder)
+                    await db.setSetting('linkedFolderRoots', roots)
+                }
+            }
+        } catch (_) {}
+
+        if (!isSilent) {
+            if (!scanComplete || scanErrors.length > 0) {
+                this.showToast(`扫描部分完成（${scanErrors.length} 个子目录无权限）：新链接 ${added} 本，更新 ${updated} 本`, 'warning')
+            } else {
+                this.showToast(`扫描完成：新链接 ${added} 本，更新 ${updated} 本（共发现 ${files.length} 本）`, 'success')
+            }
+        }
+        await this.refreshBookshelf?.()
+    }
+
+    async exportAnnotatedPdf() {
+        if (!this.currentBookId || this.currentBookData?.format !== 'pdf') {
+            this.showToast('仅支持 PDF 电子书导出带批注副本', 'info')
+            return
+        }
+        const docId = this.pdfDriver?.docId || this.pdfViewport?.driver?.docId || this.currentBookData.docId
+        if (!docId && !this.currentBookData.nativeSnapshotPath) {
+            this.showToast('无法定位原生 PDF 文档', 'warning')
+            return
+        }
+        const title = this.currentBookData.title || 'document'
+        const defaultName = `${title}_annotated.pdf`
+        let savePath = null
+        if (window.platformBridge?.dialogPickSavePath) {
+            savePath = await window.platformBridge.dialogPickSavePath({
+                defaultName,
+                defaultPath: defaultName,
+                title: '保存带批注的 PDF 副本',
+                filterName: 'PDF 文档 (*.pdf)',
+                filterExt: 'pdf'
+            })
+        }
+        if (!savePath) return
+
+        // Query real highlights and ink drawings for the active book
+        const activeDb = this.db || db
+        let highlights = []
+        try {
+            if (typeof activeDb?.getHighlightsByBook === 'function') {
+                highlights = (await activeDb.getHighlightsByBook(this.currentBookId)) || []
+            }
+        } catch (e) {
+            console.error('[ExportAnnotatedPdf] Note retrieval failed:', e)
+            this.showToast('读取批注失败，已停止导出: ' + (e.message || String(e)), 'error')
+            return
+        }
+        const numPages = this.pdfDriver?.numPages || this.pdfViewport?.numPages || 0
+        const items = []
+
+        for (const hl of highlights || []) {
+            const segments = (hl.pdfTarget?.segments && hl.pdfTarget.segments.length > 0)
+                ? hl.pdfTarget.segments
+                : [{
+                    page: hl.pdfTarget?.page ?? hl.page ?? 0,
+                    quads: hl.pdfTarget?.quads || hl.quads || [],
+                    rects: hl.pdfTarget?.rects || (hl.rect ? [hl.rect] : [])
+                }]
+
+            for (const seg of segments) {
+                const page = seg.page ?? hl.pdfTarget?.page ?? hl.page ?? 0
+                const pageDims = this.pdfViewport?.pageSizes?.[page] || this.pdfDriver?.pageSizes?.[page] || { width: 612, height: 792 }
+                const pageW = pageDims.width || 612
+                const pageH = pageDims.height || 792
+
+                const quads = (seg.quads || []).flat()
+                let rect = seg.rects?.[0] || seg.rect || hl.pdfTarget?.rects?.[0] || hl.rect
+                if (quads.length >= 8) {
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+                    for (let i = 0; i < quads.length; i += 2) {
+                        minX = Math.min(minX, quads[i])
+                        maxX = Math.max(maxX, quads[i])
+                        minY = Math.min(minY, quads[i + 1])
+                        maxY = Math.max(maxY, quads[i + 1])
+                    }
+                    rect = [minX, minY, maxX, maxY]
+                } else if (rect && rect.length >= 4) {
+                    if (rect[0] <= 1 && rect[1] <= 1 && rect[2] <= 1 && rect[3] <= 1 && (rect[2] > 0 || rect[3] > 0)) {
+                        rect = [rect[0] * pageW, rect[1] * pageH, rect[2] * pageW, rect[3] * pageH]
+                    }
+                } else {
+                    rect = [0, 0, pageW, 20]
+                }
+                items.push({
+                    page,
+                    type: hl.type || (hl.note && !quads.length ? 'note' : 'highlight'),
+                    color: hl.color || '#ffeb3b',
+                    opacity: hl.opacity ?? 0.8,
+                    rect: rect || [0, 0, 100, 100],
+                    quads: quads.length ? quads : undefined,
+                    text: hl.note || hl.text || undefined,
+                    author: hl.author || 'Linden Leaf'
+                })
+            }
+        }
+
+        if (typeof activeDb?.getPdfPageDrawing === 'function') {
+            const clipIntervalsAgainstCapsule = (ax, ay, bx, by, e1x, e1y, e2x, e2y, radius) => {
+                const intervals = []
+                const vx = bx - ax
+                const vy = by - ay
+                const vLenSq = vx * vx + vy * vy
+
+                const addDiskInterval = (cx, cy) => {
+                    const ox = ax - cx
+                    const oy = ay - cy
+                    if (vLenSq < 1e-12) {
+                        if (ox * ox + oy * oy <= radius * radius) intervals.push([0, 1])
+                        return
+                    }
+                    const b = 2 * (ox * vx + oy * vy)
+                    const c = ox * ox + oy * oy - radius * radius
+                    const disc = b * b - 4 * vLenSq * c
+                    if (disc < 0) return
+                    const sqrtD = Math.sqrt(Math.max(0, disc))
+                    const t1 = Math.max(0, (-b - sqrtD) / (2 * vLenSq))
+                    const t2 = Math.min(1, (-b + sqrtD) / (2 * vLenSq))
+                    if (t1 <= t2) intervals.push([t1, t2])
+                }
+
+                addDiskInterval(e1x, e1y)
+                addDiskInterval(e2x, e2y)
+
+                const ux = e2x - e1x
+                const uy = e2y - e1y
+                const uLen = Math.hypot(ux, uy)
+                if (uLen > 1e-9) {
+                    const uHatX = ux / uLen
+                    const uHatY = uy / uLen
+                    const nHatX = -uHatY
+                    const nHatY = uHatX
+
+                    const solveLinearRange = (f0, fv, minVal, maxVal) => {
+                        if (Math.abs(fv) < 1e-12) {
+                            return (f0 >= minVal && f0 <= maxVal) ? [0, 1] : null
+                        }
+                        let tMin = (minVal - f0) / fv
+                        let tMax = (maxVal - f0) / fv
+                        if (tMin > tMax) {
+                            const tmp = tMin
+                            tMin = tMax
+                            tMax = tmp
+                        }
+                        const lo = Math.max(0, tMin)
+                        const hi = Math.min(1, tMax)
+                        return lo <= hi ? [lo, hi] : null
+                    }
+
+                    const d0 = (ax - e1x) * nHatX + (ay - e1y) * nHatY
+                    const dv = vx * nHatX + vy * nHatY
+                    const perpRange = solveLinearRange(d0, dv, -radius, radius)
+                    if (perpRange) {
+                        const s0 = (ax - e1x) * uHatX + (ay - e1y) * uHatY
+                        const sv = vx * uHatX + vy * uHatY
+                        const paraRange = solveLinearRange(s0, sv, 0, uLen)
+                        if (paraRange) {
+                            const lo = Math.max(perpRange[0], paraRange[0])
+                            const hi = Math.min(perpRange[1], paraRange[1])
+                            if (lo <= hi) intervals.push([lo, hi])
+                        }
+                    }
+                }
+                return intervals
+            }
+
+            const subtractIntervalsFromUnit = (erasedIntervals) => {
+                if (!erasedIntervals.length) return [[0, 1]]
+                const sorted = erasedIntervals
+                    .map(([a, b]) => [Math.max(0, a), Math.min(1, b)])
+                    .filter(([a, b]) => a <= b + 1e-9)
+                    .sort((x, y) => x[0] - y[0])
+                if (!sorted.length) return [[0, 1]]
+                const merged = [sorted[0]]
+                for (let k = 1; k < sorted.length; k++) {
+                    const prev = merged[merged.length - 1]
+                    const cur = sorted[k]
+                    if (cur[0] <= prev[1] + 1e-6) {
+                        prev[1] = Math.max(prev[1], cur[1])
+                    } else {
+                        merged.push(cur)
+                    }
+                }
+                const kept = []
+                let cursor = 0
+                for (const [a, b] of merged) {
+                    if (a - cursor > 1e-5) {
+                        kept.push([cursor, a])
+                    }
+                    cursor = Math.max(cursor, b)
+                }
+                if (1 - cursor > 1e-5) {
+                    kept.push([cursor, 1])
+                }
+                return kept
+            }
+
+            for (let p = 0; p < numPages; p++) {
+                try {
+                    const drawing = await activeDb.getPdfPageDrawing(this.currentBookId, p)
+                    if (drawing?.strokes?.length) {
+                        const pageDims = this.pdfViewport?.pageSizes?.[p] || this.pdfDriver?.pageSizes?.[p] || { width: 612, height: 792 }
+                        const pageW = pageDims.width || 612
+                        const pageH = pageDims.height || 792
+                        const allStrokes = drawing.strokes
+                        const validStrokes = []
+
+                        for (let i = 0; i < allStrokes.length; i++) {
+                            const s = allStrokes[i]
+                            if (!s || s.tool === 'eraser') continue
+                            const pts = Array.isArray(s) ? s : (s.points || [])
+                            if (!pts.length) continue
+                            const penWidth = Number(s.width ?? drawing.width) || 2.0
+
+                            // Collect subsequent erasers on this page
+                            const erasersAfter = []
+                            for (let j = i + 1; j < allStrokes.length; j++) {
+                                const er = allStrokes[j]
+                                if (!er || er.tool !== 'eraser') continue
+                                const erPts = Array.isArray(er) ? er : (er.points || [])
+                                if (erPts.length > 0) {
+                                    erasersAfter.push({
+                                        points: erPts,
+                                        width: Number(er.width) || 20
+                                    })
+                                }
+                            }
+
+                            if (pts.length === 1) {
+                                const px = (Number(pts[0][0]) || 0) * pageW
+                                const py = (Number(pts[0][1]) || 0) * pageH
+                                let ptErased = false
+                                for (const er of erasersAfter) {
+                                    const r = Math.max((er.width + penWidth) / 2, Math.min(pageW, pageH) * Math.max(0.025, er.width / 800))
+                                    for (let q = 0; q < er.points.length; q++) {
+                                        const e1x = (Number(er.points[q][0]) || 0) * pageW
+                                        const e1y = (Number(er.points[q][1]) || 0) * pageH
+                                        const e2x = q + 1 < er.points.length ? (Number(er.points[q + 1][0]) || 0) * pageW : e1x
+                                        const e2y = q + 1 < er.points.length ? (Number(er.points[q + 1][1]) || 0) * pageH : e1y
+                                        if (clipIntervalsAgainstCapsule(px, py, px, py, e1x, e1y, e2x, e2y, r).length > 0) {
+                                            ptErased = true
+                                            break
+                                        }
+                                    }
+                                    if (ptErased) break
+                                }
+                                if (!ptErased) {
+                                    validStrokes.push({ ...s, points: [pts[0]] })
+                                }
+                                continue
+                            }
+
+                            const remainingSegments = []
+                            let currentPolyline = []
+
+                            for (let segIdx = 0; segIdx < pts.length - 1; segIdx++) {
+                                const pA = pts[segIdx]
+                                const pB = pts[segIdx + 1]
+                                const ax = (Number(pA[0]) || 0) * pageW
+                                const ay = (Number(pA[1]) || 0) * pageH
+                                const bx = (Number(pB[0]) || 0) * pageW
+                                const by = (Number(pB[1]) || 0) * pageH
+
+                                const erasedIntervals = []
+                                for (const er of erasersAfter) {
+                                    const r = Math.max((er.width + penWidth) / 2, Math.min(pageW, pageH) * Math.max(0.025, er.width / 800))
+                                    if (er.points.length === 1) {
+                                        const ex = (Number(er.points[0][0]) || 0) * pageW
+                                        const ey = (Number(er.points[0][1]) || 0) * pageH
+                                        erasedIntervals.push(...clipIntervalsAgainstCapsule(ax, ay, bx, by, ex, ey, ex, ey, r))
+                                    } else {
+                                        for (let q = 0; q < er.points.length - 1; q++) {
+                                            const e1x = (Number(er.points[q][0]) || 0) * pageW
+                                            const e1y = (Number(er.points[q][1]) || 0) * pageH
+                                            const e2x = (Number(er.points[q + 1][0]) || 0) * pageW
+                                            const e2y = (Number(er.points[q + 1][1]) || 0) * pageH
+                                            erasedIntervals.push(...clipIntervalsAgainstCapsule(ax, ay, bx, by, e1x, e1y, e2x, e2y, r))
+                                        }
+                                    }
+                                }
+
+                                const keptPieces = subtractIntervalsFromUnit(erasedIntervals)
+                                if (keptPieces.length === 0) {
+                                    if (currentPolyline.length > 0) {
+                                        remainingSegments.push(currentPolyline)
+                                        currentPolyline = []
+                                    }
+                                    continue
+                                }
+
+                                for (const [t0, t1] of keptPieces) {
+                                    const startPt = [
+                                        (Number(pA[0]) || 0) + t0 * ((Number(pB[0]) || 0) - (Number(pA[0]) || 0)),
+                                        (Number(pA[1]) || 0) + t0 * ((Number(pB[1]) || 0) - (Number(pA[1]) || 0))
+                                    ]
+                                    const endPt = [
+                                        (Number(pA[0]) || 0) + t1 * ((Number(pB[0]) || 0) - (Number(pA[0]) || 0)),
+                                        (Number(pA[1]) || 0) + t1 * ((Number(pB[1]) || 0) - (Number(pA[1]) || 0))
+                                    ]
+
+                                    if (t0 > 1e-5) {
+                                        if (currentPolyline.length > 0) {
+                                            remainingSegments.push(currentPolyline)
+                                            currentPolyline = []
+                                        }
+                                    }
+
+                                    if (currentPolyline.length === 0) {
+                                        currentPolyline.push(startPt, endPt)
+                                    } else {
+                                        currentPolyline.push(endPt)
+                                    }
+
+                                    if (t1 < 1 - 1e-5) {
+                                        remainingSegments.push(currentPolyline)
+                                        currentPolyline = []
+                                    }
+                                }
+                            }
+
+                            if (currentPolyline.length > 0) {
+                                remainingSegments.push(currentPolyline)
+                            }
+
+                            for (const seg of remainingSegments) {
+                                if (seg.length > 0) {
+                                    validStrokes.push({
+                                        ...s,
+                                        points: seg
+                                    })
+                                }
+                            }
+                        }
+
+                        if (validStrokes.length > 0) {
+
+                            // Group strokes by style { color, opacity, width }
+                            const strokeGroups = new Map()
+                            for (const s of validStrokes) {
+                                const pts = Array.isArray(s) ? s : (s.points || [])
+                                if (pts.length === 0) continue
+                                const color = s.color || drawing.color || '#ff0000'
+                                const opacity = s.opacity ?? drawing.opacity ?? 1.0
+                                const width = s.width ?? drawing.width ?? 2.0
+                                const key = `${color}__${opacity}__${width}`
+                                if (!strokeGroups.has(key)) {
+                                    strokeGroups.set(key, { color, opacity, width, pointLists: [] })
+                                }
+                                const mappedPts = pts.map(pt => [
+                                    (Number(pt[0]) || 0) * pageW,
+                                    (Number(pt[1]) || 0) * pageH
+                                ])
+                                strokeGroups.get(key).pointLists.push(mappedPts)
+                            }
+
+                            for (const g of strokeGroups.values()) {
+                                items.push({
+                                    page: p,
+                                    type: 'ink',
+                                    color: g.color,
+                                    opacity: g.opacity,
+                                    width: g.width,
+                                    strokes: g.pointLists
+                                })
+                            }
+                        }
+                    }
+                } catch (_) {}
+            }
+        }
+
+        try {
+            const res = await window.platformBridge.mupdfExportAnnotatedPdf(docId, savePath, JSON.stringify(items))
+            if (res === true || res?.success) {
+                this.showToast(`批注已导出至: ${savePath}`, 'success')
+            } else {
+                this.showToast(`导出失败: ${res?.error || '未能生成副本'}`, 'warning')
+            }
+        } catch (err) {
+            console.warn('[ExportAnnotatedPdf] failed:', err)
+            this.showToast(`导出失败: ${err.message || String(err)}`, 'warning')
+        }
+    }
+
+    async pinReferencePage(pageIndex, title = '固定参考页') {
+        if (!this.dom.readerPinnedReferencePanel) return
+        const maxPages = this.pdfDriver?.numPages || this.pdfViewport?.numPages || 1
+        const clampedPage = Math.max(1, Math.min(pageIndex, maxPages))
+        this._pinnedRefPageIndex = clampedPage
+        this.dom.readerPinnedReferencePanel.style.display = 'flex'
+        if (this.dom.pinnedRefPageBadge) this.dom.pinnedRefPageBadge.textContent = `${clampedPage}/${maxPages}`
+        if (this.dom.pinnedRefTitleText) this.dom.pinnedRefTitleText.textContent = title
+
+        // Abort previous in-flight render and bump generation epoch
+        if (this._pinnedRefAbortController) {
+            this._pinnedRefAbortController.abort()
+        }
+        const abortController = new AbortController()
+        this._pinnedRefAbortController = abortController
+        this._pinnedRefEpoch = (this._pinnedRefEpoch || 0) + 1
+        const currentEpoch = this._pinnedRefEpoch
+
+        const driver = this.pdfDriver || this.pdfViewport?.driver
+        if (driver && this.dom.pinnedRefCanvas) {
+            let bmp = null
+            try {
+                if (typeof driver.renderPageBitmap === 'function') {
+                    bmp = await driver.renderPageBitmap(clampedPage - 1, 0.4, abortController.signal)
+                } else if (typeof driver.renderPage === 'function') {
+                    const canvas = await driver.renderPage(clampedPage - 1, 0.4, abortController.signal)
+                    bmp = { canvas, width: canvas?.width || 0, height: canvas?.height || 0 }
+                }
+                if (abortController.signal.aborted || this._pinnedRefEpoch !== currentEpoch) return
+                if (bmp?.canvas && this.dom.pinnedRefCanvas) {
+                    const targetCanvas = this.dom.pinnedRefCanvas
+                    targetCanvas.width = bmp.canvas.width
+                    targetCanvas.height = bmp.canvas.height
+                    const ctx = targetCanvas.getContext('2d')
+                    ctx.drawImage(bmp.canvas, 0, 0)
+                }
+            } catch (err) {
+                if (!abortController.signal.aborted) {
+                    console.warn('Failed to render pinned reference page:', err)
+                }
+            } finally {
+                if (bmp?.canvas && bmp.canvas !== this.dom.pinnedRefCanvas) {
+                    bmp.canvas.width = 0
+                    bmp.canvas.height = 0
+                }
+            }
         }
     }
 
@@ -13882,7 +16310,7 @@ this.applyPdfPageAppearance()
                 this.hideSelectionPopup()
             }
             this.loadNotesList()
-            this.showToast('已添加高亮笔记', '✓')
+            this.showToast('已添加高亮笔记', 'success')
             return
         }
 
@@ -13976,7 +16404,7 @@ this.applyPdfPageAppearance()
         }
 
         this.loadNotesList()
-        this.showToast('已添加高亮笔记', '✓')
+        this.showToast('已添加高亮笔记', 'success')
     }
 
     async updateHighlightColor(value, newColor) {
@@ -14214,11 +16642,51 @@ this.applyPdfPageAppearance()
         }
     }
 
+    _buildManualTocTree(manualItems) {
+        if (!manualItems || !manualItems.length) return []
+        const map = new Map()
+        const roots = []
+        for (const it of manualItems) {
+            map.set(it.id, {
+                id: it.id,
+                isManual: true,
+                parentId: it.parentId,
+                order: it.order || 0,
+                page: it.pageIndex ?? 0,
+                label: (it.title || it.label || `第 ${(it.pageIndex ?? 0) + 1} 页`).trim(),
+                href: `#page=${(it.pageIndex ?? 0) + 1}`,
+                subitems: []
+            })
+        }
+        for (const node of map.values()) {
+            if (node.parentId && map.has(node.parentId)) {
+                map.get(node.parentId).subitems.push(node)
+            } else {
+                roots.push(node)
+            }
+        }
+        const sortTree = (list) => {
+            list.sort((a, b) => (a.order - b.order) || (a.page - b.page))
+            for (const it of list) {
+                if (it.subitems.length) sortTree(it.subitems)
+            }
+        }
+        sortTree(roots)
+        return roots
+    }
+
     renderTOC(toc) {
         const container = this.dom.tocContainer
+        if (!container) return
         container.innerHTML = ''
 
-        if (!toc || toc.length === 0) {
+        let effectiveToc = Array.isArray(toc) ? [...toc] : []
+        if (this._currentManualToc && this._currentManualToc.length > 0) {
+            const manualTree = this._buildManualTocTree(this._currentManualToc)
+            effectiveToc = effectiveToc.length > 0 ? [...effectiveToc, ...manualTree] : manualTree
+        }
+
+        if (!effectiveToc || effectiveToc.length === 0) {
             container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 1rem 0;">本书未检测到目录结构</div>'
             return
         }
@@ -14241,9 +16709,61 @@ this.applyPdfPageAppearance()
                 const li = document.createElement('li')
                 li.className = 'toc-item'
                 li.dataset.href = item.href
-                li.innerText = label
+                if (item.isManual && item.id) {
+                    li.dataset.manualId = item.id
+                    li.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 6px;'
+                    const titleSpan = document.createElement('span')
+                    titleSpan.textContent = label
+                    titleSpan.style.cssText = 'flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;'
+                    const actionsWrap = document.createElement('span')
+                    actionsWrap.className = 'manual-toc-actions'
+                    actionsWrap.style.cssText = 'display: inline-flex; gap: 4px; flex-shrink: 0;'
+
+                    const mkBtn = (text, cls, title, onClick) => {
+                        const b = document.createElement('button')
+                        b.type = 'button'
+                        b.className = `btn-manual-toc-action ${cls}`
+                        b.textContent = text
+                        b.title = title
+                        b.style.cssText = 'padding: 1px 5px; font-size: 0.72rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-secondary); cursor: pointer;'
+                        b.addEventListener('click', async (ev) => {
+                            ev.stopPropagation()
+                            await onClick(ev)
+                        })
+                        return b
+                    }
+
+                    actionsWrap.appendChild(mkBtn('编辑', 'btn-manual-toc-edit', '编辑目录标题与页码', async () => {
+                        await this.editManualTocItemUI(item)
+                    }))
+                    actionsWrap.appendChild(mkBtn('上移', 'btn-manual-toc-up', '上移目录项', async () => {
+                        const ids = (this._currentManualToc || []).map(x => x.id)
+                        const idx = ids.indexOf(item.id)
+                        if (idx > 0) {
+                            ;[ids[idx - 1], ids[idx]] = [ids[idx], ids[idx - 1]]
+                            await this.reorderManualToc(ids)
+                        }
+                    }))
+                    actionsWrap.appendChild(mkBtn('下移', 'btn-manual-toc-down', '下移目录项', async () => {
+                        const ids = (this._currentManualToc || []).map(x => x.id)
+                        const idx = ids.indexOf(item.id)
+                        if (idx >= 0 && idx < ids.length - 1) {
+                            ;[ids[idx + 1], ids[idx]] = [ids[idx], ids[idx + 1]]
+                            await this.reorderManualToc(ids)
+                        }
+                    }))
+                    actionsWrap.appendChild(mkBtn('删除', 'btn-manual-toc-delete', '删除目录项', async () => {
+                        await this.deleteManualTocItem(item.id)
+                    }))
+
+                    li.appendChild(titleSpan)
+                    li.appendChild(actionsWrap)
+                } else {
+                    li.innerText = label
+                }
                 li.addEventListener('click', e => {
                     e.stopPropagation()
+                    this.navHistory?.pushLocation()
                     if (this.pdfViewport) {
                         const pageIdx = typeof item.page === 'number' ? item.page : (parseInt(item.href?.replace(/[^0-9]/g, ''), 10) - 1 || 0)
                         this.pdfViewport.goToPage(pageIdx)
@@ -14263,7 +16783,7 @@ this.applyPdfPageAppearance()
             return ul
         }
 
-        container.appendChild(buildTree(toc))
+        container.appendChild(buildTree(effectiveToc))
     }
 
     highlightActiveTOCItem(href) {
@@ -14353,7 +16873,7 @@ this.applyPdfPageAppearance()
             card.addEventListener('click', e => {
                 if (e.target.classList.contains('btn-note-del') || e.target.classList.contains('btn-note-share')) return
                 if (isUnconfirmed) {
-                    this.showToast('该笔记关联的文档版本与当前文件不一致，无法准确定位', '⚠️')
+                    this.showToast('该笔记关联的文档版本与当前文件不一致，无法准确定位', 'warning')
                     return
                 }
                 if (this.pdfViewport && (note.formatType === 'pdf' || note.pdfTarget)) {
@@ -14462,9 +16982,9 @@ this.applyPdfPageAppearance()
         }
         if (res.success) {
             if (res.filePath) {
-                this.showToast(`已导出至：${res.filePath}`, '✓', 4500)
+                this.showToast(`已导出至：${res.filePath}`, 'success', 4500)
             } else {
-                this.showToast(`已导出至${res.directoryHint}：${res.filename}`, '✓', 4500)
+                this.showToast(`已导出至${res.directoryHint}：${res.filename}`, 'success', 4500)
             }
         } else {
             this.showToast(`导出笔记失败: ${res.error || '未知错误'}`, 'warning')
@@ -14665,7 +17185,7 @@ this.applyPdfPageAppearance()
                 ${note.text ? `<div class="shelf-note-card-quote">“${escapeHTML(note.text)}”</div>` : ''}
                 ${note.note ? `
                     <div class="shelf-note-card-thought">
-                        <span class="thought-label">💭 想法</span>
+                        <span class="thought-label">想法</span>
                         <div style="flex:1; word-break:break-word; white-space:pre-wrap;">${escapeHTML(note.note)}</div>
                     </div>
                 ` : ''}
@@ -14690,7 +17210,7 @@ this.applyPdfPageAppearance()
             `
 
             const jumpHandler = async () => {
-                if (!note.bookId) return this.showToast('笔记未关联有效书籍', '⚠️')
+                if (!note.bookId) return this.showToast('笔记未关联有效书籍', 'warning')
                 const target = note.pdfTarget || {}
                 const firstSegment = Array.isArray(target.segments) ? target.segments[0] : null
                 const page = firstSegment?.page ?? target.page ?? 0
@@ -14704,6 +17224,7 @@ this.applyPdfPageAppearance()
                         : null)
 
                 if (this.currentBookId && String(this.currentBookId) === String(note.bookId)) {
+                    this.navHistory?.pushLocation()
                     if (this.dom.readerView) {
                         this.dom.readerView.style.display = 'block'
                         this.dom.readerView.classList.add('active')
@@ -14739,9 +17260,9 @@ this.applyPdfPageAppearance()
                 copyText += `\n—— 摘自《${bookTitle}》· ${chapterTitle}`
                 try {
                     await navigator.clipboard.writeText(copyText)
-                    this.showToast('笔记已复制到剪贴板', '✅')
+                    this.showToast('笔记已复制到剪贴板', 'success')
                 } catch (_) {
-                    this.showToast('无法复制到剪贴板', '⚠️')
+                    this.showToast('无法复制到剪贴板', 'warning')
                 }
             })
 
@@ -14761,7 +17282,7 @@ this.applyPdfPageAppearance()
                 e.stopPropagation()
                 if (confirm('确定要删除这条划线与笔记吗？此操作不可撤销。')) {
                     await db.deleteHighlight(note.id)
-                    this.showToast('划线笔记已删除', '🗑️')
+                    this.showToast('划线笔记已删除', 'delete')
                     await this.renderShelfNotesList()
                 }
             })
@@ -14802,7 +17323,7 @@ this.applyPdfPageAppearance()
                     md += `${quoteText}\n\n`
                 }
                 if (n.note) {
-                    md += `**💭 想法**：${n.note}\n\n`
+                    md += `**想法**：${n.note}\n\n`
                 }
                 const dateStr = n.createdAt ? new Date(n.createdAt).toLocaleString() : ''
                 if (dateStr && dateStr !== 'Invalid Date') {
@@ -14819,9 +17340,9 @@ this.applyPdfPageAppearance()
         }
         if (res.success) {
             if (res.filePath) {
-                this.showToast(`已导出至：${res.filePath}`, '✓', 4500)
+                this.showToast(`已导出至：${res.filePath}`, 'success', 4500)
             } else {
-                this.showToast(`全部笔记已导出至${res.directoryHint}：${res.filename}`, '✓', 4500)
+                this.showToast(`全部笔记已导出至${res.directoryHint}：${res.filename}`, 'success', 4500)
             }
         } else {
             this.showToast(`导出笔记失败: ${res.error || '未知错误'}`, 'warning')
@@ -14859,6 +17380,12 @@ this.applyPdfPageAppearance()
                 for (let pageIdx = 0; pageIdx < totalPages; pageIdx++) {
                     if (signal.aborted || this._searchToken !== currentToken) return
                     try {
+                        if (typeof this.pdfDriver.getPagePlainText === 'function') {
+                            const plain = await this.pdfDriver.getPagePlainText(pageIdx)
+                            if (typeof plain === 'string' && !plain.toLowerCase().includes(qLower)) {
+                                continue
+                            }
+                        }
                         const { spans = [] } = await this.pdfDriver.getTextLayer(pageIdx)
                         const pageSize = this.pdfViewport?.pageSizes?.[pageIdx] || { width: 595, height: 842 }
                         const fullText = spans.map(s => s.text).join(' ')
@@ -15012,6 +17539,7 @@ this.applyPdfPageAppearance()
                     const { pre = '', match = query, post = '' } = item.excerpt || {}
                     itemEl.innerHTML = `${escapeHTML(pre)}<mark>${escapeHTML(match)}</mark>${escapeHTML(post)}`
                     itemEl.addEventListener('click', async () => {
+                        this.navHistory?.pushLocation()
                         if (this.pdfViewport && typeof item.pageIndex === 'number') {
                             const idx = this.currentSearchMatches.findIndex(m => m === item)
                             if (idx !== -1) this.currentSearchMatchIndex = idx
@@ -15436,7 +17964,7 @@ this.applyPdfPageAppearance()
 
             let coverUrl = ''
             if (book.coverBlob) {
-                coverUrl = coverUrlPool.get(book.id, book.coverBlob)
+                coverUrl = coverUrlPool.getForBook(book)
             }
 
             const bookSecs = (book.periodReadingSeconds != null ? book.periodReadingSeconds : book.totalReadingSeconds) || 0
@@ -15540,7 +18068,7 @@ this.applyPdfPageAppearance()
 
                     const progressPct = b.progress?.fraction ? Math.round(b.progress.fraction * 100) : 0
                     const durStr = tracker.formatDuration(b.periodReadingSeconds || b.totalReadingSeconds || 0)
-                    const coverUrl = b.coverBlob ? coverUrlPool.get(b.id, b.coverBlob) : null
+                    const coverUrl = b.coverBlob ? coverUrlPool.getForBook(b) : null
 
                     row.innerHTML = `
                         <div style="width: 44px; height: 60px; border-radius: 4px; overflow: hidden; background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
@@ -15591,7 +18119,7 @@ this.applyPdfPageAppearance()
                     row.style.cssText = 'display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); cursor: pointer;'
 
                     const durStr = tracker.formatDuration(b.periodReadingSeconds || b.totalReadingSeconds || 0)
-                    const coverUrl = b.coverBlob ? coverUrlPool.get(b.id, b.coverBlob) : null
+                    const coverUrl = b.coverBlob ? coverUrlPool.getForBook(b) : null
 
                     row.innerHTML = `
                         <div style="width: 44px; height: 60px; border-radius: 4px; overflow: hidden; background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
@@ -15696,6 +18224,9 @@ this.applyPdfPageAppearance()
         if (!window.electronAPI?.syncGetConfig) return
         try {
             this.syncConfig = await window.electronAPI.syncGetConfig()
+            if (this.syncConfig?.disableAutoSync && typeof window !== 'undefined') {
+                window.__LINDEN_DISABLE_AUTO_SYNC__ = true
+            }
         } catch (e) {
             this.syncConfig = {
                 enabled: false,
@@ -15722,7 +18253,7 @@ this.applyPdfPageAppearance()
         this.renderSyncUI()
 
         // Auto sync on startup
-        if (this.syncConfig.enabled && this.syncConfig.autoSyncOnStartup && this.syncConfig.username && (this.syncConfig.password || this.syncConfig.hasPassword)) {
+        if (this.syncConfig.enabled && this.syncConfig.autoSyncOnStartup && !this.syncConfig.disableAutoSync) {
             setTimeout(() => {
                 this.triggerSilentBackgroundSync()
             }, 1200)
@@ -15770,6 +18301,16 @@ this.applyPdfPageAppearance()
             if (e.target === modal) this.closeWebdavSyncModal()
         })
 
+        // Helper to update field visibility based on active preset
+        const updateSyncFieldPanels = (preset) => {
+            const fWebdav = document.getElementById('sync-fields-webdav')
+            const fOauth = document.getElementById('sync-fields-oauth')
+            const fLocal = document.getElementById('sync-fields-local')
+            if (fWebdav) fWebdav.style.display = (preset === 'jianguoyun' || preset === 'custom') ? 'block' : 'none'
+            if (fOauth) fOauth.style.display = (preset === 'onedrive' || preset === 'google_drive') ? 'block' : 'none'
+            if (fLocal) fLocal.style.display = (preset === 'local_folder') ? 'block' : 'none'
+        }
+
         // Preset tab switching
         document.querySelectorAll('.btn-sync-preset')?.forEach(btn => {
             btn.addEventListener('click', () => {
@@ -15780,28 +18321,65 @@ this.applyPdfPageAppearance()
                 if (preset === 'jianguoyun' && serverInput) {
                     serverInput.value = 'https://dav.jianguoyun.com/dav/'
                 }
+                updateSyncFieldPanels(preset)
             })
         })
 
-        // Password visibility toggle
+        // Pick local folder button
+        const btnPickFolder = document.getElementById('btn-sync-pick-folder')
+        btnPickFolder?.addEventListener('click', async () => {
+            try {
+                let folder = null
+                if (window.platformBridge?.dialogPickFolder) {
+                    folder = await window.platformBridge.dialogPickFolder()
+                } else if (window.electronAPI?.openDirectoryDialog) {
+                    folder = await window.electronAPI.openDirectoryDialog()
+                }
+                if (folder) {
+                    const input = document.getElementById('sync-input-local-folder')
+                    if (input) input.value = folder
+                }
+            } catch (err) {
+                console.warn('Pick folder failed:', err)
+            }
+        })
+
+        document.getElementById('btn-oauth-cancel')?.addEventListener('click', () => {
+            const pending = this._pendingOAuth
+            if (!pending || pending.consumed) return
+            pending.cancelled = true
+            pending.abortController?.abort()
+            this.showToast('正在取消授权', 'info')
+        })
+
+        // OAuth logout button
+        const btnOAuthLogout = document.getElementById('btn-oauth-logout')
+        btnOAuthLogout?.addEventListener('click', async () => {
+            try {
+                const config = this.getSyncConfigFromUI()
+                const { getStorageProvider } = await import('./storage-providers.js')
+                const provider = getStorageProvider(config.providerType, config)
+                if (typeof provider?.logout === 'function') {
+                    await provider.logout()
+                }
+                if (this.syncConfig) {
+                    this.syncConfig.hasOAuthToken = false
+                }
+                const oauthStatus = document.getElementById('sync-oauth-status')
+                if (oauthStatus) oauthStatus.innerText = '未授权'
+                this.showToast('已退出当前云盘授权')
+            } catch (err) {
+                this.showToast(`退出授权失败: ${err.message}`)
+            }
+        })
+
+        // Password visibility toggle (only controls input type for entered text, per S04)
         const btnTogglePwd = this.dom.btnToggleSyncPwd || document.getElementById('btn-toggle-sync-pwd')
-        btnTogglePwd?.addEventListener('click', async () => {
+        btnTogglePwd?.addEventListener('click', () => {
             const pwdInput = this.dom.syncInputPassword || document.getElementById('sync-input-password')
             if (!pwdInput) return
             const isPwd = pwdInput.type === 'password'
             if (isPwd) {
-                // If value is empty but there is a saved password in backend, fetch decrypted password
-                if (!pwdInput.value && this.syncConfig?.hasPassword && window.electronAPI?.syncRevealPassword) {
-                    try {
-                        const revealed = await window.electronAPI.syncRevealPassword()
-                        if (revealed) {
-                            pwdInput.value = revealed
-                            if (this.syncConfig) this.syncConfig.password = revealed
-                        }
-                    } catch (e) {
-                        console.warn('Failed to reveal sync password:', e)
-                    }
-                }
                 pwdInput.type = 'text'
                 btnTogglePwd.setAttribute('title', '隐藏密码')
                 btnTogglePwd.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
@@ -15822,7 +18400,7 @@ this.applyPdfPageAppearance()
             }
             this.renderSyncUI()
             this.closeWebdavSyncModal()
-            this.showToast('云端同步已开启，多端数据将自动实时对齐', '✓')
+            this.showToast('云端同步已开启，多端数据将自动实时对齐', 'success')
             this.triggerSilentBackgroundSync()
         })
 
@@ -15836,7 +18414,7 @@ this.applyPdfPageAppearance()
             }
             this.renderSyncUI()
             this.closeWebdavSyncModal()
-            this.showToast('已关闭云端同步', '✓')
+            this.showToast('已关闭云端同步', 'success')
         })
 
         // Action buttons inside modal
@@ -15851,10 +18429,14 @@ this.applyPdfPageAppearance()
         const c = this.syncConfig
 
         // Update sidebar status badge
-        const badge = this.dom.syncStatusBadgeSidebar || document.getElementById('sync-status-badge-sidebar')
+        const badge = this.dom?.syncStatusBadgeSidebar || (typeof document !== 'undefined' ? document.getElementById('sync-status-badge-sidebar') : null)
         if (badge) {
-            if (c.enabled && c.username) {
-                const typeName = c.serverType === 'jianguoyun' ? '坚果云' : 'WebDAV'
+            if (c.enabled && (c.username || c.folderPath || c.hasOAuthToken || c.clientId)) {
+                let typeName = 'WebDAV'
+                if (c.serverType === 'jianguoyun') typeName = '坚果云'
+                else if (c.providerType === 'onedrive' || c.serverType === 'onedrive') typeName = 'OneDrive'
+                else if (c.providerType === 'google_drive' || c.serverType === 'google_drive') typeName = 'Google Drive'
+                else if (c.providerType === 'local_folder' || c.serverType === 'local_folder') typeName = '本地目录'
                 badge.innerText = `已开启 (${typeName})`
                 badge.style.background = 'rgba(16, 185, 129, 0.12)'
                 badge.style.color = '#059669'
@@ -15866,12 +18448,12 @@ this.applyPdfPageAppearance()
         }
 
         // Form fields inside modal
-        const serverInput = this.dom.syncInputServer || document.getElementById('sync-input-server')
+        const serverInput = this.dom?.syncInputServer || (typeof document !== 'undefined' ? document.getElementById('sync-input-server') : null)
         if (serverInput) serverInput.value = c.serverUrl || 'https://dav.jianguoyun.com/dav/'
-        const userInput = this.dom.syncInputUsername || document.getElementById('sync-input-username')
+        const userInput = this.dom?.syncInputUsername || (typeof document !== 'undefined' ? document.getElementById('sync-input-username') : null)
         if (userInput) userInput.value = c.username || ''
-        const pwdInput = this.dom.syncInputPassword || document.getElementById('sync-input-password')
-        const btnTogglePwd = this.dom.btnToggleSyncPwd || document.getElementById('btn-toggle-sync-pwd')
+        const pwdInput = this.dom?.syncInputPassword || (typeof document !== 'undefined' ? document.getElementById('sync-input-password') : null)
+        const btnTogglePwd = this.dom?.btnToggleSyncPwd || (typeof document !== 'undefined' ? document.getElementById('btn-toggle-sync-pwd') : null)
         if (pwdInput) {
             pwdInput.type = 'password'
             pwdInput.value = c.password || ''
@@ -15885,19 +18467,44 @@ this.applyPdfPageAppearance()
             btnTogglePwd.setAttribute('title', '显示密码')
             btnTogglePwd.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
         }
-        const dirInput = this.dom.syncInputDir || document.getElementById('sync-input-dir')
+        const dirInput = this.dom?.syncInputDir || (typeof document !== 'undefined' ? document.getElementById('sync-input-dir') : null)
         if (dirInput) dirInput.value = c.remoteDir || 'LindenLeaf'
 
-        // Update preset active button
-        document.querySelectorAll('.btn-sync-preset')?.forEach(btn => {
-            const isMatch = btn.dataset.preset === (c.serverType || 'jianguoyun')
-            btn.classList.toggle('active', isMatch)
-        })
+        const localFolderInput = typeof document !== 'undefined' ? document.getElementById('sync-input-local-folder') : null
+        if (localFolderInput) localFolderInput.value = c.folderPath || ''
+
+        const clientIdInput = typeof document !== 'undefined' ? document.getElementById('sync-input-client-id') : null
+        if (clientIdInput) clientIdInput.value = c.clientId || ''
+
+        const includeUserFilesInput = typeof document !== 'undefined' ? document.getElementById('sync-oauth-include-user-files') : null
+        if (includeUserFilesInput) {
+            includeUserFilesInput.checked = Boolean(c.includeUserFiles)
+        }
+
+        const oauthStatus = typeof document !== 'undefined' ? document.getElementById('sync-oauth-status') : null
+        if (oauthStatus) {
+            oauthStatus.innerText = c.hasOAuthToken ? '已授权' : '未授权'
+        }
+
+        // Update preset active button and visible section
+        const activePreset = c.serverType || (c.providerType === 'local_folder' ? 'local_folder' : (c.providerType === 'onedrive' ? 'onedrive' : (c.providerType === 'google_drive' ? 'google_drive' : 'jianguoyun')))
+        if (typeof document !== 'undefined') {
+            document.querySelectorAll('.btn-sync-preset')?.forEach(btn => {
+                const isMatch = btn.dataset.preset === activePreset
+                btn.classList.toggle('active', isMatch)
+            })
+            const fWebdav = document.getElementById('sync-fields-webdav')
+            const fOauth = document.getElementById('sync-fields-oauth')
+            const fLocal = document.getElementById('sync-fields-local')
+            if (fWebdav) fWebdav.style.display = (activePreset === 'jianguoyun' || activePreset === 'custom') ? 'block' : 'none'
+            if (fOauth) fOauth.style.display = (activePreset === 'onedrive' || activePreset === 'google_drive') ? 'block' : 'none'
+            if (fLocal) fLocal.style.display = (activePreset === 'local_folder') ? 'block' : 'none'
+        }
 
         // Update status card
-        const dot = this.dom.syncStatusDot || document.getElementById('sync-status-dot')
-        const title = this.dom.syncStatusTitle || document.getElementById('sync-status-title')
-        const desc = this.dom.syncStatusDesc || document.getElementById('sync-status-desc')
+        const dot = this.dom?.syncStatusDot || (typeof document !== 'undefined' ? document.getElementById('sync-status-dot') : null)
+        const title = this.dom?.syncStatusTitle || (typeof document !== 'undefined' ? document.getElementById('sync-status-title') : null)
+        const desc = this.dom?.syncStatusDesc || (typeof document !== 'undefined' ? document.getElementById('sync-status-desc') : null)
 
         if (c.lastSyncTime) {
             const timeStr = new Date(c.lastSyncTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -15920,14 +18527,33 @@ this.applyPdfPageAppearance()
     }
 
     getSyncConfigFromUI() {
-        const serverType = document.querySelector('.btn-sync-preset.active')?.dataset.preset || this.syncConfig?.serverType || 'jianguoyun'
-        const serverInput = this.dom.syncInputServer || document.getElementById('sync-input-server')
-        const userInput = this.dom.syncInputUsername || document.getElementById('sync-input-username')
-        const pwdInput = this.dom.syncInputPassword || document.getElementById('sync-input-password')
-        const dirInput = this.dom.syncInputDir || document.getElementById('sync-input-dir')
+        const activePreset = typeof document !== 'undefined' ? document.querySelector('.btn-sync-preset.active')?.dataset.preset : null
+        const serverType = activePreset || this.syncConfig?.serverType || 'jianguoyun'
+        const serverInput = this.dom?.syncInputServer || (typeof document !== 'undefined' ? document.getElementById('sync-input-server') : null)
+        const userInput = this.dom?.syncInputUsername || (typeof document !== 'undefined' ? document.getElementById('sync-input-username') : null)
+        const pwdInput = this.dom?.syncInputPassword || (typeof document !== 'undefined' ? document.getElementById('sync-input-password') : null)
+        const dirInput = this.dom?.syncInputDir || (typeof document !== 'undefined' ? document.getElementById('sync-input-dir') : null)
+        const localFolderInput = typeof document !== 'undefined' ? document.getElementById('sync-input-local-folder') : null
+        const clientIdInput = typeof document !== 'undefined' ? document.getElementById('sync-input-client-id') : null
+        const includeUserFilesInput = typeof document !== 'undefined' ? document.getElementById('sync-oauth-include-user-files') : null
+
+        let providerType = (serverType === 'local_folder' ? 'local_folder' : 
+            (serverType === 'onedrive' ? 'onedrive' : 
+            (serverType === 'google_drive' ? 'google_drive' : 'webdav')))
+        if (!activePreset && this.syncConfig?.providerType) {
+            providerType = this.syncConfig.providerType
+        }
+
         return {
             enabled: this.syncConfig?.enabled || false,
             serverType,
+            providerType,
+            folderPath: localFolderInput?.value.trim() || this.syncConfig?.folderPath || '',
+            clientId: clientIdInput?.value.trim() || this.syncConfig?.clientId || '',
+            includeUserFiles: includeUserFilesInput ? includeUserFilesInput.checked : Boolean(this.syncConfig?.includeUserFiles),
+            accountId: this.syncConfig?.accountId || '',
+            disableAutoSync: this.syncConfig?.disableAutoSync || false,
+            hasOAuthToken: this.syncConfig?.hasOAuthToken || false,
             serverUrl: serverInput?.value.trim() || this.syncConfig?.serverUrl || 'https://dav.jianguoyun.com/dav/',
             username: userInput?.value.trim() || this.syncConfig?.username || '',
             password: pwdInput?.value || this.syncConfig?.password || '',
@@ -15937,7 +18563,11 @@ this.applyPdfPageAppearance()
             autoSyncOnBookClose: true,
             lastSyncTime: this.syncConfig?.lastSyncTime || null,
             lastSyncStatus: this.syncConfig?.lastSyncStatus || null,
-            lastSyncSummary: this.syncConfig?.lastSyncSummary || null
+            lastSyncSummary: this.syncConfig?.lastSyncSummary || null,
+            confirmedEndpoint: this.syncConfig?.confirmedEndpoint || null,
+            confirmedEndpoints: this.syncConfig?.confirmedEndpoints || [],
+            requiresReview: Boolean(this.syncConfig?.requiresReview),
+            lastSyncedEndpoint: this.syncConfig?.lastSyncedEndpoint || null
         }
     }
 
@@ -15989,10 +18619,24 @@ this.applyPdfPageAppearance()
             this.showToast('保存配置失败，无法进行连接测试', 'error')
             return
         }
-        const config = this.syncConfig
-        if (!config.username || (!config.password && !config.hasPassword)) {
-            this.showToast('请先输入坚果云账号（邮箱）和应用授权密码', 'warning')
-            return
+        const config = this.syncConfig || {}
+        const isOAuth = config.providerType === 'onedrive' || config.providerType === 'google_drive'
+        const isLocalFolder = config.providerType === 'local_folder'
+        if (isOAuth) {
+            if (!config.clientId) {
+                this.showToast('请先配置客户端 ID (Client ID)', 'warning')
+                return
+            }
+        } else if (isLocalFolder) {
+            if (!config.folderPath) {
+                this.showToast('请先选择本地同步目录', 'warning')
+                return
+            }
+        } else {
+            if (!config.username || (!config.password && !config.hasPassword)) {
+                this.showToast('请先输入坚果云账号（邮箱）和应用授权密码', 'warning')
+                return
+            }
         }
 
         const btnTest = this.dom.btnSyncTestConn || document.getElementById('btn-sync-test-conn')
@@ -16006,9 +18650,20 @@ this.applyPdfPageAppearance()
         const desc = this.dom.syncStatusDesc || document.getElementById('sync-status-desc')
 
         try {
-            const res = window.electronAPI?.syncTestConnection
-                ? await window.electronAPI.syncTestConnection(config)
-                : { success: true, message: 'WebDAV 连接成功' }
+            let res = null
+            if (config.providerType && config.providerType !== 'webdav') {
+                try {
+                    const { getStorageProvider } = await import('./storage-providers.js')
+                    const provider = getStorageProvider(config.providerType, config)
+                    res = await provider.authenticate()
+                } catch (pErr) {
+                    res = { success: false, error: pErr.message || String(pErr) }
+                }
+            } else if (window.electronAPI?.syncTestConnection) {
+                res = await window.electronAPI.syncTestConnection(config)
+            } else {
+                res = { success: true, message: 'WebDAV 连接成功' }
+            }
             if (res.success) {
                 if (dot) dot.innerHTML = '<span class="sync-indicator-dot online"></span>'
                 if (title) {
@@ -16048,10 +18703,24 @@ this.applyPdfPageAppearance()
             this.showToast('保存配置失败，无法启动同步', 'error')
             return
         }
-        const config = this.syncConfig
-        if (!config.username || (!config.password && !config.hasPassword)) {
-            this.showToast('请先输入坚果云账号与应用授权密码', 'warning')
-            return
+        const config = this.syncConfig || {}
+        const isOAuth = config.providerType === 'onedrive' || config.providerType === 'google_drive'
+        const isLocalFolder = config.providerType === 'local_folder'
+        if (isOAuth) {
+            if (!config.clientId) {
+                this.showToast('请先配置云盘 Client ID 并完成授权', 'warning')
+                return
+            }
+        } else if (isLocalFolder) {
+            if (!config.folderPath) {
+                this.showToast('请先选择本地同步目录', 'warning')
+                return
+            }
+        } else {
+            if (!config.username || (!config.password && !config.hasPassword)) {
+                this.showToast('请先输入坚果云账号与应用授权密码', 'warning')
+                return
+            }
         }
 
         const btnTrigger = this.dom.btnSyncTriggerNow || document.getElementById('btn-sync-trigger-now')
@@ -16067,13 +18736,30 @@ this.applyPdfPageAppearance()
             title.style.color = '#d97706'
         }
 
+        const normFolder = String(config.folderPath || '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
+        const endpointIdentity = `${config.providerType || 'webdav'}::${config.serverUrl || ''}::${config.username || config.accountId || ''}::${config.remoteDir || ''}::${normFolder}`
+        const isFirstSyncForEndpoint = !config.lastSyncTime || config.lastSyncedEndpoint !== endpointIdentity
+
         const desc = this.dom.syncStatusDesc || document.getElementById('sync-status-desc')
         try {
+            let provider = null
+            try {
+                const { getStorageProvider } = await import('./storage-providers.js')
+                provider = getStorageProvider(config.providerType || 'webdav', config)
+            } catch (_) {}
+
+            const prep = await this.prepareFirstSync(config, { isManual: true, provider })
+            if (!prep?.shouldProceed) return
+
             const res = await syncEngine.executeSyncLifecycle(config, {
+                provider,
                 onProgress: (msg) => {
                     if (desc) desc.innerText = msg
                 }
             })
+
+            this._lastSyncedUsername = config.username
+            this._lastSyncedRemoteDir = config.remoteDir
 
             const stats = res.stats || {}
             let summaryParts = []
@@ -16085,16 +18771,21 @@ this.applyPdfPageAppearance()
 
             const syncTime = Date.now()
             this.syncConfig.lastSyncTime = syncTime
+            this.syncConfig.lastSyncedEndpoint = endpointIdentity
             this.syncConfig.lastSyncStatus = 'success'
             this.syncConfig.lastSyncSummary = summaryStr
             await this.saveSyncConfig({
                 lastSyncTime: syncTime,
+                lastSyncedEndpoint: endpointIdentity,
                 lastSyncStatus: 'success',
                 lastSyncSummary: summaryStr
             })
             this.renderSyncUI()
 
-            this.showToast(`云同步成功！${summaryStr}`, 'cloud')
+            const successMsg = isFirstSyncForEndpoint
+                ? `首次多端同步完成！已创建合并前备份。${summaryStr}`
+                : `云同步成功！${summaryStr}`
+            this.showToast(successMsg, 'cloud')
             await this.renderCustomListsSidebar()
             await this.refreshBookshelf()
             if (this.shelfCategory === 'stats') {
@@ -16111,12 +18802,10 @@ this.applyPdfPageAppearance()
             }
         } catch (err) {
             console.error('Manual sync error:', err)
-            const syncTime = Date.now()
-            this.syncConfig.lastSyncTime = syncTime
+            // Item 3: Failed sync must NOT update lastSyncTime as a success record
             this.syncConfig.lastSyncStatus = 'error'
             this.syncConfig.lastSyncSummary = err.message
             await this.saveSyncConfig({
-                lastSyncTime: syncTime,
                 lastSyncStatus: 'error',
                 lastSyncSummary: err.message
             })
@@ -16131,22 +18820,54 @@ this.applyPdfPageAppearance()
     }
 
     async triggerSilentBackgroundSync() {
-        if (!this.syncConfig?.enabled || !this.syncConfig?.username || (!this.syncConfig?.password && !this.syncConfig?.hasPassword)) return
+        if (typeof process !== 'undefined' && (process.env?.DISABLE_AUTO_SYNC || process.env?.LINDEN_DISABLE_AUTO_SYNC)) return
+        if (typeof window !== 'undefined' && (window.DISABLE_AUTO_SYNC || window.__LINDEN_DISABLE_AUTO_SYNC__)) return
+        if (!this.syncConfig?.enabled) return
+        const config = this.syncConfig || {}
+        const isOAuth = config.providerType === 'onedrive' || config.providerType === 'google_drive'
+        const isLocalFolder = config.providerType === 'local_folder'
+        if (isOAuth) {
+            if (!config.clientId || !config.hasOAuthToken) return
+        } else if (isLocalFolder) {
+            if (!config.folderPath) return
+        } else {
+            if (!config.username || (!config.password && !config.hasPassword)) return
+        }
+
         const now = Date.now()
         if (this._lastSilentSyncAttempt && (now - this._lastSilentSyncAttempt < 10000)) {
             return // Cooldown 10s
         }
         this._lastSilentSyncAttempt = now
+
+        const normFolder = String(config.folderPath || '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
+        const endpointIdentity = `${config.providerType || 'webdav'}::${config.serverUrl || ''}::${config.username || config.accountId || ''}::${config.remoteDir || ''}::${normFolder}`
+        try {
+            const prep = await this.prepareFirstSync(config, { isManual: false })
+            if (!prep?.shouldProceed) return
+        } catch (err) {
+            console.warn('[CloudSync] 预检失败，已停止后台同步:', err)
+            return
+        }
+
         try {
             console.log('[CloudSync] Starting silent background sync with 35s timeout...')
-            const syncPromise = syncEngine.executeSyncLifecycle(this.syncConfig)
+            let provider = null
+            try {
+                const { getStorageProvider } = await import('./storage-providers.js')
+                provider = getStorageProvider(config.providerType || 'webdav', config)
+            } catch (_) {}
+
+            const syncPromise = syncEngine.executeSyncLifecycle(config, { provider })
             const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Silent background sync timeout (35s)')), 35000))
             const res = await Promise.race([syncPromise, timeoutPromise])
             const syncTime = Date.now()
             this.syncConfig.lastSyncTime = syncTime
+            this.syncConfig.lastSyncedEndpoint = endpointIdentity
             this.syncConfig.lastSyncStatus = 'success'
             await this.saveSyncConfig({
                 lastSyncTime: syncTime,
+                lastSyncedEndpoint: endpointIdentity,
                 lastSyncStatus: 'success'
             })
             this.renderSyncUI()
@@ -16156,7 +18877,7 @@ this.applyPdfPageAppearance()
             }
 
             if (this.currentBookId && res?.deletedBookIds && res.deletedBookIds.includes(this.currentBookId)) {
-                this.showToast('当前阅读的书籍已在其他设备被删除，已安全退出阅读', '⚠️')
+                this.showToast('当前阅读的书籍已在其他设备被删除，已安全退出阅读', 'warning')
                 this.closeReader()
             }
 
@@ -16166,6 +18887,83 @@ this.applyPdfPageAppearance()
         } catch (e) {
             console.warn('[CloudSync] Silent background sync error (ignored):', e.message)
         }
+    }
+
+    async startOAuthLogin(providerType = 'onedrive', options = {}) {
+        const { getStorageProvider } = await import('./storage-providers.js')
+        const provider = getStorageProvider(providerType, this.syncConfig || {})
+        if (typeof provider.startOAuthLogin === 'function') {
+            const login = await provider.startOAuthLogin('http://localhost:18520/callback', options)
+            return login
+        }
+        throw new Error(`Provider ${providerType} does not support OAuth login`)
+    }
+
+    async prepareFirstSync(config = this.syncConfig, { isManual = false, provider = null } = {}) {
+        const cfg = config || {}
+        const normFolder = String(cfg.folderPath || '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
+        const endpointIdentity = `${cfg.providerType || 'webdav'}::${cfg.serverUrl || ''}::${cfg.username || cfg.accountId || ''}::${cfg.remoteDir || ''}::${normFolder}`
+        let confirmed = cfg.confirmedEndpoint === endpointIdentity || (Array.isArray(cfg.confirmedEndpoints) && cfg.confirmedEndpoints.includes(endpointIdentity))
+        if (!confirmed && !isManual) {
+            cfg.requiresReview = true
+            if (this.syncConfig) this.syncConfig.requiresReview = true
+            await this.saveSyncConfig?.({ requiresReview: true })
+            this.showToast?.('检测到新同步端点，请手动查看两端数据并确认首次同步', 'info')
+            return { shouldProceed: false, requiresReview: true, endpointIdentity }
+        }
+        const first = !cfg.lastSyncTime || cfg.lastSyncedEndpoint !== endpointIdentity
+        if (!confirmed || first) {
+            if (!provider) {
+                const { getStorageProvider } = await import('./storage-providers.js')
+                provider = getStorageProvider(cfg.providerType || 'webdav', cfg)
+            }
+            const preview = await syncEngine.previewSyncPayload(cfg, provider)
+            if (!confirmed) {
+                const describe = x => `${x.books} 本书、${x.highlights} 条划线、${x.bookmarks} 个书签、${x.sessions} 条阅读记录`
+                const accepted = await this.showConfirmDialog('确认首次同步', `本机：${describe(preview.local)}\n远端${preview.remoteExists ? '' : '（暂无数据）'}：${describe(preview.remote)}\n\n确认合并两端数据？合并前会先创建本机备份。`)
+                if (!accepted) return { shouldProceed: false, cancelled: true, endpointIdentity }
+                const confirmedEndpoints = [...new Set([...(cfg.confirmedEndpoints || []), endpointIdentity])]
+                const updated = { confirmedEndpoint: endpointIdentity, confirmedEndpoints, requiresReview: false }
+                if (!await this.saveSyncConfig(updated)) throw new Error('无法保存同步确认状态')
+                Object.assign(cfg, updated)
+                if (this.syncConfig) Object.assign(this.syncConfig, updated)
+                confirmed = true
+            }
+            let backupRes = null
+            if (typeof window !== 'undefined' && window.advancedSettings?.createFullDataBackup) {
+                backupRes = await window.advancedSettings.createFullDataBackup()
+            } else if (typeof db.createFullBackup === 'function') backupRes = await db.createFullBackup()
+            if (!backupRes || backupRes.success !== true) throw new Error(backupRes?.error || '备份写入失败')
+        }
+        return { shouldProceed: true, endpointIdentity }
+    }
+
+    async handleOAuthCallback(providerType, code, codeVerifier, nonce, includeUserFiles = false) {
+        const normalizedType = providerType === 'googledrive' ? 'google_drive' : providerType
+        const { getStorageProvider } = await import('./storage-providers.js')
+        const provider = getStorageProvider(normalizedType, {
+            ...(this.syncConfig || {}),
+            providerType: normalizedType,
+            accountId: ''
+        })
+        if (typeof provider.handleOAuthCallback === 'function') {
+            const res = await provider.handleOAuthCallback(code, codeVerifier, 'http://localhost:18520/callback', nonce, includeUserFiles)
+            if (res && res.success) {
+                const resolvedAccountId = res.accountId || provider.accountId
+                if (!resolvedAccountId) throw new Error('未获取有效账号主体')
+                const updatedCfg = {
+                    ...this.syncConfig,
+                    providerType: normalizedType,
+                    accountId: resolvedAccountId,
+                    hasOAuthToken: true
+                }
+                this.syncConfig = updatedCfg
+                await this.saveSyncConfig(updatedCfg)
+                this.showToast('云盘 OAuth 授权成功', 'cloud')
+            }
+            return res
+        }
+        throw new Error(`Provider ${providerType} does not support OAuth callback`)
     }
 
 
@@ -16203,42 +19001,87 @@ this.applyPdfPageAppearance()
             this.dom.updateCurrentVersion.innerText = `v${updater.currentVersion}`
         }
 
-        // Silent background check after 8s on startup
-        setTimeout(async () => {
-            await this.handleCheckForUpdates(true)
-        }, 8000)
+        // P11: Satellite reader windows skip background update check
+        if (!this.isSatelliteReaderWindow) {
+            setTimeout(async () => {
+                await this.handleCheckForUpdates(true)
+            }, 8000)
+        }
     }
 
     openUpdateModal(info) {
-        if (!this.dom.modalUpdateDialog) return
+        if (!this.dom.modalUpdateDialog || this.isSatelliteReaderWindow) return
         this._latestUpdateInfo = info
+        this._lastFocusedElementBeforeUpdateModal = document.activeElement
+
+        const stripEmoji = (str) => {
+            if (!str) return ''
+            return str.replace(/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{1F1E6}-\u{1F1FF}]|[\u{1F600}-\u{1F64F}]|[\u{1F680}-\u{1F6FF}]|[\u{1F900}-\u{1F9FF}]/gu, '').trim()
+        }
+
         if (this.dom.updateModalTitle) {
-            this.dom.updateModalTitle.innerText = info.releaseTitle || '发现新版本'
+            this.dom.updateModalTitle.innerText = '发现新版本'
         }
         const cleanCurrent = (info.currentVersion || '').replace(/^[vV]/, '')
         const cleanLatest = (info.latestVersion || '').replace(/^[vV]/, '')
         if (this.dom.updateCurrentVersion) {
-            this.dom.updateCurrentVersion.innerText = `v${cleanCurrent}`
+            this.dom.updateCurrentVersion.innerText = `当前 v${cleanCurrent}`
         }
         if (this.dom.updateLatestVersion) {
-            this.dom.updateLatestVersion.innerText = `v${cleanLatest}`
+            this.dom.updateLatestVersion.innerText = `Linden Leaf ${cleanLatest}`
         }
         if (this.dom.updatePublishedDate) {
             this.dom.updatePublishedDate.innerText = info.publishedAt || new Date().toLocaleDateString()
         }
         if (this.dom.updateReleaseNotes) {
-            this.dom.updateReleaseNotes.innerText = info.releaseNotes || '包含常规性能优化与问题修复。'
+            let notes = stripEmoji(info.releaseNotes || '包含常规性能优化与问题修复。')
+            notes = notes.replace(/#{1,6}\s*/g, '').replace(/\*\*(.*?)\*\*/g, '$1')
+            this.dom.updateReleaseNotes.innerText = notes
         }
 
         this.dom.modalUpdateDialog.style.display = 'flex'
         this.dom.modalUpdateDialog.classList.add('show')
+
+        if (this._updateModalKeyDownHandler) {
+            window.removeEventListener('keydown', this._updateModalKeyDownHandler)
+        }
+        this._updateModalKeyDownHandler = (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault()
+                this.closeUpdateModal()
+                return
+            }
+            if (e.key === 'Tab') {
+                const focusables = this.dom.modalUpdateDialog.querySelectorAll('button:not([disabled]), [tabindex="0"]')
+                if (focusables.length === 0) return
+                const first = focusables[0]
+                const last = focusables[focusables.length - 1]
+                if (e.shiftKey && document.activeElement === first) {
+                    e.preventDefault()
+                    last.focus()
+                } else if (!e.shiftKey && document.activeElement === last) {
+                    e.preventDefault()
+                    first.focus()
+                }
+            }
+        }
+        window.addEventListener('keydown', this._updateModalKeyDownHandler)
+        this.dom.btnUpdateDownload?.focus()
     }
 
     closeUpdateModal() {
         if (!this.dom.modalUpdateDialog) return
+        if (this._updateModalKeyDownHandler) {
+            window.removeEventListener('keydown', this._updateModalKeyDownHandler)
+            this._updateModalKeyDownHandler = null
+        }
         this.dom.modalUpdateDialog.classList.remove('show')
         setTimeout(() => {
             this.dom.modalUpdateDialog.style.display = 'none'
+            if (this._lastFocusedElementBeforeUpdateModal?.focus) {
+                this._lastFocusedElementBeforeUpdateModal.focus()
+                this._lastFocusedElementBeforeUpdateModal = null
+            }
         }, 200)
     }
 
@@ -16257,11 +19100,11 @@ this.applyPdfPageAppearance()
                     this.showToast(`当前已是最新版本 (v${res.currentVersion})`, 'success')
                 }
             } else if (!silent) {
-                this.showToast(res.error || '检查更新失败', '⚠️')
+                this.showToast(res.error || '检查更新失败', 'warning')
             }
         } catch (err) {
             if (!silent) {
-                this.showToast(`检查更新出错: ${err.message}`, '⚠️')
+                this.showToast(`检查更新出错: ${err.message}`, 'warning')
             }
         } finally {
             if (!silent && this.dom.btnCheckUpdates) {
@@ -16269,6 +19112,988 @@ this.applyPdfPageAppearance()
                 if (this.dom.btnCheckUpdatesText) this.dom.btnCheckUpdatesText.innerText = '检查更新'
             }
         }
+    }
+
+    // ==========================================================
+    // S01: Manual Table of Contents & OCR Assisted TOC
+    // ==========================================================
+    async addCurrentPageToToc(customTitle = null, parentId = null) {
+        if (!this.currentBookId) {
+            this.showToast('请先打开书籍', 'warning')
+            return null
+        }
+        const { addManualTocItem } = await import('./pdf-toc.js')
+        const pageIndex = this.pdfViewport?.currentPage ?? (this.currentPage || 0)
+        const title = customTitle || `第 ${pageIndex + 1} 页`
+        const list = this._currentManualToc || []
+        const updated = addManualTocItem(list, {
+            title,
+            pageIndex,
+            parentId,
+            documentIdentity: this.currentBookData?.documentHash || this.currentBookId
+        }, { maxPages: this.pdfViewport?.numPages })
+        this._currentManualToc = updated
+        try {
+            await db.setSetting(`linden_manual_toc_${this.currentBookId}`, updated)
+        } catch (_) {}
+        this.renderTOC?.(this.currentPdfTOC || [])
+        this.showToast('已添加当前页到目录')
+        return updated
+    }
+
+    async updateManualTocItem(id, updates, expected = null) {
+        if (!this.currentBookId || !this._currentManualToc) return null
+        const bookId = this.currentBookId, epoch = this._currentBookEpoch
+        const { updateManualTocItem } = await import('./pdf-toc.js')
+        if (this.currentBookId !== bookId || this._currentBookEpoch !== epoch || (expected && (expected.bookId !== bookId || expected.epoch !== epoch))) return null
+        const updated = updateManualTocItem(this._currentManualToc, id, updates, { maxPages: this.pdfViewport?.numPages })
+        await db.setSetting(`linden_manual_toc_${bookId}`, updated)
+        if (this.currentBookId === bookId && this._currentBookEpoch === epoch) {
+            this._currentManualToc = updated
+            this.renderTOC?.(this.currentPdfTOC || [])
+        }
+        return updated
+    }
+
+    async showReaderFieldsDialog(title, fields) {
+        return await new Promise(resolve => {
+            const previousFocus = document.activeElement
+            const backdrop = document.createElement('div')
+            backdrop.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;padding:20px'
+            const form = document.createElement('form')
+            form.setAttribute('role', 'dialog'); form.setAttribute('aria-modal', 'true'); form.setAttribute('aria-label', title)
+            form.style.cssText = 'background:var(--bg-app,#faf9f5);color:var(--text-main,#222);width:min(520px,100%);max-height:90vh;overflow:auto;border-radius:14px;padding:22px;box-shadow:0 12px 40px #0004'
+            const heading = document.createElement('h2'); heading.textContent = title; form.append(heading)
+            const inputs = {}
+            for (const field of fields) {
+                const label = document.createElement('label'); label.style.cssText = 'display:block;margin:12px 0;font-size:14px'
+                const name = document.createElement('span'); name.textContent = field.label; label.append(name)
+                const input = document.createElement(field.options ? 'select' : 'input')
+                input.name = field.name; input.style.cssText = 'display:block;box-sizing:border-box;width:100%;padding:8px;margin-top:4px'
+                if (field.options) {
+                    for (const option of field.options) { const el = document.createElement('option'); el.value = option.value; el.textContent = option.label; input.append(el) }
+                } else {
+                    input.type = field.type || 'text'
+                    if (field.min != null) input.min = String(field.min)
+                    if (field.max != null) input.max = String(field.max)
+                    if (field.step != null) input.step = String(field.step)
+                    if (field.required) input.required = true
+                }
+                input.value = String(field.value ?? '')
+                label.append(input); form.append(label); inputs[field.name] = input
+            }
+            const error = document.createElement('div'); error.setAttribute('role','alert'); error.style.color = '#c33'; form.append(error)
+            const actions = document.createElement('div'); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;margin-top:18px'
+            const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = '取消'
+            const submit = document.createElement('button'); submit.type = 'submit'; submit.textContent = '保存'
+            actions.append(cancel, submit); form.append(actions); backdrop.append(form); document.body.append(backdrop)
+            let done = false
+            const finish = value => { if (done) return; done = true; backdrop.remove(); previousFocus?.focus?.(); resolve(value) }
+            cancel.addEventListener('click', () => finish(null))
+            backdrop.addEventListener('click', event => { if (event.target === backdrop) finish(null) })
+            form.addEventListener('keydown', event => {
+                if (event.key === 'Escape') { event.preventDefault(); finish(null) }
+                if (event.key === 'Tab') {
+                    const focusable = [...form.querySelectorAll('input,select,button')].filter(x => !x.disabled)
+                    const first = focusable[0], last = focusable[focusable.length - 1]
+                    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+                    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+                }
+            })
+            form.addEventListener('submit', event => {
+                event.preventDefault()
+                const values = Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, v.value]))
+                const message = fields.validate?.(values)
+                if (message) { error.textContent = message; return }
+                finish(values)
+            })
+            Object.values(inputs)[0]?.focus()
+        })
+    }
+
+    async editManualTocItemUI(item) {
+        if (!item || !this.currentBookId) return
+        const bookId = this.currentBookId, epoch = this._currentBookEpoch, viewport = this.pdfViewport
+        const list = this._currentManualToc || []
+        const current = list.find(x => x.id === item.id)
+        if (!current) return
+        const descendants = new Set([current.id])
+        let changed = true
+        while (changed) {
+            changed = false
+            for (const entry of list) if (descendants.has(entry.parentId) && !descendants.has(entry.id)) { descendants.add(entry.id); changed = true }
+        }
+        const fields = [
+            { name:'title', label:'目录标题', value:current.title, required:true },
+            { name:'page', label:'目标页码（PDF 物理页）', type:'number', min:1, max:viewport?.numPages || 1, step:1, value:current.pageIndex + 1, required:true },
+            { name:'parent', label:'父级章节', value:current.parentId || '', options:[{ value:'', label:'顶级目录' }, ...list.filter(x => !descendants.has(x.id)).map(x => ({ value:x.id, label:x.title }))] }
+        ]
+        fields.validate = v => !v.title.trim() ? '目录标题不能为空' : (!Number.isInteger(Number(v.page)) || Number(v.page) < 1 || Number(v.page) > (viewport?.numPages || 0) ? '页码超出文档范围' : '')
+        const result = await this.showReaderFieldsDialog('编辑目录项', fields)
+        if (!result || this.currentBookId !== bookId || this._currentBookEpoch !== epoch || this.pdfViewport !== viewport) return
+        try {
+            const updated = await this.updateManualTocItem(current.id, { title:result.title.trim(), pageIndex:Number(result.page)-1, parentId:result.parent || null }, { bookId, epoch })
+            if (updated && this.currentBookId === bookId && this._currentBookEpoch === epoch) this.showToast('目录项已更新')
+        } catch (err) { this.showToast(`更新目录项失败: ${err.message}`, 'warning') }
+    }
+
+    async deleteManualTocItem(id) {
+        if (!this.currentBookId || !this._currentManualToc) return null
+        const { deleteManualTocItem } = await import('./pdf-toc.js')
+        const updated = deleteManualTocItem(this._currentManualToc, id)
+        this._currentManualToc = updated
+        try {
+            await db.setSetting(`linden_manual_toc_${this.currentBookId}`, updated)
+        } catch (_) {}
+        this.renderTOC?.(this.currentPdfTOC || [])
+        return updated
+    }
+
+    async reorderManualToc(orderedIds) {
+        if (!this.currentBookId || !this._currentManualToc) return null
+        const { reorderManualTocItems } = await import('./pdf-toc.js')
+        const updated = reorderManualTocItems(this._currentManualToc, orderedIds)
+        this._currentManualToc = updated
+        try {
+            await db.setSetting(`linden_manual_toc_${this.currentBookId}`, updated)
+        } catch (_) {}
+        this.renderTOC?.(this.currentPdfTOC || [])
+        return updated
+    }
+
+    async parseOcrTocAndApply(ocrLines, pageOffset = 0, options = {}) {
+        if (!this.currentBookId) return []
+        const expectedBookId = this.currentBookId
+        const expectedBookData = this.currentBookData
+        const expectedEpoch = this._currentBookEpoch ?? this._readerEpoch
+        const { parseOcrTocCandidates, addManualTocItem } = await import('./pdf-toc.js')
+        let finalOffset = Number(pageOffset) || 0
+        if (options.interactiveConfirm && typeof this.showInputDialog === 'function') {
+            const previewList = parseOcrTocCandidates(ocrLines, {
+                pageOffset: finalOffset,
+                totalPages: this.pdfViewport?.numPages
+            })
+            if (previewList.length === 0) {
+                this.showToast('未从当前页 OCR 文本中识别出目录行', 'warning')
+                return []
+            }
+            const sampleSummary = previewList.slice(0, 5).map(c => `${c.title} -> PDF第${c.pageIndex + 1}页`).join('；')
+            const offsetInput = await this.showInputDialog({
+                title: '确认 OCR 目录识别与页码偏移',
+                message: `共识别到 ${previewList.length} 条目录候选（预览：${sampleSummary}）。请输入正文第 1 页对应的 PDF 页码偏移量：`,
+                value: String(finalOffset),
+                confirmText: '应用目录',
+                cancelText: '取消'
+            })
+            if (offsetInput === null) return []
+            if (
+                this.currentBookId !== expectedBookId ||
+                (expectedBookData && this.currentBookData && this.currentBookData !== expectedBookData) ||
+                (expectedEpoch != null && (this._currentBookEpoch ?? this._readerEpoch) !== expectedEpoch)
+            ) {
+                return []
+            }
+            finalOffset = parseInt(offsetInput, 10) || 0
+        }
+        const candidates = parseOcrTocCandidates(ocrLines, {
+            pageOffset: finalOffset,
+            totalPages: this.pdfViewport?.numPages
+        })
+        if (candidates.length === 0) {
+            this.showToast('未从当前页 OCR 文本中识别出目录行', 'warning')
+            return []
+        }
+        let list = this._currentManualToc || []
+        for (const cand of candidates) {
+            list = addManualTocItem(list, {
+                title: cand.title,
+                pageIndex: cand.pageIndex,
+                pageLabel: cand.pageLabel,
+                documentIdentity: this.currentBookData?.documentHash || this.currentBookId
+            }, { maxPages: this.pdfViewport?.numPages })
+        }
+        this._currentManualToc = list
+        try {
+            await db.setSetting(`linden_manual_toc_${this.currentBookId}`, list)
+        } catch (_) {}
+        this.renderTOC?.(this.currentPdfTOC || [])
+        this.showToast(`已识别并添加 ${candidates.length} 条目录项`)
+        return candidates
+    }
+
+    async exportManualToc(format = 'markdown') {
+        const { exportTocAsMarkdown, exportTocAsJson } = await import('./pdf-toc.js')
+        const items = this._currentManualToc || []
+        if (format === 'json') {
+            return exportTocAsJson(items, {
+                bookId: this.currentBookId,
+                title: this.currentBookData?.title,
+                documentHash: this.currentBookData?.documentHash
+            })
+        }
+        return exportTocAsMarkdown(items)
+    }
+
+    // ==========================================================
+    // S02: Two-Column / Multi-Region Sequential Reading Mode
+    // ==========================================================
+    enableColumnReading(defaultRegions = null, pageOverrides = null) {
+        const normalize = (r) => {
+            if (!r || typeof r !== 'object') return { x: 0, y: 0, width: 1.0, height: 1.0 }
+            const x = Number.isFinite(r.x) ? Math.max(0, Math.min(1, r.x)) : 0
+            const y = Number.isFinite(r.y) ? Math.max(0, Math.min(1, r.y)) : 0
+            const rawW = r.width ?? r.w
+            const rawH = r.height ?? r.h
+            const width = Number.isFinite(rawW) ? Math.max(0.01, Math.min(1 - x, rawW)) : 1.0
+            const height = Number.isFinite(rawH) ? Math.max(0.01, Math.min(1 - y, rawH)) : 1.0
+            return { x, y, width, height }
+        }
+        const normalized = Array.isArray(defaultRegions) ? defaultRegions.map(normalize) : defaultRegions
+        if (this.pdfViewport) {
+            this.pdfViewport.setColumnReadingConfig({
+                enabled: true,
+                defaultRegions: normalized,
+                pageOverrides
+            })
+            if (this.currentBookId && typeof localStorage !== 'undefined') {
+                try {
+                    localStorage.setItem(`linden_col_cfg_${this.currentBookId}`, JSON.stringify({
+                        enabled: true,
+                        defaultRegions: normalized,
+                        pageOverrides
+                    }))
+                } catch (_) {}
+            }
+            this.showToast('已开启按栏顺序阅读模式')
+        }
+    }
+
+    disableColumnReading() {
+        if (this.pdfViewport) {
+            this.pdfViewport.setColumnReadingConfig({ enabled: false })
+            this.showToast('已退出按栏顺序阅读模式')
+        }
+    }
+
+    stepColumnReading(direction = 'next') {
+        if (!this.pdfViewport) return false
+        if (direction === 'next') {
+            return this.pdfViewport.nextColumnStep()
+        } else {
+            return this.pdfViewport.prevColumnStep()
+        }
+    }
+
+    // ==========================================================
+    // S03: Scan Enhancement Presets with Per-Book State
+    // ==========================================================
+    applyScanEnhancement(preset = 'original', customParams = null) {
+        const state = this.pdfViewport?.setScanEnhancementPreset(preset, customParams)
+        if (this.currentBookId) {
+            try {
+                localStorage.setItem(`linden_scan_${this.currentBookId}`, JSON.stringify({ preset, customParams }))
+            } catch (_) {}
+        }
+        return state
+    }
+
+    resetScanEnhancement() {
+        if (this.currentBookId) {
+            try {
+                localStorage.removeItem(`linden_scan_${this.currentBookId}`)
+            } catch (_) {}
+        }
+        return this.pdfViewport?.setScanEnhancementPreset('original')
+    }
+
+    restoreBookScanEnhancement(bookId) {
+        if (!bookId) return
+        try {
+            const raw = localStorage.getItem(`linden_scan_${bookId}`)
+            if (raw) {
+                const { preset, customParams } = JSON.parse(raw)
+                this.pdfViewport?.setScanEnhancementPreset(preset, customParams)
+                return
+            }
+        } catch (_) {}
+        this.pdfViewport?.setScanEnhancementPreset('original')
+    }
+
+    // ==========================================================
+    // S04: Reading Ruler and Controlled Auto-Scroll
+    // ==========================================================
+    setReadingRuler(enabled = true, options = {}) {
+        this.pdfViewport?.setReadingRuler({ enabled, ...options })
+    }
+
+    toggleAutoScroll(speed = 30) {
+        if (!this.pdfViewport) return false
+        if (this.pdfViewport._autoScrollActive) {
+            this.pdfViewport.stopAutoScroll()
+            this.showToast('已停止自动滚屏')
+            return false
+        } else {
+            this.pdfViewport.startAutoScroll({ speed })
+            this.showToast('已开启自动滚屏')
+            return true
+        }
+    }
+
+    // ==========================================================
+    // S05: Scoped PDF Dual Viewports
+    // ==========================================================
+    async openSecondaryPdfViewport(splitDirection = 'horizontal', initialPage = null) {
+        const primary = this.pdfViewport, driver = this.pdfDriver, area = this.dom.readerContentArea
+        if (!driver || !primary || !area) throw new Error('请先打开 PDF 文档')
+        this.closeSecondaryPdfViewport()
+        const request = this._pdfSplitRequestId
+        this._pdfSplitOpening = true
+        const epoch = this._currentBookEpoch
+        let AdaptivePdfDriverLease, PdfViewport
+        try {
+            const modules = await Promise.all([import('./pdf-driver.js'), import('./pdf-viewport.js')])
+            AdaptivePdfDriverLease = modules[0].AdaptivePdfDriverLease
+            PdfViewport = modules[1].PdfViewport
+        } catch (error) {
+            if (this._pdfSplitRequestId === request) this.closeSecondaryPdfViewport()
+            throw error
+        }
+        if (this._pdfSplitRequestId !== request || this.pdfViewport !== primary || this.pdfDriver !== driver || this._currentBookEpoch !== epoch || primary._destroyed) {
+            if (this._pdfSplitRequestId === request) this.closeSecondaryPdfViewport()
+            return null
+        }
+        this._pdfSplitOpening = false
+
+        const pane = document.createElement('section')
+        pane.className = 'pdf-secondary-viewport-pane'
+        pane.setAttribute('aria-label', 'PDF 参考视图')
+        pane.innerHTML = `<header class="pdf-reference-toolbar">
+            <span class="pdf-reference-title">参考页</span>
+            <button type="button" data-ref="prev" title="参考页：上一页" aria-label="参考页：上一页">‹</button>
+            <form class="pdf-reference-page-form"><input data-ref="page" type="number" min="1" step="1" aria-label="参考页页码"/><span data-ref="total"></span></form>
+            <button type="button" data-ref="next" title="参考页：下一页" aria-label="参考页：下一页">›</button>
+            <button type="button" data-ref="fit">适页</button>
+            <button type="button" data-ref="width">适宽</button>
+            <button type="button" data-ref="swap" title="交换正文与参考页的位置">交换</button>
+            <button type="button" data-ref="close" title="关闭参考视图" aria-label="关闭参考视图">×</button>
+        </header><div class="pdf-reference-content"></div>`
+        const body = pane.querySelector('.pdf-reference-content')
+        const controller = new AbortController(), lease = new AdaptivePdfDriverLease(driver, 'secondary')
+        const state = { primary, driver, area, pane, controller, lease, epoch,
+            zoomMode: primary.zoomMode, scale: primary.scale, automaticMainFit: !primary.getColumnReadingState?.().enabled }
+        this._pdfSplitSession = state
+        area.classList.add('pdf-split-active')
+        area.classList.toggle('pdf-split-stacked', splitDirection === 'vertical')
+        area.append(pane)
+        this._secondaryContainer = pane
+        // Keep the existing main-reader toolbar over the main pane, including
+        // narrow/stacked layouts. Preserve its nodes and listeners on close.
+        const toolbar = this.dom.pdfZoomBar || document.getElementById('pdf-zoom-control-bar')
+        if (toolbar?.parentNode) {
+            const placeholder = document.createComment('PDF main toolbar position')
+            toolbar.parentNode.insertBefore(placeholder, toolbar)
+            const host = document.createElement('div')
+            host.className = 'pdf-primary-tools-host'
+            host.append(toolbar)
+            area.append(host)
+            Object.assign(state, { toolbar, toolbarPlaceholder: placeholder, toolbarHost: host })
+        }
+
+        const input = pane.querySelector('[data-ref="page"]'), prev = pane.querySelector('[data-ref="prev"]'), next = pane.querySelector('[data-ref="next"]')
+        const sync = () => {
+            if (this._pdfSplitSession !== state) return
+            const page = viewport.currentPage + 1, total = viewport.numPages || driver.numPages || 1
+            input.max = String(total)
+            if (document.activeElement !== input) input.value = String(page)
+            pane.querySelector('[data-ref="total"]').textContent = `/ ${total}`
+            prev.disabled = page <= 1
+            next.disabled = page >= total
+        }
+        const viewport = new PdfViewport(body, { readOnly: true, bufferPages: 0, loadOutline: false,
+            isLowMemoryDevice: true, bitmapCacheLimitBytes: 8 * 1024 * 1024, maxCanvasPixels: 4_000_000,
+            onPageChange: p => { this._secondaryCurrentPage = p; sync() } })
+        state.viewport = viewport
+        this.secondaryPdfViewport = viewport
+        viewport.scrollArea.tabIndex = 0
+        viewport.scrollArea.setAttribute('aria-label', '参考页阅读区域')
+        const listen = (element, event, handler, extra = {}) => element.addEventListener(event, handler, { ...extra, signal: controller.signal })
+        const turn = direction => { const page = viewport.getAdjacentPage(direction); if (page != null) viewport.goToPage(page); sync() }
+        const jump = () => {
+            const page = Number(input.value)
+            if (!Number.isInteger(page) || page < 1 || page > viewport.numPages) {
+                input.value = String(viewport.currentPage + 1)
+                this.showToast(`请输入 1～${viewport.numPages} 的页码`, 'warning')
+                return
+            }
+            viewport.goToPage(page - 1)
+            input.value = String(page)
+            sync()
+        }
+        listen(pane.querySelector('form'), 'submit', event => { event.preventDefault(); event.stopPropagation(); jump() })
+        listen(input, 'change', jump)
+        listen(prev, 'click', () => turn('prev'))
+        listen(next, 'click', () => turn('next'))
+        listen(pane.querySelector('[data-ref="fit"]'), 'click', () => viewport.setZoom('fit-page'))
+        listen(pane.querySelector('[data-ref="width"]'), 'click', () => viewport.setZoom('fit-width'))
+        listen(pane.querySelector('[data-ref="swap"]'), 'click', () => { this.swapPdfViewports(); sync() })
+        listen(pane.querySelector('[data-ref="close"]'), 'click', () => this.closeSecondaryPdfViewport())
+        listen(viewport.scrollArea, 'pointerdown', event => { if (event.button === 0) viewport.scrollArea.focus({ preventScroll: true }) })
+        // Reference navigation must never fall through to the main reader's hotkeys.
+        listen(pane, 'keydown', event => {
+            if (event.target.closest('input,button,select,textarea,[contenteditable="true"]')) { event.stopPropagation(); return }
+            if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return
+            if (['ArrowLeft', 'PageUp', 'ArrowRight', 'PageDown', 'ArrowUp', 'ArrowDown', ' ', 'Home', 'End'].includes(event.key)) {
+                event.preventDefault(); event.stopPropagation()
+                if (event.key === 'ArrowUp' || event.key === 'ArrowDown') viewport.scrollArea.scrollBy({ top: event.key === 'ArrowUp' ? -90 : 90, behavior: 'auto' })
+                else if (event.key === 'Home' || event.key === 'End') viewport.goToPage(event.key === 'Home' ? 0 : viewport.numPages - 1)
+                else turn(['ArrowLeft', 'PageUp'].includes(event.key) || event.key === ' ' && event.shiftKey ? 'prev' : 'next')
+                sync()
+            }
+        })
+        for (const event of ['click', 'pointerdown', 'pointerup', 'mouseup', 'wheel']) listen(pane, event, e => e.stopPropagation())
+
+        const button = document.getElementById('btn-pdf-split-viewport')
+        button?.classList.add('active')
+        button?.setAttribute('aria-pressed', 'true')
+        button?.setAttribute('aria-busy', 'true')
+        try {
+            if (state.automaticMainFit) primary.setZoom('fit-width')
+            const target = Number.isInteger(initialPage) ? initialPage : primary.currentPage || 0
+            await viewport.attachOpenedDriver(lease, { initialPage: Math.max(0, Math.min(driver.numPages - 1, target)) })
+            if (this._pdfSplitSession !== state || this.pdfViewport !== primary || this._currentBookEpoch !== epoch || viewport._destroyed) return null
+            viewport.setZoom('fit-page')
+            sync()
+            this.showToast('参考视图已打开，可在右侧输入页码独立跳转')
+            return viewport
+        } catch (error) {
+            if (this._pdfSplitSession !== state) return null
+            this.closeSecondaryPdfViewport()
+            throw error
+        } finally {
+            if (this._pdfSplitSession === state) button?.removeAttribute('aria-busy')
+        }
+    }
+
+    swapPdfViewports() {
+        if (!this.pdfViewport || !this.secondaryPdfViewport) return false
+        const mainPage = this.pdfViewport.currentPage || 0, referencePage = this.secondaryPdfViewport.currentPage || 0
+        this.pdfViewport.goToPage(referencePage)
+        this.secondaryPdfViewport.goToPage(mainPage)
+        return true
+    }
+
+    closeSecondaryPdfViewport() {
+        this._pdfSplitRequestId = (this._pdfSplitRequestId || 0) + 1
+        this._pdfSplitOpening = false
+        const state = this._pdfSplitSession, viewport = this.secondaryPdfViewport
+        this._pdfSplitSession = null
+        this.secondaryPdfViewport = null
+        state?.controller.abort()
+        viewport?.destroy?.()
+        const pane = state?.pane || this._secondaryContainer
+        const restoreFocus = Boolean(pane?.contains(document.activeElement))
+        pane?.remove()
+        if (state?.toolbarPlaceholder?.parentNode) {
+            state.toolbarPlaceholder.parentNode.insertBefore(state.toolbar, state.toolbarPlaceholder)
+            state.toolbarPlaceholder.remove()
+        }
+        state?.toolbarHost?.remove()
+        this._secondaryContainer = null
+        const area = state?.area || this.dom?.readerContentArea
+        area?.classList.remove('pdf-split-active', 'pdf-split-stacked')
+        if (state && this.pdfViewport === state.primary && this._currentBookEpoch === state.epoch && !state.primary._destroyed) {
+            if (state.primary.getColumnReadingState?.().enabled) state.primary._applyColumnFocus()
+            else if (state.automaticMainFit && state.primary.zoomMode === 'fit-width') state.primary.setZoom(state.zoomMode || state.scale)
+            else state.primary.setZoom(state.primary.zoomMode || state.primary.scale)
+        }
+        const button = document.getElementById('btn-pdf-split-viewport')
+        button?.classList.remove('active')
+        button?.setAttribute('aria-pressed', 'false')
+        button?.removeAttribute('aria-busy')
+        if (restoreFocus && button?.isConnected) button.focus()
+        return true
+    }
+
+    initPdfMoreTools() {
+        const button = document.getElementById('btn-pdf-more-tools')
+        const panel = document.getElementById('pdf-more-tools-panel')
+        if (!button || !panel) return
+        this._pdfMoreToolsController?.abort()
+        this._pdfMoreToolsObserver?.disconnect()
+        const controller = new AbortController()
+        this._pdfMoreToolsController = controller
+        const options = { signal: controller.signal }
+        this.setPdfMoreToolsOpen(false)
+        button.addEventListener('click', () => this.setPdfMoreToolsOpen(panel.hidden), options)
+        document.addEventListener('pointerdown', event => {
+            if (!panel.hidden && !panel.contains(event.target) && !button.contains(event.target)) this.setPdfMoreToolsOpen(false)
+        }, options)
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && !panel.hidden) {
+                event.preventDefault()
+                event.stopImmediatePropagation()
+                this.setPdfMoreToolsOpen(false)
+                button.focus()
+            }
+        }, { ...options, capture: true })
+        panel.addEventListener('focusout', event => {
+            if (event.relatedTarget && !panel.contains(event.relatedTarget) && event.relatedTarget !== button) this.setPdfMoreToolsOpen(false)
+        }, options)
+        const update = () => {
+            for (const id of ['btn-toggle-reading-ruler', 'btn-toggle-auto-scroll', 'btn-toggle-column-reading', 'btn-pdf-split-viewport', 'btn-scan-gray-boost', 'btn-scan-text-darken']) {
+                const control = document.getElementById(id)
+                control?.setAttribute('aria-pressed', String(control.classList.contains('active')))
+            }
+        }
+        if (typeof MutationObserver !== 'undefined') {
+            this._pdfMoreToolsObserver = new MutationObserver(update)
+            this._pdfMoreToolsObserver.observe(panel, { subtree: true, attributes: true, attributeFilter: ['class'] })
+        }
+        update()
+    }
+
+    setPdfMoreToolsOpen(open) {
+        const button = document.getElementById('btn-pdf-more-tools')
+        const panel = document.getElementById('pdf-more-tools-panel')
+        if (!button || !panel) return
+        panel.hidden = !open
+        button.setAttribute('aria-expanded', String(Boolean(open)))
+    }
+
+    toggleReadingRuler() {
+        if (!this.pdfViewport && !this.foliateView) {
+            this.showToast('请先打开图书以启用阅读标尺')
+            return
+        }
+        if (this._readingRulerActive) {
+            this.removeReadingRuler()
+            this.showToast('已关闭阅读标尺')
+        } else {
+            this.setReadingRuler({ enabled: true })
+            this.showToast('已开启阅读标尺')
+        }
+    }
+
+    setReadingRuler(opts = { enabled: true }) {
+        this._readingRulerActive = !!opts.enabled
+        if (this.pdfViewport?.setReadingRuler) {
+            this.pdfViewport.setReadingRuler(opts)
+        }
+        document.getElementById('btn-toggle-reading-ruler')?.classList.toggle('active', this._readingRulerActive)
+    }
+
+    removeReadingRuler() {
+        this._readingRulerActive = false
+        if (this.pdfViewport?.removeReadingRuler) {
+            this.pdfViewport.removeReadingRuler()
+        }
+        document.getElementById('btn-toggle-reading-ruler')?.classList.remove('active')
+    }
+
+    toggleAutoScroll() {
+        if (!this.pdfViewport && !this.foliateView) {
+            this.showToast('请先打开图书以启用自动滚动')
+            return
+        }
+        if (this._autoScrollRunning) {
+            this.stopAutoScroll()
+            this.showToast('已停止自动滚动')
+        } else {
+            this.startAutoScroll()
+            this.showToast('已开启自动滚动')
+        }
+    }
+
+    startAutoScroll(speed = 30) {
+        this._autoScrollRunning = true
+        if (this.pdfViewport?.startAutoScroll) {
+            this.pdfViewport.startAutoScroll({ speed })
+        }
+        document.getElementById('btn-toggle-auto-scroll')?.classList.add('active')
+    }
+
+    stopAutoScroll() {
+        this._autoScrollRunning = false
+        if (this.pdfViewport?.stopAutoScroll) {
+            this.pdfViewport.stopAutoScroll()
+        }
+        document.getElementById('btn-toggle-auto-scroll')?.classList.remove('active')
+    }
+
+    pauseAutoScroll() {
+        if (this.pdfViewport?.pauseAutoScroll) {
+            this.pdfViewport.pauseAutoScroll()
+        }
+    }
+
+    resumeAutoScroll() {
+        if (this.pdfViewport?.resumeAutoScroll) {
+            this.pdfViewport.resumeAutoScroll()
+        }
+    }
+
+    toggleAutoScrollPause() {
+        if (!this._autoScrollRunning) return
+        if (this.pdfViewport?._autoScrollPaused) {
+            this.resumeAutoScroll()
+            this.showToast('恢复自动滚动')
+        } else {
+            this.pauseAutoScroll()
+            this.showToast('已暂停自动滚动')
+        }
+    }
+
+    restoreBookColumnReading(bookId) {
+        if (!bookId || !this.pdfViewport || typeof localStorage === 'undefined') return
+        try {
+            const raw = localStorage.getItem(`linden_col_cfg_${bookId}`)
+            if (raw) {
+                const cfg = JSON.parse(raw)
+                if (cfg && typeof cfg === 'object') {
+                    this.pdfViewport.setColumnReadingConfig?.(cfg)
+                    document.getElementById('btn-toggle-column-reading')?.classList.toggle('active', Boolean(cfg.enabled))
+                    return
+                }
+            }
+        } catch (_) {}
+        this.pdfViewport.setColumnReadingConfig?.({ enabled: false })
+        document.getElementById('btn-toggle-column-reading')?.classList.remove('active')
+    }
+
+    async configureColumnRegionsUI() {
+        if (!this.pdfViewport || !this.currentBookId) { this.showToast('请先打开 PDF 图书'); return }
+        const bookId = this.currentBookId, epoch = this._currentBookEpoch, viewport = this.pdfViewport
+        let saved = {}
+        try { saved = JSON.parse(localStorage.getItem(`linden_col_cfg_${bookId}`) || '{}') } catch (_) {}
+        const defaults = saved.defaultRegions || [{x:.04,y:.04,width:.44,height:.92},{x:.52,y:.04,width:.44,height:.92}]
+        const r0 = defaults[0] || {x:0,y:0,width:.5,height:1}, r1 = defaults[1] || {x:.5,y:0,width:.5,height:1}
+        const regionFields = []
+        for (const [index, region] of [r0,r1].entries()) for (const [key, label] of [['x','左边距'],['y','上边距'],['width','宽度'],['height','高度']]) {
+            regionFields.push({ name:`r${index}${key}`, label:`第 ${index+1} 栏${label}（0–1）`, type:'number', min:0, max:1, step:.01, required:true, value:region[key] ?? region[key === 'width' ? 'w' : key === 'height' ? 'h' : key] ?? 0 })
+        }
+        const fields = [
+            { name:'scope', label:'应用范围', value:'all', options:[{value:'all',label:'整本书默认'},{value:'range',label:'指定页范围'}] },
+            { name:'mode', label:'阅读方式', value:'columns', options:[{value:'columns',label:'按两个区域阅读'},{value:'full',label:'整页（页范围例外）'},{value:'skip',label:'跳过（页范围例外）'}] },
+            { name:'order', label:'阅读顺序', value:'normal', options:[{value:'normal',label:'第 1 栏 → 第 2 栏'},{value:'reverse',label:'第 2 栏 → 第 1 栏'}] },
+            { name:'start', label:'起始物理页（指定范围时）', type:'number', min:1, max:viewport.numPages, step:1, value:(viewport.currentPage || 0)+1 },
+            { name:'end', label:'结束物理页（指定范围时）', type:'number', min:1, max:viewport.numPages, step:1, value:(viewport.currentPage || 0)+1 },
+            ...regionFields
+        ]
+        fields.validate = v => {
+            if (v.scope === 'all' && v.mode !== 'columns') return '整页和跳过仅适用于指定页范围'
+            if (v.scope === 'range' && (!Number.isInteger(+v.start) || !Number.isInteger(+v.end) || +v.start < 1 || +v.end < +v.start || +v.end > viewport.numPages)) return '页码范围无效'
+            for (const i of [0,1]) {
+                const [x,y,w,h] = ['x','y','width','height'].map(k => Number(v[`r${i}${k}`]))
+                if (![x,y,w,h].every(Number.isFinite) || x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 1 || y + h > 1) return `第 ${i+1} 栏区域超出页面或面积为零`
+            }
+            return ''
+        }
+        const result = await this.showReaderFieldsDialog('按栏阅读设置', fields)
+        if (!result || this.currentBookId !== bookId || this._currentBookEpoch !== epoch || this.pdfViewport !== viewport) return
+        const regions = [0,1].map(i => Object.fromEntries(['x','y','width','height'].map(k => [k,Number(result[`r${i}${k}`])])))
+        if (result.order === 'reverse') regions.reverse()
+        const pageOverrides = { ...(saved.pageOverrides || {}) }
+        let defaultRegions = defaults
+        if (result.scope === 'all') defaultRegions = regions
+        else for (let p = Number(result.start)-1; p < Number(result.end); p++) pageOverrides[p] = result.mode === 'columns' ? regions : result.mode
+        this.enableColumnReading(defaultRegions, pageOverrides)
+        document.getElementById('btn-toggle-column-reading')?.classList.add('active')
+    }
+
+    syncColumnReadingUI(state) {
+        const button = document.getElementById('btn-toggle-column-reading')
+        if (button) {
+            button.classList.toggle('active', state.enabled)
+            button.setAttribute('aria-pressed', String(state.enabled))
+            button.textContent = state.enabled ? `按栏 ${state.regionIndex + 1}/${state.regionCount}` : '按栏'
+            button.title = state.enabled ? `第 ${state.pageIndex + 1} 页，第 ${state.regionIndex + 1} 栏；滚轮或方向键前进，再次点击退出` : '按栏阅读'
+        }
+        this.dom?.btnPdfSpreadToggle?.classList.toggle('active', this.pdfViewport?.spreadMode === 'dual')
+    }
+
+    toggleColumnReading() {
+        if (!this.pdfViewport) {
+            this.showToast('仅支持 PDF 格式按栏阅读')
+            return
+        }
+        const current = this.pdfViewport.getColumnReadingState?.().enabled
+        const next = !current
+        let savedCfg = null
+        if (this.currentBookId && typeof localStorage !== 'undefined') {
+            try {
+                const raw = localStorage.getItem(`linden_col_cfg_${this.currentBookId}`)
+                if (raw) savedCfg = JSON.parse(raw)
+            } catch (_) {}
+        }
+        const nextCfg = {
+            ...(savedCfg && typeof savedCfg === 'object' ? savedCfg : {}),
+            enabled: next
+        }
+        this.pdfViewport.setColumnReadingConfig?.(nextCfg)
+        if (this.currentBookId && typeof localStorage !== 'undefined') {
+            try {
+                localStorage.setItem(`linden_col_cfg_${this.currentBookId}`, JSON.stringify(nextCfg))
+            } catch (_) {}
+        }
+        document.getElementById('btn-toggle-column-reading')?.classList.toggle('active', next)
+        this.syncColumnReadingUI(this.pdfViewport.getColumnReadingState())
+        const enabled = this.pdfViewport.getColumnReadingState().enabled
+        this.showToast(enabled ? '已按一栏宽度显示：滚轮或方向键继续阅读，再次点击按栏退出' : (next ? '这些页面均被排除，请先调整分栏设置' : '已退出按栏阅读模式'))
+    }
+
+    toggleSecondaryPdfViewport() {
+        if (this.secondaryPdfViewport || this._pdfSplitOpening) {
+            this.closeSecondaryPdfViewport()
+            document.getElementById('btn-pdf-split-viewport')?.classList.remove('active')
+            this.showToast('已关闭副视口')
+        } else {
+            if (!this.pdfDriver || !this.pdfViewport) {
+                this.showToast('请先打开 PDF 文档')
+                return
+            }
+            this.openSecondaryPdfViewport('horizontal').catch(error => {
+                console.warn('[PDF] Reference view failed:', error)
+                this.showToast('参考视图打开失败，请重试', 'warning')
+            })
+        }
+    }
+
+    toggleScanPreset(presetId) {
+        if (!this.pdfViewport) {
+            this.showToast('仅支持在 PDF 阅读界面应用扫描增强')
+            return
+        }
+        const currentState = this.pdfViewport.getScanEnhancementState?.() || {}
+        const currentPreset = currentState.preset || 'original'
+        const next = (currentPreset === presetId) ? 'original' : presetId
+        this.pdfViewport.setScanEnhancementPreset?.(next)
+        if (this.currentBookId && typeof localStorage !== 'undefined') {
+            if (next !== 'original') {
+                localStorage.setItem('linden_scan_' + this.currentBookId, next)
+            } else {
+                localStorage.removeItem('linden_scan_' + this.currentBookId)
+            }
+        }
+        document.getElementById('btn-scan-gray-boost')?.classList.toggle('active', next === 'gray-boost')
+        document.getElementById('btn-scan-text-darken')?.classList.toggle('active', next === 'text-darken')
+        const name = next === 'gray-boost' ? '灰底增强' : (next === 'text-darken' ? '字迹加深' : '原图模式')
+        this.showToast(`已切换扫描增强: ${name}`)
+    }
+
+    async handleOAuthLogin() {
+        try {
+            if (this._pendingOAuth) { this.showToast('已有授权正在进行，请等待完成或取消', 'warning'); return }
+            const providerType = this.syncConfig?.providerType || document.querySelector('.btn-sync-preset.active')?.dataset.preset || document.getElementById('sync-provider-select')?.value
+            if (providerType !== 'onedrive' && providerType !== 'googledrive' && providerType !== 'google_drive') {
+                this.showToast('请选择 OneDrive 或 Google Drive 同步提供者')
+                return
+            }
+            const clientId = this.syncConfig?.clientId || document.getElementById('sync-input-client-id')?.value?.trim()
+            if (!clientId) {
+                this.showToast('请先配置客户端 ID (Client ID)', 'warning')
+                return
+            }
+            const filesInput = document.getElementById('sync-oauth-include-user-files')
+            const includeUserFiles = filesInput ? filesInput.checked : Boolean(this.syncConfig?.includeUserFiles)
+            const config = {
+                ...(this.syncConfig || {}),
+                providerType,
+                clientId,
+                includeUserFiles
+            }
+            if (this.dom && typeof this.saveSyncConfig === 'function') {
+                await this.saveSyncConfig(config)
+            }
+            const { getStorageProvider } = await import('./storage-providers.js')
+            const provider = getStorageProvider(providerType, this.syncConfig || config)
+            if (typeof provider?.startOAuthLogin === 'function') {
+                const login = await provider.startOAuthLogin('http://localhost:18520/callback', { includeUserFiles })
+                const pendingSession = {
+                    providerType,
+                    ...login,
+                    createdAt: Date.now(),
+                    abortController: new AbortController(),
+                    consumed: false
+                }
+                this._pendingOAuth = pendingSession
+                const cancelButton = document.getElementById('btn-oauth-cancel')
+                if (cancelButton) cancelButton.style.display = ''
+
+                let opened = false
+                const openAuthUrl = () => {
+                    if (opened || this._pendingOAuth !== pendingSession || pendingSession.consumed || pendingSession.cancelled) return
+                    opened = true
+                    if (login?.authUrl) {
+                        if (window.platformBridge?.openExternal) {
+                            window.platformBridge.openExternal(login.authUrl)
+                        } else if (typeof window !== 'undefined' && window.open) {
+                            window.open(login.authUrl, '_blank')
+                        }
+                        this.showToast('已在浏览器打开授权页面')
+                    }
+                }
+
+                if (typeof window !== 'undefined' && typeof window.platformBridge?.waitOAuthCallback === 'function') {
+                    this._pendingOAuthCallbackPromise = Promise.resolve(window.platformBridge.waitOAuthCallback(18520, 180, openAuthUrl, login.state, pendingSession.abortController.signal)).then(async (cbRes) => {
+                        if (!cbRes || cbRes.cancelled || pendingSession.cancelled) return cbRes
+                        if (cbRes.error) {
+                            this.showToast(`授权未完成: ${cbRes.error}`, 'warning')
+                            return cbRes
+                        }
+                        const activePending = this._pendingOAuth
+                        const isExpired = !activePending || (Date.now() - (activePending.createdAt || 0) > 10 * 60 * 1000)
+                        const hasValidState = typeof cbRes?.state === 'string' &&
+                            cbRes.state.length > 0 &&
+                            typeof login?.state === 'string' &&
+                            login.state.length > 0 &&
+                            cbRes.state === login.state &&
+                            activePending === pendingSession &&
+                            !activePending.consumed
+                        if (!hasValidState || isExpired) {
+                            this.showToast('OAuth 回调安全校验失败：缺少或无效的 state 参数', 'error')
+                            return { success: false, error: 'Invalid or missing OAuth state' }
+                        }
+                        if (typeof cbRes?.code === 'string' && cbRes.code.length > 0) {
+                            activePending.consumed = true
+                            if (cancelButton) cancelButton.style.display = 'none'
+                            return await this.handleOAuthCallback(providerType, cbRes.code, login.codeVerifier, login.nonce, includeUserFiles)
+                        }
+                        return { success: false, error: 'Missing OAuth authorization code' }
+                    }).catch((cbErr) => {
+                        this.showToast(`OAuth 回调异常: ${cbErr?.message || cbErr}`, 'error')
+                        return { success: false, error: cbErr?.message || String(cbErr) }
+                    }).finally(() => {
+                        if (this._pendingOAuth === pendingSession) this._pendingOAuth = null
+                        if (cancelButton) cancelButton.style.display = 'none'
+                    })
+                } else {
+                    this._pendingOAuth = null
+                    if (cancelButton) cancelButton.style.display = 'none'
+                    throw new Error('本地授权回调不可用')
+                }
+            }
+        } catch (err) {
+            this._pendingOAuth?.abortController?.abort()
+            this._pendingOAuth = null
+            const cancelButton = document.getElementById('btn-oauth-cancel')
+            if (cancelButton?.style) cancelButton.style.display = 'none'
+            this.showToast(`发起授权失败: ${err.message}`)
+        }
+    }
+
+    async openCloudBookPickerUI(pageToken = null) {
+        const panel = document.getElementById('cloud-books-picker-panel')
+        const listContainer = document.getElementById('cloud-books-list-container')
+        const spaceSelect = document.getElementById('cloud-books-space-select')
+        const btnNextPage = document.getElementById('btn-cloud-books-next-page')
+        if (panel) panel.style.display = 'block'
+        if (listContainer && !pageToken) {
+            listContainer.innerHTML = '<div style="color: var(--text-muted); padding: 4px 0;">正在加载云盘书库...</div>'
+        }
+        try {
+            const space = spaceSelect?.value || 'approot'
+            const res = await this.browseAndImportCloudBooks({ pageSize: 20, pageToken, space })
+            const items = res?.items || []
+            if (listContainer) {
+                if (!pageToken) listContainer.innerHTML = ''
+                if (items.length === 0 && !pageToken) {
+                    listContainer.innerHTML = '<div style="color: var(--text-muted); padding: 4px 0;">该目录下暂无可导入的电子书文件</div>'
+                } else {
+                    for (const item of items) {
+                        const row = document.createElement('div')
+                        row.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 2px; border-bottom: 1px solid var(--border-color);'
+                        const nameEl = document.createElement('span')
+                        nameEl.textContent = item.name || item.id
+                        nameEl.style.cssText = 'flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+                        const btnImport = document.createElement('button')
+                        btnImport.type = 'button'
+                        btnImport.className = 'btn-secondary-action'
+                        btnImport.style.cssText = 'padding: 2px 8px; font-size: 0.72rem;'
+                        btnImport.textContent = '导入'
+                        btnImport.addEventListener('click', async () => {
+                            btnImport.disabled = true
+                            btnImport.textContent = '导入中...'
+                            try {
+                                await this.browseAndImportCloudBooks({ space, selectedFileId: item.id, selectedFileMeta: item })
+                                btnImport.textContent = '已导入'
+                            } catch (e) {
+                                btnImport.disabled = false
+                                btnImport.textContent = '重试'
+                                this.showToast(`导入云盘图书失败: ${e.message || e}`, 'error')
+                            }
+                        })
+                        row.appendChild(nameEl)
+                        row.appendChild(btnImport)
+                        listContainer.appendChild(row)
+                    }
+                }
+            }
+            if (btnNextPage) {
+                if (res?.nextPageToken) {
+                    btnNextPage.style.display = 'inline-block'
+                    btnNextPage.onclick = () => this.openCloudBookPickerUI(res.nextPageToken)
+                } else {
+                    btnNextPage.style.display = 'none'
+                }
+            }
+            if (spaceSelect && !spaceSelect._boundCloudSpace) {
+                spaceSelect._boundCloudSpace = true
+                spaceSelect.addEventListener('change', () => this.openCloudBookPickerUI(null))
+            }
+            return res
+        } catch (err) {
+            if (listContainer) {
+                listContainer.innerHTML = `<div style="color: #dc2626; padding: 4px 0;">${escapeHTML(err.message || String(err))}</div>`
+            }
+            this.showToast(`读取云盘书库失败: ${err.message || err}`, 'warning')
+            return null
+        }
+    }
+
+    async browseAndImportCloudBooks({ pageSize = 20, pageToken = null, space = 'approot', selectedFileId = null, selectedFileMeta = null, signal = null } = {}) {
+        const providerType = this.syncConfig?.providerType
+        if (providerType !== 'onedrive' && providerType !== 'google_drive' && providerType !== 'googledrive') {
+            throw new Error('当前未配置 OneDrive 或 Google Drive 提供者')
+        }
+        const normalizedType = providerType === 'googledrive' ? 'google_drive' : providerType
+        const { getStorageProvider } = await import('./storage-providers.js')
+        const provider = getStorageProvider(normalizedType, this.syncConfig || {})
+        const auth = await provider.authenticate()
+        if (!auth.success) {
+            throw new Error(auth.error || '云盘尚未授权登录')
+        }
+        const listing = await provider.listCloudBooks(pageSize, pageToken, { space })
+        if (selectedFileId) {
+            let target = selectedFileMeta || (listing.items || []).find(it => it.id === selectedFileId)
+            if (!target && typeof provider.getCloudBookMeta === 'function') {
+                try {
+                    target = await provider.getCloudBookMeta(selectedFileId)
+                } catch (_) {}
+            }
+            if (!target) {
+                target = { id: selectedFileId, name: selectedFileId }
+            }
+            const buf = await provider.downloadCloudBook(target.id, signal)
+            const bytes = new Uint8Array(buf instanceof ArrayBuffer ? buf : (buf?.buffer || []))
+            let finalName = target.name || selectedFileId
+            const isZip = bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4B && bytes[2] === 0x03 && bytes[3] === 0x04
+            const isPdf = bytes.length >= 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46
+            const isTxt = (target.mimeType === 'text/plain') || (!isZip && !isPdf && bytes.length > 0 && !bytes.subarray(0, Math.min(bytes.length, 512)).some(b => b === 0))
+            if (!/\.[a-zA-Z0-9]+$/.test(finalName)) {
+                if (isZip) finalName += '.epub'
+                else if (isPdf) finalName += '.pdf'
+                else if (isTxt) finalName += '.txt'
+                else finalName += '.epub'
+            } else if (finalName.endsWith('.pdf') && isZip) {
+                finalName = finalName.replace(/\.pdf$/, '.epub')
+            } else if (finalName.endsWith('.pdf') && isTxt && !isPdf) {
+                finalName = finalName.replace(/\.pdf$/, '.txt')
+            }
+            const fileObj = new File([buf], finalName)
+            const imported = await this.importFilesAndWait([fileObj])
+            return { listing, imported }
+        }
+        return listing
     }
 
     async getBuildInfo() {
@@ -16287,17 +20112,21 @@ this.applyPdfPageAppearance()
 export { UniversalReaderApp }
 
 // Expose modules to global window for accessibility and diagnostics
-window.db = db
-window.tracker = tracker
-window.quoteCard = quoteCard
+if (typeof window !== 'undefined') {
+    window.db = db
+    window.tracker = tracker
+    window.quoteCard = quoteCard
 
-// Initialize Application on DOM Ready or immediately if DOMContentLoaded already fired
-if (document.readyState === 'loading') {
-    window.addEventListener('DOMContentLoaded', () => {
-        window.app = new UniversalReaderApp()
-        window.readerApp = window.app
-    })
-} else {
-    window.app = new UniversalReaderApp()
-    window.readerApp = window.app
+    // Initialize Application on DOM Ready or immediately if DOMContentLoaded already fired
+    if (typeof document !== 'undefined') {
+        if (document.readyState === 'loading') {
+            window.addEventListener('DOMContentLoaded', () => {
+                window.app = new UniversalReaderApp()
+                window.readerApp = window.app
+            })
+        } else {
+            window.app = new UniversalReaderApp()
+            window.readerApp = window.app
+        }
+    }
 }

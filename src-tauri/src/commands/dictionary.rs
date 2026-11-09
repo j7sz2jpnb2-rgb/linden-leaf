@@ -74,9 +74,7 @@ impl Drop for InstallingGuard {
 
 fn get_custom_dict_dir_lock() -> &'static RwLock<Option<PathBuf>> {
     CUSTOM_DICT_DIR.get_or_init(|| {
-        let meta_file = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("com.lindenleaf.reader")
+        let meta_file = crate::commands::fs::resolve_app_data_dir()
             .join("resources_config.json");
         if meta_file.exists() {
             if let Ok(content) = fs::read_to_string(&meta_file) {
@@ -126,8 +124,7 @@ pub struct DictStatus {
 }
 
 fn get_default_dict_storage_dir() -> PathBuf {
-    let mut dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.push("com.lindenleaf.reader");
+    let mut dir = crate::commands::fs::resolve_app_data_dir();
     dir.push("dictionary");
     let _ = fs::create_dir_all(&dir);
     dir
@@ -1241,7 +1238,7 @@ pub fn dict_get_resource_locations() -> serde_json::Value {
     let dict_size = fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     let dict_installed = db_path.exists() && dict_size > 100_000 && !is_explicitly_uninstalled();
 
-    let app_data = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("com.lindenleaf.reader");
+    let app_data = crate::commands::fs::resolve_app_data_dir();
     let model_dir = app_data.join("models");
     let _ = fs::create_dir_all(&model_dir);
     let audio_cache_dir = dirs::cache_dir().unwrap_or_else(|| app_data.clone()).join("com.lindenleaf.reader").join("audio_cache");
@@ -1350,9 +1347,7 @@ pub fn dict_migrate_storage(
 
     {
         let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let meta_file = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("com.lindenleaf.reader")
+        let meta_file = crate::commands::fs::resolve_app_data_dir()
             .join("resources_config.json");
         let conf = serde_json::json!({
             "dictionaryDir": target.to_string_lossy().to_string(),
@@ -1381,7 +1376,7 @@ pub fn dict_migrate_storage(
 
 #[tauri::command]
 pub fn resource_clear_audio_cache() -> Result<u64, String> {
-    let app_data = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("com.lindenleaf.reader");
+    let app_data = crate::commands::fs::resolve_app_data_dir();
     let audio_cache_dir = dirs::cache_dir().unwrap_or_else(|| app_data).join("com.lindenleaf.reader").join("audio_cache");
     let mut cleared_bytes: u64 = 0;
     if audio_cache_dir.exists() {

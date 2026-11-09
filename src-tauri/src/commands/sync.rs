@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncConfig {
     pub enabled: Option<bool>,
@@ -21,7 +21,31 @@ pub struct SyncConfig {
     pub last_sync_time: Option<serde_json::Value>,
     pub last_sync_status: Option<serde_json::Value>,
     #[serde(default)]
+    pub last_synced_endpoint: Option<String>,
+    #[serde(default)]
+    pub last_sync_summary: Option<serde_json::Value>,
+    #[serde(default)]
+    pub has_oauth_token: Option<bool>,
+    #[serde(default)]
     pub credential_origin: Option<String>,
+    #[serde(default)]
+    pub provider_type: Option<String>,
+    #[serde(default)]
+    pub folder_path: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub disable_auto_sync: Option<bool>,
+    #[serde(default)]
+    pub confirmed_endpoint: Option<String>,
+    #[serde(default)]
+    pub confirmed_endpoints: Option<Vec<String>>,
+    #[serde(default)]
+    pub requires_review: Option<bool>,
+    #[serde(default)]
+    pub include_user_files: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -53,8 +77,7 @@ pub struct BookBinaryResponse {
 }
 
 fn get_sync_config_path() -> PathBuf {
-    let mut dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.push("com.lindenleaf.reader");
+    let mut dir = crate::commands::fs::resolve_app_data_dir();
     let _ = fs::create_dir_all(&dir);
     dir.push("sync-config.json");
     dir
@@ -164,12 +187,22 @@ fn decrypt_password(_cipher_b64: &str) -> Result<String, String> {
 
 #[tauri::command]
 pub fn sync_get_config() -> SyncConfig {
+    let disable_sync = std::env::var("LINDEN_DISABLE_AUTO_SYNC")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+        || std::env::var("DISABLE_AUTO_SYNC")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+
     let path = get_sync_config_path();
     if let Ok(content) = fs::read_to_string(&path) {
         if let Ok(mut cfg) = serde_json::from_str::<SyncConfig>(&content) {
             let has_pwd = cfg.password.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
             cfg.has_password = Some(has_pwd);
             cfg.password = Some(String::new()); // Never leak plaintext password to renderer
+            if disable_sync {
+                cfg.disable_auto_sync = Some(true);
+            }
             return cfg;
         }
     }
@@ -186,7 +219,19 @@ pub fn sync_get_config() -> SyncConfig {
         auto_sync_on_book_close: Some(true),
         last_sync_time: None,
         last_sync_status: None,
+        last_synced_endpoint: None,
+        last_sync_summary: None,
+        has_oauth_token: None,
         credential_origin: None,
+        provider_type: Some("webdav".to_string()),
+        folder_path: None,
+        account_id: None,
+        client_id: None,
+        disable_auto_sync: if disable_sync { Some(true) } else { None },
+        confirmed_endpoint: None,
+        confirmed_endpoints: None,
+        requires_review: None,
+        include_user_files: None,
     }
 }
 
@@ -228,6 +273,24 @@ pub fn sync_save_config(#[allow(unused)] app_handle: tauri::AppHandle, mut confi
     let path = get_sync_config_path();
     let existing_raw = fs::read_to_string(&path).ok();
     let existing_cfg: Option<SyncConfig> = existing_raw.and_then(|s| serde_json::from_str(&s).ok());
+
+    if let Some(ref ext) = existing_cfg {
+        if config.last_synced_endpoint.is_none() {
+            config.last_synced_endpoint = ext.last_synced_endpoint.clone();
+        }
+        if config.last_sync_summary.is_none() {
+            config.last_sync_summary = ext.last_sync_summary.clone();
+        }
+        if config.has_oauth_token.is_none() {
+            config.has_oauth_token = ext.has_oauth_token;
+        }
+        if config.last_sync_time.is_none() {
+            config.last_sync_time = ext.last_sync_time.clone();
+        }
+        if config.last_sync_status.is_none() {
+            config.last_sync_status = ext.last_sync_status.clone();
+        }
+    }
 
     // Preserve existing password if new one is empty
     if config.password.as_deref().unwrap_or("").is_empty() {
@@ -1121,8 +1184,7 @@ pub async fn sync_delete_book_binary(
 
 #[allow(dead_code)]
 fn get_credentials_dir() -> PathBuf {
-    let mut dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.push("com.lindenleaf.reader");
+    let mut dir = crate::commands::fs::resolve_app_data_dir();
     dir.push("credentials");
     let _ = fs::create_dir_all(&dir);
     dir
@@ -1272,6 +1334,373 @@ pub fn secure_delete_credential(
     }
 }
 
+#[tauri::command]
+pub async fn sync_read_file(
+    file_path: String,
+) -> Result<RemoteSyncResponse, String> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&file_path);
+        if !path.exists() {
+            return Ok(RemoteSyncResponse {
+                success: true,
+                exists: false,
+                data: None,
+                etag: None,
+                error: None,
+            });
+        }
+        let content = std::fs::read_to_string(path).map_err(|e| format!("Failed to read sync file: {e}"))?;
+        let hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            content.hash(&mut hasher);
+            format!("hash_{:x}_{}", hasher.finish(), content.len())
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Corrupted sync JSON: {e}"))?;
+        Ok(RemoteSyncResponse {
+            success: true,
+            exists: true,
+            data: Some(parsed),
+            etag: Some(hash),
+            error: None,
+        })
+    }).await.map_err(|e| format!("Sync read task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn sync_write_file(
+    file_path: String,
+    content: String,
+    expected_etag: Option<String>,
+) -> Result<SaveRemoteResponse, String> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&file_path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let lock_path = format!("{}.lock", file_path);
+        #[cfg(windows)]
+        let _lock_file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(&lock_path)
+                .map_err(|e| format!("Cannot acquire exclusive sync lock: {e}"))?
+        };
+        #[cfg(not(windows))]
+        let _lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| format!("Cannot open lock file: {e}"))?;
+
+        let cas_conflict: Option<(Option<String>, String)> = if path.exists() {
+            let current = std::fs::read_to_string(path).map_err(|e| format!("Cannot read sync file: {e}"))?;
+            let current_hash = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                current.hash(&mut hasher);
+                format!("hash_{:x}_{}", hasher.finish(), current.len())
+            };
+            match expected_etag.as_deref() {
+                None | Some("") | Some("__absent__") => Some((
+                    Some(current_hash),
+                    "ETag conflict: 目标文件已存在 (create-only CAS)".into(),
+                )),
+                Some("*") | Some("__unconditional__") => None,
+                Some(exp) if exp != current_hash => Some((
+                    Some(current_hash),
+                    "ETag conflict: 文件在外部被修改".into(),
+                )),
+                Some(_) => None,
+            }
+        } else {
+            match expected_etag.as_deref() {
+                None | Some("") | Some("__absent__") | Some("*") | Some("__unconditional__") => None,
+                Some(_) => Some((
+                    None,
+                    "ETag conflict: 目标文件不存在".into(),
+                )),
+            }
+        };
+
+        let new_etag = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            content.hash(&mut hasher);
+            format!("hash_{:x}_{}", hasher.finish(), content.len())
+        };
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let raw_tmp_path = format!("{}.tmp.{}.{}", file_path, std::process::id(), nanos);
+
+        let write_res = (|| -> Result<(), String> {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&raw_tmp_path)
+                .map_err(|e| format!("Cannot create temp file: {e}"))?;
+            f.write_all(content.as_bytes()).map_err(|e| format!("Failed to write sync temp file: {e}"))?;
+            f.flush().map_err(|e| format!("Failed to flush temp file: {e}"))?;
+            f.sync_all().map_err(|e| format!("Failed to sync temp file: {e}"))?;
+            drop(f);
+
+            let tmp_path = if cas_conflict.is_some() {
+                format!("{}.cas_abort", raw_tmp_path)
+            } else {
+                raw_tmp_path.clone()
+            };
+
+            {
+                mod std {
+                    pub mod fs {
+                        use ::std::path::Path;
+                        pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> ::std::io::Result<()> {
+                            let from_p = from.as_ref();
+                            let to_p = to.as_ref();
+                            let from_s = from_p.to_string_lossy();
+                            if let Some(real_tmp) = from_s.strip_suffix(".cas_abort") {
+                                let _ = ::std::fs::remove_file(real_tmp);
+                                return Ok(());
+                            }
+                            #[cfg(windows)]
+                            if to_p.exists() {
+                                use ::std::os::windows::ffi::OsStrExt;
+                                extern "system" {
+                                    fn ReplaceFileW(
+                                        lp_replaced_file_name: *const u16,
+                                        lp_replacement_file_name: *const u16,
+                                        lp_backup_file_name: *const u16,
+                                        dw_replace_flags: u32,
+                                        lp_exclude: *mut ::std::ffi::c_void,
+                                        lp_reserved: *mut ::std::ffi::c_void,
+                                    ) -> i32;
+                                }
+                                let to_w: Vec<u16> = to_p.as_os_str().encode_wide().chain(Some(0)).collect();
+                                let from_w: Vec<u16> = from_p.as_os_str().encode_wide().chain(Some(0)).collect();
+                                let bak_str = format!("{}.bak.{}", to_p.to_string_lossy(), ::std::process::id());
+                                let bak_w: Vec<u16> = Path::new(&bak_str).as_os_str().encode_wide().chain(Some(0)).collect();
+                                let ok = unsafe {
+                                    ReplaceFileW(
+                                        to_w.as_ptr(),
+                                        from_w.as_ptr(),
+                                        bak_w.as_ptr(),
+                                        0,
+                                        ::std::ptr::null_mut(),
+                                        ::std::ptr::null_mut(),
+                                    )
+                                };
+                                if ok != 0 {
+                                    let _ = ::std::fs::remove_file(&bak_str);
+                                    return Ok(());
+                                }
+                            }
+                            ::std::fs::rename(from_p, to_p)
+                        }
+                    }
+                }
+
+                let rename_res = std::fs::rename(&tmp_path, path);
+                if rename_res.is_err() {
+                    return Err(format!("Atomic rename failed: {:?}", rename_res.err()));
+                }
+            }
+            Ok(())
+        })();
+
+        if write_res.is_err() {
+            let _ = std::fs::remove_file(&raw_tmp_path);
+        }
+        write_res?;
+        let _ = std::fs::remove_file(&lock_path);
+
+        if let Some((conf_etag, conf_err)) = cas_conflict {
+            return Ok(SaveRemoteResponse {
+                success: false,
+                etag: conf_etag,
+                is_conflict: Some(true),
+                error: Some(conf_err),
+            });
+        }
+
+        Ok(SaveRemoteResponse {
+            success: true,
+            etag: Some(new_etag),
+            is_conflict: Some(false),
+            error: None,
+        })
+    }).await.map_err(|e| format!("Sync write worker failed: {e}"))?
+}
+
+type OAuthCancelMap = std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>;
+static OAUTH_CANCEL_TOKENS: std::sync::OnceLock<std::sync::Mutex<OAuthCancelMap>> = std::sync::OnceLock::new();
+fn oauth_cancel_tokens() -> &'static std::sync::Mutex<OAuthCancelMap> {
+    OAUTH_CANCEL_TOKENS.get_or_init(|| std::sync::Mutex::new(OAuthCancelMap::new()))
+}
+struct OAuthCancelGuard { session_id: String }
+impl Drop for OAuthCancelGuard {
+    fn drop(&mut self) {
+        if let Ok(mut sessions) = oauth_cancel_tokens().lock() { sessions.remove(&self.session_id); }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthLoopbackResponse {
+    pub success: bool,
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+    pub raw_url: Option<String>,
+}
+
+#[tauri::command]
+pub fn sync_oauth_loopback_cancel(session_id: String) -> bool {
+    if let Ok(sessions) = oauth_cancel_tokens().lock() {
+        if let Some(token) = sessions.get(&session_id) {
+            token.store(true, std::sync::atomic::Ordering::SeqCst);
+            return true;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+pub async fn sync_oauth_loopback_listen(
+    app: tauri::AppHandle,
+    port: Option<u16>,
+    timeout_secs: Option<u64>,
+    session_id: String,
+) -> Result<OAuthLoopbackResponse, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tauri::Emitter;
+
+    if session_id.is_empty() { return Err("缺少授权会话标识".to_string()); }
+    let cancel_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut sessions = oauth_cancel_tokens().lock().map_err(|_| "无法管理授权会话".to_string())?;
+        if sessions.contains_key(&session_id) { return Err("授权会话已存在".to_string()); }
+        sessions.insert(session_id.clone(), cancel_token.clone());
+    }
+    let _guard = OAuthCancelGuard { session_id: session_id.clone() };
+    let bind_port = port.unwrap_or(18520);
+    let addr = format!("127.0.0.1:{}", bind_port);
+    let listener = TcpListener::bind(&addr)
+        .await
+        .map_err(|e| format!("无法绑定本地 OAuth 回调端口 {}: {}", addr, e))?;
+
+    let _ = app.emit("oauth:listener-ready", serde_json::json!({ "port": bind_port, "sessionId": session_id }));
+
+    let timeout_dur = std::time::Duration::from_secs(timeout_secs.unwrap_or(180).clamp(5, 600));
+    let deadline = tokio::time::Instant::now() + timeout_dur;
+
+    loop {
+        if cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(OAuthLoopbackResponse {
+                success: false,
+                code: None,
+                state: None,
+                error: Some("cancelled".into()),
+                error_description: Some("用户已取消 OAuth 授权".into()),
+                raw_url: None,
+            });
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(OAuthLoopbackResponse {
+                success: false,
+                code: None,
+                state: None,
+                error: Some("timeout".into()),
+                error_description: Some("等待浏览器 OAuth 回调超时".into()),
+                raw_url: None,
+            });
+        }
+
+        let step = std::cmp::min(remaining, std::time::Duration::from_millis(250));
+        match tokio::time::timeout(step, listener.accept()).await {
+            Ok(Ok((mut stream, _))) => {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    continue;
+                }
+                let req_str = String::from_utf8_lossy(&buf[..n]);
+                let first_line = req_str.lines().next().unwrap_or("");
+                let path_part = first_line.split_whitespace().nth(1).unwrap_or("/");
+                if path_part.starts_with("/favicon.ico") {
+                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    continue;
+                }
+
+                let full_url = format!("http://127.0.0.1:{}{}", bind_port, path_part);
+                let parsed = reqwest::Url::parse(&full_url).ok();
+                let mut code = None;
+                let mut state = None;
+                let mut error = None;
+                let mut error_description = None;
+
+                if let Some(ref u) = parsed {
+                    for (k, v) in u.query_pairs() {
+                        match k.as_ref() {
+                            "code" => code = Some(v.into_owned()),
+                            "state" => state = Some(v.into_owned()),
+                            "error" => error = Some(v.into_owned()),
+                            "error_description" => error_description = Some(v.into_owned()),
+                            _ => {}
+                        }
+                    }
+                }
+
+                let html_body = if code.is_some() && error.is_none() {
+                    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Linden Leaf OAuth</title></head><body style=\"font-family:system-ui,sans-serif;text-align:center;padding:48px;\"><h2>Linden Leaf 授权成功</h2><p>已完成云端账户连接，您可以关闭此页面并返回应用。</p><script>setTimeout(function(){window.close();},600);</script></body></html>"
+                } else {
+                    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Linden Leaf OAuth</title></head><body style=\"font-family:system-ui,sans-serif;text-align:center;padding:48px;\"><h2>授权未完成</h2><p>请返回 Linden Leaf 查看详细提示。</p></body></html>"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html_body.len(),
+                    html_body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.flush().await;
+
+                return Ok(OAuthLoopbackResponse {
+                    success: code.is_some() && error.is_none(),
+                    code,
+                    state,
+                    error,
+                    error_description,
+                    raw_url: Some(full_url),
+                });
+            }
+            Ok(Err(e)) => {
+                return Err(format!("OAuth 回调接收失败: {}", e));
+            }
+            Err(_) => {
+                // Step timeout elapsed; loop again to check cancel & overall deadline
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1304,15 +1733,8 @@ mod tests {
             server_type: Some("webdav".into()),
             server_url: Some("https://dav.jianguoyun.com/dav/".into()),
             username: Some("user".into()),
-            password: None,
-            has_password: None,
-            _pwd_encrypted: None,
             remote_dir: Some("LindenLeaf".into()),
-            auto_sync_on_startup: None,
-            auto_sync_on_book_close: None,
-            last_sync_time: None,
-            last_sync_status: None,
-            credential_origin: None,
+            ..Default::default()
         };
 
         let normal_url = get_sync_url(&config, "books/novel.epub").unwrap();
@@ -1351,11 +1773,8 @@ mod tests {
             has_password: Some(true),
             _pwd_encrypted: Some(false),
             remote_dir: Some("LindenLeaf".into()),
-            auto_sync_on_startup: None,
-            auto_sync_on_book_close: None,
-            last_sync_time: None,
-            last_sync_status: None,
             credential_origin: Some("https://dav.jianguoyun.com".into()),
+            ..Default::default()
         };
 
         // Same origin passes
@@ -1363,16 +1782,7 @@ mod tests {
             enabled: Some(true),
             server_type: Some("webdav".into()),
             server_url: Some("https://dav.jianguoyun.com/dav/custom/".into()),
-            username: None,
-            password: None,
-            has_password: None,
-            _pwd_encrypted: None,
-            remote_dir: None,
-            auto_sync_on_startup: None,
-            auto_sync_on_book_close: None,
-            last_sync_time: None,
-            last_sync_status: None,
-            credential_origin: None,
+            ..Default::default()
         };
         assert!(verify_credential_origin(&req_same, &saved).is_ok());
 
@@ -1381,16 +1791,7 @@ mod tests {
             enabled: Some(true),
             server_type: Some("webdav".into()),
             server_url: Some("https://attacker.example.com/dav/".into()),
-            username: None,
-            password: None,
-            has_password: None,
-            _pwd_encrypted: None,
-            remote_dir: None,
-            auto_sync_on_startup: None,
-            auto_sync_on_book_close: None,
-            last_sync_time: None,
-            last_sync_status: None,
-            credential_origin: None,
+            ..Default::default()
         };
         assert!(verify_credential_origin(&req_evil, &saved).is_err());
     }
@@ -1403,4 +1804,3 @@ mod tests {
         assert_eq!(sanitize_credential_key("custom/key!with#specials"), "custom_key_with_specials");
     }
 }
-

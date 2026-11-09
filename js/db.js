@@ -28,9 +28,46 @@ export const toLocalDateKey = (dateInput = new Date()) => {
     return `${year}-${month}-${day}`
 }
 
+export const computeContentHash = async (blobOrFile) => {
+    if (!blobOrFile) return null
+    try {
+        const size = blobOrFile.size || 0
+        if (size === 0) return 'e_empty'
+        const subtle = globalThis.crypto?.subtle
+        if (!subtle) return `sz_${size}`
+        if (size <= 2 * 1024 * 1024) {
+            const buf = await blobOrFile.arrayBuffer()
+            const hashBuf = await subtle.digest('SHA-256', buf)
+            const arr = Array.from(new Uint8Array(hashBuf))
+            return arr.map(b => b.toString(16).padStart(2, '0')).join('')
+        }
+        // For larger files: sample head 64KB, middle 64KB, tail 64KB + length
+        const head = blobOrFile.slice(0, 64 * 1024)
+        const midPos = Math.floor(size / 2)
+        const mid = blobOrFile.slice(midPos, midPos + 64 * 1024)
+        const tail = blobOrFile.slice(Math.max(0, size - 64 * 1024))
+        const [hBuf, mBuf, tBuf] = await Promise.all([head.arrayBuffer(), mid.arrayBuffer(), tail.arrayBuffer()])
+        const totalLen = hBuf.byteLength + mBuf.byteLength + tBuf.byteLength + 8
+        const combined = new Uint8Array(totalLen)
+        combined.set(new Uint8Array(hBuf), 0)
+        combined.set(new Uint8Array(mBuf), hBuf.byteLength)
+        combined.set(new Uint8Array(tBuf), hBuf.byteLength + mBuf.byteLength)
+        const dv = new DataView(combined.buffer)
+        dv.setBigUint64(hBuf.byteLength + mBuf.byteLength + tBuf.byteLength, BigInt(size), true)
+        const hashBuf = await subtle.digest('SHA-256', combined)
+        const arr = Array.from(new Uint8Array(hashBuf))
+        return 's_' + arr.map(b => b.toString(16).padStart(2, '0')).join('')
+    } catch (_) {
+        return null
+    }
+}
+
 export const openDB = () => {
     if (dbInstance) return Promise.resolve(dbInstance)
     if (_openPromise) return _openPromise
+    if (typeof indexedDB === 'undefined') {
+        return Promise.reject(new Error('IndexedDB is not available in current environment'))
+    }
     _openPromise = new Promise((resolve, reject) => {
         const req = indexedDB.open(DB_NAME, DB_VERSION)
         
@@ -271,6 +308,8 @@ export const isContentIdentityMatching = (item, currentSnapshot, options = {}) =
             } else {
                 return { matches: false, status: 'revision_mismatch', pendingConfirmation: false }
             }
+        } else if (!itemRev && !currentRev && !itemHash && !currentHash) {
+            return { matches: true, status: 'matched_unversioned', pendingConfirmation: false }
         }
     }
 
@@ -286,35 +325,65 @@ export const isContentIdentityMatching = (item, currentSnapshot, options = {}) =
 // Books CRUD
 export const LARGE_PDF_SNAPSHOT_THRESHOLD = 25 * 1024 * 1024 // 25 MB
 
-export function createLazySnapshotBlob(filePath, size, type = 'application/pdf') {
+export function createLazySnapshotBlob(filePath, size, type = 'application/pdf', byteOffset = 0, byteLength = null) {
+    const totalSize = (byteLength !== null && byteLength !== undefined) ? byteLength : size
     const dummy = new Blob([], { type })
+    const lazyObj = {
+        isLazySnapshot: true,
+        nativeSnapshotOnly: true,
+        nativeSnapshotPath: filePath,
+        size: totalSize,
+        type,
+        byteOffset,
+        byteLength: totalSize,
+        async materialize() {
+            if (typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
+                const buf = await platformBridge.readFileBuffer(filePath)
+                if (!buf) throw new Error(`Failed to read native snapshot at: ${filePath}`)
+                let ab = buf instanceof ArrayBuffer ? buf : (ArrayBuffer.isView(buf) ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : buf.buffer || buf)
+                if (byteOffset > 0 || (byteLength !== null && totalSize < ab.byteLength)) {
+                    const sliced = ab.slice(byteOffset, byteOffset + totalSize)
+                    return new Blob([sliced], { type })
+                }
+                return new Blob([ab], { type })
+            }
+            throw new Error(`Platform bridge unavailable to materialize native snapshot at: ${filePath}`)
+        },
+        async arrayBuffer() {
+            if (typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
+                const buf = await platformBridge.readFileBuffer(filePath)
+                if (!buf) throw new Error(`Failed to read native snapshot at: ${filePath}`)
+                let ab = buf instanceof ArrayBuffer ? buf : (ArrayBuffer.isView(buf) ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : buf.buffer || buf)
+                if (byteOffset > 0 || (byteLength !== null && totalSize < ab.byteLength)) {
+                    return ab.slice(byteOffset, byteOffset + totalSize)
+                }
+                return ab
+            }
+            throw new Error(`Platform bridge unavailable to read native snapshot at: ${filePath}`)
+        },
+        async text() {
+            const buf = await this.arrayBuffer()
+            return new TextDecoder().decode(buf)
+        },
+        async bytes() {
+            const buf = await this.arrayBuffer()
+            return new Uint8Array(buf)
+        },
+        slice(start = 0, end = totalSize, contentType = type) {
+            const s = Math.max(0, start < 0 ? totalSize + start : start)
+            const e = Math.min(totalSize, end < 0 ? totalSize + end : end)
+            const newLength = Math.max(0, e - s)
+            return createLazySnapshotBlob(filePath, size, contentType, byteOffset + s, newLength)
+        }
+    }
+
     return new Proxy(dummy, {
         get(target, prop) {
-            if (prop === 'size') return size
-            if (prop === 'type') return type
-            if (prop === 'nativeSnapshotOnly') return true
-            if (prop === 'nativeSnapshotPath') return filePath
-            if (prop === 'arrayBuffer') {
-                return async () => {
-                    if (typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
-                        const buf = await platformBridge.readFileBuffer(filePath)
-                        return buf instanceof ArrayBuffer ? buf : (buf?.buffer || buf)
-                    }
-                    return new ArrayBuffer(0)
-                }
+            if (prop in lazyObj) {
+                const val = lazyObj[prop]
+                return typeof val === 'function' ? val.bind(lazyObj) : val
             }
-            if (prop === 'text') {
-                return async () => {
-                    if (typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
-                        const buf = await platformBridge.readFileBuffer(filePath)
-                        return new TextDecoder().decode(buf)
-                    }
-                    return ''
-                }
-            }
-            if (prop === 'slice') {
-                return () => dummy
-            }
+            if (prop === Symbol.toStringTag) return 'Blob'
             const val = Reflect.get(target, prop)
             return typeof val === 'function' ? val.bind(target) : val
         }
@@ -324,19 +393,27 @@ export function createLazySnapshotBlob(filePath, size, type = 'application/pdf')
 export const saveBook = async bookData => {
     const db = await openDB()
     const origin = await getRevisionOrigin()
-    const { blob, nativePath, nativeSnapshotPath, ...meta } = bookData
+    const { blob, ...meta } = bookData
+    const nativePath = bookData.nativePath
+    const nativeSnapshotPath = bookData.nativeSnapshotPath
 
     return new Promise((resolve, reject) => {
         try {
-            const storeNames = (blob || nativePath) ? ['books', 'book_files'] : ['books']
+            const storeNames = (blob || nativePath || nativeSnapshotPath) ? ['books', 'book_files'] : ['books']
             if (db.objectStoreNames.contains('deleted_records')) {
                 storeNames.push('deleted_records')
             }
             const tx = db.transaction(storeNames, 'readwrite')
             const bookStore = tx.objectStore('books')
 
+            const explicitBlobRevision = meta.blobRevision || null
+            const generatedBlobRevision = (blob || nativeSnapshotPath) ? (explicitBlobRevision || generateRevision()) : explicitBlobRevision
+            if (generatedBlobRevision) {
+                meta.blobRevision = generatedBlobRevision
+            }
+
             if (meta.title != null) {
-                if (blob) {
+                if (blob || nativePath || nativeSnapshotPath) {
                     meta.isCloudOnly = false
                     meta.hasLocalFile = true
                 }
@@ -356,7 +433,7 @@ export const saveBook = async bookData => {
                     const existing = getReq.result
                     if (existing) {
                         Object.assign(existing, meta)
-                        if (blob) {
+                        if (blob || nativePath || nativeSnapshotPath) {
                             existing.isCloudOnly = false
                             existing.hasLocalFile = true
                         }
@@ -368,48 +445,88 @@ export const saveBook = async bookData => {
             }
 
             let previousSnapshotPath = null
-            if ((blob || nativePath) && meta.id) {
+            if ((blob || nativePath || nativeSnapshotPath) && meta.id) {
                 const fileStore = tx.objectStore('book_files')
                 const fileReq = fileStore.get(meta.id)
                 fileReq.onsuccess = () => {
                     const local = fileReq.result || { id: meta.id }
+                    const suppliedSnapshot = nativeSnapshotPath || blob?.nativeSnapshotPath || null
+                    const suppliedSnapshotPath = typeof suppliedSnapshot === 'object' ? suppliedSnapshot?.path : suppliedSnapshot
+                    const nativeDescriptor = blob && !(blob instanceof Blob) && (blob.isLazySnapshot || blob.nativeSnapshotOnly || typeof blob.materialize === 'function')
+                    // Supplying new bytes must never relabel an old cache as those new bytes.
+                    const effectiveSnapshotPath = blob
+                        ? ((suppliedSnapshotPath && (suppliedSnapshotPath !== local.nativeSnapshotPath || nativeDescriptor)) ? suppliedSnapshotPath : null)
+                        : (suppliedSnapshotPath || local.nativeSnapshotPath || null)
+                    const isLazy = blob && (blob.isLazySnapshot || blob.nativeSnapshotOnly || typeof blob.materialize === 'function')
+                    const isTauri = typeof platformBridge !== 'undefined' && platformBridge.isTauri
+                    const format = (meta.format || '').toLowerCase()
+                    const isLargeNativePdf = isTauri &&
+                        (format === 'pdf' || (blob?.type && blob.type.includes('pdf'))) &&
+                        effectiveSnapshotPath &&
+                        ((blob?.size > LARGE_PDF_SNAPSHOT_THRESHOLD) || !blob)
+
                     if (blob) {
                         previousSnapshotPath = local.nativeSnapshotPath || null
-                        const isTauri = typeof platformBridge !== 'undefined' && platformBridge.isTauri
-                        const effectiveSnapshotPath = nativeSnapshotPath || local.nativeSnapshotPath || null
-                        const format = (meta.format || '').toLowerCase()
-                        const isLargeNativePdf = isTauri &&
-                            (format === 'pdf' || (blob.type && blob.type.includes('pdf'))) &&
-                            effectiveSnapshotPath &&
-                            blob.size > LARGE_PDF_SNAPSHOT_THRESHOLD
-
-                        local.blobRevision = generateRevision()
+                        local.blobRevision = explicitBlobRevision || generatedBlobRevision || generateRevision()
                         local.revisionOrigin = origin
-                        local.documentHash = null // Clear old hash association
+                        local.documentHash = meta.documentHash !== undefined ? meta.documentHash : null
                         local.nativeSnapshotPath = effectiveSnapshotPath
                         local.nativeSnapshotRevision = effectiveSnapshotPath ? local.blobRevision : null
                         local.nativeSnapshotOrigin = effectiveSnapshotPath ? origin : null
-                        local.nativeSnapshotSize = effectiveSnapshotPath ? blob.size : null
+                        local.nativeSnapshotSize = effectiveSnapshotPath ? (blob.size || blob.byteLength || 0) : null
 
-                        if (isLargeNativePdf) {
+                        if (isLargeNativePdf || isLazy) {
                             local.blob = null
                             local.nativeSnapshotOnly = true
                         } else {
                             local.blob = blob
                             local.nativeSnapshotOnly = false
                         }
+                    } else if (effectiveSnapshotPath) {
+                        previousSnapshotPath = local.nativeSnapshotPath || null
+                        local.blobRevision = explicitBlobRevision || generatedBlobRevision || local.blobRevision || generateRevision()
+                        local.revisionOrigin = local.revisionOrigin || origin
+                        local.documentHash = meta.documentHash !== undefined ? meta.documentHash : (local.documentHash || null)
+                        local.nativeSnapshotPath = effectiveSnapshotPath
+                        local.nativeSnapshotRevision = local.blobRevision
+                        local.nativeSnapshotOrigin = local.revisionOrigin
+                        local.nativeSnapshotSize = meta.size || meta.fileSize || local.nativeSnapshotSize || 0
+                        local.nativeSnapshotOnly = true
+                        local.blob = null
+                    } else if (nativePath) {
+                        local.blobRevision = explicitBlobRevision || local.blobRevision || generateRevision()
+                        local.revisionOrigin = local.revisionOrigin || origin
+                        local.documentHash = meta.documentHash !== undefined ? meta.documentHash : (local.documentHash || null)
+                        local.nativeSnapshotSize = meta.size || meta.fileSize || local.nativeSnapshotSize || 0
+                        local.nativeSnapshotOnly = true
+                        local.blob = null
                     }
                     if (nativePath !== undefined) local.nativePath = nativePath
+                    const effectivePath = effectiveSnapshotPath || nativePath || local.nativePath || null
+                    const effectiveSize = local.nativeSnapshotSize || meta.size || meta.fileSize || 0
+                    local.sourceDescriptor = {
+                        kind: effectiveSnapshotPath ? 'native-snapshot' : (local.nativePath ? 'linked-file' : (local.blob ? 'embedded-blob' : 'unknown')),
+                        path: effectivePath,
+                        size: effectiveSize,
+                        revision: local.blobRevision,
+                        documentHash: local.documentHash || null
+                    }
                     local.updatedAt = Date.now()
                     fileStore.put(local)
+                    if (blob) {
+                        const metadata = bookStore.get(meta.id)
+                        metadata.onsuccess = () => {
+                            if (!metadata.result) return
+                            bookStore.put({ ...metadata.result,
+                                blobRevision: local.blobRevision, revisionOrigin: local.revisionOrigin,
+                                nativeSnapshotPath: local.nativeSnapshotPath, nativeSnapshotRevision: local.nativeSnapshotRevision,
+                                nativeSnapshotOrigin: local.nativeSnapshotOrigin, nativeSnapshotSize: local.nativeSnapshotSize,
+                                nativeSnapshotOnly: local.nativeSnapshotOnly })
+                        }
+                    }
                 }
             }
-            if (storeNames.includes('deleted_records') && meta.id && meta.title != null) {
-                tx.objectStore('deleted_records').delete(meta.id)
-                if (meta.stableKey) {
-                    tx.objectStore('deleted_records').delete(`key:${meta.stableKey}`)
-                }
-            }
+            // Item 2: Do NOT purge tombstones from deleted_records in saveBook
             tx.oncomplete = () => {
                 if (previousSnapshotPath && previousSnapshotPath !== nativeSnapshotPath &&
                     typeof platformBridge !== 'undefined' && platformBridge.reclaimSnapshot) {
@@ -419,7 +536,7 @@ export const saveBook = async bookData => {
                         const req = checkTx.objectStore('book_files').getAll()
                         req.onsuccess = () => {
                             const files = req.result || []
-                            const isStillReferenced = files.some(f => f.id !== meta.id && f.nativeSnapshotPath === previousSnapshotPath)
+                            const isStillReferenced = files.some(f => f.nativeSnapshotPath === previousSnapshotPath)
                             if (!isStillReferenced) {
                                 platformBridge.reclaimSnapshot(previousSnapshotPath).catch(err => {
                                     console.warn('[db.saveBook] Replaced snapshot reclaim notice:', err)
@@ -428,6 +545,7 @@ export const saveBook = async bookData => {
                         }
                     }).catch(() => {})
                 }
+                invalidateReadingStatsCache()
                 resolve(meta.id)
             }
             tx.onerror = () => reject(tx.error || new Error('Failed to save book'))
@@ -452,12 +570,14 @@ export const getBookFileBlob = async id => {
                     resolve(rec.blob)
                     return
                 }
-                const diskPath = rec?.nativeSnapshotPath || rec?.nativePath
+                const diskPath = rec?.nativeSnapshotPath || rec?.nativePath || rec?.sourceDescriptor?.path
                 if (diskPath && typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
                     try {
                         const buf = await platformBridge.readFileBuffer(diskPath)
                         if (buf) {
-                            const blob = new Blob([buf], { type: 'application/pdf' })
+                            const ext = (diskPath.split('.').pop() || '').toLowerCase()
+                            const mimeType = ext === 'pdf' ? 'application/pdf' : (ext === 'txt' ? 'text/plain' : (ext === 'epub' ? 'application/epub+zip' : 'application/octet-stream'))
+                            const blob = new Blob([buf], { type: mimeType })
                             resolve(blob)
                             return
                         }
@@ -528,6 +648,38 @@ export const saveBookNativePath = async (id, nativePath) => {
     })
 }
 
+// Bind a native cache to the exact version read by the caller. This changes only
+// local cache metadata; progress, annotations and the content identity stay intact.
+export const bindSavedPdfNativeSnapshot = async (snapshot, descriptor) => {
+    if (!snapshot?.bookId || !snapshot.blobRevision || !descriptor?.path || descriptor.size !== snapshot.blob?.size) return false
+    const database = await openDB()
+    return new Promise((resolve, reject) => {
+        const tx = database.transaction(['book_files', 'books'], 'readwrite')
+        const files = tx.objectStore('book_files'), books = tx.objectStore('books')
+        let file, book, pending = 2, bound = false
+        const apply = () => {
+            if (--pending) return
+            if (!file?.blob || !book || file.blobRevision !== snapshot.blobRevision ||
+                (file.revisionOrigin || snapshot.revisionOrigin) !== snapshot.revisionOrigin || file.blob.size !== snapshot.blob.size) return
+            const fields = {
+                nativeSnapshotPath: descriptor.path,
+                nativeSnapshotRevision: snapshot.blobRevision,
+                nativeSnapshotOrigin: snapshot.revisionOrigin,
+                nativeSnapshotSize: descriptor.size
+            }
+            files.put({ ...file, ...fields })
+            books.put({ ...book, ...fields })
+            bound = true
+        }
+        const fr = files.get(snapshot.bookId), br = books.get(snapshot.bookId)
+        fr.onsuccess = () => { file = fr.result; apply() }
+        br.onsuccess = () => { book = br.result; apply() }
+        tx.oncomplete = () => resolve(bound)
+        tx.onerror = () => reject(tx.error || new Error('Failed binding saved PDF snapshot'))
+        tx.onabort = () => reject(tx.error || new Error('Saved PDF snapshot transaction aborted'))
+    })
+}
+
 export const hasBookFileBlob = async id => {
     if (!id) return false
     const db = await openDB()
@@ -547,6 +699,7 @@ export const saveBookFileBlob = async (id, blob) => {
     if (!id || !blob) return false
     const db = await openDB()
     const origin = await getRevisionOrigin()
+    const newRevision = generateRevision()
     return new Promise((resolve, reject) => {
         const tx = db.transaction(['books', 'book_files'], 'readwrite')
         const fileStore = tx.objectStore('book_files')
@@ -556,7 +709,7 @@ export const saveBookFileBlob = async (id, blob) => {
         localReq.onsuccess = () => {
             const local = localReq.result || { id }
             local.blob = blob
-            local.blobRevision = generateRevision()
+            local.blobRevision = newRevision
             local.revisionOrigin = origin
             local.documentHash = null // Clear old hash association
             local.nativeSnapshotPath = null
@@ -573,6 +726,9 @@ export const saveBookFileBlob = async (id, blob) => {
             if (book) {
                 book.isCloudOnly = false
                 book.hasLocalFile = true
+                book.blobRevision = newRevision
+                book.revisionOrigin = origin
+                book.size = blob.size
                 // Do NOT touch updatedAt here so downloading binary does not conflict with remote deletions
                 bookStore.put(book)
             }
@@ -636,10 +792,13 @@ export const getBookFileSnapshot = async id => {
         })
     }
 
-    // Check if large native PDF with nativeSnapshotOnly
-    if (fileRecord && (fileRecord.nativeSnapshotOnly || (!fileRecord.blob && fileRecord.nativeSnapshotPath))) {
-        const snapshotSize = fileRecord.nativeSnapshotSize || bookRecord?.size || 0
-        const virtualBlob = createLazySnapshotBlob(fileRecord.nativeSnapshotPath, snapshotSize)
+    // Check if large native PDF with nativeSnapshotOnly, OR linked file with nativePath / nativeSnapshotPath
+    const effectiveFilePath = fileRecord?.nativeSnapshotPath || fileRecord?.nativePath || fileRecord?.sourceDescriptor?.path
+    if (fileRecord && (fileRecord.nativeSnapshotOnly || (!fileRecord.blob && effectiveFilePath))) {
+        const snapshotSize = fileRecord.nativeSnapshotSize || fileRecord.sourceDescriptor?.size || bookRecord?.size || 0
+        const format = (bookRecord?.format || fileRecord.format || 'pdf').toLowerCase()
+        const mimeType = format === 'pdf' ? 'application/pdf' : (format === 'txt' ? 'text/plain' : (format === 'epub' ? 'application/epub+zip' : 'application/octet-stream'))
+        const virtualBlob = createLazySnapshotBlob(effectiveFilePath, snapshotSize, mimeType)
         return Object.freeze({
             bookId: id,
             blob: virtualBlob,
@@ -647,12 +806,19 @@ export const getBookFileSnapshot = async id => {
             revisionOrigin: fileRecord.revisionOrigin || origin,
             documentHash: fileRecord.documentHash || null,
             nativePath: fileRecord.nativePath || null,
-            nativeSnapshotPath: fileRecord.nativeSnapshotPath,
+            nativeSnapshotPath: fileRecord.nativeSnapshotPath || null,
             nativeSnapshotRevision: fileRecord.nativeSnapshotRevision || fileRecord.blobRevision || 'v_native',
             nativeSnapshotOrigin: fileRecord.nativeSnapshotOrigin || origin,
             nativeSnapshotSize: snapshotSize,
             nativeSnapshotOnly: true,
-            format: bookRecord?.format || 'pdf',
+            sourceDescriptor: fileRecord.sourceDescriptor || {
+                kind: fileRecord.nativeSnapshotPath ? 'native-snapshot' : 'linked-file',
+                path: effectiveFilePath,
+                size: snapshotSize,
+                revision: fileRecord.blobRevision || 'v_native',
+                documentHash: fileRecord.documentHash || null
+            },
+            format: bookRecord?.format || format || 'pdf',
             title: bookRecord?.title || '',
             author: bookRecord?.author || '',
             progress: bookRecord?.progress || null
@@ -1142,10 +1308,11 @@ export const relinkBookFile = async (bookId, fileData = {}) => {
         const tx = db.transaction(storeNames, 'readwrite')
         const bookStore = tx.objectStore('books')
         const fileStore = db.objectStoreNames.contains('book_files') ? tx.objectStore('book_files') : null
+        let book = null
 
         const bookReq = bookStore.get(bookId)
         bookReq.onsuccess = () => {
-            const book = bookReq.result
+            book = bookReq.result
             if (book) {
                 if (blob) {
                     book.isCloudOnly = false
@@ -1163,6 +1330,8 @@ export const relinkBookFile = async (bookId, fileData = {}) => {
                 }
                 book.updatedAt = Date.now()
                 bookStore.put(book)
+            } else {
+                tx.abort()
             }
         }
 
@@ -1172,7 +1341,7 @@ export const relinkBookFile = async (bookId, fileData = {}) => {
                 const local = fileReq.result || { id: bookId }
                 if (blob) {
                     const isTauri = typeof platformBridge !== 'undefined' && platformBridge.isTauri
-                    const effectiveSnapshotPath = nativeSnapshotPath || local.nativeSnapshotPath || null
+                    const effectiveSnapshotPath = nativeSnapshotPath || null
                     const format = (book?.format || '').toLowerCase()
                     const isLargeNativePdf = isTauri &&
                         (format === 'pdf' || (blob.type && blob.type.includes('pdf'))) &&
@@ -1226,12 +1395,20 @@ export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Dat
             bookReq.onsuccess = () => {
                 const book = bookReq.result
                 const stableKey = book?.stableKey || null
+                const documentHash = book?.documentHash || null
+                const format = book?.format || null
+                const size = book?.size || 0
                 bookStore.delete(id)
                 if (recordTombstone && storeNames.includes('deleted_records')) {
-                    tx.objectStore('deleted_records').put({ id, stableKey, type: 'book', deletedAt: tombstoneTime })
-                    if (stableKey) {
-                        tx.objectStore('deleted_records').put({ id: `key:${stableKey}`, stableKey, type: 'book', deletedAt: tombstoneTime })
-                    }
+                    tx.objectStore('deleted_records').put({
+                        id,
+                        stableKey,
+                        documentHash,
+                        format,
+                        size,
+                        type: 'book',
+                        deletedAt: tombstoneTime
+                    })
                 }
             }
             let oldSnapshotPath = null
@@ -1292,6 +1469,7 @@ export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Dat
                         }
                     }).catch(() => {})
                 }
+                invalidateReadingStatsCache()
                 resolve(true)
             }
             tx.onerror = () => reject(tx.error || new Error(`Failed to delete book ${id}`))
@@ -1314,7 +1492,10 @@ export const saveHighlight = async highlight => {
         if (storeNames.includes('deleted_records')) {
             tx.objectStore('deleted_records').delete(highlight.id)
         }
-        tx.oncomplete = () => resolve(highlight.id)
+        tx.oncomplete = () => {
+            invalidateReadingStatsCache()
+            resolve(highlight.id)
+        }
         tx.onerror = () => reject(tx.error || new Error('Failed to save highlight'))
         tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving highlight'))
     })
@@ -1341,6 +1522,7 @@ export const applySyncedHighlight = async highlight => {
                     return resolve(false)
                 }
                 store.put(highlight)
+                invalidateReadingStatsCache()
                 resolve(true)
             }
             exReq.onerror = () => reject(exReq.error || new Error('Failed to get highlight'))
@@ -1438,11 +1620,25 @@ export const deleteHighlight = async (id, recordTombstone = true, tombstoneTime 
         const storeNames = db.objectStoreNames.contains('deleted_records') ? ['highlights', 'deleted_records'] : ['highlights']
         const tx = db.transaction(storeNames, 'readwrite')
         const store = tx.objectStore('highlights')
-        store.delete(id)
-        if (recordTombstone && storeNames.includes('deleted_records')) {
-            tx.objectStore('deleted_records').put({ id, type: 'highlight', deletedAt: tombstoneTime })
+        const getReq = store.get(id)
+        getReq.onsuccess = () => {
+            const existing = getReq.result
+            if (existing) {
+                const exTime = existing.updatedAt || existing.createdAt || 0
+                if (tombstoneTime && exTime > tombstoneTime) {
+                    // Local highlight has been updated after the deletion tombstone. Protect it!
+                    return resolve(false)
+                }
+            }
+            store.delete(id)
+            if (recordTombstone && storeNames.includes('deleted_records')) {
+                tx.objectStore('deleted_records').put({ id, type: 'highlight', deletedAt: tombstoneTime })
+            }
+            invalidateReadingStatsCache()
+            resolve(true)
         }
-        tx.oncomplete = () => resolve(true)
+        getReq.onerror = () => reject(getReq.error || new Error('Failed to get highlight before deleting'))
+        tx.oncomplete = () => {}
         tx.onerror = () => reject(tx.error || new Error('Failed to delete highlight'))
         tx.onabort = () => reject(tx.error || new Error('Transaction aborted deleting highlight'))
     })
@@ -1460,7 +1656,10 @@ export const saveBookmark = async bookmark => {
         if (storeNames.includes('deleted_records')) {
             tx.objectStore('deleted_records').delete(bookmark.id)
         }
-        tx.oncomplete = () => resolve(bookmark.id)
+        tx.oncomplete = () => {
+            invalidateReadingStatsCache()
+            resolve(bookmark.id)
+        }
         tx.onerror = () => reject(tx.error || new Error('Failed to save bookmark'))
         tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving bookmark'))
     })
@@ -1487,6 +1686,7 @@ export const applySyncedBookmark = async bookmark => {
                     return resolve(false)
                 }
                 store.put(bookmark)
+                invalidateReadingStatsCache()
                 resolve(true)
             }
             exReq.onerror = () => reject(exReq.error || new Error('Failed to get bookmark'))
@@ -1584,11 +1784,25 @@ export const deleteBookmark = async (id, recordTombstone = true, tombstoneTime =
         const storeNames = db.objectStoreNames.contains('deleted_records') ? ['bookmarks', 'deleted_records'] : ['bookmarks']
         const tx = db.transaction(storeNames, 'readwrite')
         const store = tx.objectStore('bookmarks')
-        store.delete(id)
-        if (recordTombstone && storeNames.includes('deleted_records')) {
-            tx.objectStore('deleted_records').put({ id, type: 'bookmark', deletedAt: tombstoneTime })
+        const getReq = store.get(id)
+        getReq.onsuccess = () => {
+            const existing = getReq.result
+            if (existing) {
+                const exTime = existing.updatedAt || existing.createdAt || 0
+                if (tombstoneTime && exTime > tombstoneTime) {
+                    // Local bookmark has been updated after the deletion tombstone. Protect it!
+                    return resolve(false)
+                }
+            }
+            store.delete(id)
+            if (recordTombstone && storeNames.includes('deleted_records')) {
+                tx.objectStore('deleted_records').put({ id, type: 'bookmark', deletedAt: tombstoneTime })
+            }
+            invalidateReadingStatsCache()
+            resolve(true)
         }
-        tx.oncomplete = () => resolve(true)
+        getReq.onerror = () => reject(getReq.error || new Error('Failed to get bookmark before deleting'))
+        tx.oncomplete = () => {}
         tx.onerror = () => reject(tx.error || new Error('Failed to delete bookmark'))
         tx.onabort = () => reject(tx.error || new Error('Transaction aborted deleting bookmark'))
     })
@@ -1632,8 +1846,58 @@ export const setSetting = async (key, value) => {
 }
 
 // ==========================================
+// ==========================================
 // Reading Sessions & Reading Analytics
 // ==========================================
+
+export const mergeSessionIntervals = (ivListA = [], ivListB = []) => {
+    const combined = []
+    const add = (list) => {
+        if (!Array.isArray(list)) return
+        for (const iv of list) {
+            let s = 0, e = 0
+            if (Array.isArray(iv) && iv.length >= 2) {
+                s = typeof normalizeTimestampMs === 'function' ? normalizeTimestampMs(iv[0]) : Number(iv[0])
+                e = typeof normalizeTimestampMs === 'function' ? normalizeTimestampMs(iv[1]) : Number(iv[1])
+            } else if (iv && typeof iv === 'object') {
+                s = typeof normalizeTimestampMs === 'function' ? normalizeTimestampMs(iv.start ?? iv.startMs) : Number(iv.start ?? iv.startMs)
+                e = typeof normalizeTimestampMs === 'function' ? normalizeTimestampMs(iv.end ?? iv.endMs) : Number(iv.end ?? iv.endMs)
+            }
+            if (e > s) combined.push([s, e])
+        }
+    }
+    add(ivListA)
+    add(ivListB)
+    if (combined.length === 0) return []
+    combined.sort((a, b) => a[0] - b[0])
+    const merged = [combined[0]]
+    for (let i = 1; i < combined.length; i++) {
+        const last = merged[merged.length - 1]
+        const curr = combined[i]
+        if (curr[0] <= last[1]) {
+            last[1] = Math.max(last[1], curr[1])
+        } else {
+            merged.push(curr)
+        }
+    }
+    return merged
+}
+
+export const calculateIntervalUnionSeconds = (intervals = []) => {
+    if (!Array.isArray(intervals) || intervals.length === 0) return 0
+    let totalMs = 0
+    for (const iv of intervals) {
+        if (Array.isArray(iv) && iv.length >= 2) {
+            totalMs += Math.max(0, iv[1] - iv[0])
+        } else if (iv && typeof iv === 'object') {
+            const s = Number(iv.start ?? iv.startMs ?? 0)
+            const e = Number(iv.end ?? iv.endMs ?? 0)
+            totalMs += Math.max(0, e - s)
+        }
+    }
+    return Math.round(totalMs / 1000)
+}
+
 export const recordReadingSession = async (session, updateBookTotal = true) => {
     if (!session || !session.id) return null
     const db = await openDB()
@@ -1647,9 +1911,27 @@ export const recordReadingSession = async (session, updateBookTotal = true) => {
         getSessReq.onsuccess = () => {
             const existing = getSessReq.result
             const prevDuration = (existing && existing.durationSeconds) ? existing.durationSeconds : 0
-            const delta = Math.max(0, (session.durationSeconds || 0) - prevDuration)
+            const incomingDuration = session.durationSeconds || 0
+            const effectiveDuration = Math.max(prevDuration, incomingDuration)
+
+            const mergedIntervals = mergeSessionIntervals(existing?.activeIntervals, session?.activeIntervals)
+            const intervalSecs = calculateIntervalUnionSeconds(mergedIntervals)
+
+            const prevActive = (existing && typeof existing.activeDurationSeconds === 'number') ? existing.activeDurationSeconds : 0
+            const incomingActive = (session && typeof session.activeDurationSeconds === 'number') ? session.activeDurationSeconds : 0
+            const effectiveActive = Math.max(prevActive, incomingActive, intervalSecs)
+            const delta = Math.max(0, effectiveDuration - prevDuration)
             
-            sessStore.put(session)
+            const mergedSession = {
+                ...existing,
+                ...session,
+                durationSeconds: effectiveDuration,
+                activeDurationSeconds: effectiveActive,
+                activeIntervals: mergedIntervals.length > 0 ? mergedIntervals : (existing?.activeIntervals || session?.activeIntervals || []),
+                startTime: existing?.startTime ? Math.min(existing.startTime, session.startTime || existing.startTime) : session.startTime,
+                endTime: Math.max(existing?.endTime || 0, session.endTime || 0) || Date.now(),
+            }
+            sessStore.put(mergedSession)
 
             // Increment book totalReadingSeconds only in normal reading, and totalListeningSeconds for listening
             if (updateBookTotal && session.bookId && delta > 0 && bookStore) {
@@ -1670,7 +1952,10 @@ export const recordReadingSession = async (session, updateBookTotal = true) => {
             }
         }
 
-        tx.oncomplete = () => resolve(session.id)
+        tx.oncomplete = () => {
+            invalidateReadingStatsCache()
+            resolve(session.id)
+        }
         tx.onerror = () => reject(tx.error || new Error('Failed to record session'))
         tx.onabort = () => reject(tx.error || new Error('Transaction aborted'))
     })
@@ -1694,9 +1979,40 @@ export const saveReadingSessionsBatch = async (sessions = []) => {
         const tx = db.transaction(['reading_sessions'], 'readwrite')
         const sessStore = tx.objectStore('reading_sessions')
         for (const session of valid) {
-            sessStore.put(session)
+            const getReq = sessStore.get(session.id)
+            getReq.onsuccess = () => {
+                const existing = getReq.result
+                if (existing) {
+                    const prevDuration = existing.durationSeconds || 0
+                    const incomingDuration = session.durationSeconds || 0
+                    const effectiveDuration = Math.max(prevDuration, incomingDuration)
+
+                    const mergedIntervals = mergeSessionIntervals(existing.activeIntervals, session.activeIntervals)
+                    const intervalSecs = calculateIntervalUnionSeconds(mergedIntervals)
+
+                    const prevActive = (typeof existing.activeDurationSeconds === 'number') ? existing.activeDurationSeconds : 0
+                    const incomingActive = (typeof session.activeDurationSeconds === 'number') ? session.activeDurationSeconds : 0
+                    const effectiveActive = Math.max(prevActive, incomingActive, intervalSecs)
+
+                    const merged = {
+                        ...existing,
+                        ...session,
+                        durationSeconds: effectiveDuration,
+                        activeDurationSeconds: effectiveActive,
+                        activeIntervals: mergedIntervals.length > 0 ? mergedIntervals : (existing.activeIntervals || session.activeIntervals || []),
+                        startTime: existing.startTime ? Math.min(existing.startTime, session.startTime || existing.startTime) : session.startTime,
+                        endTime: Math.max(existing.endTime || 0, session.endTime || 0) || Date.now(),
+                    }
+                    sessStore.put(merged)
+                } else {
+                    sessStore.put(session)
+                }
+            }
         }
-        tx.oncomplete = () => resolve(valid.length)
+        tx.oncomplete = () => {
+            invalidateReadingStatsCache()
+            resolve(valid.length)
+        }
         tx.onerror = () => reject(tx.error || new Error('Failed batch saving reading sessions'))
         tx.onabort = () => reject(tx.error || new Error('Batch reading sessions transaction aborted'))
     })
@@ -1767,6 +2083,14 @@ export const computeActiveSessionSeconds = (sessList) => {
     return Math.round(unionSecs) + unintervaledSeconds
 }
 
+let _statsRevision = 1
+let _cachedAggregatedStats = null
+
+export const invalidateReadingStatsCache = () => {
+    _statsRevision++
+    _cachedAggregatedStats = null
+}
+
 // Calculate Reading Full Statistics (Supports Week, Month, Year, Total views)
 export const getReadingStats = async (viewMode = 'month', targetYear = new Date().getFullYear(), targetMonth = new Date().getMonth() + 1, weekOffset = 0) => {
     const _normalizeTimestampMs = typeof normalizeTimestampMs === 'function' ? normalizeTimestampMs : (t) => {
@@ -1800,68 +2124,87 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         return f >= 0.999 ? 'finished' : (f > 0 ? 'reading' : 'unread')
     }
 
-    const allRawSessions = await getAllReadingSessions()
-    const sessions = allRawSessions.filter(s => s && _getSessionDur(s) > 0)
-    const books = await getAllBooks()
-    const highlights = await getAllHighlights()
-    const bookTitles = new Map(books.map(book => [book.id, book.title]))
+    let agg = _cachedAggregatedStats
+    if (!agg || agg.rev !== _statsRevision) {
+        const allRawSessions = await getAllReadingSessions()
+        const sessions = allRawSessions.filter(s => s && _getSessionDur(s) > 0)
+        const books = await getAllBooks()
+        const highlights = await getAllHighlights()
+        const bookTitles = new Map(books.map(book => [book.id, book.title]))
 
+        const now = new Date()
+        let totalSeconds = 0
+        const dailyMap = {} // 'YYYY-MM-DD' -> seconds
+        const monthlyMap = {} // 'YYYY-MM' -> seconds
+        const yearlyMap = {} // 'YYYY' -> seconds
+        const activeDates = new Set()
+        let earliestTime = now.getTime()
+
+        const dayGroupMap = new Map()
+        for (const sess of sessions) {
+            const d = sess.date || toLocalDateKey(sess.startTime || now)
+            if (!dayGroupMap.has(d)) dayGroupMap.set(d, [])
+            dayGroupMap.get(d).push(sess)
+
+            const sStart = _normalizeTimestampMs(sess.startTime)
+            if (sStart && sStart < earliestTime) {
+                earliestTime = sStart
+            }
+        }
+
+        for (const [d, daySessions] of dayGroupMap.entries()) {
+            const dur = _computeActiveSessionSeconds(daySessions)
+            totalSeconds += dur
+            dailyMap[d] = dur
+            const ym = d.slice(0, 7)
+            monthlyMap[ym] = (monthlyMap[ym] || 0) + dur
+            const y = d.slice(0, 4)
+            yearlyMap[y] = (yearlyMap[y] || 0) + dur
+        }
+
+        // Active reading days: any natural day with total reading time in dailyMap >= 60 seconds
+        for (const [d, daySecs] of Object.entries(dailyMap)) {
+            if (daySecs >= 60) {
+                activeDates.add(d)
+            }
+        }
+
+        let unallocatedHistoricalSeconds = 0
+        for (const b of books) {
+            if (b.totalReadingSeconds && b.totalReadingSeconds > 0) {
+                const bTime = b.lastReadAt || b.addedAt || now.getTime()
+                if (bTime < earliestTime) earliestTime = bTime
+            }
+        }
+        let totalBookFallback = 0
+        for (const b of books) {
+            if (b.totalReadingSeconds && b.totalReadingSeconds > 0) {
+                totalBookFallback += b.totalReadingSeconds
+            }
+        }
+        if (totalBookFallback > totalSeconds) {
+            unallocatedHistoricalSeconds = totalBookFallback - totalSeconds
+        }
+
+        agg = {
+            rev: _statsRevision,
+            books,
+            highlights,
+            bookTitles,
+            totalSeconds,
+            dailyMap,
+            monthlyMap,
+            yearlyMap,
+            activeDates,
+            earliestTime,
+            unallocatedHistoricalSeconds
+        }
+        _cachedAggregatedStats = agg
+    }
+
+    const { books, highlights, bookTitles, totalSeconds, dailyMap, monthlyMap, yearlyMap, activeDates, earliestTime, unallocatedHistoricalSeconds } = agg
     const now = new Date()
     const todayStr = toLocalDateKey(now)
-    let totalSeconds = 0
-    const dailyMap = {} // 'YYYY-MM-DD' -> seconds
-    const monthlyMap = {} // 'YYYY-MM' -> seconds
-    const yearlyMap = {} // 'YYYY' -> seconds
-    const activeDates = new Set()
-    let earliestTime = now.getTime()
-
-    const dayGroupMap = new Map()
-    for (const sess of sessions) {
-        const d = sess.date || toLocalDateKey(sess.startTime || now)
-        if (!dayGroupMap.has(d)) dayGroupMap.set(d, [])
-        dayGroupMap.get(d).push(sess)
-
-        const sStart = _normalizeTimestampMs(sess.startTime)
-        if (sStart && sStart < earliestTime) {
-            earliestTime = sStart
-        }
-    }
-
-    for (const [d, daySessions] of dayGroupMap.entries()) {
-        const dur = _computeActiveSessionSeconds(daySessions)
-        totalSeconds += dur
-        dailyMap[d] = dur
-        const ym = d.slice(0, 7)
-        monthlyMap[ym] = (monthlyMap[ym] || 0) + dur
-        const y = d.slice(0, 4)
-        yearlyMap[y] = (yearlyMap[y] || 0) + dur
-    }
-
-    // Active reading days: any natural day with total reading time in dailyMap >= 60 seconds
-    for (const [d, daySecs] of Object.entries(dailyMap)) {
-        if (daySecs >= 60) {
-            activeDates.add(d)
-        }
-    }
-
-    // Isolate books with total reading time but no session records into unallocatedHistoricalSeconds
-    // rather than fabricating daily reading time, streaks, or active dates (LL-43)
-    let unallocatedHistoricalSeconds = 0
-    for (const b of books) {
-        if (b.totalReadingSeconds && b.totalReadingSeconds > 0) {
-            const bTime = b.lastReadAt || b.addedAt || now.getTime()
-            if (bTime < earliestTime) earliestTime = bTime
-        }
-    }
-    let totalBookFallback = 0
-    for (const b of books) {
-        if (b.totalReadingSeconds && b.totalReadingSeconds > 0) {
-            totalBookFallback += b.totalReadingSeconds
-        }
-    }
-    if (totalBookFallback > totalSeconds) {
-        unallocatedHistoricalSeconds = totalBookFallback - totalSeconds
-    }
     const finalTotalSeconds = totalSeconds + unallocatedHistoricalSeconds
 
     // Calculate true consecutive reading streak days
@@ -2509,7 +2852,7 @@ export const remapPdfDrawingId = (drawing, targetBookId) => {
             if (origMatch) revisionOrigin = origMatch[1]
         }
         if (pageIndex == null) {
-            const pageMatch = drawing.id.match(/_page_(\d+)$/)
+            const pageMatch = drawing.id.match(/_(?:page|drawing)_(\d+)$/)
             if (pageMatch) pageIndex = parseInt(pageMatch[1], 10)
         }
     }
@@ -2576,6 +2919,7 @@ export const getPdfPageDrawing = async (bookId, pageIndex, versionMeta = {}) => 
             candidates.push(`${bookId}_rev_${blobRevision}_page_${pageIndex}`)
         }
         candidates.push(`${bookId}_page_${pageIndex}`)
+        candidates.push(`${bookId}_drawing_${pageIndex}`)
 
         const checkCrossDeviceHashFallback = () => {
             if (!documentHash || typeof store.openCursor !== 'function') return resolve(null)
@@ -2997,9 +3341,10 @@ export const clearAllAiHistory = async () => {
     })
 }
 
-export const recoverInterruptedAiMessages = async () => {
+export const recoverInterruptedAiMessages = async (maxAgeMs = 120000) => {
     if (typeof indexedDB === 'undefined') return 0
     const db = await openDB()
+    const now = Date.now()
     return new Promise((resolve) => {
         try {
             if (!db.objectStoreNames.contains('ai_messages')) return resolve(0)
@@ -3012,9 +3357,13 @@ export const recoverInterruptedAiMessages = async () => {
                 if (cursor) {
                     const val = cursor.value
                     if (val && (val.status === 'streaming' || val.status === 'queued')) {
-                        val.status = 'interrupted'
-                        cursor.update(val)
-                        recovered++
+                        const lastActivity = Math.max(val.updatedAt || 0, val.createdAt || 0, val.timestamp || 0)
+                        if (now - lastActivity >= maxAgeMs) {
+                            val.status = 'interrupted'
+                            val.updatedAt = now
+                            cursor.update(val)
+                            recovered++
+                        }
                     }
                     cursor.continue()
                 } else {
@@ -3031,7 +3380,9 @@ export const recoverInterruptedAiMessages = async () => {
 // ==========================================
 // Chapter Bilingual Translation Storage (v10)
 // ==========================================
+let _cachedChapterTransStats = null
 export const saveChapterTranslation = async (record) => {
+    _cachedChapterTransStats = null
     if (typeof indexedDB === 'undefined' || !record?.id) return false
     const db = await openDB()
     return new Promise((resolve) => {
@@ -3164,6 +3515,7 @@ export const getAllChapterTranslations = async () => {
 export { buildTranslationRevisionArchive, checkTranslationCompatibility }
 
 export const clearAllChapterTranslations = async (bookId = null) => {
+    _cachedChapterTransStats = null
     if (typeof indexedDB === 'undefined') return false
     const db = await openDB()
     return new Promise((resolve) => {
@@ -3216,6 +3568,9 @@ export const clearAllChapterTranslations = async (bookId = null) => {
 }
 
 export const getChapterTranslationsStats = async () => {
+    if (_cachedChapterTransStats && (Date.now() - _cachedChapterTransStats.timestamp < 60000)) {
+        return { count: _cachedChapterTransStats.count, estimatedBytes: _cachedChapterTransStats.estimatedBytes }
+    }
     if (typeof indexedDB === 'undefined') return { count: 0, estimatedBytes: 0 }
     const db = await openDB()
     return new Promise((resolve) => {
@@ -3230,12 +3585,15 @@ export const getChapterTranslationsStats = async () => {
                 const cursor = e.target.result
                 if (cursor) {
                     count++
-                    try {
-                        const json = JSON.stringify(cursor.value)
-                        estimatedBytes += json.length * 2
-                    } catch (err) {}
+                    const val = cursor.value
+                    if (val) {
+                        const textLen = (val.translatedText ? val.translatedText.length : 0) + (val.originalText ? val.originalText.length : 0)
+                        const paraEst = Array.isArray(val.paragraphs) ? val.paragraphs.length * 150 : 0
+                        estimatedBytes += (textLen * 2) + paraEst + 256
+                    }
                     cursor.continue()
                 } else {
+                    _cachedChapterTransStats = { count, estimatedBytes, timestamp: Date.now() }
                     resolve({ count, estimatedBytes })
                 }
             }
@@ -3243,5 +3601,962 @@ export const getChapterTranslationsStats = async () => {
         } catch (e) {
             resolve({ count: 0, estimatedBytes: 0 })
         }
+    })
+}
+
+/**
+ * R09: Normalize navigation target into typed location object
+ * @param {*} target
+ * @returns {object|null}
+ */
+export function normalizeNavigationTarget(target) {
+    if (target == null) return null
+    if (typeof target === 'number') {
+        const pageIndex = Math.max(0, Math.floor(target))
+        return {
+            type: 'pdf',
+            page: pageIndex + 1,
+            pageIndex: pageIndex,
+            yRatio: 0
+        }
+    }
+    if (typeof target === 'string') {
+        if (/^\d+$/.test(target.trim())) {
+            const pageNum = Math.max(1, parseInt(target.trim(), 10))
+            return {
+                type: 'pdf',
+                page: pageNum,
+                pageIndex: pageNum - 1,
+                yRatio: 0
+            }
+        }
+        return {
+            type: 'epub',
+            cfi: target
+        }
+    }
+    if (typeof target === 'object') {
+        const res = { ...target }
+        if (res.cfi) {
+            res.type = 'epub'
+            return res
+        }
+        if (res.charOffset !== undefined) {
+            res.type = res.type || 'txt'
+            return res
+        }
+        if (res.page !== undefined || res.pageIndex !== undefined) {
+            res.type = 'pdf'
+            if (res.page !== undefined && res.pageIndex === undefined) {
+                res.page = Math.max(1, Math.floor(res.page))
+                res.pageIndex = res.page - 1
+            } else if (res.pageIndex !== undefined && res.page === undefined) {
+                res.pageIndex = Math.max(0, Math.floor(res.pageIndex))
+                res.page = res.pageIndex + 1
+            } else if (res.page !== undefined && res.pageIndex !== undefined) {
+                res.page = Math.max(1, Math.floor(res.page))
+                res.pageIndex = Math.max(0, Math.floor(res.pageIndex))
+            }
+            if (res.yRatio !== undefined && typeof res.yRatio === 'number') {
+                res.yRatio = Math.max(0, Math.min(1, res.yRatio))
+            } else {
+                res.yRatio = 0
+            }
+            return res
+        }
+        return res
+    }
+    return null
+}
+
+export const createFullBackup = async (options = {}) => {
+    if (typeof window !== 'undefined' && window.advancedSettingsManager?.createFullDataBackup) {
+        return await window.advancedSettingsManager.createFullDataBackup(options)
+    }
+    const { AdvancedSettingsManager } = await import('./advanced-settings.js')
+    const mgr = new AdvancedSettingsManager()
+    return await mgr.createFullDataBackup(options)
+}
+
+const RESTORE_JOURNAL_PREFIX = '__restore_journal_'
+const RESTORE_LOCALSTORAGE_JOURNAL_KEY = '__linden_pending_restore_journal'
+const _activeRestoreLockReleasers = new Map()
+
+export const acquireRestoreOperationLock = async (operationId) => {
+    if (!operationId) return
+    if (_activeRestoreLockReleasers.has(operationId)) return
+    if (typeof navigator !== 'undefined' && navigator.locks && typeof navigator.locks.request === 'function') {
+        const acquired = await new Promise((resolveGranted) => {
+            let releaseGlobal = null
+            const holdGlobal = new Promise((r) => { releaseGlobal = r })
+            navigator.locks.request(
+                'linden_restore_database_mutex',
+                { mode: 'exclusive' },
+                async () => {
+                    let releaseOp = null
+                    const holdOp = new Promise((r) => { releaseOp = r })
+                    navigator.locks.request(
+                        `linden_restore_op_${operationId}`,
+                        { mode: 'exclusive' },
+                        async () => {
+                            _activeRestoreLockReleasers.set(operationId, () => {
+                                _activeRestoreLockReleasers.delete(operationId)
+                                if (releaseOp) releaseOp()
+                                if (releaseGlobal) releaseGlobal()
+                            })
+                            resolveGranted(true)
+                            await holdOp
+                        }
+                    ).catch(() => {
+                        if (releaseGlobal) releaseGlobal()
+                        resolveGranted(false)
+                    })
+                    await holdGlobal
+                }
+            ).catch(() => {
+                resolveGranted(false)
+            })
+        })
+        if (!acquired) throw new Error('无法取得恢复互斥锁，已停止恢复')
+    } else if (typeof window !== 'undefined') {
+        throw new Error('当前环境缺少跨窗口锁，已停止恢复以保护数据')
+    } else {
+        // Non-browser / Node test context: process-isolated
+        _activeRestoreLockReleasers.set(operationId, () => {
+            _activeRestoreLockReleasers.delete(operationId)
+        })
+    }
+}
+
+export const releaseRestoreOperationLock = async (operationId) => {
+    if (!operationId) return
+    const releaser = _activeRestoreLockReleasers.get(operationId)
+    if (typeof releaser === 'function') {
+        _activeRestoreLockReleasers.delete(operationId)
+        try { releaser() } catch (_) {}
+    }
+}
+
+const computeRecordRevision = (rec) => {
+    if (!rec || typeof rec !== 'object') return String(rec)
+    const summary = {}
+    for (const k of Object.keys(rec).sort()) {
+        if (k === '_preserveUpdatedAt') continue
+        const v = rec[k]
+        if (typeof Blob !== 'undefined' && v instanceof Blob) {
+            summary[k] = `[blob:${v.size || 0}:${v.type || ''}]`
+        } else if (typeof ArrayBuffer !== 'undefined' && (v instanceof ArrayBuffer || ArrayBuffer.isView(v))) {
+            summary[k] = `[binary:${v.byteLength || 0}]`
+        } else {
+            summary[k] = v
+        }
+    }
+    try {
+        return JSON.stringify(summary)
+    } catch (_) {
+        return String(rec.updatedAt || rec.createdAt || rec.deletedAt || '')
+    }
+}
+
+/**
+ * Atomic Single-Transaction Restore Plan Executor (Item 2 / Group 1)
+ * Enforces tombstones from both deleted_records store and incoming plan inside the
+ * single readwrite transaction, and records a per-key before-image/revision journal
+ * for selective post-commit rollback and startup crash recovery.
+ *
+ * @param {object} plan
+ * @param {IDBDatabase} [customDb]
+ * @returns {Promise<{ success: boolean, stats: object, operationId: string, journal: object }>}
+ */
+export const applyRestorePlan = async (plan, customDb = null) => {
+    if (!plan || typeof plan !== 'object') {
+        throw new Error('无效的恢复计划 (Invalid restore plan)')
+    }
+    const db = customDb || await openDB()
+    const targetStores = [
+        'books', 'book_files', 'highlights', 'bookmarks',
+        'reading_sessions', 'chapter_translations', 'pdf_drawings',
+        'custom_lists', 'settings', 'deleted_records'
+    ].filter(s => db.objectStoreNames.contains(s))
+
+    const operationId = plan.operationId || `restore_op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    if (plan.persistJournal !== false) {
+        await acquireRestoreOperationLock(operationId)
+    }
+
+    return new Promise((resolve, reject) => {
+        let tx = null
+        const rejectAndRelease = (err) => {
+            releaseRestoreOperationLock(operationId)
+            reject(err)
+        }
+        try {
+            tx = db.transaction(targetStores, 'readwrite')
+
+            const stats = {
+                books: 0,
+                highlights: 0,
+                bookmarks: 0,
+                sessions: 0,
+                translations: 0,
+                drawings: 0,
+                lists: 0,
+                settings: 0,
+                deletedRecords: 0
+            }
+
+            const journalEntries = []
+            const journal = {
+                operationId,
+                createdAt: Date.now(),
+                status: 'committed_pending_finalize',
+                entries: journalEntries,
+                localStorageEntries: Array.isArray(plan.localStorageEntries) ? plan.localStorageEntries : []
+            }
+
+            let aborted = false
+            const fail = (err) => {
+                if (!aborted) {
+                    aborted = true
+                    try { tx.abort() } catch (_) {}
+                    rejectAndRelease(err)
+                }
+            }
+
+            const isValidIdbKey = (k) => (typeof k === 'string' && k.length > 0) || (typeof k === 'number' && !Number.isNaN(k))
+            const abortWithDataError = () => {
+                const err = new DOMException("Evaluating the object store's key path yielded a value that is not a valid key.", "DataError")
+                fail(err)
+                return false
+            }
+
+            let pendingAsyncOps = 0
+            const flushJournalToSettingsStore = () => {
+                if (aborted) return
+                if (plan.persistJournal !== false && tx.objectStoreNames.contains('settings')) {
+                    const setStore = tx.objectStore('settings')
+                    if (setStore && typeof setStore.put === 'function') {
+                        try {
+                            setStore.put({
+                                key: `${RESTORE_JOURNAL_PREFIX}${operationId}`,
+                                value: journal,
+                                updatedAt: Date.now()
+                            })
+                        } catch (_) {}
+                    }
+                }
+            }
+
+            const beginAsyncOp = () => { pendingAsyncOps++ }
+            const endAsyncOp = () => {
+                pendingAsyncOps = Math.max(0, pendingAsyncOps - 1)
+                if (pendingAsyncOps === 0) {
+                    flushJournalToSettingsStore()
+                }
+            }
+
+            const executeWritesWithTombstones = (existingDeletedInTx) => {
+                if (aborted) return
+
+                const deletedList = plan.deletedRecordsToPut || plan.deletedRecords || []
+                const combinedTombstones = [
+                    ...(Array.isArray(existingDeletedInTx) ? existingDeletedInTx : []),
+                    ...(Array.isArray(deletedList) ? deletedList : [])
+                ].filter(Boolean)
+
+                const getBookTombstoneDeletedAt = (b) => {
+                    if (!b) return 0
+                    let maxDel = 0
+                    for (const dr of combinedTombstones) {
+                        if (dr.type !== 'book') continue
+                        const matchId = dr.id && b.id && dr.id === b.id
+                        const matchHash = b.documentHash && dr.documentHash && dr.documentHash === b.documentHash
+                        const matchStableId = dr.stableKey && b.id && dr.stableKey === `id:${b.id}`
+                        const matchStableHash = dr.stableKey && b.documentHash && dr.stableKey === `hash:${b.documentHash}`
+                        if (matchId || matchHash || matchStableId || matchStableHash) {
+                            const delAt = dr.deletedAt || 0
+                            if (delAt > maxDel) maxDel = delAt
+                        }
+                    }
+                    return maxDel
+                }
+
+                const getBookIdTombstoneDeletedAt = (bookId) => {
+                    if (!bookId) return 0
+                    let maxDel = 0
+                    for (const dr of combinedTombstones) {
+                        if (dr.type !== 'book') continue
+                        if (dr.id === bookId || dr.stableKey === `id:${bookId}`) {
+                            const delAt = dr.deletedAt || 0
+                            if (delAt > maxDel) maxDel = delAt
+                        }
+                    }
+                    return maxDel
+                }
+
+                const getItemTombstoneDeletedAt = (type, item) => {
+                    if (!item) return 0
+                    let maxDel = 0
+                    for (const dr of combinedTombstones) {
+                        if (dr.type === type && dr.id === item.id) {
+                            const delAt = dr.deletedAt || 0
+                            if (delAt > maxDel) maxDel = delAt
+                        }
+                    }
+                    if (item.bookId) {
+                        const bookDel = getBookIdTombstoneDeletedAt(item.bookId)
+                        if (bookDel > maxDel) maxDel = bookDel
+                    }
+                    return maxDel
+                }
+
+                const putWithLWW = (store, item, id, statKey, mergeFn = null, tombstoneDeletedAt = 0) => {
+                    const inTime = item.updatedAt || item.addedAt || item.createdAt || item.startTime || item.modified_time || 0
+                    if (tombstoneDeletedAt > 0 && tombstoneDeletedAt >= inTime) {
+                        // Suppressed by newer or equal tombstone; if store already has an older active record, remove it
+                        if (typeof store.get === 'function' && typeof store.delete === 'function') {
+                            beginAsyncOp()
+                            const getReq = store.get(id)
+                            getReq.onsuccess = () => {
+                                if (!aborted) {
+                                    const existing = getReq.result
+                                    const exTime = existing ? (existing.updatedAt || existing.addedAt || existing.createdAt || existing.startTime || existing.modified_time || 0) : 0
+                                    if (existing && exTime <= tombstoneDeletedAt) {
+                                        journalEntries.push({
+                                            store: store.name,
+                                            key: id,
+                                            hadBefore: true,
+                                            beforeImage: existing,
+                                            afterAction: 'delete',
+                                            afterRevision: null
+                                        })
+                                        store.delete(id)
+                                    }
+                                }
+                                endAsyncOp()
+                            }
+                            getReq.onerror = () => {
+                                endAsyncOp()
+                                fail(getReq.error || new Error(`Failed to get from ${store.name}`))
+                            }
+                        }
+                        return
+                    }
+
+                    if (typeof store.get !== 'function') {
+                        journalEntries.push({
+                            store: store.name || statKey,
+                            key: id,
+                            hadBefore: false,
+                            beforeImage: null,
+                            afterAction: 'put',
+                            afterRevision: computeRecordRevision(item)
+                        })
+                        const putReq = store.put(item)
+                        if (putReq && typeof putReq === 'object' && 'onsuccess' in putReq) {
+                            putReq.onsuccess = () => {
+                                if (!aborted && statKey) stats[statKey] = (stats[statKey] || 0) + 1
+                            }
+                            putReq.onerror = () => fail(putReq.error || new Error(`Failed to put in ${store.name}`))
+                        } else {
+                            if (!aborted && statKey) stats[statKey] = (stats[statKey] || 0) + 1
+                        }
+                        return
+                    }
+
+                    beginAsyncOp()
+                    const getReq = store.get(id)
+                    getReq.onsuccess = () => {
+                        if (aborted) {
+                            endAsyncOp()
+                            return
+                        }
+                        const existing = getReq.result
+                        const exTime = existing ? (existing.updatedAt || existing.addedAt || existing.createdAt || existing.startTime || existing.modified_time || 0) : 0
+                        if (existing && exTime > inTime) {
+                            // Existing record is newer (e.g. concurrent edit)! Do not overwrite with older backup edit.
+                            endAsyncOp()
+                            return
+                        }
+                        const toPut = (existing && mergeFn) ? mergeFn(existing, item) : item
+                        journalEntries.push({
+                            store: store.name,
+                            key: id,
+                            hadBefore: existing !== undefined && existing !== null,
+                            beforeImage: existing !== undefined && existing !== null ? existing : null,
+                            afterAction: 'put',
+                            afterRevision: computeRecordRevision(toPut)
+                        })
+                        const putReq = store.put(toPut)
+                        if (putReq && typeof putReq === 'object' && 'onsuccess' in putReq) {
+                            putReq.onsuccess = () => {
+                                if (!aborted && statKey) stats[statKey] = (stats[statKey] || 0) + 1
+                                endAsyncOp()
+                            }
+                            putReq.onerror = () => {
+                                endAsyncOp()
+                                fail(putReq.error || new Error(`Failed to put in ${store.name}`))
+                            }
+                        } else {
+                            if (!aborted && statKey) stats[statKey] = (stats[statKey] || 0) + 1
+                            endAsyncOp()
+                        }
+                    }
+                    getReq.onerror = () => {
+                        endAsyncOp()
+                        fail(getReq.error || new Error(`Failed to get from ${store.name}`))
+                    }
+                }
+
+                const mergeBook = (existing, b) => {
+                    let progress = existing.progress
+                    const existingProgTime = existing.progress?.updatedAt || 0
+                    const incomingProgTime = b.progress?.updatedAt || 0
+                    if (incomingProgTime > existingProgTime) {
+                        progress = b.progress
+                    } else if (existingProgTime === 0 && incomingProgTime === 0) {
+                        const exFrac = existing.progress?.fraction || 0
+                        const inFrac = b.progress?.fraction || 0
+                        progress = inFrac > exFrac ? b.progress : existing.progress
+                    }
+
+                    const totalReadingSeconds = Math.max(
+                        existing.totalReadingSeconds || 0,
+                        b.totalReadingSeconds || 0
+                    )
+
+                    const incomingIsNewer = (b.updatedAt || 0) >= (existing.updatedAt || 0)
+
+                    return {
+                        ...b,
+                        ...existing,
+                        title: incomingIsNewer ? (b.title || existing.title) : (existing.title || b.title),
+                        author: incomingIsNewer ? (b.author || existing.author) : (existing.author || b.author),
+                        progress: progress || existing.progress || b.progress,
+                        totalReadingSeconds,
+                        updatedAt: Math.max(existing.updatedAt || 0, b.updatedAt || 0),
+                        hasLocalFile: existing.hasLocalFile !== undefined ? existing.hasLocalFile : b.hasLocalFile,
+                        isCloudOnly: existing.hasLocalFile ? false : (existing.isCloudOnly !== undefined ? existing.isCloudOnly : b.isCloudOnly),
+                        nativeSnapshotPath: existing.nativeSnapshotPath || b.nativeSnapshotPath,
+                        blobRevision: existing.blobRevision || b.blobRevision,
+                        documentHash: existing.documentHash || b.documentHash,
+                        coverBlob: existing.coverBlob || b.coverBlob
+                    }
+                }
+
+                // 1. Books
+                if (Array.isArray(plan.booksToPut) && tx.objectStoreNames.contains('books')) {
+                    const bookStore = tx.objectStore('books')
+                    for (const b of plan.booksToPut) {
+                        if (b) {
+                            if (!isValidIdbKey(b.id)) return abortWithDataError()
+                            const tombDelAt = getBookTombstoneDeletedAt(b)
+                            putWithLWW(bookStore, b, b.id, 'books', mergeBook, tombDelAt)
+                        }
+                    }
+                }
+
+                // 1b. Book Files
+                if (Array.isArray(plan.bookFilesToPut) && tx.objectStoreNames.contains('book_files')) {
+                    const fileStore = tx.objectStore('book_files')
+                    for (const f of plan.bookFilesToPut) {
+                        if (f) {
+                            if (!isValidIdbKey(f.id)) return abortWithDataError()
+                            const tombDelAt = getBookIdTombstoneDeletedAt(f.id)
+                            const fTime = f.updatedAt || 0
+                            if (tombDelAt > 0 && tombDelAt >= fTime) continue
+                            if (typeof fileStore.get === 'function') {
+                                beginAsyncOp()
+                                const gReq = fileStore.get(f.id)
+                                gReq.onsuccess = () => {
+                                    if (!aborted) {
+                                        const existing = gReq.result
+                                        journalEntries.push({
+                                            store: 'book_files',
+                                            key: f.id,
+                                            hadBefore: existing !== undefined && existing !== null,
+                                            beforeImage: existing !== undefined && existing !== null ? existing : null,
+                                            afterAction: 'put',
+                                            afterRevision: computeRecordRevision(f)
+                                        })
+                                        fileStore.put(f)
+                                        stats.bookFiles = (stats.bookFiles || 0) + 1
+                                    }
+                                    endAsyncOp()
+                                }
+                                gReq.onerror = () => {
+                                    endAsyncOp()
+                                    fail(gReq.error)
+                                }
+                            } else {
+                                fileStore.put(f)
+                                stats.bookFiles = (stats.bookFiles || 0) + 1
+                            }
+                        }
+                    }
+                }
+
+                // 2. Highlights
+                if (Array.isArray(plan.highlightsToPut) && tx.objectStoreNames.contains('highlights')) {
+                    const hlStore = tx.objectStore('highlights')
+                    for (const h of plan.highlightsToPut) {
+                        if (h) {
+                            if (!isValidIdbKey(h.id)) return abortWithDataError()
+                            const tombDelAt = getItemTombstoneDeletedAt('highlight', h)
+                            putWithLWW(hlStore, h, h.id, 'highlights', null, tombDelAt)
+                        }
+                    }
+                }
+
+                // 3. Bookmarks
+                if (Array.isArray(plan.bookmarksToPut) && tx.objectStoreNames.contains('bookmarks')) {
+                    const bmStore = tx.objectStore('bookmarks')
+                    for (const bm of plan.bookmarksToPut) {
+                        if (bm) {
+                            if (!isValidIdbKey(bm.id)) return abortWithDataError()
+                            const tombDelAt = getItemTombstoneDeletedAt('bookmark', bm)
+                            putWithLWW(bmStore, bm, bm.id, 'bookmarks', null, tombDelAt)
+                        }
+                    }
+                }
+
+                // 4. Reading Sessions
+                if (Array.isArray(plan.sessionsToPut) && tx.objectStoreNames.contains('reading_sessions')) {
+                    const sessStore = tx.objectStore('reading_sessions')
+                    for (const s of plan.sessionsToPut) {
+                        if (s) {
+                            if (!isValidIdbKey(s.id)) return abortWithDataError()
+                            const tombDelAt = getItemTombstoneDeletedAt('session', s)
+                            putWithLWW(sessStore, s, s.id, 'sessions', null, tombDelAt)
+                        }
+                    }
+                }
+
+                // 5. Chapter Translations
+                if (Array.isArray(plan.translationsToPut) && tx.objectStoreNames.contains('chapter_translations')) {
+                    const trStore = tx.objectStore('chapter_translations')
+                    for (const ct of plan.translationsToPut) {
+                        if (ct) {
+                            if (!isValidIdbKey(ct.id)) return abortWithDataError()
+                            const tombDelAt = getItemTombstoneDeletedAt('translation', ct)
+                            putWithLWW(trStore, ct, ct.id, 'translations', null, tombDelAt)
+                        }
+                    }
+                }
+
+                // 6. PDF Drawings
+                if (Array.isArray(plan.drawingsToPut) && tx.objectStoreNames.contains('pdf_drawings')) {
+                    const drawStore = tx.objectStore('pdf_drawings')
+                    for (const d of plan.drawingsToPut) {
+                        if (d) {
+                            if (!isValidIdbKey(d.id)) return abortWithDataError()
+                            const tombDelAt = getItemTombstoneDeletedAt('drawing', d)
+                            putWithLWW(drawStore, d, d.id, 'drawings', null, tombDelAt)
+                        }
+                    }
+                }
+
+                // 7. Custom Lists
+                if (Array.isArray(plan.listsToPut) && tx.objectStoreNames.contains('custom_lists')) {
+                    const listStore = tx.objectStore('custom_lists')
+                    for (const l of plan.listsToPut) {
+                        if (l) {
+                            if (!isValidIdbKey(l.id)) return abortWithDataError()
+                            const tombDelAt = getItemTombstoneDeletedAt('list', l)
+                            putWithLWW(listStore, l, l.id, 'lists', null, tombDelAt)
+                        }
+                    }
+                }
+
+                // 8. Settings
+                if (Array.isArray(plan.settingsToPut) && tx.objectStoreNames.contains('settings')) {
+                    const setStore = tx.objectStore('settings')
+                    for (const st of plan.settingsToPut) {
+                        if (st) {
+                            if (!isValidIdbKey(st.key)) return abortWithDataError()
+                            if (typeof setStore.get === 'function') {
+                                beginAsyncOp()
+                                const gReq = setStore.get(st.key)
+                                gReq.onsuccess = () => {
+                                    if (!aborted) {
+                                        const existing = gReq.result
+                                        journalEntries.push({
+                                            store: 'settings',
+                                            key: st.key,
+                                            hadBefore: existing !== undefined && existing !== null,
+                                            beforeImage: existing !== undefined && existing !== null ? existing : null,
+                                            afterAction: 'put',
+                                            afterRevision: computeRecordRevision(st)
+                                        })
+                                        setStore.put(st)
+                                        stats.settings++
+                                    }
+                                    endAsyncOp()
+                                }
+                                gReq.onerror = () => {
+                                    endAsyncOp()
+                                    fail(gReq.error)
+                                }
+                            } else {
+                                setStore.put(st)
+                                stats.settings++
+                            }
+                        }
+                    }
+                }
+
+                // 9. Deleted Records (tombstones)
+                const tombstoneTypeToStore = {
+                    book: 'books',
+                    books: 'books',
+                    highlight: 'highlights',
+                    highlights: 'highlights',
+                    bookmark: 'bookmarks',
+                    bookmarks: 'bookmarks',
+                    session: 'reading_sessions',
+                    sessions: 'reading_sessions',
+                    reading_session: 'reading_sessions',
+                    translation: 'chapter_translations',
+                    translations: 'chapter_translations',
+                    drawing: 'pdf_drawings',
+                    drawings: 'pdf_drawings',
+                    list: 'custom_lists',
+                    lists: 'custom_lists'
+                }
+                if (Array.isArray(deletedList) && tx.objectStoreNames.contains('deleted_records')) {
+                    const delStore = tx.objectStore('deleted_records')
+                    for (const dr of deletedList) {
+                        if (dr) {
+                            if (!isValidIdbKey(dr.id)) return abortWithDataError()
+                            const targetStoreName = dr.type ? tombstoneTypeToStore[String(dr.type).toLowerCase()] : null
+                            if (targetStoreName && tx.objectStoreNames.contains(targetStoreName)) {
+                                const tStore = tx.objectStore(targetStoreName)
+                                if (typeof tStore.get === 'function' && typeof tStore.delete === 'function') {
+                                    beginAsyncOp()
+                                    const tGetReq = tStore.get(dr.id)
+                                    tGetReq.onsuccess = () => {
+                                        if (!aborted) {
+                                            const activeRec = tGetReq.result
+                                            const activeTime = activeRec ? (activeRec.updatedAt || activeRec.addedAt || activeRec.createdAt || activeRec.startTime || activeRec.modified_time || 0) : 0
+                                            if (activeRec && (dr.deletedAt || 0) >= activeTime) {
+                                                journalEntries.push({
+                                                    store: targetStoreName,
+                                                    key: dr.id,
+                                                    hadBefore: true,
+                                                    beforeImage: activeRec,
+                                                    afterAction: 'delete',
+                                                    afterRevision: null
+                                                })
+                                                tStore.delete(dr.id)
+                                            }
+                                        }
+                                        endAsyncOp()
+                                    }
+                                    tGetReq.onerror = () => {
+                                        endAsyncOp()
+                                        fail(tGetReq.error)
+                                    }
+                                }
+                            }
+                            if (typeof delStore.get !== 'function') {
+                                const putReq = delStore.put(dr)
+                                if (putReq && typeof putReq === 'object' && 'onsuccess' in putReq) {
+                                    putReq.onsuccess = () => {
+                                        if (!aborted) stats.deletedRecords = (stats.deletedRecords || 0) + 1
+                                    }
+                                    putReq.onerror = () => fail(putReq.error)
+                                } else {
+                                    if (!aborted) stats.deletedRecords = (stats.deletedRecords || 0) + 1
+                                }
+                                continue
+                            }
+                            beginAsyncOp()
+                            const getReq = delStore.get(dr.id)
+                            getReq.onsuccess = () => {
+                                if (aborted) {
+                                    endAsyncOp()
+                                    return
+                                }
+                                const existing = getReq.result
+                                const exTime = existing?.deletedAt || 0
+                                const inTime = dr.deletedAt || 0
+                                if (existing && exTime > inTime) {
+                                    endAsyncOp()
+                                    return
+                                }
+                                journalEntries.push({
+                                    store: 'deleted_records',
+                                    key: dr.id,
+                                    hadBefore: existing !== undefined && existing !== null,
+                                    beforeImage: existing !== undefined && existing !== null ? existing : null,
+                                    afterAction: 'put',
+                                    afterRevision: computeRecordRevision(dr)
+                                })
+                                const putReq = delStore.put(dr)
+                                if (putReq && typeof putReq === 'object' && 'onsuccess' in putReq) {
+                                    putReq.onsuccess = () => {
+                                        if (!aborted) stats.deletedRecords = (stats.deletedRecords || 0) + 1
+                                        endAsyncOp()
+                                    }
+                                    putReq.onerror = () => {
+                                        endAsyncOp()
+                                        fail(putReq.error)
+                                    }
+                                } else {
+                                    if (!aborted) stats.deletedRecords = (stats.deletedRecords || 0) + 1
+                                    endAsyncOp()
+                                }
+                            }
+                            getReq.onerror = () => {
+                                endAsyncOp()
+                                fail(getReq.error)
+                            }
+                        }
+                    }
+                }
+
+                if (pendingAsyncOps === 0) {
+                    flushJournalToSettingsStore()
+                }
+            }
+
+            if (tx.objectStoreNames.contains('deleted_records')) {
+                const delStore = tx.objectStore('deleted_records')
+                if (delStore && typeof delStore.getAll === 'function') {
+                    const allDelReq = delStore.getAll()
+                    allDelReq.onsuccess = () => {
+                        if (aborted) return
+                        executeWritesWithTombstones(allDelReq.result || [])
+                    }
+                    allDelReq.onerror = () => fail(allDelReq.error || new Error('Failed to read deleted_records in transaction'))
+                } else {
+                    executeWritesWithTombstones([])
+                }
+            } else {
+                executeWritesWithTombstones([])
+            }
+
+            tx.oncomplete = () => {
+                invalidateReadingStatsCache()
+                resolve({ success: true, stats, operationId, journal })
+            }
+
+            tx.onerror = () => {
+                fail(tx.error || new Error('applyRestorePlan 事务执行失败'))
+            }
+
+            tx.onabort = () => {
+                fail(tx.error || new Error('applyRestorePlan 事务已回滚'))
+            }
+        } catch (err) {
+            if (tx) {
+                try { tx.abort() } catch (_) {}
+            }
+            rejectAndRelease(err)
+        }
+    })
+}
+
+/**
+ * Mark a restore operation journal as committed and clean up durable recovery entries.
+ * Never swallows durable cleanup failure, and always releases the cross-window lock in finally.
+ */
+export const commitRestoreOperation = async (operationId, customDb = null, { retainLock = false } = {}) => {
+    if (!operationId) return false
+    try {
+        try {
+            if (typeof localStorage !== 'undefined') {
+                localStorage.removeItem(RESTORE_LOCALSTORAGE_JOURNAL_KEY)
+            }
+        } catch (_) {}
+        const db = customDb || await openDB()
+        if (!db || !db.objectStoreNames || !db.objectStoreNames.contains('settings')) return true
+        await new Promise((resolve, reject) => {
+            try {
+                const tx = db.transaction(['settings'], 'readwrite')
+                const req = tx.objectStore('settings').delete(`${RESTORE_JOURNAL_PREFIX}${operationId}`)
+                if (req && typeof req === 'object') {
+                    req.onerror = () => reject(req.error || new Error('Failed to delete restore journal entry'))
+                }
+                tx.oncomplete = () => resolve(true)
+                tx.onerror = () => reject(tx.error || new Error('Failed to commit restore operation journal'))
+                tx.onabort = () => reject(tx.error || new Error('Restore operation journal commit aborted'))
+            } catch (err) {
+                reject(err)
+            }
+        })
+        return true
+    } finally {
+        if (!retainLock) await releaseRestoreOperationLock(operationId)
+    }
+}
+
+/**
+ * Roll back ONLY the records touched by a specific restore operation whose current
+ * revision in IndexedDB still matches the restore operation's afterRevision.
+ * Never overwrites concurrent/subsequent user edits and never creates tombstones.
+ */
+export const rollbackRestoreOperation = async (operationId, fallbackJournal = null, customDb = null, { retainLock = false } = {}) => {
+    try {
+        const db = customDb || await openDB()
+        const targetStores = [
+            'books', 'book_files', 'highlights', 'bookmarks',
+            'reading_sessions', 'chapter_translations', 'pdf_drawings',
+            'custom_lists', 'settings', 'deleted_records'
+        ].filter(s => db.objectStoreNames && db.objectStoreNames.contains(s))
+
+        let journal = fallbackJournal
+        if (!journal && operationId && targetStores.includes('settings')) {
+            journal = await new Promise((resolve) => {
+                try {
+                    const rtx = db.transaction(['settings'], 'readonly')
+                    const req = rtx.objectStore('settings').get(`${RESTORE_JOURNAL_PREFIX}${operationId}`)
+                    req.onsuccess = () => resolve(req.result?.value || null)
+                    req.onerror = () => resolve(null)
+                } catch (_) {
+                    resolve(null)
+                }
+            })
+        }
+
+        if (!journal || !Array.isArray(journal.entries)) {
+            return { rolledBack: 0, skippedConcurrent: 0 }
+        }
+
+        let rolledBack = 0
+        let skippedConcurrent = 0
+
+        if (targetStores.length > 0) {
+            await new Promise((resolve, reject) => {
+                try {
+                    const tx = db.transaction(targetStores, 'readwrite')
+                    for (const entry of journal.entries) {
+                        if (!entry || !entry.store || !tx.objectStoreNames.contains(entry.store)) continue
+                        const st = tx.objectStore(entry.store)
+                        if (typeof st.get !== 'function') continue
+                        const getReq = st.get(entry.key)
+                        getReq.onsuccess = () => {
+                            const current = getReq.result
+                            if (entry.afterAction === 'put') {
+                                if (current === undefined || current === null) {
+                                    skippedConcurrent++
+                                    return
+                                }
+                                const currentRev = computeRecordRevision(current)
+                                if (entry.afterRevision && currentRev !== entry.afterRevision) {
+                                    // Record was modified after the restore committed; preserve the newer user edit!
+                                    skippedConcurrent++
+                                    return
+                                }
+                                if (entry.hadBefore && entry.beforeImage !== null && entry.beforeImage !== undefined) {
+                                    st.put(entry.beforeImage)
+                                    rolledBack++
+                                } else {
+                                    st.delete(entry.key)
+                                    rolledBack++
+                                }
+                            } else if (entry.afterAction === 'delete') {
+                                if ((current === undefined || current === null) && entry.hadBefore && entry.beforeImage) {
+                                    st.put(entry.beforeImage)
+                                    rolledBack++
+                                }
+                            }
+                        }
+                    }
+                    if (operationId && tx.objectStoreNames.contains('settings')) {
+                        try {
+                            tx.objectStore('settings').delete(`${RESTORE_JOURNAL_PREFIX}${operationId}`)
+                        } catch (_) {}
+                    }
+                    tx.oncomplete = () => {
+                        invalidateReadingStatsCache()
+                        resolve()
+                    }
+                    tx.onerror = () => reject(tx.error || new Error('rollbackRestoreOperation failed'))
+                    tx.onabort = () => reject(tx.error || new Error('rollbackRestoreOperation aborted'))
+                } catch (e) {
+                    reject(e)
+                }
+            })
+        }
+
+        if (Array.isArray(journal.localStorageEntries) && typeof localStorage !== 'undefined') {
+            for (const lsEntry of journal.localStorageEntries) {
+                if (!lsEntry || !lsEntry.key) continue
+                try {
+                    const currentVal = localStorage.getItem(lsEntry.key)
+                    if (lsEntry.afterValue !== undefined && currentVal !== lsEntry.afterValue) {
+                        // Key was modified after this restore operation applied; preserve newer settings!
+                        skippedConcurrent++
+                        continue
+                    }
+                    if (lsEntry.hadBefore && lsEntry.beforeValue !== null && lsEntry.beforeValue !== undefined) {
+                        localStorage.setItem(lsEntry.key, lsEntry.beforeValue)
+                        rolledBack++
+                    } else {
+                        localStorage.removeItem(lsEntry.key)
+                        rolledBack++
+                    }
+                } catch (_) {}
+            }
+            try {
+                localStorage.removeItem(RESTORE_LOCALSTORAGE_JOURNAL_KEY)
+            } catch (_) {}
+        }
+
+        return { rolledBack, skippedConcurrent }
+    } finally {
+        if (!retainLock) await releaseRestoreOperationLock(operationId)
+    }
+}
+
+/**
+ * Startup takeover barrier: inspects any unfinished restore journals in IndexedDB / localStorage
+ * and cleanly rolls them back before bookshelf or sync runs, ONLY if the exclusive lock for
+ * that operationId is not currently held by an alive window.
+ */
+export const recoverPendingRestoreOperations = async (customDb = null) => {
+    const db = customDb || await openDB()
+    const readPending = async () => {
+        const pending = []
+        if (db.objectStoreNames?.contains('settings')) {
+            const items = await new Promise((resolve, reject) => {
+                try {
+                    const tx = db.transaction(['settings'], 'readonly')
+                    const req = tx.objectStore('settings').getAll()
+                    req.onsuccess = () => resolve(req.result || [])
+                    req.onerror = () => reject(req.error || new Error('读取恢复记录失败'))
+                } catch (err) { reject(err) }
+            })
+            for (const item of items) if (item && typeof item.key === 'string' && item.key.startsWith(RESTORE_JOURNAL_PREFIX) && item.value) pending.push(item.value)
+        }
+        if (pending.length === 0 && typeof localStorage !== 'undefined') {
+            const raw = localStorage.getItem(RESTORE_LOCALSTORAGE_JOURNAL_KEY)
+            if (raw) {
+                let parsed
+                try { parsed = JSON.parse(raw) } catch (_) { throw new Error('恢复日志损坏，请先备份应用数据后处理') }
+                if (parsed?.operationId) pending.push(parsed)
+            }
+        }
+        return pending
+    }
+    if (typeof navigator === 'undefined' || !navigator.locks?.request) {
+        if ((await readPending()).length) throw new Error('存在未完成的恢复记录，但当前环境缺少跨窗口锁；已保留记录并停止自动接管')
+        return 0
+    }
+    return await navigator.locks.request('linden_restore_database_mutex', { mode: 'exclusive', ifAvailable: true }, async globalLock => {
+        if (!globalLock) return 0
+        const pending = await readPending()
+        let count = 0
+        for (const journal of pending) {
+            if (!journal?.operationId || _activeRestoreLockReleasers.has(journal.operationId)) continue
+            const recovered = await navigator.locks.request(`linden_restore_op_${journal.operationId}`, { mode: 'exclusive', ifAvailable: true }, async lock => {
+                if (!lock) return false
+                await rollbackRestoreOperation(journal.operationId, journal, db)
+                return true
+            })
+            if (recovered) count++
+        }
+        return count
     })
 }

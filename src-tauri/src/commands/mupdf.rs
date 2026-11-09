@@ -47,6 +47,13 @@ pub struct SelectionResponse {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PdfLinkItem {
+    pub rect: [f32; 4],
+    pub uri: Option<String>,
+    pub page: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RenderDiagnostics {
     #[serde(rename = "requestId")]
     pub request_id: String,
@@ -81,7 +88,6 @@ mod imp {
         thread,
         time::{SystemTime, UNIX_EPOCH},
     };
-    use std::io::Write;
     use tauri::Manager;
     use tokio::sync::oneshot;
 
@@ -125,12 +131,40 @@ mod imp {
     #[repr(C)]
     struct LlOutline { items: *mut LlOutlineItem, count: c_int }
     #[repr(C)]
+    struct LlLink {
+        rect: [f32; 4],
+        uri: *mut c_char,
+        page: c_int,
+    }
+    #[repr(C)]
+    struct LlLinks {
+        count: c_int,
+        items: *mut LlLink,
+    }
+    #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct LlRenderTimings {
         list_time_us: u64,
         raster_time_us: u64,
         pixmap_time_us: u64,
         list_hit: c_int,
+    }
+
+    #[repr(C)]
+    struct LlExportAnnot {
+        page: c_int,
+        annot_type: c_int,
+        color: [f32; 3],
+        opacity: f32,
+        rect: [f32; 4],
+        quads: *const f32,
+        quad_count: c_int,
+        text: *const c_char,
+        author: *const c_char,
+        stroke_counts: *const c_int,
+        stroke_points: *const f32,
+        stroke_count: c_int,
+        width: f32,
     }
 
     extern "C" {
@@ -145,6 +179,8 @@ mod imp {
         fn ll_free_string(value: *mut c_char);
         fn ll_get_outline(doc: *mut LlDoc, out: *mut LlOutline) -> c_int;
         fn ll_free_outline(out: *mut LlOutline);
+        fn ll_get_links(doc: *mut LlDoc, page: c_int, out: *mut LlLinks) -> c_int;
+        fn ll_free_links(out: *mut LlLinks);
         fn ll_page_bounds(doc: *mut LlDoc, page: c_int, bounds: *mut c_float) -> c_int;
         fn ll_page_bounds_many(doc: *mut LlDoc, start_page: c_int, count: c_int, bounds4: *mut c_float) -> c_int;
         fn ll_cancel_new() -> *mut LlCancel;
@@ -164,6 +200,14 @@ mod imp {
                           out: *mut LlSelection) -> c_int;
         fn ll_free_selection(out: *mut LlSelection);
         fn ll_get_last_render_timings(doc: *mut LlDoc) -> LlRenderTimings;
+        fn ll_get_page_plain_text(doc: *mut LlDoc, page: c_int, out_text: *mut *mut c_char) -> c_int;
+        fn ll_export_annotated_pdf(
+            input_path: *const c_char,
+            output_path: *const c_char,
+            password: *const c_char,
+            annots: *const LlExportAnnot,
+            annot_count: c_int,
+        ) -> c_int;
     }
 
     fn native_error(doc: *mut LlDoc) -> String {
@@ -206,6 +250,7 @@ mod imp {
         cancels: Arc<Mutex<HashMap<String, Arc<CancelHandle>>>>,
         num_pages: usize,
         file_path: PathBuf,
+        password: Option<String>,
     }
 
     enum DocCommand {
@@ -228,6 +273,14 @@ mod imp {
         Outline {
             reply: oneshot::Sender<Result<Vec<FlatOutlineItem>, String>>,
         },
+        Links {
+            page: usize,
+            reply: oneshot::Sender<Result<Vec<PdfLinkItem>, String>>,
+        },
+        PlainText {
+            page: usize,
+            reply: oneshot::Sender<Result<String, String>>,
+        },
         Render {
             page: usize,
             scale: f32,
@@ -246,6 +299,31 @@ mod imp {
     fn store() -> &'static Mutex<HashMap<String, DocumentSession>> {
         static STORE: OnceLock<Mutex<HashMap<String, DocumentSession>>> = OnceLock::new();
         STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn window_docs_store() -> &'static Mutex<HashMap<String, Vec<String>>> {
+        static STORE: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub fn register_window_doc(window_label: &str, doc_id: &str) {
+        if let Ok(mut store) = window_docs_store().lock() {
+            let list = store.entry(window_label.to_string()).or_default();
+            if !list.iter().any(|id| id == doc_id) {
+                list.push(doc_id.to_string());
+            }
+        }
+    }
+
+    pub fn mupdf_close_documents_for_window(window_label: &str) {
+        let doc_ids = if let Ok(mut store) = window_docs_store().lock() {
+            store.remove(window_label).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for doc_id in doc_ids {
+            mupdf_close_document(doc_id);
+        }
     }
 
     static DIAGNOSTICS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -356,9 +434,13 @@ mod imp {
                 for (j, c) in pending.iter().enumerate() {
                     let score = match c {
                         DocCommand::Close => 0,
-                        DocCommand::Text { .. } | DocCommand::Select { .. } => 1,
-                        DocCommand::Bounds { .. } | DocCommand::Outline { .. } => 2,
+                        DocCommand::Select { .. } => 1,
+                        DocCommand::Render { priority: 0, .. } => 2,
+                        DocCommand::Text { .. } => 3,
+                        DocCommand::Bounds { .. } => 4,
                         DocCommand::Render { priority, .. } => 10 + (*priority as i32),
+                        DocCommand::PlainText { .. } => 25,
+                        DocCommand::Outline { .. } | DocCommand::Links { .. } => 26,
                     };
                     if score < best_score {
                         best_score = score;
@@ -430,13 +512,46 @@ mod imp {
                                 .iter().map(|item| FlatOutlineItem {
                                     title: if item.title.is_null() { String::new() }
                                         else { unsafe { CStr::from_ptr(item.title) }.to_string_lossy().into_owned() },
-                                    page: if item.page >= 0 { Some(item.page as usize) } else { None },
+                                     page: if item.page >= 0 { Some(item.page as usize) } else { None },
                                     level: item.level.max(0) as usize,
                                 }).collect()
                         } else { Vec::new() };
                         Ok(items)
                     };
                     unsafe { ll_free_outline(&mut raw) };
+                    let _ = reply.send(result);
+                }
+                DocCommand::PlainText { page, reply } => {
+                    let mut out_ptr: *mut c_char = std::ptr::null_mut();
+                    let rc = unsafe { ll_get_page_plain_text(doc, page as c_int, &mut out_ptr) };
+                    if rc == 0 && !out_ptr.is_null() {
+                        let text = unsafe { CStr::from_ptr(out_ptr).to_string_lossy().into_owned() };
+                        unsafe { ll_free_string(out_ptr) };
+                        let _ = reply.send(Ok(text));
+                    } else {
+                        let _ = reply.send(Err(native_error(doc)));
+                    }
+                }
+                DocCommand::Links { page, reply } => {
+                    let mut raw = LlLinks { items: std::ptr::null_mut(), count: 0 };
+                    let status = unsafe { ll_get_links(doc, page as i32, &mut raw) };
+                    let result = if status != LL_OK {
+                        Err(native_error(doc))
+                    } else {
+                        let links = if raw.count > 0 && !raw.items.is_null() {
+                            unsafe { std::slice::from_raw_parts(raw.items, raw.count as usize) }
+                                .iter().map(|item| {
+                                    let uri = if item.uri.is_null() { None } else {
+                                        let s = unsafe { CStr::from_ptr(item.uri) }.to_string_lossy().into_owned();
+                                        if s.trim().is_empty() { None } else { Some(s) }
+                                    };
+                                    let page = if item.page >= 0 { Some(item.page as usize) } else { None };
+                                    PdfLinkItem { rect: item.rect, uri, page }
+                                }).collect()
+                        } else { Vec::new() };
+                        Ok(links)
+                    };
+                    unsafe { ll_free_links(&mut raw) };
                     let _ = reply.send(result);
                 }
                 DocCommand::Render { page, scale, rotation, clip, cancel, request_id, priority, generation: _, enqueued_at, reply } => {
@@ -495,6 +610,8 @@ mod imp {
                 DocCommand::Text { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
                 DocCommand::Select { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
                 DocCommand::Outline { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::PlainText { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::Links { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
                 DocCommand::Render { cancel, reply, request_id, .. } => {
                     cancel.abort();
                     if let Ok(mut map) = cancels.lock() { map.remove(&request_id); }
@@ -541,18 +658,40 @@ mod imp {
     #[tauri::command]
     pub fn mupdf_is_available() -> bool { true }
 
+    pub(crate) fn native_snapshot_dir_public(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+        native_snapshot_dir(app)
+    }
+
     fn native_snapshot_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-        // The project build records its D: cache location in the binary, so
-        // a desktop shortcut still resolves snapshots without a shell profile.
+        #[cfg(debug_assertions)]
         let configured = std::env::var_os("LINDEN_NATIVE_CACHE_DIR")
             .or_else(|| option_env!("LINDEN_NATIVE_CACHE_DIR").map(std::ffi::OsString::from));
+        #[cfg(not(debug_assertions))]
+        let configured = std::env::var_os("LINDEN_NATIVE_CACHE_DIR");
+
         if let Some(configured) = configured {
             let path = PathBuf::from(configured);
-            if !path.is_absolute() { return Err("LINDEN_NATIVE_CACHE_DIR must be absolute".into()); }
-            return Ok(path);
+            if path.is_absolute() && std::fs::create_dir_all(&path).is_ok() {
+                return Ok(path);
+            }
         }
-        app.path().app_cache_dir().map(|p| p.join("pdf-native"))
-            .map_err(|e| format!("Cannot locate native PDF cache: {e}"))
+        let fallback = app.path().app_cache_dir().map(|p| p.join("pdf-native"))
+            .map_err(|e| format!("Cannot locate native PDF cache: {e}"))?;
+        let _ = std::fs::create_dir_all(&fallback);
+        Ok(fallback)
+    }
+
+    // Legacy IndexedDB PDFs must be staged from their saved bytes, never from a
+    // mutable original path. Raw IPC avoids expanding tens of MB into JSON arrays.
+    #[tauri::command]
+    pub async fn mupdf_stage_pdf_bytes(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<String, String> {
+        let bytes = match request.body() {
+            tauri::ipc::InvokeBody::Raw(bytes) if bytes.len() <= 128 * 1024 * 1024 => bytes.clone(),
+            _ => return Err("Expected a PDF binary payload of at most 128 MiB".into()),
+        };
+        let root = native_snapshot_dir(&app)?;
+        tauri::async_runtime::spawn_blocking(move || super::write_saved_pdf_snapshot(&root, &bytes))
+            .await.map_err(|e| format!("PDF snapshot worker failed: {e}"))?
     }
 
     #[tauri::command]
@@ -572,21 +711,58 @@ mod imp {
             let mut input = std::fs::File::open(source).map_err(|e| format!("Cannot open PDF source: {e}"))?;
             let mut output = std::fs::OpenOptions::new().write(true).create_new(true)
                 .open(&temp_path).map_err(|e| format!("Cannot stage PDF: {e}"))?;
+            let size = input.metadata().map(|m| m.len()).unwrap_or(0);
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::Hasher;
+            use std::io::{Read, Write};
+            let mut hasher = DefaultHasher::new();
+            let mut buf = [0u8; 64 * 1024];
+            let stage_start = std::time::Instant::now();
+            let mut copy_hash_ms = 0u64;
+            let mut flush_ms = 0u64;
             let result = (|| -> Result<(), String> {
-                std::io::copy(&mut input, &mut output).map_err(|e| format!("Cannot copy PDF: {e}"))?;
+                let t0 = std::time::Instant::now();
+                loop {
+                    let n = input.read(&mut buf).map_err(|e| format!("Cannot read PDF: {e}"))?;
+                    if n == 0 { break; }
+                    hasher.write(&buf[..n]);
+                    output.write_all(&buf[..n]).map_err(|e| format!("Cannot write PDF snapshot: {e}"))?;
+                }
+                copy_hash_ms = t0.elapsed().as_millis() as u64;
+                let t1 = std::time::Instant::now();
                 output.flush().map_err(|e| format!("Cannot flush PDF: {e}"))?;
                 output.sync_all().map_err(|e| format!("Cannot sync PDF: {e}"))?;
+                flush_ms = t1.elapsed().as_millis() as u64;
                 drop(output);
                 std::fs::rename(&temp_path, &final_path).map_err(|e| format!("Cannot publish PDF snapshot: {e}"))
             })();
             if result.is_err() { let _ = std::fs::remove_file(&temp_path); }
             result?;
-            Ok(final_path.to_string_lossy().into_owned())
+            let doc_hash = format!("hash_{:x}_{size}", hasher.finish());
+            let revision = format!("rev_{nanos}_{}", NEXT_STAGE.load(Ordering::Relaxed));
+            let total_stage_ms = stage_start.elapsed().as_millis() as u64;
+            let payload = serde_json::json!({
+                "path": final_path.to_string_lossy().into_owned(),
+                "size": size,
+                "revision": revision,
+                "documentHash": doc_hash,
+                "copyHashMs": copy_hash_ms,
+                "flushMs": flush_ms,
+                "stageTotalMs": total_stage_ms
+            });
+            Ok(payload.to_string())
         }).await.map_err(|e| format!("PDF stage worker failed: {e}"))?
     }
 
     #[tauri::command]
-    pub async fn mupdf_open_document(app: tauri::AppHandle, file_path: String, password: Option<String>, expected_size: Option<u64>, max_store_mb: Option<u32>) -> Result<DocumentMetadata, String> {
+    pub async fn mupdf_open_document(
+        app: tauri::AppHandle,
+        file_path: String,
+        password: Option<String>,
+        expected_size: Option<u64>,
+        max_store_mb: Option<u32>,
+        window_label: Option<String>,
+    ) -> Result<DocumentMetadata, String> {
         if let Some(mb) = max_store_mb {
             unsafe { ll_set_max_store_mb(mb) };
         }
@@ -617,20 +793,49 @@ mod imp {
             return Err("Native PDF snapshot size differs from the indexed Blob".into());
         }
         let doc_id = make_doc_id();
+        if let Some(ref win) = window_label {
+            register_window_doc(win, &doc_id);
+        }
         let (tx, rx) = mpsc::channel();
         let cancels = Arc::new(Mutex::new(HashMap::new()));
         let (ready_tx, ready_rx) = oneshot::channel();
         let worker_cancels = cancels.clone();
         let worker_path = actual_path.to_string_lossy().into_owned();
+        let pw_clone = password.clone();
         thread::Builder::new().name(format!("ll-mupdf-{doc_id}")).spawn(move || {
-            worker(worker_path, password.unwrap_or_default(), rx, worker_cancels, ready_tx)
+            worker(worker_path, pw_clone.unwrap_or_default(), rx, worker_cancels, ready_tx)
         }).map_err(|e| format!("Failed to start MuPDF worker: {e}"))?;
 
-        let (num_pages, bounds, native_title, native_author) = ready_rx.await.map_err(|_| "MuPDF worker exited during open".to_string())??;
-        store().lock().map_err(|e| e.to_string())?.insert(
-            doc_id.clone(),
-            DocumentSession { tx, cancels, num_pages, file_path: actual_path.clone() },
-        );
+        let open_res = ready_rx.await.map_err(|_| "MuPDF worker exited during open".to_string())?;
+        let (num_pages, bounds, native_title, native_author) = match open_res {
+            Ok(data) => data,
+            Err(e) => {
+                if let Some(ref win) = window_label {
+                    if let Ok(mut win_store) = window_docs_store().lock() {
+                        if let Some(docs) = win_store.get_mut(win) {
+                            docs.retain(|d| d != &doc_id);
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        };
+
+        {
+            let win_guard = window_docs_store().lock().map_err(|e| e.to_string())?;
+            let mut store_guard = store().lock().map_err(|e| e.to_string())?;
+            if let Some(ref win) = window_label {
+                let is_alive = win_guard.get(win).map(|d| d.iter().any(|id| id == &doc_id)).unwrap_or(false);
+                if !is_alive {
+                    let _ = tx.send(DocCommand::Close);
+                    return Err("Window closed while opening document".to_string());
+                }
+            }
+            store_guard.insert(
+                doc_id.clone(),
+                DocumentSession { tx, cancels, num_pages, file_path: actual_path.clone(), password },
+            );
+        }
         let width = (bounds[2] - bounds[0]).abs().max(1.0);
         let height = (bounds[3] - bounds[1]).abs().max(1.0);
         let title = native_title.or_else(|| actual_path.file_stem().map(|x| x.to_string_lossy().into_owned()));
@@ -732,16 +937,39 @@ mod imp {
     }
 
     #[tauri::command]
-    pub async fn mupdf_get_links(_doc_id: String, _page_index: usize) -> Result<Vec<serde_json::Value>, String> { Ok(Vec::new()) }
+    pub async fn mupdf_get_links(doc_id: String, page_index: usize) -> Result<Vec<PdfLinkItem>, String> {
+        let s = session(&doc_id)?;
+        let (tx, rx) = oneshot::channel();
+        s.tx.send(DocCommand::Links { page: page_index, reply: tx }).map_err(|_| "MuPDF worker is closed".to_string())?;
+        rx.await.map_err(|_| "MuPDF worker dropped links request".to_string())?
+    }
 
     #[tauri::command]
     pub fn mupdf_close_document(doc_id: String) -> bool {
+        if let Ok(mut win_store) = window_docs_store().lock() {
+            for docs in win_store.values_mut() {
+                docs.retain(|d| d != &doc_id);
+            }
+        }
         let session = store().lock().ok().and_then(|mut m| m.remove(&doc_id));
         if let Some(s) = session {
             if let Ok(map) = s.cancels.lock() { for handle in map.values() { handle.abort(); } }
             let _ = s.tx.send(DocCommand::Close);
             true
         } else { false }
+    }
+
+    #[tauri::command]
+    pub async fn mupdf_validate_snapshot(app: tauri::AppHandle, snapshot_path: String, expected_size: u64) -> Result<bool, String> {
+        tauri::async_runtime::spawn_blocking(move || {
+            let root = match std::fs::canonicalize(native_snapshot_dir(&app)?) { Ok(x) => x, Err(_) => return Ok(false) };
+            let path = match std::fs::canonicalize(snapshot_path) { Ok(x) => x, Err(_) => return Ok(false) };
+            if path.parent() != Some(root.as_path()) { return Ok(false); }
+            let name = path.file_name().and_then(|x| x.to_str()).unwrap_or("");
+            if !name.starts_with("snapshot-") || !name.ends_with(".pdf") { return Ok(false); }
+            let meta = match std::fs::metadata(path) { Ok(x) => x, Err(_) => return Ok(false) };
+            Ok(meta.is_file() && meta.len() > 0 && (expected_size == 0 || meta.len() == expected_size))
+        }).await.map_err(|e| e.to_string())?
     }
 
     #[tauri::command]
@@ -803,17 +1031,188 @@ mod imp {
             Ok(ll_get_max_store_mb())
         }
     }
+
+    #[tauri::command]
+    pub async fn mupdf_get_plain_text(
+        doc_id: String,
+        page_index: usize,
+    ) -> Result<String, String> {
+        let s = session(&doc_id)?;
+        if page_index >= s.num_pages {
+            return Err(format!("Page index {} out of bounds (num_pages: {})", page_index, s.num_pages));
+        }
+        let (tx, rx) = oneshot::channel();
+        s.tx.send(DocCommand::PlainText { page: page_index, reply: tx })
+            .map_err(|_| "MuPDF worker is closed".to_string())?;
+        rx.await.map_err(|_| "Worker dropped PlainText reply channel".to_string())?
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ExportAnnotationItem {
+        page: usize,
+        #[serde(rename = "type")]
+        annot_type: Option<String>,
+        color: Option<String>,
+        opacity: Option<f32>,
+        rect: Option<[f32; 4]>,
+        quads: Option<Vec<f32>>,
+        text: Option<String>,
+        author: Option<String>,
+        strokes: Option<Vec<Vec<[f32; 2]>>>,
+        width: Option<f32>,
+    }
+
+    fn parse_hex_color(hex: Option<&str>) -> [f32; 3] {
+        if let Some(h) = hex {
+            let clean = h.trim().trim_start_matches('#');
+            if clean.len() == 6 {
+                if let (Ok(r), Ok(g), Ok(b)) = (
+                    u8::from_str_radix(&clean[0..2], 16),
+                    u8::from_str_radix(&clean[2..4], 16),
+                    u8::from_str_radix(&clean[4..6], 16),
+                ) {
+                    return [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0];
+                }
+            }
+        }
+        [1.0, 0.9, 0.0]
+    }
+
+    #[tauri::command]
+    pub async fn mupdf_export_annotated_pdf(
+        doc_id: String,
+        output_path: String,
+        annotations_json: String,
+    ) -> Result<bool, String> {
+        let s = session(&doc_id)?;
+        let file_path = s.file_path;
+        let password = s.password.clone();
+        let items: Vec<ExportAnnotationItem> = serde_json::from_str(&annotations_json)
+            .map_err(|e| format!("Invalid annotations JSON: {e}"))?;
+
+        tauri::async_runtime::spawn_blocking(move || {
+            let input_c = CString::new(file_path.to_string_lossy().as_bytes())
+                .map_err(|e| format!("Invalid input path: {e}"))?;
+            let output_c = CString::new(output_path.as_str())
+                .map_err(|e| format!("Invalid output path: {e}"))?;
+            let pass_c = password.as_deref().and_then(|p| CString::new(p).ok());
+            let pass_ptr = pass_c.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+
+            let mut c_annots = Vec::new();
+            let mut text_c_strings = Vec::new();
+            let mut author_c_strings = Vec::new();
+            let mut quad_buffers = Vec::new();
+            let mut stroke_count_buffers = Vec::new();
+            let mut stroke_point_buffers = Vec::new();
+
+            for item in &items {
+                let a_type = match item.annot_type.as_deref().unwrap_or("highlight") {
+                    "highlight" => 0,
+                    "underline" => 1,
+                    "strikeout" | "strike" => 2,
+                    "note" | "text" => 3,
+                    "ink" | "drawing" => 4,
+                    _ => 0,
+                };
+                let col = parse_hex_color(item.color.as_deref());
+                let op = item.opacity.unwrap_or(0.8);
+                let r = item.rect.unwrap_or([0.0, 0.0, 100.0, 100.0]);
+
+                let t_ptr = if let Some(ref t) = item.text {
+                    let cs = CString::new(t.as_str()).unwrap_or_default();
+                    let ptr = cs.as_ptr();
+                    text_c_strings.push(cs);
+                    ptr
+                } else {
+                    std::ptr::null()
+                };
+
+                let a_ptr = if let Some(ref a) = item.author {
+                    let cs = CString::new(a.as_str()).unwrap_or_default();
+                    let ptr = cs.as_ptr();
+                    author_c_strings.push(cs);
+                    ptr
+                } else {
+                    std::ptr::null()
+                };
+
+                let (q_ptr, q_cnt) = if let Some(ref q) = item.quads {
+                    quad_buffers.push(q.clone());
+                    (quad_buffers.last().unwrap().as_ptr(), (q.len() / 8) as c_int)
+                } else {
+                    (std::ptr::null(), 0)
+                };
+
+                let (sc_ptr, sp_ptr, s_cnt) = if let Some(ref strokes) = item.strokes {
+                    let mut counts = Vec::new();
+                    let mut points = Vec::new();
+                    for stroke in strokes {
+                        counts.push(stroke.len() as c_int);
+                        for p in stroke {
+                            points.push(p[0]);
+                            points.push(p[1]);
+                        }
+                    }
+                    stroke_count_buffers.push(counts);
+                    stroke_point_buffers.push(points);
+                    (
+                        stroke_count_buffers.last().unwrap().as_ptr(),
+                        stroke_point_buffers.last().unwrap().as_ptr(),
+                        strokes.len() as c_int,
+                    )
+                } else {
+                    (std::ptr::null(), std::ptr::null(), 0)
+                };
+
+                c_annots.push(LlExportAnnot {
+                    page: item.page as c_int,
+                    annot_type: a_type,
+                    color: col,
+                    opacity: op,
+                    rect: r,
+                    quads: q_ptr,
+                    quad_count: q_cnt,
+                    text: t_ptr,
+                    author: a_ptr,
+                    stroke_counts: sc_ptr,
+                    stroke_points: sp_ptr,
+                    stroke_count: s_cnt,
+                    width: item.width.unwrap_or(2.0),
+                });
+            }
+
+            let rc = unsafe {
+                ll_export_annotated_pdf(
+                    input_c.as_ptr(),
+                    output_c.as_ptr(),
+                    pass_ptr,
+                    c_annots.as_ptr(),
+                    c_annots.len() as c_int,
+                )
+            };
+            if rc == 0 {
+                Ok(true)
+            } else {
+                Err("Failed to export annotated PDF via MuPDF".to_string())
+            }
+        }).await.map_err(|e| format!("Export worker task failed: {e}"))?
+    }
 }
 
 #[cfg(not(ll_mupdf))]
 mod imp {
     use super::*;
+    use std::path::PathBuf;
     fn unavailable<T>() -> Result<T, String> { Err("MuPDF native backend is not compiled into this build".into()) }
+
+    pub fn mupdf_close_documents_for_window(_window_label: &str) {}
+    pub fn register_window_doc(_window_label: &str, _doc_id: &str) {}
 
     #[tauri::command] pub fn mupdf_is_available() -> bool { false }
     #[tauri::command] pub fn mupdf_set_store_limit(_max_mb: u32) -> Result<u32, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_stage_pdf_bytes(_app: tauri::AppHandle, _request: tauri::ipc::Request<'_>) -> Result<String, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_stage_pdf(_app: tauri::AppHandle, _file_path: String) -> Result<String, String> { unavailable() }
-    #[tauri::command] pub async fn mupdf_open_document(_app: tauri::AppHandle, _file_path: String, _password: Option<String>, _expected_size: Option<u64>, _max_store_mb: Option<u32>) -> Result<DocumentMetadata, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_open_document(_app: tauri::AppHandle, _file_path: String, _password: Option<String>, _expected_size: Option<u64>, _max_store_mb: Option<u32>, _window_label: Option<String>) -> Result<DocumentMetadata, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_bounds_range(_doc_id: String, _start_page: usize, _count: usize) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_sizes(_doc_id: String) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_text_layer(_doc_id: String, _page_index: usize) -> Result<TextLayerResponse, String> { unavailable() }
@@ -823,9 +1222,41 @@ mod imp {
     #[tauri::command] pub fn mupdf_get_render_diagnostics() -> Vec<RenderDiagnostics> { Vec::new() }
     #[tauri::command] pub fn mupdf_cancel_render(_doc_id: String, _request_id: String) -> bool { false }
     #[tauri::command] pub async fn mupdf_get_outline_flat(_doc_id: String) -> Result<Vec<FlatOutlineItem>, String> { unavailable() }
-    #[tauri::command] pub async fn mupdf_get_links(_doc_id: String, _page_index: usize) -> Result<Vec<serde_json::Value>, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_get_links(_doc_id: String, _page_index: usize) -> Result<Vec<PdfLinkItem>, String> { unavailable() }
     #[tauri::command] pub fn mupdf_close_document(_doc_id: String) -> bool { false }
+    pub(crate) fn native_snapshot_dir_public(_app: &tauri::AppHandle) -> Result<PathBuf, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_get_plain_text(_doc_id: String, _page_index: usize) -> Result<String, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_export_annotated_pdf(_doc_id: String, _output_path: String, _annotations_json: String) -> Result<bool, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_validate_snapshot(_app: tauri::AppHandle, _snapshot_path: String, _expected_size: u64) -> Result<bool, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_reclaim_snapshot(_app: tauri::AppHandle, _snapshot_path: String) -> Result<bool, String> { unavailable() }
+}
+
+// Kept independent of the WebView so disk publication can be exercised directly.
+pub(crate) fn write_saved_pdf_snapshot(root: &std::path::Path, bytes: &[u8]) -> Result<String, String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    if bytes.is_empty() || bytes.len() > 128 * 1024 * 1024 ||
+        !bytes[..bytes.len().min(1024)].windows(5).any(|w| w == b"%PDF-") {
+        return Err("Saved data is not a supported PDF binary payload".into());
+    }
+    std::fs::create_dir_all(root).map_err(|e| format!("Cannot create PDF cache: {e}"))?;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let name = format!("snapshot-blob-{}-{nanos}-{}.pdf", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    let final_path = root.join(name);
+    let temp_path = final_path.with_extension("part");
+    let result = (|| -> Result<(), String> {
+        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_path)
+            .map_err(|e| format!("Cannot create PDF snapshot: {e}"))?;
+        output.write_all(bytes).map_err(|e| format!("Cannot write PDF snapshot: {e}"))?;
+        output.sync_all().map_err(|e| format!("Cannot flush PDF snapshot: {e}"))?;
+        drop(output);
+        std::fs::rename(&temp_path, &final_path).map_err(|e| format!("Cannot publish PDF snapshot: {e}"))
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temp_path); }
+    result?;
+    Ok(serde_json::json!({"path": final_path.to_string_lossy(), "size": bytes.len()}).to_string())
 }
 
 pub use imp::*;

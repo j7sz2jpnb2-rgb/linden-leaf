@@ -52,6 +52,18 @@ for (const item of requiredWhitelist) {
     }
 }
 
+// PDF.js 5 decodes JPX/JBIG2 through external resources. Missing codecs can
+// silently leave OCR text visible while omitting the original page images.
+// Check them before touching an existing distribution.
+const requiredPdfCodecs = ['openjpeg.wasm', 'openjpeg_nowasm_fallback.js', 'jbig2.wasm', 'qcms_bg.wasm'];
+for (const filename of requiredPdfCodecs) {
+    const codecPath = path.join(rootDir, 'foliate-js-main', 'vendor', 'pdfjs', 'wasm', filename);
+    if (!fs.existsSync(codecPath) || fs.statSync(codecPath).size === 0) {
+        console.error(`[build-dist] FATAL: Missing PDF.js decoder: ${filename}. Restore the matching PDF.js wasm bundle before building.`);
+        process.exit(1);
+    }
+}
+
 // 2. Safely clean and prepare distDir
 if (fs.existsSync(distDir)) {
     try {

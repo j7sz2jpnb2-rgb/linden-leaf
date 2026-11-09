@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="light" data-startup-view="pending">
 <head>
   <meta charset="utf-8"/>
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://fonts.googleapis.com https://fonts.gstatic.com https://fonts.font.im https://fonts.gstatic.font.im https://cdn.jsdelivr.net https://api.github.com https://github.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; frame-src 'self' blob: data:; font-src 'self' data: blob: https://fonts.googleapis.com https://fonts.gstatic.com https://fonts.font.im https://fonts.gstatic.font.im https://cdn.jsdelivr.net; img-src 'self' data: blob: https://avatars.githubusercontent.com https://github.com; media-src 'self' data: blob:; connect-src 'self' data: blob: http: https: https://fonts.googleapis.com https://fonts.gstatic.com https://fonts.font.im https://fonts.gstatic.font.im https://cdn.jsdelivr.net https://api.github.com https://github.com https://*.github.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline' blob: data: https://fonts.googleapis.com https://fonts.font.im https://cdn.jsdelivr.net; object-src 'none'; base-uri 'self';"/>
@@ -61,6 +61,12 @@
       background-color: #f5eedc;
       color: #3b2e1e;
     }
+    html[data-startup-view="pending"] #bookshelf-view,
+    html[data-startup-view="pending"] #reader-view { display: none !important; }
+    #startup-loading { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: var(--bg-app); color: var(--text-main); font: 14px/1.6 system-ui,sans-serif; z-index: 10000; }
+    html[data-startup-view="pending"] #startup-loading,
+    html[data-startup-view="error"] #startup-loading { display: flex; }
+    #startup-retry { margin-left: 12px; }
   </style>
   <!-- Native Zero-Latency Hydration (底层直出机制) -->
   <script>
@@ -123,7 +129,6 @@
   <link rel="stylesheet" href="./css/desktop-settings.css"/>
   <link rel="stylesheet" href="./css/desktop-ui.css"/>
   <link rel="icon" type="image/png" href="./assets/icon.png"/>
-  <script defer src="./vendor/tesseract/tesseract.min.js"></script>
   <!-- Standard ES2024 Polyfills (Response.bytes, Uint8Array toHex/toBase64, Promise.try, Promise.withResolvers, Object.groupBy) for PDF.js v5 compatibility -->
   <script>
     if (typeof Response !== 'undefined' && typeof Response.prototype.bytes !== 'function') {
@@ -247,6 +252,7 @@
   </script>
 </head>
 <body>
+  <div id="startup-loading" role="status" aria-live="polite"><span id="startup-loading-label">正在打开…</span><button id="startup-retry" type="button" hidden onclick="location.reload()">重新打开</button></div>
   <div id="app-container">
     
     <!-- ==========================================================
@@ -279,6 +285,10 @@
             <button class="nav-item active" data-category="all" id="nav-cat-all">
               <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
               <span>全部图书</span>
+            </button>
+            <button class="nav-item" data-category="recent" id="nav-cat-recent">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span>最近打开</span>
             </button>
             <button class="nav-item" data-category="favorite" id="nav-cat-favorite">
               <svg class="icon icon-sm" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
@@ -388,6 +398,9 @@
             <!-- Import Book Button -->
             <button class="btn-header-action" id="btn-import" title="添加图书">
               <svg class="icon" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <button class="btn-header-action" id="btn-link-folder" title="链接本地文件夹为书库 (F07)">
+              <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line></svg>
             </button>
             <input type="file" id="file-input" multiple accept=".epub,.txt,.pdf,.mobi,.azw3,.azw,.fb2,.cbz,.md,.docx" hidden style="display: none !important; position: absolute !important; width: 0 !important; height: 0 !important; opacity: 0 !important; pointer-events: none !important; clip: rect(0,0,0,0) !important;"/>
 
@@ -584,6 +597,7 @@
                 </div>
               </div>
 
+              <p id="recent-files-note" hidden>这里保留未加入书架的外部文件，直到你加入书架或手动移除。阅读进度和笔记照常保存。</p>
               <!-- The Grid Container -->
               <div id="books-grid" class="books-grid-layout"></div>
             </div>
@@ -863,7 +877,7 @@
 
                   <div class="shelf-notes-color-filters" id="shelf-notes-color-filters">
                     <button type="button" class="notes-color-pill active" data-color="all">全部</button>
-                    <button type="button" class="notes-color-pill" data-color="has-note">💭 有想法</button>
+                    <button type="button" class="notes-color-pill" data-color="has-note">有想法</button>
                     <button type="button" class="notes-color-pill color-dot-pill" data-color="#facc15" title="黄色"><span class="color-dot" style="background:#facc15;"></span></button>
                     <button type="button" class="notes-color-pill color-dot-pill" data-color="#4ade80" title="绿色"><span class="color-dot" style="background:#4ade80;"></span></button>
                     <button type="button" class="notes-color-pill color-dot-pill" data-color="#60a5fa" title="蓝色"><span class="color-dot" style="background:#60a5fa;"></span></button>
@@ -914,6 +928,13 @@
               <polyline points="12 19 5 12 12 5"/>
             </svg>
           </button>
+          <button id="btn-add-to-shelf" class="btn-tool btn-add-to-shelf" style="display: none; padding: 2px 8px; font-size: 0.76rem; border-radius: 4px; background: var(--brand-terracotta, #da7756); color: #fff; border: none; cursor: pointer; margin-right: 4px;" title="将此临时阅读的文件加入我的书架 (F01)">加入书架</button>
+          <button id="btn-nav-history-back" class="btn-tool" disabled title="后退到上一位置 (Alt+Left)">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"></polyline></svg>
+          </button>
+          <button id="btn-nav-history-forward" class="btn-tool" disabled title="前进到下一位置 (Alt+Right)">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          </button>
           <button id="btn-toggle-toc" class="btn-tool" title="目录导航">
             <svg class="icon" viewBox="0 0 24 24">
               <line x1="8" y1="6" x2="21" y2="6"/>
@@ -929,6 +950,18 @@
         <div id="reader-book-title" class="reader-title-center">加载中...</div>
 
         <div class="reader-top-right">
+          <button id="btn-toggle-pin-window" class="btn-tool" title="窗口置顶 (F04)">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="17" x2="12" y2="22"></line>
+              <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a1 1 0 0 0 0-2H8a1 1 0 0 0 0 2h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path>
+            </svg>
+          </button>
+          <button id="btn-pin-ref-page" class="btn-tool" title="固定参考页 (F06)" style="display: none;">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3H8a2 2 0 0 0-2 2v16l6-3 6 3V5a2 2 0 0 0-2-2z"/></svg>
+          </button>
+          <button id="btn-ocr-page" class="btn-tool" title="OCR 识别当前页为可划选层 (F11/M08)" style="display: none;">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 7V4h3"/><path d="M20 7V4h-3"/><path d="M4 17v3h3"/><path d="M20 17v3h-3"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="12" y1="9" x2="12" y2="15"/></svg>
+          </button>
           <button id="btn-toggle-search" class="btn-tool" title="全文检索">
             <svg class="icon" viewBox="0 0 24 24">
               <circle cx="11" cy="11" r="8"/>
@@ -943,6 +976,9 @@
               <line x1="16" y1="17" x2="8" y2="17"/>
               <polyline points="10 9 9 9 8 9"/>
             </svg>
+          </button>
+          <button id="btn-export-annotated-pdf" class="btn-tool" title="导出带批注 PDF (F12)" style="display: none;">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           </button>
           <button id="btn-toggle-ai-sidebar" class="btn-tool" title="AI 阅读助手 (快捷侧栏)">
             <svg class="icon" viewBox="0 0 24 24"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
@@ -998,6 +1034,24 @@
           <svg class="icon icon-lg" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
       </div>
+      <!-- Pinned Reference Panel (F06) -->
+      <aside id="reader-pinned-reference-panel" class="reader-pinned-reference-panel" style="display: none;">
+        <div class="pinned-ref-header">
+          <div class="pinned-ref-title">
+            <svg class="icon icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="17" x2="12" y2="22"></line><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a1 1 0 0 0 0-2H8a1 1 0 0 0 0 2h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path></svg>
+            <span id="pinned-ref-title-text">固定参考页</span>
+          </div>
+          <div class="pinned-ref-actions">
+            <button type="button" id="btn-pinned-ref-prev" class="btn-tool" style="width: 24px; height: 24px; padding: 0;" title="上一页">‹</button>
+            <span id="pinned-ref-page-badge" style="font-size: 0.72rem; color: var(--text-muted); padding: 0 4px;">1</span>
+            <button type="button" id="btn-pinned-ref-next" class="btn-tool" style="width: 24px; height: 24px; padding: 0;" title="下一页">›</button>
+            <button type="button" id="btn-close-pinned-ref" class="btn-tool" style="width: 24px; height: 24px; padding: 0;" title="关闭固定参考">×</button>
+          </div>
+        </div>
+        <div id="pinned-ref-body" class="pinned-ref-body">
+          <canvas id="pinned-ref-canvas" class="pinned-ref-canvas"></canvas>
+        </div>
+      </aside>
 
       <!-- AI Sidebar Resizer Divider -->
       <div id="ai-sidebar-resizer" class="ai-sidebar-resizer" style="display: none;" title="拖动调整 AI 侧边栏宽度"></div>
@@ -1109,8 +1163,21 @@
         <button id="btn-pdf-eraser" class="btn-zoom-preset pdf-tool-btn" data-tool="eraser" title="橡皮擦" aria-label="橡皮擦"><svg class="icon" viewBox="0 0 24 24"><path d="m15 3 6 6-11 11H5l-4-4Z"/><path d="m7 10 7 7M10 20h12"/></svg></button>
         <button id="btn-pdf-clear-draw" class="btn-zoom-preset" title="清空当前页手绘批注" style="color: var(--text-muted);" aria-label="清空当前页笔迹"><svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button>
         <div class="zoom-divider"></div>
+        <button id="btn-pdf-more-tools" class="btn-zoom-preset" type="button" aria-expanded="false" aria-controls="pdf-more-tools-panel" title="更多阅读工具">更多工具<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button>
+        <div id="pdf-more-tools-panel" class="pdf-more-tools-panel" role="region" aria-label="更多 PDF 工具" hidden>
+        <div class="pdf-more-tools-heading">阅读工具</div>
         <!-- Light OCR Text Recognition & Quick Copy Tool -->
         <button id="btn-pdf-ocr-extract" class="btn-zoom-preset" title="提取或识别页面文字" style="color: var(--accent-purple); font-weight: 600;">提取文字</button>
+        <div class="zoom-divider"></div>
+        <!-- Reading Ruler, Auto-Scroll, Column Reading, Split View, Scan Presets -->
+        <button id="btn-toggle-reading-ruler" class="btn-zoom-preset" title="阅读标尺" aria-label="阅读标尺">标尺</button>
+        <button id="btn-toggle-auto-scroll" class="btn-zoom-preset" title="自动滚动" aria-label="自动滚动">自动滚</button>
+        <button id="btn-toggle-column-reading" class="btn-zoom-preset" title="按栏阅读" aria-label="按栏阅读">按栏</button>
+        <button id="btn-config-column-regions" class="btn-zoom-preset" title="配置分栏区域" aria-label="配置分栏区域">分栏设置</button>
+        <button id="btn-pdf-split-viewport" class="btn-zoom-preset" title="分屏副视口" aria-label="分屏副视口">分屏</button>
+        <button id="btn-scan-gray-boost" class="btn-zoom-preset" title="灰底增强" aria-label="灰底增强">灰底增强</button>
+        <button id="btn-scan-text-darken" class="btn-zoom-preset" title="字迹加深" aria-label="字迹加深">字迹加深</button>
+        </div>
       </div>
 
       <!-- Floating TTS Voice Player Bar -->
@@ -1190,6 +1257,12 @@
       <div class="drawer-body">
         <!-- 1. TOC Panel -->
         <div id="panel-toc" class="drawer-panel">
+          <div class="toc-toolbar" style="display: flex; gap: 6px; padding: 6px 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border-color); flex-wrap: wrap;">
+            <button type="button" id="btn-add-page-to-toc" class="btn-tool" style="width: auto; padding: 2px 8px; font-size: 0.75rem; border: 1px solid var(--border-color); border-radius: 4px;" title="将当前阅读页面加入手动目录">加当前页到目录</button>
+            <button type="button" id="btn-ocr-page-to-toc" class="btn-tool" style="width: auto; padding: 2px 8px; font-size: 0.75rem; border: 1px solid var(--border-color); border-radius: 4px;" title="识别当前页文字并提取目录候选项">OCR 辅助目录</button>
+            <button type="button" id="btn-export-toc-json" class="btn-tool" style="width: auto; padding: 2px 6px; font-size: 0.75rem; border: 1px solid var(--border-color); border-radius: 4px;" title="导出目录为 JSON 文件">导出 JSON</button>
+            <button type="button" id="btn-export-toc-md" class="btn-tool" style="width: auto; padding: 2px 6px; font-size: 0.75rem; border: 1px solid var(--border-color); border-radius: 4px;" title="导出目录为 Markdown 格式">导出 Markdown</button>
+          </div>
           <div id="toc-tree-container"></div>
         </div>
 
@@ -1271,6 +1344,30 @@
               </select>
             </div>
             <p class="setting-desc">夜间纸张会反转页面颜色。阅读彩色插图时，可以保留原始颜色。</p>
+          </div>
+
+          <!-- PDF Crop Settings (F05) -->
+          <div class="setting-section" id="pdf-crop-settings-section" data-settings-domain="reading" style="display: none;">
+            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>PDF 裁切白边 (非破坏)</span>
+              <select id="setting-pdf-crop-mode" class="setting-select" style="font-size: 0.8rem; padding: 2px 8px;">
+                <option value="none">不裁切</option>
+                <option value="manual">全书统一裁切</option>
+                <option value="odd-even">奇偶页独立裁切</option>
+              </select>
+            </div>
+            <div id="pdf-crop-controls-wrap" style="display: none; flex-direction: column; gap: 6px; margin-top: 0.6rem;">
+              <div class="control-row settings-row-pair">
+                <span class="control-label">上下边距 (%)</span>
+                <input type="range" id="setting-pdf-crop-tb" min="0" max="25" step="1" value="0" class="control-input" />
+                <span id="setting-pdf-crop-tb-val" style="font-size: 0.75rem; color: var(--text-muted); width: 28px;">0%</span>
+              </div>
+              <div class="control-row settings-row-pair">
+                <span class="control-label">左右边距 (%)</span>
+                <input type="range" id="setting-pdf-crop-lr" min="0" max="25" step="1" value="0" class="control-input" />
+                <span id="setting-pdf-crop-lr-val" style="font-size: 0.75rem; color: var(--text-muted); width: 28px;">0%</span>
+              </div>
+            </div>
           </div>
 
           <!-- Theme Selection -->
@@ -1550,11 +1647,55 @@
             </button>
           </div>
 
+          <!-- Data & Storage Paths Management Card (F13) -->
+          <div class="setting-section" id="data-backup-settings-section" data-settings-domain="system">
+            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>本地数据与备份管理</span>
+              <span id="storage-status-badge" style="padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple);">本地正常</span>
+            </div>
+            <p style="color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
+              阅读记录与书籍存储在 Windows 本机目录中，您可以随时查看所在位置或导出完整阅读备份。
+            </p>
+            <div class="storage-paths-list" style="display: flex; flex-direction: column; gap: 8px; font-size: 0.82rem; margin-bottom: 0.8rem;">
+              <div class="storage-path-item" style="display: flex; flex-direction: column; gap: 2px; background: var(--bg-tertiary); padding: 6px 8px; border-radius: 6px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="font-weight: 600; color: var(--text-main);">本地书库与原书：</span>
+                  <button type="button" id="btn-open-books-folder" class="btn-tool btn-setting-inline" style="cursor: pointer; color: var(--accent);">打开目录</button>
+                </div>
+                <span id="storage-path-books" style="color: var(--text-muted); font-family: var(--font-mono, monospace); font-size: 0.75rem; word-break: break-all;">加载中...</span>
+              </div>
+              <div class="storage-path-item" style="display: flex; flex-direction: column; gap: 2px; background: var(--bg-tertiary); padding: 6px 8px; border-radius: 6px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="font-weight: 600; color: var(--text-main);">数据库与笔记数据：</span>
+                  <button type="button" id="btn-open-data-folder" class="btn-tool btn-setting-inline" style="cursor: pointer; color: var(--accent);">打开目录</button>
+                </div>
+                <span id="storage-path-data" style="color: var(--text-muted); font-family: var(--font-mono, monospace); font-size: 0.75rem; word-break: break-all;">加载中...</span>
+              </div>
+              <div class="storage-path-item" style="display: flex; flex-direction: column; gap: 2px; background: var(--bg-tertiary); padding: 6px 8px; border-radius: 6px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="font-weight: 600; color: var(--text-main);">离线缓存与 PDF 快照：</span>
+                  <button type="button" id="btn-open-cache-folder" class="btn-tool btn-setting-inline" style="cursor: pointer; color: var(--accent);">打开目录</button>
+                </div>
+                <span id="storage-path-cache" style="color: var(--text-muted); font-family: var(--font-mono, monospace); font-size: 0.75rem; word-break: break-all;">加载中...</span>
+              </div>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button type="button" id="btn-f13-export-backup" class="btn-primary-action" style="flex: 1; justify-content: center; padding: 0.5rem 0.8rem;">
+                <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span>导出全量阅读备份</span>
+              </button>
+              <button type="button" id="btn-f13-restore-backup" class="btn-secondary-action" style="flex: 1; justify-content: center; padding: 0.5rem 0.8rem;">
+                <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <span>恢复阅读备份</span>
+              </button>
+            </div>
+          </div>
+
           <!-- About & Check for Updates Card -->
           <div class="setting-section" id="about-settings-section" data-settings-domain="system">
             <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
               <span>关于与版本更新</span>
-              <span id="app-version-badge-sidebar" style="padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple);">v2.0.5</span>
+              <span id="app-version-badge-sidebar" style="padding: 2px 8px; border-radius: 12px; background: var(--bg-tertiary); color: var(--accent-purple);">v1.0.0</span>
             </div>
             <p style="color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;">
               Linden Leaf 现代化全格式开源电子书阅读器。
@@ -2415,33 +2556,83 @@
         <p class="sync-intro">同步进度、笔记、书单与阅读统计。图书文件可由你手动备份或下载。</p>
 
         <!-- Server type preset switch -->
-        <div class="sync-preset-bar" style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
-          <button type="button" class="btn-sync-preset active" data-preset="jianguoyun" style="flex: 1; padding: 0.45rem; font-size: 0.82rem; font-weight: 500;">坚果云 (推荐)</button>
-          <button type="button" class="btn-sync-preset" data-preset="custom" style="flex: 1; padding: 0.45rem; font-size: 0.82rem; font-weight: 500;">自定义 WebDAV</button>
+        <div class="sync-preset-bar" style="display: flex; gap: 0.35rem; margin-bottom: 1rem; flex-wrap: wrap;">
+          <button type="button" class="btn-sync-preset active" data-preset="jianguoyun" style="flex: 1 1 30%; padding: 0.45rem; font-size: 0.8rem; font-weight: 500;">坚果云 (推荐)</button>
+          <button type="button" class="btn-sync-preset" data-preset="custom" style="flex: 1 1 30%; padding: 0.45rem; font-size: 0.8rem; font-weight: 500;">自定义 WebDAV</button>
+          <button type="button" class="btn-sync-preset" data-preset="onedrive" style="flex: 1 1 30%; padding: 0.45rem; font-size: 0.8rem; font-weight: 500;">OneDrive</button>
+          <button type="button" class="btn-sync-preset" data-preset="google_drive" style="flex: 1 1 30%; padding: 0.45rem; font-size: 0.8rem; font-weight: 500;">Google Drive</button>
+          <button type="button" class="btn-sync-preset" data-preset="local_folder" style="flex: 1 1 30%; padding: 0.45rem; font-size: 0.8rem; font-weight: 500;">本地目录</button>
         </div>
 
-        <!-- Form fields -->
-        <div class="sync-field-group">
-          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">服务器地址</label>
-          <input type="text" id="sync-input-server" class="jane-modal-input sync-input" placeholder="https://dav.jianguoyun.com/dav/" value="https://dav.jianguoyun.com/dav/" style="width: 100%; box-sizing: border-box;" />
-        </div>
+        <!-- WebDAV Form fields -->
+        <div id="sync-fields-webdav">
+          <div class="sync-field-group">
+            <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">服务器地址</label>
+            <input type="text" id="sync-input-server" class="jane-modal-input sync-input" placeholder="https://dav.jianguoyun.com/dav/" value="https://dav.jianguoyun.com/dav/" style="width: 100%; box-sizing: border-box;" />
+          </div>
 
-        <div class="sync-field-group" style="margin-top: 0.65rem;">
-          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">坚果云账号 / 邮箱</label>
-          <input type="email" id="sync-input-username" class="jane-modal-input sync-input" placeholder="例如: your_name@example.com" style="width: 100%; box-sizing: border-box;" />
-        </div>
+          <div class="sync-field-group" style="margin-top: 0.65rem;">
+            <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">坚果云账号 / 邮箱</label>
+            <input type="email" id="sync-input-username" class="jane-modal-input sync-input" placeholder="例如: your_name@example.com" style="width: 100%; box-sizing: border-box;" />
+          </div>
 
-        <div class="sync-field-group" style="margin-top: 0.65rem;">
-          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">应用授权密码</label>
-          <div style="position: relative;">
-            <input type="password" id="sync-input-password" class="jane-modal-input sync-input" placeholder="16 位第三方应用专用授权密码" style="width: 100%; box-sizing: border-box; padding-right: 2.4rem;" />
-            <button type="button" id="btn-toggle-sync-pwd" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; justify-content: center;" title="显示密码"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg></button>
+          <div class="sync-field-group" style="margin-top: 0.65rem;">
+            <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">应用授权密码</label>
+            <div style="position: relative;">
+              <input type="password" id="sync-input-password" class="jane-modal-input sync-input" placeholder="16 位第三方应用专用授权密码" style="width: 100%; box-sizing: border-box; padding-right: 2.4rem;" />
+              <button type="button" id="btn-toggle-sync-pwd" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; justify-content: center;" title="显示密码"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg></button>
+            </div>
+          </div>
+
+          <div class="sync-field-group" style="margin-top: 0.65rem;">
+            <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">云端同步目录</label>
+            <input type="text" id="sync-input-dir" class="jane-modal-input sync-input" value="LindenLeaf" placeholder="LindenLeaf" style="width: 100%; box-sizing: border-box;" />
           </div>
         </div>
 
-        <div class="sync-field-group" style="margin-top: 0.65rem;">
-          <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">云端同步目录</label>
-          <input type="text" id="sync-input-dir" class="jane-modal-input sync-input" value="LindenLeaf" placeholder="LindenLeaf" style="width: 100%; box-sizing: border-box;" />
+        <!-- Cloud OAuth Form fields -->
+        <div id="sync-fields-oauth" style="display: none; margin-top: 0.65rem;">
+          <div class="sync-field-group">
+            <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">Client ID（需自行配置）</label>
+            <input type="text" id="sync-input-client-id" class="jane-modal-input sync-input" placeholder="输入已注册的客户端 ID" style="width: 100%; box-sizing: border-box;" />
+          </div>
+          <div class="sync-field-group" style="margin-top: 0.4rem; display: flex; align-items: center; gap: 0.4rem;">
+            <input type="checkbox" id="sync-oauth-include-user-files" style="cursor: pointer;" />
+            <label for="sync-oauth-include-user-files" style="font-size: 0.78rem; cursor: pointer; color: var(--text-secondary);">申请个人云盘文件读取权限 (用于导入全盘书籍)</label>
+          </div>
+          <div class="sync-field-group" style="margin-top: 0.65rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+            <div id="sync-oauth-status" style="font-size: 0.78rem; color: var(--text-secondary);">授权状态: 未登录</div>
+            <div style="display: flex; gap: 0.4rem;">
+              <button type="button" id="btn-oauth-login" class="btn-primary-action" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;" title="在浏览器打开 OAuth 授权页面">OAuth 登录</button>
+              <button type="button" id="btn-browse-cloud-books" class="btn-secondary-action" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;" title="浏览并从云盘导入图书">云盘书库</button>
+              <button type="button" id="btn-oauth-cancel" class="btn-secondary-action" style="display:none;padding: 0.4rem 0.8rem;font-size:0.8rem;">取消授权</button>
+              <button type="button" id="btn-oauth-logout" class="btn-secondary-action" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;" title="清除本地凭据退出登录">注销</button>
+            </div>
+          </div>
+          <div id="cloud-books-picker-panel" style="display: none; margin-top: 0.6rem; padding: 0.55rem; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary);">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.4rem; margin-bottom: 0.4rem;">
+              <span style="font-size: 0.78rem; font-weight: 600;">云盘图书列表</span>
+              <select id="cloud-books-space-select" class="jane-modal-input" style="width: auto; padding: 2px 6px; font-size: 0.75rem;">
+                <option value="approot">应用专属目录 (AppRoot)</option>
+                <option value="drive">用户云盘 (只读导入)</option>
+              </select>
+            </div>
+            <div id="cloud-books-list-container" style="max-height: 160px; overflow-y: auto; font-size: 0.78rem;"></div>
+            <div style="display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.4rem;">
+              <button type="button" id="btn-cloud-books-next-page" class="btn-secondary-action" style="display: none; padding: 2px 8px; font-size: 0.74rem;">加载更多</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Local Folder Form fields -->
+        <div id="sync-fields-local" style="display: none; margin-top: 0.65rem;">
+          <div class="sync-field-group">
+            <label class="sync-label" style="font-size: 0.78rem; font-weight: 500; margin-bottom: 0.25rem; display: block;">本地同步目录</label>
+            <div style="display: flex; gap: 0.4rem;">
+              <input type="text" id="sync-input-local-folder" class="jane-modal-input sync-input" placeholder="例如: D:/Sync/LindenLeaf" style="flex: 1; box-sizing: border-box;" />
+              <button type="button" id="btn-sync-pick-folder" class="btn-secondary-action" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;">选择目录</button>
+            </div>
+          </div>
         </div>
 
         <details class="sync-help">
@@ -2483,50 +2674,38 @@
 
   <!-- Modal: Dedicated Update Notification Dialog -->
   <div id="modal-update-dialog" class="global-modal-backdrop" style="display: none; z-index: 99999;">
-    <div class="global-modal-card" style="max-width: 500px; width: 90vw;">
-      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <svg class="icon" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M5 17v4h14v-4"/></svg>
-          <span id="update-modal-title" class="global-modal-title" style="font-size: 1.05rem; font-weight: 600;">发现新版本</span>
+    <div class="global-modal-card" style="max-width: 480px; width: 90vw; border-radius: 12px; padding: 24px; box-shadow: 0 12px 40px rgba(0,0,0,0.14);">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 0.5rem; border: none;">
+        <div>
+          <div style="font-size: 0.75rem; color: var(--text-tertiary); margin-bottom: 4px; font-weight: 500;">软件更新</div>
+          <h2 id="update-modal-title" style="margin: 0; font-size: 1.35rem; font-weight: 600; color: var(--text-main); letter-spacing: -0.3px;">发现新版本</h2>
         </div>
-        <button id="btn-close-update-modal" class="footnote-popup-close" title="关闭" aria-label="关闭">×</button>
+        <button id="btn-close-update-modal" class="footnote-popup-close" title="关闭" aria-label="关闭" style="cursor: pointer; color: var(--text-tertiary); background: transparent; border: none; padding: 4px 8px; display: flex; align-items: center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </div>
 
-      <div style="padding: 1rem 0 0.5rem 0;">
-        <!-- Version Compare Badge -->
-        <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(139, 92, 246, 0.08); border: 1px solid rgba(139, 92, 246, 0.2); border-radius: 8px; padding: 10px 14px; margin-bottom: 1rem;">
-          <div>
-            <div style="font-size: 0.75rem; color: var(--text-tertiary);">当前版本</div>
-            <div id="update-current-version" style="font-size: 0.95rem; font-weight: 600; color: var(--text-main);">v2.0.5</div>
-          </div>
-          <div style="font-size: 1.2rem; color: var(--accent-purple);">➔</div>
-          <div>
-            <div style="font-size: 0.75rem; color: var(--text-tertiary);">最新版本</div>
-            <div id="update-latest-version" style="font-size: 0.95rem; font-weight: 700; color: var(--accent-purple);">v0.2.0</div>
-          </div>
-          <div>
-            <div style="font-size: 0.75rem; color: var(--text-tertiary);">发布日期</div>
-            <div id="update-published-date" style="font-size: 0.82rem; color: var(--text-secondary);">2026-08-28</div>
-          </div>
+      <div style="padding: 0.5rem 0 1rem 0;">
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 1rem; font-size: 0.88rem;">
+          <strong id="update-latest-version" style="font-weight: 600; color: var(--text-main);">Linden Leaf 1.0.0</strong>
+          <span id="update-current-version" style="font-size: 0.8rem; color: var(--text-tertiary); padding-left: 10px; border-left: 1px solid var(--border-color);">当前 v1.0.0</span>
+          <span style="font-size: 0.8rem; color: var(--text-tertiary); padding-left: 10px; border-left: 1px solid var(--border-color);">Windows x64</span>
         </div>
 
-        <!-- Release Notes Log -->
-        <div style="margin-bottom: 0.5rem;">
-          <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-main); margin-bottom: 0.35rem;">更新日志与新特性：</div>
-          <div id="update-release-notes" style="max-height: 180px; overflow-y: auto; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px; font-size: 0.8rem; line-height: 1.5; color: var(--text-secondary); white-space: pre-wrap; font-family: inherit;">
-          </div>
+        <p style="margin: 0 0 0.75rem 0; font-size: 0.88rem; color: var(--text-secondary); line-height: 1.5;">本次更新着重改善书架体验与阅读稳定性：</p>
+
+        <div id="update-release-notes" style="max-height: 180px; overflow-y: auto; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 14px; font-size: 0.82rem; line-height: 1.6; color: var(--text-main);">
         </div>
       </div>
 
-      <!-- Action buttons footer -->
-      <div class="global-modal-footer" style="display: flex; justify-content: flex-end; align-items: center; gap: 0.6rem; margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
-        <button type="button" id="btn-update-later" class="btn-secondary-action" style="padding: 0.45rem 1rem; font-size: 0.82rem;">
-          <span>稍后再说</span>
-        </button>
-        <button type="button" id="btn-update-download" class="btn-primary-action" style="padding: 0.45rem 1.25rem; font-size: 0.82rem;">
-          <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          <span>立即前往 GitHub 下载</span>
-        </button>
+      <div class="global-modal-footer" style="display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
+        <div style="font-size: 0.75rem; color: var(--text-tertiary); line-height: 1.4;">将在浏览器中打开<br>官方版本下载页面</div>
+        <div style="display: flex; gap: 8px;">
+          <button type="button" id="btn-update-later" class="btn-secondary-action" style="padding: 0.5rem 1.1rem; font-size: 0.85rem; border-radius: 7px;">
+            <span>稍后</span>
+          </button>
+          <button type="button" id="btn-update-download" class="btn-primary-action" style="padding: 0.5rem 1.3rem; font-size: 0.85rem; border-radius: 7px; font-weight: 500;">
+            <span>前往下载</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -2937,7 +3116,6 @@
     </div>
   </div>
 
-  <script defer src="./vendor/mammoth/mammoth.browser.min.js"></script>
   <script defer src="./services/webdav.js"></script>
   <script type="module" src="./js/app.js?v=20260914_rel_v1"></script>
 </body>

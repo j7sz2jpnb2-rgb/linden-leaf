@@ -98,6 +98,43 @@ LL_API int ll_select(ll_doc *doc, int page, float ax, float ay, float bx, float 
 LL_API int ll_select_mode(ll_doc *doc, int page, float ax, float ay, float bx, float by,
                           int mode, ll_selection *out);
 LL_API void ll_free_selection(ll_selection *out);
+
+typedef struct ll_link {
+    float rect[4];
+    char *uri;
+    int page;
+} ll_link;
+
+typedef struct ll_links {
+    int count;
+    ll_link *items;
+} ll_links;
+
+LL_API int ll_get_links(ll_doc *doc, int page, ll_links *out);
+LL_API void ll_free_links(ll_links *out);
+
+LL_API int ll_get_page_plain_text(ll_doc *doc, int page, char **out_text);
+
+typedef struct ll_export_annot {
+    int page;
+    int type; /* 0: highlight, 1: underline, 2: strikeout, 3: text/note, 4: ink */
+    float color[3];
+    float opacity;
+    float rect[4];
+    const float *quads;
+    int quad_count;
+    const char *text;
+    const char *author;
+    const int *stroke_counts;
+    const float *stroke_points;
+    int stroke_count;
+    float width;
+} ll_export_annot;
+
+LL_API int ll_export_annotated_pdf(const char *input_path, const char *output_path,
+                                   const char *password,
+                                   const ll_export_annot *annots, int annot_count);
+
 LL_API ll_stats ll_get_stats(ll_doc *doc);
 LL_API ll_render_timings ll_get_last_render_timings(ll_doc *doc);
 
@@ -105,3 +142,4 @@ LL_API ll_render_timings ll_get_last_render_timings(ll_doc *doc);
 }
 #endif
 #endif
+

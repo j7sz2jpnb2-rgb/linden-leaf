@@ -1,5 +1,6 @@
 #include "ll_mupdf.h"
 #include <mupdf/fitz.h>
+#include <mupdf/pdf.h>
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -140,6 +141,123 @@ static ll_page *get_page_internal(ll_doc *d, int number, int *hit, int priority)
     return entry;
 }
 
+static void project_quad(const fz_quad *q, float ux, float uy, float vx, float vy,
+                         float u_range[2], float v_range[2]) {
+    float pts[4][2] = {
+        {q->ul.x, q->ul.y},
+        {q->ur.x, q->ur.y},
+        {q->ll.x, q->ll.y},
+        {q->lr.x, q->lr.y}
+    };
+    float min_u = 1e9f, max_u = -1e9f;
+    float min_v = 1e9f, max_v = -1e9f;
+    for (int i = 0; i < 4; ++i) {
+        float pu = pts[i][0] * ux + pts[i][1] * uy;
+        float pv = pts[i][0] * vx + pts[i][1] * vy;
+        if (pu < min_u) min_u = pu;
+        if (pu > max_u) max_u = pu;
+        if (pv < min_v) min_v = pv;
+        if (pv > max_v) max_v = pv;
+    }
+    u_range[0] = min_u; u_range[1] = max_u;
+    v_range[0] = min_v; v_range[1] = max_v;
+}
+
+static fz_quad adapt_quad(const fz_quad *raw, const fz_quad *ink,
+                          int flags, fz_point dir, float font_size) {
+    /* 1. Invisible OCR text (PDF rendering mode 3 Tr, neither filled nor stroked) */
+    if (!(flags & (FZ_STEXT_FILLED | FZ_STEXT_STROKED))) {
+        return *raw;
+    }
+
+    float len = sqrtf(dir.x * dir.x + dir.y * dir.y);
+    if (len <= 1e-4f) {
+        dir.x = 1.0f; dir.y = 0.0f; len = 1.0f;
+    }
+    float ux = dir.x / len, uy = dir.y / len;
+    float vx = -uy, vy = ux;
+
+    float r_u[2], r_v[2];
+    float i_u[2], i_v[2];
+    project_quad(raw, ux, uy, vx, vy, r_u, r_v);
+    project_quad(ink, ux, uy, vx, vy, i_u, i_v);
+
+    float ih = i_v[1] - i_v[0];
+    /* 2. Empty outline fallback (zero-height ink outline, e.g. real book sample 5) */
+    if (ih <= 0.001f) {
+        return *raw;
+    }
+
+    float rh = r_v[1] - r_v[0];
+    int sane_raw = (rh > 0.001f && rh <= font_size * 2.5f);
+    float low = sane_raw ? (r_v[0] < i_v[0] ? r_v[0] : i_v[0]) : i_v[0];
+    float high = sane_raw ? (r_v[1] > i_v[1] ? r_v[1] : i_v[1]) : i_v[1];
+
+    /* Reconstruct quad corners */
+    fz_quad out;
+    out.ul.x = ux * r_u[0] + vx * low;  out.ul.y = uy * r_u[0] + vy * low;
+    out.ur.x = ux * r_u[1] + vx * low;  out.ur.y = uy * r_u[1] + vy * low;
+    out.ll.x = ux * r_u[0] + vx * high; out.ll.y = uy * r_u[0] + vy * high;
+    out.lr.x = ux * r_u[1] + vx * high; out.lr.y = uy * r_u[1] + vy * high;
+    return out;
+}
+
+static void adapt_stext_page(ll_doc *d, ll_page *p) {
+    if (!d || !p || !p->text || !p->list) return;
+    fz_stext_page *acc_text = NULL;
+    fz_var(acc_text);
+    fz_try(d->ctx) {
+        fz_stext_options opts = {0};
+        opts.flags = FZ_STEXT_ACCURATE_BBOXES;
+        acc_text = fz_new_stext_page_from_display_list(d->ctx, p->list, &opts);
+        if (!acc_text) return;
+
+        fz_stext_block *acc_b = acc_text->first_block;
+        for (fz_stext_block *b = p->text->first_block; b; b = b->next) {
+            if (b->type != FZ_STEXT_BLOCK_TEXT) continue;
+            while (acc_b && acc_b->type != FZ_STEXT_BLOCK_TEXT) {
+                acc_b = acc_b->next;
+            }
+            if (!acc_b) break;
+
+            fz_stext_line *acc_l = acc_b->u.t.first_line;
+            for (fz_stext_line *l = b->u.t.first_line; l; l = l->next) {
+                if (!acc_l) break;
+
+                fz_stext_char *acc_c = acc_l->first_char;
+                for (fz_stext_char *c = l->first_char; c; c = c->next) {
+                    fz_stext_char *matched_acc = NULL;
+                    if (acc_c && acc_c->c == c->c) {
+                        matched_acc = acc_c;
+                        acc_c = acc_c->next;
+                    } else if (acc_c) {
+                        fz_stext_char *scan = acc_c->next;
+                        for (int k = 0; scan && k < 4; k++, scan = scan->next) {
+                            if (scan->c == c->c) {
+                                matched_acc = scan;
+                                acc_c = scan->next;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (matched_acc) {
+                        c->quad = adapt_quad(&c->quad, &matched_acc->quad, matched_acc->flags, acc_l->dir, c->size);
+                    }
+                }
+                acc_l = acc_l->next;
+            }
+            acc_b = acc_b->next;
+        }
+    }
+    fz_always(d->ctx) {
+        if (acc_text) fz_drop_stext_page(d->ctx, acc_text);
+    }
+    fz_catch(d->ctx) {
+        /* Non-fatal: keep unadapted metrics on failure */
+    }
+}
+
 static ll_page *get_page(ll_doc *d, int number) {
     return get_page_internal(d, number, NULL, 0);
 }
@@ -148,6 +266,7 @@ static fz_stext_page *get_text(ll_doc *d, int number) {
     ll_page *p = get_page(d, number);
     if (!p->text) {
         p->text = fz_new_stext_page_from_display_list(d->ctx, p->list, NULL);
+        adapt_stext_page(d, p);
         ++d->stats.text_builds;
     }
     return p->text;
@@ -662,6 +781,77 @@ void ll_free_selection(ll_selection *out) {
     memset(out, 0, sizeof(*out));
 }
 
+int ll_get_links(ll_doc *d, int number, ll_links *out) {
+    if (!d || !out) return LL_ERROR;
+    clear_error(d);
+    memset(out, 0, sizeof(*out));
+    if (number < 0 || number >= d->count) return LL_ERROR;
+
+    fz_page *page = NULL;
+    fz_link *links = NULL;
+    fz_var(page);
+    fz_var(links);
+
+    fz_try(d->ctx) {
+        page = fz_load_page(d->ctx, d->document, number);
+        links = fz_load_links(d->ctx, page);
+
+        int count = 0;
+        for (fz_link *l = links; l; l = l->next) {
+            count++;
+        }
+        out->count = count;
+        if (count > 0) {
+            out->items = calloc((size_t)count, sizeof(ll_link));
+            if (!out->items) fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
+
+            int idx = 0;
+            for (fz_link *l = links; l; l = l->next, idx++) {
+                out->items[idx].rect[0] = l->rect.x0;
+                out->items[idx].rect[1] = l->rect.y0;
+                out->items[idx].rect[2] = l->rect.x1;
+                out->items[idx].rect[3] = l->rect.y1;
+                out->items[idx].page = -1;
+                if (l->uri) {
+                    size_t ulen = strlen(l->uri);
+                    out->items[idx].uri = malloc(ulen + 1);
+                    if (out->items[idx].uri) {
+                        memcpy(out->items[idx].uri, l->uri, ulen + 1);
+                    }
+                    if (!fz_is_external_link(d->ctx, l->uri)) {
+                        float xp = 0, yp = 0;
+                        fz_location loc = fz_resolve_link(d->ctx, d->document, l->uri, &xp, &yp);
+                        if (loc.page >= 0) {
+                            out->items[idx].page = fz_page_number_from_location(d->ctx, d->document, loc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fz_always(d->ctx) {
+        if (links) fz_drop_link(d->ctx, links);
+        if (page) fz_drop_page(d->ctx, page);
+    }
+    fz_catch(d->ctx) {
+        caught(d);
+        ll_free_links(out);
+        return LL_ERROR;
+    }
+    return LL_OK;
+}
+
+void ll_free_links(ll_links *out) {
+    if (!out) return;
+    if (out->items) {
+        for (int i = 0; i < out->count; i++) {
+            if (out->items[i].uri) free(out->items[i].uri);
+        }
+        free(out->items);
+    }
+    memset(out, 0, sizeof(*out));
+}
+
 ll_render_timings ll_get_last_render_timings(ll_doc *d) {
     if (!d) {
         ll_render_timings zero = {0, 0, 0, 0};
@@ -669,3 +859,155 @@ ll_render_timings ll_get_last_render_timings(ll_doc *d) {
     }
     return d->last_render_timings;
 }
+
+int ll_get_page_plain_text(ll_doc *d, int number, char **out_text) {
+    if (!d || !out_text) return LL_ERROR;
+    *out_text = NULL;
+    clear_error(d);
+    if (number < 0 || number >= d->count) return LL_ERROR;
+
+    fz_buffer *buf = NULL;
+    fz_output *out = NULL;
+    fz_var(buf);
+    fz_var(out);
+    fz_try(d->ctx) {
+        fz_stext_page *text = get_text(d, number);
+        buf = fz_new_buffer(d->ctx, 1024);
+        out = fz_new_output_with_buffer(d->ctx, buf);
+        fz_print_stext_page_as_text(d->ctx, out, text);
+        fz_close_output(d->ctx, out);
+        const char *s = fz_string_from_buffer(d->ctx, buf);
+        size_t len = strlen(s);
+        char *copy = malloc(len + 1);
+        if (!copy) fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
+        memcpy(copy, s, len + 1);
+        *out_text = copy;
+    }
+    fz_always(d->ctx) {
+        fz_drop_output(d->ctx, out);
+        fz_drop_buffer(d->ctx, buf);
+    }
+    fz_catch(d->ctx) {
+        caught(d);
+        if (*out_text) {
+            free(*out_text);
+            *out_text = NULL;
+        }
+        return LL_ERROR;
+    }
+    return LL_OK;
+}
+
+int ll_export_annotated_pdf(const char *input_path, const char *output_path,
+                           const char *password,
+                           const ll_export_annot *annots, int annot_count) {
+    if (!input_path || !output_path) return LL_ERROR;
+
+    fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_UNLIMITED);
+    if (!ctx) return LL_ERROR;
+    fz_register_document_handlers(ctx);
+
+    pdf_document *pdf = NULL;
+    fz_var(pdf);
+
+    fz_try(ctx) {
+        pdf = pdf_open_document(ctx, input_path);
+        if (!pdf) fz_throw(ctx, FZ_ERROR_SYSTEM, "Cannot open PDF document");
+
+        if (password && password[0]) {
+            if (pdf_needs_password(ctx, pdf)) {
+                if (!pdf_authenticate_password(ctx, pdf, password)) {
+                    fz_throw(ctx, FZ_ERROR_GENERIC, "Invalid PDF password");
+                }
+            }
+        }
+
+        int total_pages = pdf_count_pages(ctx, pdf);
+
+        for (int p = 0; p < total_pages; p++) {
+            int page_annot_count = 0;
+            for (int i = 0; i < annot_count; i++) {
+                if (annots[i].page == p) page_annot_count++;
+            }
+            if (page_annot_count == 0) continue;
+
+            pdf_page *page = pdf_load_page(ctx, pdf, p);
+            if (!page) continue;
+
+            for (int i = 0; i < annot_count; i++) {
+                const ll_export_annot *ea = &annots[i];
+                if (ea->page != p) continue;
+
+                enum pdf_annot_type atype = PDF_ANNOT_HIGHLIGHT;
+                switch (ea->type) {
+                    case 0: atype = PDF_ANNOT_HIGHLIGHT; break;
+                    case 1: atype = PDF_ANNOT_UNDERLINE; break;
+                    case 2: atype = PDF_ANNOT_STRIKE_OUT; break;
+                    case 3: atype = PDF_ANNOT_TEXT; break;
+                    case 4: atype = PDF_ANNOT_INK; break;
+                    default: atype = PDF_ANNOT_HIGHLIGHT; break;
+                }
+
+                pdf_annot *annot = pdf_create_annot(ctx, page, atype);
+                if (!annot) continue;
+
+                fz_rect r = { ea->rect[0], ea->rect[1], ea->rect[2], ea->rect[3] };
+                pdf_set_annot_rect(ctx, annot, r);
+                pdf_set_annot_color(ctx, annot, 3, ea->color);
+                if (ea->opacity > 0.0f) {
+                    pdf_set_annot_opacity(ctx, annot, ea->opacity);
+                }
+                if (ea->text && ea->text[0]) {
+                    pdf_set_annot_contents(ctx, annot, ea->text);
+                }
+                if (ea->author && ea->author[0]) {
+                    pdf_set_annot_author(ctx, annot, ea->author);
+                }
+
+                if ((ea->type == 0 || ea->type == 1 || ea->type == 2) && ea->quads && ea->quad_count > 0) {
+                    fz_quad *qv = malloc(sizeof(fz_quad) * (size_t)ea->quad_count);
+                    if (qv) {
+                        for (int q = 0; q < ea->quad_count; q++) {
+                            qv[q].ul.x = ea->quads[q * 8 + 0];
+                            qv[q].ul.y = ea->quads[q * 8 + 1];
+                            qv[q].ur.x = ea->quads[q * 8 + 2];
+                            qv[q].ur.y = ea->quads[q * 8 + 3];
+                            qv[q].ll.x = ea->quads[q * 8 + 4];
+                            qv[q].ll.y = ea->quads[q * 8 + 5];
+                            qv[q].lr.x = ea->quads[q * 8 + 6];
+                            qv[q].lr.y = ea->quads[q * 8 + 7];
+                        }
+                        pdf_set_annot_quad_points(ctx, annot, ea->quad_count, qv);
+                        free(qv);
+                    }
+                }
+
+                if (ea->type == 4 && ea->stroke_counts && ea->stroke_points && ea->stroke_count > 0) {
+                    pdf_set_annot_ink_list(ctx, annot, ea->stroke_count, ea->stroke_counts,
+                                           (const fz_point *)ea->stroke_points);
+                    if (ea->width > 0.0f) {
+                        pdf_set_annot_border(ctx, annot, ea->width);
+                    }
+                }
+
+                pdf_update_annot(ctx, annot);
+                pdf_drop_annot(ctx, annot);
+            }
+
+            pdf_update_page(ctx, page);
+            pdf_drop_page(ctx, page);
+        }
+
+        pdf_save_document(ctx, pdf, output_path, &pdf_default_write_options);
+    }
+    fz_always(ctx) {
+        if (pdf) pdf_drop_document(ctx, pdf);
+        fz_drop_context(ctx);
+    }
+    fz_catch(ctx) {
+        return LL_ERROR;
+    }
+    return LL_OK;
+}
+
+

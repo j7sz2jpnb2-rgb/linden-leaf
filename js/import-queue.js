@@ -366,7 +366,10 @@ export class ImportQueue {
     async _executeImportJob(job) {
         const t0_total = performance.now()
         let nativeSnapshotPath = null
+        let stageDescriptor = null
         let activeStableKey = null
+        let savedBookId = null
+        let isCommittedToDb = false
         const signal = job.abortController.signal
         const myToken = job.attemptToken || 0
 
@@ -415,9 +418,14 @@ export class ImportQueue {
                 fileBuffer = raw.buffer
             } else if (raw.filePath) {
                 // If PDF on Tauri, stage to native cache first
+                stageDescriptor = null
                 if (ext === 'pdf' && platformBridge.isTauri && platformBridge.stagePdfSource) {
                     try {
-                        nativeSnapshotPath = await platformBridge.stagePdfSource(raw.filePath)
+                        const staged = await platformBridge.stagePdfSource(raw.filePath)
+                        if (staged) {
+                            stageDescriptor = typeof staged === 'object' ? staged : { path: staged }
+                            nativeSnapshotPath = stageDescriptor.path || String(staged)
+                        }
                     } catch (stageErr) {
                         console.warn('[ImportQueue] stagePdfSource skipped:', stageErr)
                     }
@@ -431,6 +439,7 @@ export class ImportQueue {
                     if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
                         platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
                         nativeSnapshotPath = null
+                        stageDescriptor = null
                     }
                     fileBuffer = await platformBridge.readFileBuffer(raw.filePath, { signal })
                 }
@@ -607,7 +616,7 @@ const formatContributor = contributor => {
                 return
             }
 
-            let savedBookId = null
+            savedBookId = null
 
             if (match && match.isCloudOnly) {
                 // Cloud placeholder download: populate local file content
@@ -617,6 +626,8 @@ const formatContributor = contributor => {
                     blob: fileObj,
                     nativePath: raw.filePath || null,
                     nativeSnapshotPath,
+                    blobRevision: stageDescriptor?.revision || null,
+                    documentHash: stageDescriptor?.documentHash || null,
                     filename: fileName,
                     isCloudOnly: false,
                     hasLocalFile: true,
@@ -642,6 +653,8 @@ const formatContributor = contributor => {
                     blob: fileObj,
                     nativePath: raw.filePath || null,
                     nativeSnapshotPath,
+                    blobRevision: stageDescriptor?.revision || null,
+                    documentHash: stageDescriptor?.documentHash || null,
                     coverBlob: initialCoverBlob,
                     readingStatus: 'unread',
                     tags: [],
@@ -655,6 +668,7 @@ const formatContributor = contributor => {
                 })
             }
 
+            isCommittedToDb = true
             job.durationMs.save = Math.round(performance.now() - t0_save)
             job.bookId = savedBookId
             job.status = 'succeeded'
@@ -686,11 +700,11 @@ const formatContributor = contributor => {
             fileBuffer = null
 
         } catch (err) {
-            if (nativeSnapshotPath && platformBridge.reclaimSnapshot) {
+            if (!isCommittedToDb && nativeSnapshotPath && platformBridge.reclaimSnapshot) {
                 platformBridge.reclaimSnapshot(nativeSnapshotPath).catch(() => {})
             }
 
-            if (job.status === 'succeeded' || job.bookId) {
+            if (isCommittedToDb || job.status === 'succeeded' || job.bookId) {
                 // Book already committed to DB, preserve succeeded status
             } else if (isAborted() || signal.aborted) {
                 job.status = 'cancelled'

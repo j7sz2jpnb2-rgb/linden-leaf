@@ -430,24 +430,24 @@ export class PdfPageTurnAdapter extends PageTurnAdapter {
         return this.viewport?.currentPage ?? 0
     }
 
-    canTurnPrev() {
-        return this.getCurrentPage() > 0
+    _getTargetPage(direction) {
+        if (typeof this.viewport?.getAdjacentPage === 'function') return this.viewport.getAdjacentPage(direction)
+        const target = this.getCurrentPage() + (direction === 'next' ? 1 : -1)
+        return target >= 0 && target < this.getTotalPages() ? target : null
     }
 
-    canTurnNext() {
-        return this.getCurrentPage() < this.getTotalPages() - 1
-    }
+    canTurnPrev() { return this._getTargetPage('prev') != null }
+
+    canTurnNext() { return this._getTargetPage('next') != null }
 
     async turnPrev() {
-        if (this.canTurnPrev()) {
-            await this.viewport.goToPage(this.getCurrentPage() - 1)
-        }
+        const target = this._getTargetPage('prev')
+        if (target != null) await this.viewport.goToPage(target)
     }
 
     async turnNext() {
-        if (this.canTurnNext()) {
-            await this.viewport.goToPage(this.getCurrentPage() + 1)
-        }
+        const target = this._getTargetPage('next')
+        if (target != null) await this.viewport.goToPage(target)
     }
 
     isBusy() {
@@ -479,8 +479,8 @@ export class PdfPageTurnAdapter extends PageTurnAdapter {
         // Retrieve current and target page canvases for realistic page-turn projection
         const curPage = this.getCurrentPage()
         const curCanvas = this._getCanvasForPage(curPage)
-        const targetPage = direction === 'next' ? curPage + 1 : curPage - 1
-        const nextCanvas = this._getCanvasForPage(targetPage)
+        const targetPage = this._getTargetPage(direction)
+        const nextCanvas = targetPage == null ? null : this._getCanvasForPage(targetPage)
         const bgColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-bg') || (typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement).getPropertyValue('--book-bg') : ''))) || '#ffffff'
         const textColor = (typeof document !== 'undefined' && (document.documentElement?.style?.getPropertyValue('--book-color') || (typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement).getPropertyValue('--book-color') : ''))) || '#141413'
         return {

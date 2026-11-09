@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Linden Leaf",
-  "version": "2.0.17",
+  "version": "1.0.0",
   "identifier": "com.lindenleaf.reader",
   "build": {
     "beforeDevCommand": "node scripts/build-dist.js",
-    "beforeBuildCommand": "node scripts/build-dist.js",
+    "beforeBuildCommand": "",
     "frontendDist": "../dist-tauri"
   },
   "app": {

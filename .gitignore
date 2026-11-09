@@ -75,3 +75,5 @@ scripts/launch-preview.vbs
 
 
 deliveries/
+
+*.exe

@@ -420,10 +420,17 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         if (!tombstoneMap.has(tId) || delTime >= (tombstoneMap.get(tId).deletedAt || 0)) {
             tombstoneMap.set(tId, { ...t, id: tId, type: normType, deletedAt: delTime })
         }
-        if (normType === 'book' && t.stableKey) {
-            const keyByStable = `book:${t.stableKey}`
-            if (!tombstoneMap.has(keyByStable) || delTime >= (tombstoneMap.get(keyByStable).deletedAt || 0)) {
-                tombstoneMap.set(keyByStable, { ...t, id: tId, type: 'book', deletedAt: delTime })
+        if (normType === 'book') {
+            if (t.documentHash) {
+                const keyByHash = `book:hash:${t.documentHash}`
+                if (!tombstoneMap.has(keyByHash) || delTime >= (tombstoneMap.get(keyByHash).deletedAt || 0)) {
+                    tombstoneMap.set(keyByHash, { ...t, id: tId, type: 'book', deletedAt: delTime })
+                }
+            } else if (t.stableKey) {
+                const legacyKey = `book:legacy:${t.stableKey}`
+                if (!tombstoneMap.has(legacyKey) || delTime >= (tombstoneMap.get(legacyKey).deletedAt || 0)) {
+                    tombstoneMap.set(legacyKey, { ...t, id: tId, type: 'book', deletedAt: delTime })
+                }
             }
         }
     }
@@ -490,6 +497,19 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         }
     })
 
+    // P09: Pre-index local books by stableKey to avoid O(N*M) full-scan comparisons
+    const localBooksByStableKey = new Map()
+    for (const b of bookMap.values()) {
+        if (b.isLocal && b.stableKey) {
+            let list = localBooksByStableKey.get(b.stableKey)
+            if (!list) {
+                list = []
+                localBooksByStableKey.set(b.stableKey, list)
+            }
+            list.push(b)
+        }
+    }
+
     ;(remotePayload.booksMeta || []).forEach(remoteBook => {
         if (!remoteBook || !remoteBook.id) return
         const rLastRead = clampTime(remoteBook.lastReadAt)
@@ -513,13 +533,35 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         }
 
         let localBook = bookMap.get(cleanRemoteBook.id)
+        if (localBook) {
+            const hashDiff = localBook.documentHash && cleanRemoteBook.documentHash && localBook.documentHash !== cleanRemoteBook.documentHash
+            const fmtDiff = localBook.format && cleanRemoteBook.format && sanitizeSyncFormat(localBook.format) !== sanitizeSyncFormat(cleanRemoteBook.format)
+            const sizeDiff = localBook.size && cleanRemoteBook.size && localBook.size !== cleanRemoteBook.size
+            if (hashDiff || fmtDiff || sizeDiff) {
+                // Different content identity on same ID; do not merge
+                localBook = null
+            }
+        }
         if (!localBook && cleanRemoteBook.stableKey) {
-            localBook = Array.from(bookMap.values()).find(b => b.isLocal && b.stableKey && b.stableKey === cleanRemoteBook.stableKey)
+            const candidates = localBooksByStableKey.get(cleanRemoteBook.stableKey) || []
+            localBook = candidates.find(b => {
+                if (b.format && cleanRemoteBook.format && b.format !== cleanRemoteBook.format) return false
+                if (b.size && cleanRemoteBook.size && b.size !== cleanRemoteBook.size) return false
+                if (b.documentHash && cleanRemoteBook.documentHash && b.documentHash !== cleanRemoteBook.documentHash) return false
+                return true
+            })
         }
 
         if (!localBook) {
-            bookMap.set(cleanRemoteBook.id, {
+            let targetId = cleanRemoteBook.id
+            if (bookMap.has(targetId)) {
+                const suffix = (cleanRemoteBook.documentHash || cleanRemoteBook.stableKey || Math.random().toString(36).slice(2)).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'rem'
+                targetId = `${cleanRemoteBook.id}_remote_${suffix}`
+                bookIdRemap.set(cleanRemoteBook.id, targetId)
+            }
+            bookMap.set(targetId, {
                 ...cleanRemoteBook,
+                id: targetId,
                 tags: Array.isArray(cleanRemoteBook.tags) ? cleanRemoteBook.tags : [],
                 tagsUpdatedAt: rTagsUpdated,
                 readingStatus: cleanRemoteBook.readingStatus || 'unread',
@@ -568,11 +610,21 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         }
     })
     
-    // Filter books by book tombstones (checking both id and stableKey)
+    // Filter books by book tombstones (checking exact id, documentHash, and legacy fallback)
     const mergedBooksMeta = Array.from(bookMap.values()).filter(b => {
-        const tombKey = `book:${b.id}`
-        const tombByKey = b.stableKey ? `book:${b.stableKey}` : null
-        const tomb = tombstoneMap.get(tombKey) || (tombByKey ? tombstoneMap.get(tombByKey) : null)
+        const tombById = tombstoneMap.get(`book:${b.id}`)
+        const tombByHash = b.documentHash ? tombstoneMap.get(`book:hash:${b.documentHash}`) : null
+        let tomb = tombById || tombByHash
+        if (!tomb && b.stableKey && !b.documentHash) {
+            const legacyTomb = tombstoneMap.get(`book:legacy:${b.stableKey}`)
+            if (legacyTomb && !legacyTomb.documentHash) {
+                const cleanFmt = sanitizeSyncFormat(legacyTomb.format)
+                const cleanBFmt = sanitizeSyncFormat(b.format)
+                if (cleanFmt === cleanBFmt && (!legacyTomb.size || !b.size || legacyTomb.size === b.size)) {
+                    tomb = legacyTomb
+                }
+            }
+        }
         if (tomb) {
             if ((tomb.deletedAt || 0) >= (b.updatedAt || b.addedAt || 0)) return false
         }
@@ -586,7 +638,14 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         if (!remoteBook || !remoteBook.id) return
         let localBook = bookMap.get(remoteBook.id)
         if (!localBook && remoteBook.stableKey) {
-            localBook = Array.from(bookMap.values()).find(b => b.isLocal && b.stableKey && b.stableKey === remoteBook.stableKey)
+            const cleanRemoteFormat = sanitizeSyncFormat(remoteBook.format)
+            const candidates = localBooksByStableKey.get(remoteBook.stableKey) || []
+            localBook = candidates.find(b => {
+                if (b.format && cleanRemoteFormat && b.format !== cleanRemoteFormat) return false
+                if (b.size && remoteBook.size && b.size !== remoteBook.size) return false
+                if (b.documentHash && remoteBook.documentHash && b.documentHash !== remoteBook.documentHash) return false
+                return true
+            })
         }
         if (localBook && localBook.id !== remoteBook.id) {
             bookIdRemap.set(remoteBook.id, localBook.id)
@@ -681,12 +740,20 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
             const remoteDur = remoteS.durationSeconds || 0
             const bestTitle = s.bookTitle || remoteS.bookTitle || ''
             const bestAuthor = s.bookAuthor || remoteS.bookAuthor || ''
+            const mergedIntervals = typeof db.mergeSessionIntervals === 'function'
+                ? db.mergeSessionIntervals(s.activeIntervals, remoteS.activeIntervals)
+                : (s.activeIntervals || remoteS.activeIntervals || [])
+            const intervalSecs = typeof db.calculateIntervalUnionSeconds === 'function'
+                ? db.calculateIntervalUnionSeconds(mergedIntervals)
+                : 0
             sessMap.set(s.id, {
                 ...remoteS,
                 ...s,
                 bookTitle: bestTitle,
                 bookAuthor: bestAuthor,
-                durationSeconds: Math.max(localDur, remoteDur)
+                durationSeconds: Math.max(localDur, remoteDur),
+                activeDurationSeconds: Math.max(s.activeDurationSeconds || 0, remoteS.activeDurationSeconds || 0, intervalSecs),
+                activeIntervals: mergedIntervals
             })
         }
     })
@@ -816,15 +883,32 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
     const ctMap = new Map()
     const getCtStableKey = (ct) => {
         if (!ct) return ''
-        const bookKey = ct.bookStableKey || ct.contentHash || ct.bookId || ''
+        let effectiveBookId = ct.bookId
+        if (effectiveBookId && bookIdRemap.has(effectiveBookId)) {
+            effectiveBookId = bookIdRemap.get(effectiveBookId)
+        }
         const chapKey = ct.chapterSourceKey || ct.chapterKey || ''
+        if (effectiveBookId && chapKey) {
+            return `${effectiveBookId}::${chapKey}`
+        }
+        const bookKey = ct.bookStableKey || ct.contentHash || effectiveBookId || ''
         return `${bookKey}::${chapKey}` || ct.id || ''
     }
 
     ;(remotePayload.chapterTranslations || []).forEach(ct => {
         if (!ct) return
-        const key = getCtStableKey(ct)
-        if (key) ctMap.set(key, structuredClone(ct))
+        let targetBookId = ct.bookId
+        if (ct.bookId && bookIdRemap.has(ct.bookId)) {
+            targetBookId = bookIdRemap.get(ct.bookId)
+        }
+        const chapKey = ct.chapterSourceKey || ct.chapterKey || ''
+        let targetId = ct.id
+        if (targetBookId !== ct.bookId) {
+            targetId = chapKey ? `${targetBookId}::${chapKey}` : (ct.id ? ct.id.replace(ct.bookId, targetBookId) : ct.id)
+        }
+        const cleanCt = { ...ct, bookId: targetBookId, id: targetId, chapterKey: chapKey || ct.chapterKey }
+        const key = getCtStableKey(cleanCt)
+        if (key) ctMap.set(key, structuredClone(cleanCt))
     })
     ;(localPayload.chapterTranslations || []).forEach(ct => {
         if (!ct) return
@@ -901,7 +985,7 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
                     : (ct.status === 'completed' || remoteCt.status === 'completed')
                 const allCompleted = mergedParas.length > 0 && !hasIncomplete && meetsTotalCount
 
-                ctMap.set(ct.id, {
+                ctMap.set(key, {
                     ...remoteCt,
                     ...ct,
                     status: allCompleted ? 'completed' : 'partial',
@@ -910,7 +994,7 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
                     updatedAt: maxUpdated
                 })
             } else if ((ct.updatedAt || 0) >= (remoteCt.updatedAt || 0)) {
-                ctMap.set(ct.id, structuredClone(ct))
+                ctMap.set(key, structuredClone(ct))
             }
         }
     })
@@ -975,57 +1059,61 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
 /**
  * 3. Apply Merged Payload back into Local IndexedDB
  */
-export const applyMergedPayload = async mergedPayload => {
-    const allLocalBooks = await db.getAllBooks()
+export const applyMergedPayload = async (mergedPayload, customDb = null) => {
+    const activeDb = customDb || (typeof globalThis.db !== 'undefined' && globalThis.db ? globalThis.db : db)
+    const allLocalBooks = await activeDb.getAllBooks()
+    const allDeleted = (typeof activeDb.getAllDeletedRecords === 'function' ? await activeDb.getAllDeletedRecords() : []) || []
 
     // A. Apply Deletion Tombstones (with protection for re-imported / surviving books)
     const survivingBookIds = new Set((mergedPayload.booksMeta || []).map(b => b.id))
-    const survivingStableKeys = new Set((mergedPayload.booksMeta || []).filter(b => b.stableKey).map(b => b.stableKey))
+    const survivingHashes = new Set((mergedPayload.booksMeta || []).filter(b => b.documentHash).map(b => b.documentHash))
     const deletedBookIds = []
-    const deletedStableKeys = new Set()
     if (Array.isArray(mergedPayload.deletedRecords)) {
         for (const tomb of mergedPayload.deletedRecords) {
             if (tomb && tomb.id) {
                 const delTime = tomb.deletedAt || Date.now()
                 if (tomb.type === 'book' || tomb.type === 'books') {
-                    // Never delete a book if it survived in mergedPayload.booksMeta or if local book was added/updated after tombstone
-                    if (survivingBookIds.has(tomb.id) || (tomb.stableKey && survivingStableKeys.has(tomb.stableKey))) {
-                        continue
-                    }
-                    const localByStable = tomb.stableKey ? allLocalBooks.find(b => b.stableKey === tomb.stableKey) : null
-                    const localBook = allLocalBooks.find(b => b.id === tomb.id) || localByStable
-                    if (localBook && (localBook.updatedAt || localBook.addedAt || 0) > delTime) {
-                        continue
-                    }
-
-                    await db.deleteBook(tomb.id, false, delTime)
-                    deletedBookIds.push(tomb.id)
-                    // Also cross-delete local book matching stableKey if ID differed across devices
-                    if (tomb.stableKey) {
-                        deletedStableKeys.add(tomb.stableKey)
-                        if (localByStable && localByStable.id !== tomb.id) {
-                            await db.deleteBook(localByStable.id, false, delTime)
-                            deletedBookIds.push(localByStable.id)
+                    // Match candidates: exact id, exact documentHash, or legacy (no hash on either side AND format + size match)
+                    const candidateBooks = allLocalBooks.filter(b => {
+                        if (b.id === tomb.id) return true
+                        if (tomb.documentHash && b.documentHash && tomb.documentHash === b.documentHash) return true
+                        if (!tomb.documentHash && !b.documentHash && tomb.stableKey && b.stableKey === tomb.stableKey) {
+                            const cleanTombFmt = sanitizeSyncFormat(tomb.format)
+                            const cleanBFmt = sanitizeSyncFormat(b.format)
+                            if (cleanTombFmt && cleanBFmt && cleanTombFmt !== cleanBFmt) return false
+                            if (tomb.size && b.size && tomb.size !== b.size) return false
+                            return true
                         }
+                        return false
+                    })
+
+                    for (const localBook of candidateBooks) {
+                        // Never delete if this local book survived in mergedPayload
+                        if (survivingBookIds.has(localBook.id)) continue
+                        if (localBook.documentHash && survivingHashes.has(localBook.documentHash)) continue
+                        if ((localBook.updatedAt || localBook.addedAt || 0) > delTime) continue
+
+                        await activeDb.deleteBook(localBook.id, false, delTime)
+                        deletedBookIds.push(localBook.id)
                     }
                 } else if (tomb.type === 'highlight' || tomb.type === 'highlights') {
-                    await db.deleteHighlight(tomb.id, false, delTime)
+                    await activeDb.deleteHighlight(tomb.id, false, delTime)
                 } else if (tomb.type === 'bookmark' || tomb.type === 'bookmarks') {
-                    await db.deleteBookmark(tomb.id, false, delTime)
+                    await activeDb.deleteBookmark(tomb.id, false, delTime)
                 } else if (tomb.type === 'custom_list') {
-                    await db.deleteCustomList(tomb.id, false, delTime)
+                    await activeDb.deleteCustomList(tomb.id, false, delTime)
                 } else if (tomb.type === 'pdfDrawing' || tomb.type === 'pdf_drawings') {
                     const parts = tomb.id.split('_page_')
-                    const localDrawing = parts.length === 2 ? await db.getPdfPageDrawing(parts[0], parseInt(parts[1], 10)) : null
+                    const localDrawing = parts.length === 2 && typeof activeDb.getPdfPageDrawing === 'function' ? await activeDb.getPdfPageDrawing(parts[0], parseInt(parts[1], 10)) : null
                     if (!localDrawing || delTime >= (localDrawing.updatedAt || 0)) {
-                        await db.clearPdfDrawingById(tomb.id)
+                        if (typeof activeDb.clearPdfDrawingById === 'function') await activeDb.clearPdfDrawingById(tomb.id)
                     }
                 } else if (tomb.type === 'chapter_translation' || tomb.type === 'chapter_translations' || tomb.type === 'chapterTranslation') {
                     const parts = tomb.id.split('::')
                     if (parts.length === 2) {
-                        const localCt = await db.getChapterTranslation(parts[0], parts[1])
+                        const localCt = typeof activeDb.getChapterTranslation === 'function' ? await activeDb.getChapterTranslation(parts[0], parts[1]) : null
                         if (localCt && delTime >= (localCt.updatedAt || 0)) {
-                            await db.deleteChapterTranslation(parts[0], parts[1])
+                            if (typeof activeDb.deleteChapterTranslation === 'function') await activeDb.deleteChapterTranslation(parts[0], parts[1])
                         }
                     }
                 }
@@ -1036,10 +1124,10 @@ export const applyMergedPayload = async mergedPayload => {
     // B. Apply custom lists
     if (Array.isArray(mergedPayload.customLists)) {
         for (const list of mergedPayload.customLists) {
-            if (typeof db.applySyncedCustomList === 'function') {
-                await db.applySyncedCustomList(list)
-            } else {
-                await db.saveCustomList(list)
+            if (typeof activeDb.applySyncedCustomList === 'function') {
+                await activeDb.applySyncedCustomList(list)
+            } else if (typeof activeDb.saveCustomList === 'function') {
+                await activeDb.saveCustomList(list)
             }
         }
     }
@@ -1050,22 +1138,73 @@ export const applyMergedPayload = async mergedPayload => {
     if (Array.isArray(mergedPayload.booksMeta)) {
         const localClientId = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || ''
         const incomingClientId = mergedPayload.clientId || ''
+
+        // Pre-build indexes for fast candidate lookup and strict content identity verification
+        const localBooksById = new Map()
+        const localBooksByHash = new Map()
+        const localBooksByWeakKey = new Map()
+        for (const b of allLocalBooks || []) {
+            if (b.id) localBooksById.set(b.id, b)
+            if (b.documentHash) localBooksByHash.set(b.documentHash, b)
+            const wk = b.stableKey || (b.title && b.size > 0 ? `${b.title}_${b.size}` : null)
+            if (wk) {
+                if (!localBooksByWeakKey.has(wk)) localBooksByWeakKey.set(wk, [])
+                localBooksByWeakKey.get(wk).push(b)
+            }
+        }
+
         for (const meta of mergedPayload.booksMeta) {
             if (!meta || !meta.id) continue
             // Re-check tombstones with fresh DB query to avoid race with concurrent local delete
-            const allDeleted = typeof db.getAllDeletedRecords === 'function' ? await db.getAllDeletedRecords() : []
-            const tombstone = allDeleted.find(t => (t.id === meta.id || (meta.stableKey && t.stableKey === meta.stableKey)))
+            const tombstone = allDeleted.find(t => {
+                if (t.id === meta.id) return true
+                if (t.documentHash && meta.documentHash && t.documentHash === meta.documentHash) return true
+                if (!t.documentHash && !meta.documentHash && meta.stableKey && t.stableKey === meta.stableKey) {
+                    const cleanTombFmt = sanitizeSyncFormat(t.format)
+                    const cleanMetaFmt = sanitizeSyncFormat(meta.format)
+                    if (cleanTombFmt && cleanMetaFmt && cleanTombFmt !== cleanMetaFmt) return false
+                    if (t.size && meta.size && t.size !== meta.size) return false
+                    return true
+                }
+                return false
+            })
             if (tombstone && (tombstone.deletedAt || 0) >= (meta.updatedAt || meta.addedAt || 0)) {
                 continue
             }
 
             // Fresh read directly from DB rather than stale snapshot to avoid clobbering concurrent user edits
-            let localBook = await db.getBook(meta.id)
-            if (!localBook && meta.stableKey) {
-                const currentBooks = typeof db.getAllBooks === 'function' ? await db.getAllBooks() : allLocalBooks
-                localBook = currentBooks.find(b => (b.stableKey && b.stableKey === meta.stableKey) || 
-                    (meta.title && meta.size > 0 && b.title === meta.title && b.size === meta.size))
+            let localBook = (typeof activeDb.getBook === 'function' ? await activeDb.getBook(meta.id) : null) || localBooksById.get(meta.id)
+            if (!localBook && meta.documentHash) {
+                localBook = localBooksByHash.get(meta.documentHash)
             }
+            if (!localBook) {
+                const wk = meta.stableKey || (meta.title && meta.size > 0 ? `${meta.title}_${meta.size}` : null)
+                const candidates = wk ? (localBooksByWeakKey.get(wk) || []) : []
+                for (const cand of candidates) {
+                    if (meta.documentHash && cand.documentHash) {
+                        if (meta.documentHash === cand.documentHash) {
+                            localBook = cand
+                            break
+                        }
+                        continue
+                    }
+                    const cleanMetaFmt = sanitizeSyncFormat(meta.format)
+                    const cleanCandFmt = sanitizeSyncFormat(cand.format)
+                    if (cleanMetaFmt && cleanCandFmt && cleanMetaFmt !== cleanCandFmt) continue
+                    if (meta.size && cand.size && meta.size !== cand.size) continue
+                    if (meta.title && cand.title && meta.title === cand.title) {
+                        localBook = cand
+                        break
+                    }
+                }
+            }
+
+            if (localBook) {
+                // Re-read candidate from DB before commit to prevent clobbering concurrent modifications
+                const fresh = typeof activeDb.getBook === 'function' ? await activeDb.getBook(localBook.id) : null
+                if (fresh) localBook = fresh
+            }
+
             if (localBook && localBook.id !== meta.id) {
                 bookIdRemap.set(meta.id, localBook.id)
             }
@@ -1128,7 +1267,7 @@ export const applyMergedPayload = async mergedPayload => {
                 }
                 if (changed) {
                     // Check if book was deleted right before saving
-                    const liveCheck = await db.getBook(localBook.id)
+                    const liveCheck = typeof activeDb.getBook === 'function' ? await activeDb.getBook(localBook.id) : null
                     if (liveCheck) {
                         // Preserve any higher timestamps that occurred locally between read and write
                         if ((liveCheck.tagsUpdatedAt || 0) > (localBook.tagsUpdatedAt || 0)) {
@@ -1137,12 +1276,12 @@ export const applyMergedPayload = async mergedPayload => {
                         }
                         localBook.updatedAt = meta.updatedAt || localBook.updatedAt || Date.now()
                         localBook._preserveUpdatedAt = true
-                        await db.saveBook(localBook)
+                        if (typeof activeDb.saveBook === 'function') await activeDb.saveBook(localBook)
                     }
                 }
                 if (localBook.isCloudOnly && isAutoDownloadEligible(meta)) {
                     localBook.cloudBackupState = 'pending_auto_download'
-                    await db.saveBook(localBook)
+                    if (typeof activeDb.saveBook === 'function') await activeDb.saveBook(localBook)
                     pendingAutoDownloads.push(localBook)
                 }
             } else if (meta.cloudBackup && meta.cloudBackup.hasBackup) {
@@ -1168,7 +1307,7 @@ export const applyMergedPayload = async mergedPayload => {
                     updatedAt: meta.updatedAt || Date.now(),
                     _preserveUpdatedAt: true
                 }
-                await db.saveBook(cloudBookRecord)
+                if (typeof activeDb.saveBook === 'function') await activeDb.saveBook(cloudBookRecord)
                 if (isAutoEligible) {
                     pendingAutoDownloads.push(cloudBookRecord)
                 }
@@ -1190,12 +1329,12 @@ export const applyMergedPayload = async mergedPayload => {
             }
             preparedHighlights.push(hl)
         }
-        if (typeof db.applySyncedHighlightsBatch === 'function') {
-            await db.applySyncedHighlightsBatch(preparedHighlights)
+        if (typeof activeDb.applySyncedHighlightsBatch === 'function') {
+            await activeDb.applySyncedHighlightsBatch(preparedHighlights)
         } else {
             for (const hl of preparedHighlights) {
-                if (typeof db.applySyncedHighlight === 'function') await db.applySyncedHighlight(hl)
-                else await db.saveHighlight(hl)
+                if (typeof activeDb.applySyncedHighlight === 'function') await activeDb.applySyncedHighlight(hl)
+                else if (typeof activeDb.saveHighlight === 'function') await activeDb.saveHighlight(hl)
             }
         }
     }
@@ -1213,12 +1352,12 @@ export const applyMergedPayload = async mergedPayload => {
             }
             preparedBookmarks.push(bm)
         }
-        if (typeof db.applySyncedBookmarksBatch === 'function') {
-            await db.applySyncedBookmarksBatch(preparedBookmarks)
+        if (typeof activeDb.applySyncedBookmarksBatch === 'function') {
+            await activeDb.applySyncedBookmarksBatch(preparedBookmarks)
         } else {
             for (const bm of preparedBookmarks) {
-                if (typeof db.applySyncedBookmark === 'function') await db.applySyncedBookmark(bm)
-                else await db.saveBookmark(bm)
+                if (typeof activeDb.applySyncedBookmark === 'function') await activeDb.applySyncedBookmark(bm)
+                else if (typeof activeDb.saveBookmark === 'function') await activeDb.saveBookmark(bm)
             }
         }
     }
@@ -1233,20 +1372,20 @@ export const applyMergedPayload = async mergedPayload => {
             }
             preparedSessions.push(sess)
         }
-        if (typeof db.saveReadingSessionsBatch === 'function') {
-            await db.saveReadingSessionsBatch(preparedSessions)
+        if (typeof activeDb.saveReadingSessionsBatch === 'function') {
+            await activeDb.saveReadingSessionsBatch(preparedSessions)
         } else {
             for (const sess of preparedSessions) {
-                await db.saveReadingSession(sess, false)
+                if (typeof activeDb.saveReadingSession === 'function') await activeDb.saveReadingSession(sess, false)
             }
         }
     }
 
     // G. Apply Settings
     if (mergedPayload.settings && typeof mergedPayload.settings === 'object' && Object.keys(mergedPayload.settings).length > 0) {
-        const localSettings = (await db.getSetting('readerSettings')) || {}
+        const localSettings = (typeof activeDb.getSetting === 'function' ? await activeDb.getSetting('readerSettings') : null) || {}
         const mergedSettings = { ...localSettings, ...mergedPayload.settings }
-        await db.setSetting('readerSettings', mergedSettings)
+        if (typeof activeDb.setSetting === 'function') await activeDb.setSetting('readerSettings', mergedSettings)
     }
 
     // G2. Apply Reading Presets
@@ -1310,8 +1449,9 @@ export const applyMergedPayload = async mergedPayload => {
 
     // H. Apply PDF Drawings (with BookId Remapping and Local Tombstone / Edit Protection)
     if (Array.isArray(mergedPayload.pdfDrawings) && mergedPayload.pdfDrawings.length > 0) {
-        const dbInstance = await db.openDB()
-        if (dbInstance.objectStoreNames.contains('pdf_drawings')) {
+        const getDbPromise = typeof activeDb.openDB === 'function' ? activeDb.openDB() : (typeof db.openDB === 'function' ? db.openDB() : null)
+        const dbInstance = getDbPromise ? await getDbPromise : null
+        if (dbInstance && dbInstance.objectStoreNames && dbInstance.objectStoreNames.contains('pdf_drawings')) {
             const hasDeleted = dbInstance.objectStoreNames.contains('deleted_records')
             const storeNames = hasDeleted ? ['pdf_drawings', 'deleted_records'] : ['pdf_drawings']
             const tx = dbInstance.transaction(storeNames, 'readwrite')
@@ -1325,7 +1465,7 @@ export const applyMergedPayload = async mergedPayload => {
                     targetBookId = bookIdRemap.get(d.bookId)
                 }
                 d.bookId = targetBookId
-                d.id = db.remapPdfDrawingId ? db.remapPdfDrawingId(d, targetBookId) : d.id
+                d.id = (activeDb.remapPdfDrawingId || db.remapPdfDrawingId) ? (activeDb.remapPdfDrawingId || db.remapPdfDrawingId)(d, targetBookId) : d.id
                 if (d.bookId && deletedBookIds.includes(d.bookId)) {
                     return
                 }
@@ -1367,18 +1507,19 @@ export const applyMergedPayload = async mergedPayload => {
 
     // I. Apply Chapter Translations (with BookId Remapping)
     const syncChapterTrans = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_chapter_translations') : 'false') === 'true'
-    if (syncChapterTrans && Array.isArray(mergedPayload.chapterTranslations) && mergedPayload.chapterTranslations.length > 0 && typeof db.saveChapterTranslation === 'function') {
+    if (syncChapterTrans && Array.isArray(mergedPayload.chapterTranslations) && mergedPayload.chapterTranslations.length > 0 && typeof activeDb.saveChapterTranslation === 'function') {
         for (const ct of mergedPayload.chapterTranslations) {
-            if (!ct || !ct.bookId || !ct.chapterKey) continue
+            const chapKey = ct.chapterKey || ct.chapterSourceKey
+            if (!ct || !ct.bookId || !chapKey) continue
             let targetBookId = ct.bookId
             if (bookIdRemap.has(targetBookId)) {
                 targetBookId = bookIdRemap.get(targetBookId)
             }
             if (deletedBookIds.includes(targetBookId)) continue
-            const record = { ...ct, bookId: targetBookId, id: `${targetBookId}::${ct.chapterKey}` }
-            const localCt = await db.getChapterTranslation(targetBookId, ct.chapterKey)
+            const record = { ...ct, bookId: targetBookId, chapterKey: chapKey, id: `${targetBookId}::${chapKey}` }
+            const localCt = typeof activeDb.getChapterTranslation === 'function' ? await activeDb.getChapterTranslation(targetBookId, chapKey) : null
             if (!localCt || (record.updatedAt || 0) >= (localCt.updatedAt || 0)) {
-                await db.saveChapterTranslation(record)
+                await activeDb.saveChapterTranslation(record)
             }
         }
     }
@@ -1389,8 +1530,59 @@ export const applyMergedPayload = async mergedPayload => {
 /**
  * 4. Master Full Sync Lifecycle Executor with Mutex and ETag Optimistic Concurrency
  */
-export const executeSyncLifecycle = async (config, { onProgress = () => {} } = {}) => {
-    if (!window.electronAPI?.syncFetchRemote || !window.electronAPI?.syncSaveRemote) {
+export function validateSyncPayload(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('云端同步数据格式无效，为防止数据丢失已中止同步')
+    }
+    const version = data.schemaVersion ?? data.version
+    if (typeof version !== 'number') {
+        throw new Error('缺少同步数据版本标识')
+    }
+    if (version > 4) {
+        throw new Error(`不支持的云端数据版本 (version: ${version})，为防止损坏新版数据已中止同步`)
+    }
+    const knownKeys = ['booksMeta', 'highlights', 'bookmarks', 'readingSessions', 'customLists', 'deletedRecords', 'pdfDrawings']
+    if (version < 1 || !knownKeys.some(k => Object.prototype.hasOwnProperty.call(data, k)) || knownKeys.some(k => Object.prototype.hasOwnProperty.call(data, k) && !Array.isArray(data[k]))) {
+        throw new Error('云端同步数据 Schema 无效，为防止数据损坏已中止同步')
+    }
+    return true
+}
+
+export const previewSyncPayload = async (config, provider) => {
+    let remoteData = null
+    if (provider) {
+        const res = await provider.readFile('linden_sync_data.json')
+        if (!res || res.error || res.authError || res.offline || res.invalid || res.status === 'invalid' || res.status === 'offline' || res.status === 'auth-error' || res.status === 401 || res.status === 403) throw new Error(res?.error || '远端数据读取失败')
+        if (!(res.missing || res.status === 'missing')) {
+            if (res.content == null || (typeof res.content === 'string' && !res.content.trim())) throw new Error('远端同步数据为空，已停止同步')
+            try { remoteData = typeof res.content === 'string' ? JSON.parse(res.content) : res.content } catch (_) { throw new Error('远端同步数据损坏，已停止同步') }
+            validateSyncPayload(remoteData)
+        }
+    } else {
+        const bridge = typeof window !== 'undefined' ? (window.platformBridge || window.electronAPI) : null
+        if (!bridge?.syncFetchRemote) throw new Error('当前环境不支持云端读取')
+        const res = await bridge.syncFetchRemote(config)
+        if (!res || res.error) throw new Error(res?.error || '远端数据读取失败')
+        if (res.exists) { remoteData = res.data; validateSyncPayload(remoteData) }
+    }
+    const localData = await exportSyncPayload()
+    const summarize = data => ({ books: data?.booksMeta?.length || 0, highlights: data?.highlights?.length || 0, bookmarks: data?.bookmarks?.length || 0, sessions: data?.readingSessions?.length || 0 })
+    return { local: summarize(localData), remote: summarize(remoteData), remoteExists: remoteData !== null }
+}
+
+export const executeSyncLifecycle = async (config, { onProgress = () => {}, provider = null } = {}) => {
+
+
+    let activeProvider = provider
+    if (!activeProvider && config?.providerType) {
+        try {
+            const { getStorageProvider } = await import('./storage-providers.js')
+            activeProvider = getStorageProvider(config.providerType, config)
+        } catch (_) {}
+    }
+
+    const bridge = (typeof window !== 'undefined' ? (window.platformBridge || window.electronAPI) : null)
+    if (!activeProvider && (!bridge?.syncFetchRemote || !bridge?.syncSaveRemote)) {
         throw new Error('当前环境不支持桌面云同步 API')
     }
 
@@ -1402,14 +1594,52 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {} } = {
         onProgress('正在提取本地阅读数据...', 'export')
         const localPayload = await exportSyncPayload()
 
-        onProgress('正在拉取云端数据...', 'fetch')
-        const remoteRes = await window.electronAPI.syncFetchRemote(config)
-        if (remoteRes.error) {
-            throw new Error(`云端读取失败: ${remoteRes.error}`)
-        }
+        let remoteData = null
+        let remoteEtag = null
 
-        const remoteData = remoteRes.exists ? remoteRes.data : null
-        const remoteEtag = remoteRes.etag || null
+        if (activeProvider) {
+            onProgress('正在从云端存储拉取数据...', 'fetch')
+            const fileRes = await activeProvider.readFile('linden_sync_data.json')
+            if (!fileRes || fileRes.error || fileRes.invalid || fileRes.status === 'invalid') {
+                throw new Error(fileRes?.error || '云端存储无响应或数据无效')
+            }
+            if (fileRes.status === 'auth-error' || fileRes.authError || fileRes.status === 401 || fileRes.status === 403) {
+                throw new Error('云端服务认证失败 (auth-error)')
+            }
+            if (fileRes.status === 'offline' || fileRes.offline) {
+                throw new Error('网络连接不可用 (offline)')
+            }
+            if (fileRes.status === 'missing' || fileRes.missing) {
+                remoteData = null
+            } else if (fileRes.content !== undefined && fileRes.content !== null) {
+                const rawStr = typeof fileRes.content === 'string' ? fileRes.content.trim() : null
+                if (typeof fileRes.content === 'string' && !rawStr) {
+                    throw new Error('云端同步数据损坏 (Empty response)，为防止数据丢失已中止同步')
+                }
+                try {
+                    remoteData = rawStr ? JSON.parse(rawStr) : fileRes.content
+                } catch (e) {
+                    console.warn('[Sync] Failed to parse remote JSON:', e)
+                    remoteData = null
+                    throw new Error(`云端同步数据损坏 (Invalid JSON)，为防止数据丢失已中止同步: ${e.message}`)
+                }
+                validateSyncPayload(remoteData)
+            } else {
+                throw new Error('云端同步数据读取异常 (invalid)')
+            }
+            remoteEtag = fileRes?.etag || null
+        } else {
+            onProgress('正在拉取云端数据...', 'fetch')
+            const remoteRes = await bridge.syncFetchRemote(config)
+            if (remoteRes.error) {
+                throw new Error(`云端读取失败: ${remoteRes.error}`)
+            }
+            remoteData = remoteRes.exists ? remoteRes.data : null
+            if (remoteData) {
+                validateSyncPayload(remoteData)
+            }
+            remoteEtag = remoteRes.etag || null
+        }
 
         onProgress('正在执行多端数据智能合并...', 'merge')
         let { merged, stats } = mergeSyncData(localPayload, remoteData)
@@ -1421,23 +1651,63 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {} } = {
         while (maxRetries >= 0) {
             onProgress('正在上传合并数据至云端...', 'upload')
             const summaryMd = generateReadingSummaryMarkdown(merged)
-            lastSaveRes = await window.electronAPI.syncSaveRemote(config, merged, currentRemoteEtag, summaryMd)
-            if (lastSaveRes.success) break
 
-            if (lastSaveRes.isConflict && maxRetries > 0) {
-                maxRetries--
-                onProgress('检测到云端并发更新，正在自动合并最新数据...', 'merge')
-                await new Promise(r => setTimeout(r, 600 * (2 - maxRetries)))
-                const reFetch = await window.electronAPI.syncFetchRemote(config)
-                if (reFetch.error) throw new Error(`云端重新拉取失败: ${reFetch.error}`)
-                currentRemoteEtag = reFetch.etag || null
-                const reMergedResult = mergeSyncData(localPayload, reFetch.exists ? reFetch.data : null)
-                merged = reMergedResult.merged
-                stats = reMergedResult.stats
-                continue
+            if (activeProvider) {
+                const writeContent = JSON.stringify(merged, null, 2)
+                const writeRes = await activeProvider.writeFile('linden_sync_data.json', writeContent, { ifMatch: currentRemoteEtag })
+                if (writeRes.success) break
+
+                if (writeRes.conflict && maxRetries > 0) {
+                    maxRetries--
+                    onProgress('检测到云端并发更新，正在自动合并最新数据...', 'merge')
+                    await new Promise(r => setTimeout(r, 600 * (2 - maxRetries)))
+                    const reFetch = await activeProvider.readFile('linden_sync_data.json')
+                    if (!reFetch || reFetch.authError || reFetch.offline || reFetch.invalid) {
+                        throw new Error('云端重新拉取失败，为防止数据覆盖已中止')
+                    }
+                    let reRemoteData = null
+                    if (reFetch.missing) {
+                        reRemoteData = null
+                    } else if (reFetch.content !== undefined && reFetch.content !== null) {
+                        const rawStr = typeof reFetch.content === 'string' ? reFetch.content.trim() : null
+                        if (typeof reFetch.content === 'string' && !rawStr) {
+                            throw new Error('云端重新拉取数据为空，为防止数据覆盖已中止')
+                        }
+                        try {
+                            reRemoteData = rawStr ? JSON.parse(rawStr) : reFetch.content
+                        } catch (e) {
+                            throw new Error(`云端重新拉取数据解析失败: ${e.message}`)
+                        }
+                        validateSyncPayload(reRemoteData)
+                    } else {
+                        throw new Error('云端重新拉取数据异常')
+                    }
+                    currentRemoteEtag = reFetch?.etag || null
+                    const reMergedResult = mergeSyncData(localPayload, reRemoteData)
+                    merged = reMergedResult.merged
+                    stats = reMergedResult.stats
+                    continue
+                }
+                throw new Error(`云端保存失败: ${writeRes.error || '写入冲突或存储异常'}`)
+            } else {
+                lastSaveRes = await bridge.syncSaveRemote(config, merged, currentRemoteEtag, summaryMd)
+                if (lastSaveRes.success) break
+
+                if (lastSaveRes.isConflict && maxRetries > 0) {
+                    maxRetries--
+                    onProgress('检测到云端并发更新，正在自动合并最新数据...', 'merge')
+                    await new Promise(r => setTimeout(r, 600 * (2 - maxRetries)))
+                    const reFetch = await bridge.syncFetchRemote(config)
+                    if (reFetch.error) throw new Error(`云端重新拉取失败: ${reFetch.error}`)
+                    currentRemoteEtag = reFetch.etag || null
+                    const reMergedResult = mergeSyncData(localPayload, reFetch.exists ? reFetch.data : null)
+                    merged = reMergedResult.merged
+                    stats = reMergedResult.stats
+                    continue
+                }
+
+                throw new Error(`云端保存失败: ${lastSaveRes.error || '未知网络错误'}`)
             }
-
-            throw new Error(`云端保存失败: ${lastSaveRes.error || '未知网络错误'}`)
         }
 
         onProgress('正在更新本地书库与阅读记录...', 'apply')

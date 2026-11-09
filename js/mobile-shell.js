@@ -18,9 +18,27 @@
 import * as db from './db.js'
 import { ttsPlayer } from './tts-player.js'
 import { platformBridge } from './platformBridge.js'
-import { advancedSettings } from './advanced-settings.js'
-import { MobileSettings } from './mobile-settings.js'
 import { resolveReadingState, setReadingStatus, updateBookTags } from './tags-manager.js'
+
+let _cachedAdvancedSettings = null
+async function getAdvancedSettings() {
+    if (_cachedAdvancedSettings) return _cachedAdvancedSettings
+    if (typeof window !== 'undefined' && window.advancedSettings) {
+        _cachedAdvancedSettings = window.advancedSettings
+        return _cachedAdvancedSettings
+    }
+    const mod = await import('./advanced-settings.js')
+    _cachedAdvancedSettings = mod.advancedSettings
+    return _cachedAdvancedSettings
+}
+
+let _MobileSettingsClass = null
+async function getMobileSettingsClass() {
+    if (_MobileSettingsClass) return _MobileSettingsClass
+    const mod = await import('./mobile-settings.js')
+    _MobileSettingsClass = mod.MobileSettings
+    return _MobileSettingsClass
+}
 
 function escapeHTML(str) {
     if (!str) return ''
@@ -46,7 +64,7 @@ function getBookFraction(book) {
 export function getBookCoverUrl(book) {
     if (!book) return null
     if (book.coverBlob && window.coverUrlPool) {
-        return window.coverUrlPool.get(book.id, book.coverBlob)
+        return window.coverUrlPool.getForBook(book)
     }
     if (book.cover && typeof book.cover === 'string' && !book.cover.includes('icon.png')) {
         const trimmed = book.cover.trim()
@@ -109,9 +127,30 @@ export class MobileShellController {
         this.longPressTimer = null
         this.searchGeneration = 0
         this.isInReader = false
-        this.settingsPage = new MobileSettings(this)
+        this._settingsPageInstance = null
+        this.settingsPage = {
+            open: async (group) => {
+                const sp = await this.ensureSettingsPage()
+                return sp.open(group)
+            },
+            close: () => {
+                this._settingsPageInstance?.close?.()
+            },
+            back: () => {
+                return this._settingsPageInstance?.back?.() ?? false
+            }
+        }
 
         this.init()
+    }
+
+    async ensureSettingsPage() {
+        if (!this._settingsPageInstance) {
+            const Cls = await getMobileSettingsClass()
+            this._settingsPageInstance = new Cls(this)
+            Object.assign(this.settingsPage, this._settingsPageInstance)
+        }
+        return this._settingsPageInstance
     }
 
     init() {
@@ -1890,7 +1929,8 @@ export class MobileShellController {
             }
             document.getElementById('cell-profile-stats').onclick = () => this.openStatsSubview()
             const engineName = { system: '系统语音', offline: '自建服务', api: '云端 API' }
-            document.getElementById('mobile-tts-engine-name').textContent = engineName[advancedSettings.config.ttsProvider] || '系统语音'
+            const ttsProv = window.advancedSettings?.config?.ttsProvider || 'system'
+            document.getElementById('mobile-tts-engine-name').textContent = engineName[ttsProv] || '系统语音'
         } catch (e) {
             console.error('[MobileShell] Error rendering Me tab:', e)
         }

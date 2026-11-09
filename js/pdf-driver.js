@@ -7,7 +7,10 @@ import { platformBridge } from './platformBridge.js'
 const abortError = () => new DOMException('Render cancelled', 'AbortError')
 
 const normalizeSource = async source => {
-    const blob = source?.blob || source?.file || source
+    let blob = source?.blob || source?.file || source
+    if (blob?.materialize) {
+        blob = await blob.materialize()
+    }
     if (blob instanceof Uint8Array) return blob
     if (blob instanceof ArrayBuffer) return new Uint8Array(blob)
     if (blob?.arrayBuffer) return new Uint8Array(await blob.arrayBuffer())
@@ -40,9 +43,14 @@ export class PdfJsDriver {
         if (this._destroyed) throw new Error('Driver is destroyed')
         const loadingTask = this.pdfjsLib.getDocument({
             data,
+            password: (source?.password !== undefined && source?.password !== null) ? source.password : undefined,
             cMapUrl: new URL('../foliate-js-main/vendor/pdfjs/cmaps/', import.meta.url).toString(),
             cMapPacked: true,
             standardFontDataUrl: new URL('../foliate-js-main/vendor/pdfjs/standard_fonts/', import.meta.url).toString(),
+            // PDF.js 5 uses external decoders for JPX/JBIG2 and color profiles.
+            // Without this local bundle a JPEG 2000 scan may disappear while
+            // the PDF's text continues to render, producing a false text-only page.
+            wasmUrl: new URL('../foliate-js-main/vendor/pdfjs/wasm/', import.meta.url).toString(),
             // Let PDF.js use its own image/canvas heuristics, while the viewport
             // separately caps output backing pixels.
             canvasMaxAreaInBytes: 64 * 1024 * 1024,
@@ -267,6 +275,22 @@ export class PdfJsDriver {
         } finally { page.cleanup() }
     }
 
+    async getPagePlainText(pageIndex) {
+        if (!this.pdfDoc) return ''
+        if (this._plainTextCache?.has(pageIndex)) return this._plainTextCache.get(pageIndex)
+        if (!this._plainTextCache) this._plainTextCache = new Map()
+        const page = await this.pdfDoc.getPage(pageIndex + 1)
+        try {
+            const textContent = await page.getTextContent()
+            const text = (textContent.items || []).map(i => i.str || '').join(' ')
+            this._plainTextCache.set(pageIndex, text)
+            if (this._plainTextCache.size > 200) {
+                this._plainTextCache.delete(this._plainTextCache.keys().next().value)
+            }
+            return text
+        } finally { page.cleanup() }
+    }
+
     destroy() {
         this._destroyed = true
         if (this.loadingTask) {
@@ -320,11 +344,13 @@ export class MuPdfTauriDriver {
         if (!nativePath) throw new Error('Native MuPDF requires a local file path')
         const savedStoreMb = typeof localStorage !== 'undefined' ? Number(localStorage.getItem('linden_pdf_store_mb')) : null
         const maxStoreMb = (savedStoreMb && savedStoreMb >= 32 && savedStoreMb <= 1024) ? savedStoreMb : (source?.maxStoreMb ?? null)
+        const windowLabel = platformBridge.getCurrentWindowLabel ? platformBridge.getCurrentWindowLabel() : null
         const meta = await platformBridge._invokeTauri('mupdf_open_document', {
             filePath: nativePath,
-            password: null,
+            password: (source?.password !== undefined && source?.password !== null) ? source.password : null,
             expectedSize: source?.expectedSize ?? null,
             maxStoreMb: maxStoreMb,
+            windowLabel: windowLabel || null,
         })
         if (this._destroyed) {
             platformBridge._invokeTauri('mupdf_close_document', { docId: meta.docId }).catch(() => {})
@@ -528,6 +554,41 @@ export class MuPdfTauriDriver {
         return promise
     }
 
+    async getPagePlainText(pageIndex) {
+        if (this._plainTextCache?.has(pageIndex)) {
+            return this._plainTextCache.get(pageIndex)
+        }
+        if (!this._plainTextCache) {
+            this._plainTextCache = new Map()
+        }
+        if (this.geometryCache?.has(pageIndex)) {
+            const chars = await this.geometryCache.get(pageIndex)
+            const text = (chars || []).map(c => c.text || '').join('')
+            this._plainTextCache.set(pageIndex, text)
+            return text
+        }
+        let text = ''
+        try {
+            const raw = await platformBridge._invokeTauri('mupdf_get_plain_text', {
+                docId: this.docId,
+                pageIndex
+            })
+            if (typeof raw === 'string') {
+                text = raw
+            } else if (raw && typeof raw.text === 'string') {
+                text = raw.text
+            }
+        } catch (_) {
+            const chars = await this.getTextGeometry(pageIndex)
+            text = (chars || []).map(c => c.text || '').join('')
+        }
+        this._plainTextCache.set(pageIndex, text)
+        if (this._plainTextCache.size > 200) {
+            this._plainTextCache.delete(this._plainTextCache.keys().next().value)
+        }
+        return text
+    }
+
     async getTextLayer(pageIndex) {
         const chars = await this.getTextGeometry(pageIndex)
         if (!chars || !chars.length) return { spans: [], chars: [] }
@@ -617,6 +678,35 @@ export class MuPdfTauriDriver {
     }
 }
 
+const savedPdfPreparations = new Map()
+
+export async function prepareSavedPdfNativeSnapshot(snapshot) {
+    if (!snapshot?.bookId || !(snapshot.blob instanceof Blob) || !snapshot.blob.size || snapshot.blob.size > 128 * 1024 * 1024 ||
+        !platformBridge.isTauri || platformBridge.isAndroid || !await MuPdfTauriDriver.isAvailable()) return snapshot
+    const key = JSON.stringify([snapshot.bookId, snapshot.revisionOrigin, snapshot.blobRevision])
+    if (savedPdfPreparations.has(key)) return savedPdfPreparations.get(key)
+    const task = (async () => {
+        let staged = null, committed = false
+        try {
+            staged = await platformBridge.stageSavedPdfBlob(snapshot.blob)
+            if (!staged) return snapshot
+            const { bindSavedPdfNativeSnapshot } = await import('./db.js')
+            committed = await bindSavedPdfNativeSnapshot(snapshot, staged)
+            if (!committed) return snapshot
+            return Object.freeze({ ...snapshot, nativeSnapshotPath: staged.path,
+                nativeSnapshotRevision: snapshot.blobRevision, nativeSnapshotOrigin: snapshot.revisionOrigin,
+                nativeSnapshotSize: staged.size })
+        } catch (error) {
+            console.warn('[PDF] Saved PDF native cache unavailable; keeping saved Blob:', error)
+            return snapshot
+        } finally {
+            if (staged?.path && !committed) await platformBridge.reclaimSnapshot?.(staged.path).catch(() => {})
+        }
+    })()
+    savedPdfPreparations.set(key, task)
+    try { return await task } finally { if (savedPdfPreparations.get(key) === task) savedPdfPreparations.delete(key) }
+}
+
 export class AdaptivePdfDriver {
     constructor({ nativePath = null, snapshot = null } = {}) {
         this.nativePath = nativePath
@@ -627,32 +717,59 @@ export class AdaptivePdfDriver {
 
     async open(source) {
         if (this._destroyed) throw new Error('Driver is destroyed')
+        const password = source?.password || null
         // A staged native file and the IndexedDB Blob must have been created
         // from the same immutable import snapshot and bound in one DB write.
-        const snap = this.snapshot
-        const nativeReady = snap?.nativeSnapshotPath && (
-            snap.nativeSnapshotOnly ? (snap.nativeSnapshotSize > 0) :
-            (snap.blob &&
-             snap.nativeSnapshotRevision === snap.blobRevision &&
-             snap.nativeSnapshotOrigin === snap.revisionOrigin &&
-             snap.nativeSnapshotSize === snap.blob.size)
+        let snap = this.snapshot
+        let nativeReady = Boolean(
+            snap?.nativeSnapshotPath && (
+                snap.nativeSnapshotOnly ||
+                !snap.blob ||
+                (snap.blob &&
+                 snap.nativeSnapshotRevision === snap.blobRevision &&
+                 snap.nativeSnapshotOrigin === snap.revisionOrigin &&
+                 (snap.nativeSnapshotSize == null || snap.nativeSnapshotSize === 0 || snap.nativeSnapshotSize === snap.blob.size))
+            )
         )
+        if (nativeReady && snap.blob instanceof Blob && platformBridge.isTauri && !platformBridge.isAndroid &&
+            !await platformBridge.validatePdfSnapshot(snap.nativeSnapshotPath, snap.nativeSnapshotSize || snap.blob.size)) {
+            nativeReady = false
+            snap = { ...snap, nativeSnapshotPath: null }
+        }
+        if (!nativeReady) {
+            snap = await prepareSavedPdfNativeSnapshot(snap)
+            this.snapshot = snap
+            nativeReady = Boolean(snap?.nativeSnapshotPath && snap.nativeSnapshotRevision === snap.blobRevision && snap.nativeSnapshotOrigin === snap.revisionOrigin)
+        }
+        if (this._destroyed) throw abortError()
         if (nativeReady && await MuPdfTauriDriver.isAvailable()) {
             if (this._destroyed) throw new Error('Driver is destroyed')
             const native = new MuPdfTauriDriver()
             this.backend = native
             this.kind = native.kind
             try {
-                const expectedSize = snap.nativeSnapshotSize || snap.blob?.size || null
-                return await native.open({ nativePath: snap.nativeSnapshotPath, expectedSize })
+                const expectedSize = (snap.nativeSnapshotSize && snap.nativeSnapshotSize > 0)
+                    ? snap.nativeSnapshotSize
+                    : (snap.blob?.size && snap.blob.size > 0 ? snap.blob.size : null)
+                return await native.open({ nativePath: snap.nativeSnapshotPath, expectedSize, password })
             } catch (err) {
                 native.destroy()
                 if (this._destroyed) throw err
+                const msg = String(err?.message || err).toLowerCase()
+                if (err?.name === 'PasswordException' || msg.includes('password') || msg.includes('needs_password')) {
+                    throw err
+                }
                 console.warn('[PDF] Native snapshot open failed; using PDF.js:', err)
             }
         }
         let blobToOpen = this.snapshot?.blob || source?.blob || source?.file || source
-        if ((!blobToOpen || blobToOpen.size === 0) && snap?.nativeSnapshotPath && typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
+        if (typeof blobToOpen?.materialize === 'function') {
+            try {
+                blobToOpen = await blobToOpen.materialize()
+            } catch (mErr) {
+                console.warn('[PDF] Materialize lazy snapshot notice:', mErr)
+            }
+        } else if ((!blobToOpen || blobToOpen.size === 0 || blobToOpen.isLazySnapshot || blobToOpen.nativeSnapshotOnly) && snap?.nativeSnapshotPath && typeof platformBridge !== 'undefined' && platformBridge.readFileBuffer) {
             try {
                 const buf = await platformBridge.readFileBuffer(snap.nativeSnapshotPath)
                 if (buf) blobToOpen = new Blob([buf], { type: 'application/pdf' })
@@ -663,15 +780,29 @@ export class AdaptivePdfDriver {
         const fallback = new PdfJsDriver()
         this.backend = fallback
         this.kind = fallback.kind
-        return fallback.open(blobToOpen)
+        return fallback.open({ blob: blobToOpen, password })
     }
 
+    get docId() { return this.backend?.docId || this._docId || null }
     get numPages() { return this.backend?.numPages || 0 }
     get allPageSizesKnown() { return Boolean(this.backend?.allPageSizesKnown) }
-    getPageSizes(...args) { return this.backend.getPageSizes(...args) }
-    renderPage(...args) { return this.backend.renderPage(...args) }
+    getPageSizes(...args) { return this.backend?.getPageSizes?.(...args) }
+    renderPage(...args) { return this.backend?.renderPage?.(...args) }
+    async renderPageBitmap(pageIndex, scale = 1.0, signal = null) {
+        if (!this.backend) return null
+        if (typeof this.backend.renderPageBitmap === 'function') {
+            return this.backend.renderPageBitmap(pageIndex, scale, signal)
+        }
+        if (typeof this.backend.renderPage === 'function') {
+            const result = await this.backend.renderPage(pageIndex, scale, signal)
+            const canvas = (result && result.tagName === 'CANVAS') ? result : (result?.canvas || result)
+            return { canvas, width: canvas?.width || 0, height: canvas?.height || 0 }
+        }
+        return null
+    }
     renderTextLayer(...args) { return this.backend.renderTextLayer?.(...args) }
     getTextLayer(...args) { return this.backend.getTextLayer(...args) }
+    getPagePlainText(...args) { return this.backend?.getPagePlainText?.(...args) || Promise.resolve('') }
     getTextGeometry(...args) { return this.backend.getTextGeometry?.(...args) }
     select(...args) { return this.backend.select?.(...args) }
     getOutline(...args) { return this.backend.getOutline?.(...args) }
@@ -680,6 +811,73 @@ export class AdaptivePdfDriver {
         this._destroyed = true
         this.backend?.destroy?.()
         this.backend = null
+    }
+}
+
+export class AdaptivePdfDriverLease {
+    constructor(realDriver, viewId = 'primary') {
+        this.realDriver = realDriver;
+        this.viewId = viewId;
+        this._destroyed = false;
+    }
+
+    get kind() { return this.realDriver?.kind || 'lease' }
+    get docId() { return this.realDriver?.docId || null }
+    get numPages() { return this.realDriver?.numPages || 0 }
+    get pageSize() { return this.realDriver?.pageSize }
+    getPageSize(...args) { return this.realDriver?.getPageSize?.(...args) }
+    getPageSizes(...args) { return this.realDriver?.getPageSizes?.(...args) }
+    async open(source) {
+        if (this._destroyed) throw new Error('Driver lease is destroyed')
+        if (this.realDriver?.open && (!this.realDriver.numPages || this.realDriver.numPages === 0)) {
+            return await this.realDriver.open(source)
+        }
+        return {
+            numPages: this.numPages,
+            pageSizes: this.getPageSizes?.() || [],
+            allPageSizesKnown: true,
+            docId: this.docId
+        }
+    }
+    renderPage(...args) {
+        if (this._destroyed) throw new Error('Driver lease is destroyed')
+        return this.realDriver?.renderPage?.(...args)
+    }
+    renderPageBitmap(...args) {
+        if (this._destroyed) throw new Error('Driver lease is destroyed')
+        return this.realDriver?.renderPageBitmap?.(...args)
+    }
+    renderTextLayer(...args) {
+        if (this._destroyed) throw new Error('Driver lease is destroyed')
+        return this.realDriver?.renderTextLayer?.(...args)
+    }
+    getTextLayer(...args) {
+        if (this._destroyed) throw new Error('Driver lease is destroyed')
+        return this.realDriver?.getTextLayer?.(...args)
+    }
+    getPagePlainText(...args) {
+        if (this._destroyed) return Promise.resolve('')
+        return this.realDriver?.getPagePlainText?.(...args) || Promise.resolve('')
+    }
+    getTextGeometry(...args) {
+        if (this._destroyed) throw new Error('Driver lease is destroyed')
+        return this.realDriver?.getTextGeometry?.(...args)
+    }
+    select(...args) {
+        if (this._destroyed) return null
+        return this.realDriver?.select?.(...args)
+    }
+    getOutline(...args) {
+        if (this._destroyed) return Promise.resolve([])
+        return this.realDriver?.getOutline?.(...args) || Promise.resolve([])
+    }
+    getLinks(...args) {
+        if (this._destroyed) return Promise.resolve([])
+        return this.realDriver?.getLinks?.(...args) || Promise.resolve([])
+    }
+    destroy() {
+        this._destroyed = true;
+        // Do NOT destroy realDriver; only release this lease
     }
 }
 

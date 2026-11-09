@@ -225,7 +225,20 @@ export class OcrService {
         if (this._worker) return this._worker
         if (this._workerInitPromise) return this._workerInitPromise
         if (typeof Tesseract === 'undefined') {
-            throw new Error('Tesseract OCR 引擎未加载，请检查本地脚本或网络连接')
+            if (typeof document !== 'undefined') {
+                try {
+                    await new Promise((resolve, reject) => {
+                        const s = document.createElement('script')
+                        s.src = './vendor/tesseract/tesseract.min.js'
+                        s.onload = () => resolve()
+                        s.onerror = (e) => reject(new Error('Tesseract OCR 脚本加载失败: ' + e))
+                        document.head.appendChild(s)
+                    })
+                } catch (_) {}
+            }
+            if (typeof Tesseract === 'undefined') {
+                throw new Error('Tesseract OCR 引擎未加载，请检查本地脚本或网络连接')
+            }
         }
 
         onStageChange?.('正在初始化 OCR 引擎与语言模型...')
@@ -302,6 +315,136 @@ export class OcrService {
         })()
 
         return this._workerInitPromise
+    }
+
+    /**
+     * Recognize text from a single canvas with geometry spans mapped back to page points
+     * @param {HTMLCanvasElement} canvas
+     * @param {AbortSignal} [signal]
+     * @param {number} [scale=1.0] Rendering scale of canvas relative to page points
+     * @returns {Promise<{ text: string, spans: Array<{ text: string, rect: number[], line: number }> }>}
+     */
+    async recognizeCanvas(canvas, signal = null, scaleOrOptions = 1.0) {
+        if (!canvas) throw new Error('Canvas is required for OCR')
+        if (signal?.aborted) throw new Error('任务已取消')
+        const jobId = ++this._currentJobId
+        const worker = await this._getWorker(null, jobId)
+        if (signal?.aborted || jobId !== this._currentJobId) throw new Error('任务已取消')
+        const activeSignal = signal || new AbortController().signal
+        const ocrRes = await recognizeWithCancellation(worker, canvas, activeSignal)
+        if (activeSignal.aborted || jobId !== this._currentJobId) throw new Error('任务已取消')
+
+        let scale = 1.0
+        let rotation = 0
+        let originX = 0
+        let originY = 0
+        if (typeof scaleOrOptions === 'number') {
+            scale = scaleOrOptions
+        } else if (scaleOrOptions && typeof scaleOrOptions === 'object') {
+            scale = scaleOrOptions.scale || 1.0
+            rotation = scaleOrOptions.rotation || 0
+            originX = scaleOrOptions.originX || 0
+            originY = scaleOrOptions.originY || 0
+        }
+        const safeScale = scale > 0 ? scale : 1.0
+
+        const mapPoint = (px, py) => {
+            let x = px / safeScale
+            let y = py / safeScale
+            if (rotation === 90) {
+                const ch = (canvas.height || 0) / safeScale
+                const nx = y
+                const ny = ch - x
+                x = nx
+                y = ny
+            } else if (rotation === 180) {
+                const cw = (canvas.width || 0) / safeScale
+                const ch = (canvas.height || 0) / safeScale
+                x = cw - x
+                y = ch - y
+            } else if (rotation === 270) {
+                const cw = (canvas.width || 0) / safeScale
+                const nx = cw - y
+                const ny = x
+                x = nx
+                y = ny
+            }
+            return [x + originX, y + originY]
+        }
+
+        const mapBbox = (b) => {
+            const [x0, y0] = mapPoint(b.x0 ?? 0, b.y0 ?? 0)
+            const [x1, y1] = mapPoint(b.x1 ?? 0, b.y1 ?? 0)
+            return [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)]
+        }
+
+        const spans = []
+        if (ocrRes?.data?.lines?.length) {
+            ocrRes.data.lines.forEach((line, lineIdx) => {
+                if (line.words?.length) {
+                    line.words.forEach(w => {
+                        const text = w.text?.trim()
+                        if (!text) return
+                        if (Array.isArray(w.symbols) && w.symbols.length > 0) {
+                            for (const sym of w.symbols) {
+                                const st = sym.text?.trim()
+                                if (!st) continue
+                                const sb = sym.bbox || w.bbox || { x0: 0, y0: 0, x1: 0, y1: 0 }
+                                spans.push({
+                                    text: st,
+                                    rect: mapBbox(sb),
+                                    line: lineIdx
+                                })
+                            }
+                        } else {
+                            const b = w.bbox || { x0: 0, y0: 0, x1: 0, y1: 0 }
+                            spans.push({
+                                text,
+                                rect: mapBbox(b),
+                                line: lineIdx
+                            })
+                        }
+                    })
+                } else {
+                    const text = line.text?.trim()
+                    if (!text) return
+                    const b = line.bbox || { x0: 0, y0: 0, x1: 0, y1: 0 }
+                    spans.push({
+                        text,
+                        rect: mapBbox(b),
+                        line: lineIdx
+                    })
+                }
+            })
+        } else if (ocrRes?.data?.words?.length) {
+            ocrRes.data.words.forEach((word, wordIdx) => {
+                const text = word.text?.trim()
+                if (!text) return
+                const b = word.bbox || { x0: 0, y0: 0, x1: 0, y1: 0 }
+                spans.push({
+                    text,
+                    rect: mapBbox(b),
+                    line: wordIdx
+                })
+            })
+        } else if (ocrRes?.data?.spans?.length) {
+            ocrRes.data.spans.forEach((s, idx) => {
+                const text = s.text?.trim()
+                if (!text) return
+                const r = s.rect || [0, 0, 0, 0]
+                const [x0, y0] = mapPoint(r[0], r[1])
+                const [x1, y1] = mapPoint(r[2], r[3])
+                spans.push({
+                    text,
+                    rect: [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)],
+                    line: s.line ?? idx
+                })
+            })
+        }
+
+        const rawText = (ocrRes?.data?.text || spans.map(s => s.text).join('\n')).trim()
+        const text = cleanOcrChineseSpaces(rawText)
+        return { text, spans }
     }
 
     /**

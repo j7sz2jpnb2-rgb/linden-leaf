@@ -806,9 +806,40 @@ export class AiSidebarController {
             return
         }
 
+        // Synchronously acquire generation lock and requestId BEFORE any async calls (N12)
+        this.isGenerating = true
+        this.activeRequestId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)
+        const currentRequestId = this.activeRequestId
+        if (this.dom.btnAiStopGeneration) {
+            this.dom.btnAiStopGeneration.disabled = false
+            this.dom.btnAiStopGeneration.classList.add('active')
+        }
+        if (this.dom.btnAiSendMessage) this.dom.btnAiSendMessage.disabled = true
+        if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = '正在准备请求...'
+
+        const releaseLockOnPreflightError = () => {
+            if (this.activeRequestId === currentRequestId) {
+                this.isGenerating = false
+                this.activeRequestId = null
+                if (this.dom.btnAiStopGeneration) {
+                    this.dom.btnAiStopGeneration.disabled = true
+                    this.dom.btnAiStopGeneration.classList.remove('active')
+                }
+                if (this.dom.btnAiSendMessage) this.dom.btnAiSendMessage.disabled = false
+                if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = ''
+            }
+        }
+
         // Check if AI is configured
-        const ready = await isAiReady()
+        let ready = false
+        try {
+            ready = await isAiReady()
+        } catch (e) {
+            releaseLockOnPreflightError()
+            throw e
+        }
         if (!ready) {
+            releaseLockOnPreflightError()
             this.app?.showToast?.('请先在「设置 - 排版与主题设置」中配置大模型 API Key', 'warning')
             return
         }
@@ -817,7 +848,12 @@ export class AiSidebarController {
         this.dispatchedAt = Date.now()
 
         // 1. Ensure conversation exists
-        await this.ensureActiveConversation()
+        try {
+            await this.ensureActiveConversation()
+        } catch (e) {
+            releaseLockOnPreflightError()
+            throw e
+        }
 
         const refSnapshot = this.currentReference
         const rawBudget = this.app?.advancedSettings?.aiContextTokenBudget ?? this.app?.advancedSettings?.config?.aiContextTokenBudget
@@ -879,10 +915,13 @@ export class AiSidebarController {
             status: 'completed'
         }
 
-        await saveAiMessage(userMsg)
+        const userSaved = await saveAiMessage(userMsg).catch(() => false)
+        if (userSaved === false) {
+            releaseLockOnPreflightError()
+            this.app?.showToast?.('消息持久化失败，已取消发送', 'warning')
+            return
+        }
         this.appendMessageToUI(userMsg)
-
-        // Clear pending quote after it has been frozen into this message!
         this.clearPendingReference()
 
         // 3. Create Assistant Placeholder Record in DB & UI
@@ -898,12 +937,18 @@ export class AiSidebarController {
             usage: null
         }
 
-        await saveAiMessage(assistantMsg)
+        const assistantSaved = await saveAiMessage(assistantMsg).catch(() => false)
+        if (assistantSaved === false) {
+            releaseLockOnPreflightError()
+            this.app?.showToast?.('会话初始化失败，已取消发送', 'warning')
+            return
+        }
         const msgElement = this.appendMessageToUI(assistantMsg)
+        this._activeAssistantMsg = assistantMsg
 
-        // 4. Update UI State to Generating
+        // 4. Update UI State to Generating using the locked currentRequestId
         this.isGenerating = true
-        this.activeRequestId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)
+        this.activeRequestId = currentRequestId
         if (this.dom.btnAiStopGeneration) {
             this.dom.btnAiStopGeneration.disabled = false
             this.dom.btnAiStopGeneration.classList.add('active')
@@ -927,19 +972,80 @@ export class AiSidebarController {
 
         try {
             const configuredMaxTokens = this.app?.advancedSettings?.aiMaxTokens || this.app?.advancedSettings?.config?.aiMaxTokens || getAiConfig().maxTokens || 2048
+            let lastSaveTime = Date.now()
+            let pendingSave = false
+            const throttleSaveChunk = (text) => {
+                const now = Date.now()
+                if (now - lastSaveTime > 500 && !pendingSave) {
+                    lastSaveTime = now
+                    pendingSave = true
+                    saveAiMessage({ ...assistantMsg, content: text, status: 'streaming', updatedAt: Date.now() })
+                        .catch(() => {})
+                        .finally(() => { pendingSave = false })
+                }
+            }
+            let renderRafId = null
+            let renderTimer = null
+            let pendingText = ''
+            let lastRenderTime = 0
+            const FLUSH_INTERVAL_MS = 60
+
+            const flushContent = (text, forceScroll = false) => {
+                if (!contentDiv || !text) return
+                const chatEl = this.dom.aiChatMessages
+                const wasNearBottom = forceScroll || (chatEl ? (chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight) < 60 : true)
+                contentDiv.innerHTML = renderSafeMarkdown(text)
+                if (wasNearBottom) {
+                    this.scrollToBottom()
+                }
+            }
+
+            const scheduleChunkRender = (fullText) => {
+                pendingText = fullText
+                const now = performance.now()
+                const elapsed = now - lastRenderTime
+                if (elapsed >= FLUSH_INTERVAL_MS) {
+                    if (renderTimer) { clearTimeout(renderTimer); renderTimer = null }
+                    if (!renderRafId) {
+                        renderRafId = requestAnimationFrame(() => {
+                            renderRafId = null
+                            lastRenderTime = performance.now()
+                            if (this.activeRequestId !== currentRequestId) return
+                            flushContent(pendingText)
+                        })
+                    }
+                } else if (!renderTimer && !renderRafId) {
+                    renderTimer = setTimeout(() => {
+                        renderTimer = null
+                        if (!renderRafId) {
+                            renderRafId = requestAnimationFrame(() => {
+                                renderRafId = null
+                                lastRenderTime = performance.now()
+                                if (this.activeRequestId !== currentRequestId) return
+                                flushContent(pendingText)
+                            })
+                        }
+                    }, FLUSH_INTERVAL_MS - elapsed)
+                }
+            }
+
             const response = await requestAiCompletion({
-                requestId: this.activeRequestId,
+                requestId: currentRequestId,
                 messages,
                 maxTokens: configuredMaxTokens,
                 returnMetadata: true,
                 onChunk: (delta, fullText) => {
+                    if (this.activeRequestId !== currentRequestId) return
                     assistantMsg.content = fullText
-                    if (contentDiv) {
-                        contentDiv.innerHTML = renderSafeMarkdown(fullText)
-                    }
-                    this.scrollToBottom()
+                    scheduleChunkRender(fullText)
+                    throttleSaveChunk(fullText)
                 }
             })
+            if (this.activeRequestId !== currentRequestId) return
+
+            if (renderTimer) { clearTimeout(renderTimer); renderTimer = null }
+            if (renderRafId) { cancelAnimationFrame(renderRafId); renderRafId = null }
+
             const resultText = typeof response === 'string' ? response : (response?.fullText || '')
             const finishReason = typeof response === 'string' ? null : response?.finishReason
 
@@ -951,9 +1057,7 @@ export class AiSidebarController {
             assistantMsg.usage = response?.usage || null
             await saveAiMessage(assistantMsg)
 
-            if (contentDiv) {
-                contentDiv.innerHTML = renderSafeMarkdown(resultText)
-            }
+            flushContent(resultText, true)
             if (metaDiv) {
                 const usageLabel = assistantMsg.usage?.total_tokens ? ` · ${assistantMsg.usage.total_tokens} tokens` : ' · Token: 未知'
                 const isPartial = assistantMsg.status === 'partial'
@@ -965,6 +1069,7 @@ export class AiSidebarController {
             }
             if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = assistantMsg.status === 'partial' ? '回答未完，可继续' : assistantMsg.status === 'cancelled' ? '已停止' : assistantMsg.status === 'failed' ? '请求失败' : '生成完成'
         } catch (err) {
+            if (this.activeRequestId !== currentRequestId) return
             const errStr = err?.message || String(err)
             const hasPartialAnswer = Boolean(assistantMsg.content?.trim())
             assistantMsg.status = hasPartialAnswer ? 'partial' : 'failed'
@@ -984,24 +1089,28 @@ export class AiSidebarController {
             }
             if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = hasPartialAnswer ? '回答中断，已保留部分内容' : '请求失败'
         } finally {
-            this.isGenerating = false
-            this.activeRequestId = null
-            if (this.dom.btnAiStopGeneration) {
-                this.dom.btnAiStopGeneration.disabled = true
-                this.dom.btnAiStopGeneration.classList.remove('active')
+            if (this._activeAssistantMsg === assistantMsg) {
+                this._activeAssistantMsg = null
             }
-            if (this.dom.btnAiSendMessage) this.dom.btnAiSendMessage.disabled = false
+            if (this.activeRequestId === currentRequestId) {
+                this.isGenerating = false
+                this.activeRequestId = null
+                if (this.dom.btnAiStopGeneration) {
+                    this.dom.btnAiStopGeneration.disabled = true
+                    this.dom.btnAiStopGeneration.classList.remove('active')
+                }
+                if (this.dom.btnAiSendMessage) this.dom.btnAiSendMessage.disabled = false
 
-            // Calculate actual remaining cooldown since dispatch time:
-            // "第一条立即发送；若 3 秒就完成，还需等 7 秒才能再发。若 15 秒完成，可立即发送下一条。"
-            const elapsedSecs = Math.floor((Date.now() - (this.dispatchedAt || 0)) / 1000)
-            const configuredCooldown = this.app?.advancedSettings?.config?.aiCooldownSeconds ?? this.app?.advancedSettings?.aiCooldownSeconds ?? 10
-            const remaining = configuredCooldown > 0 ? Math.max(0, configuredCooldown - elapsedSecs) : 0
+                // Calculate actual remaining cooldown since dispatch time:
+                const elapsedSecs = Math.floor((Date.now() - (this.dispatchedAt || 0)) / 1000)
+                const configuredCooldown = this.app?.advancedSettings?.config?.aiCooldownSeconds ?? this.app?.advancedSettings?.aiCooldownSeconds ?? 10
+                const remaining = configuredCooldown > 0 ? Math.max(0, configuredCooldown - elapsedSecs) : 0
 
-            if (remaining > 0) {
-                this.startCooldownCountdown(remaining)
-            } else {
-                this.clearCooldown()
+                if (remaining > 0) {
+                    this.startCooldownCountdown(remaining)
+                } else {
+                    this.clearCooldown()
+                }
             }
             this.scrollToBottom()
         }
@@ -1281,7 +1390,8 @@ export class AiSidebarController {
             // Support cross-book navigation if reference belongs to another book
             if (ref.bookId && this.app?.currentBookId && ref.bookId !== this.app.currentBookId) {
                 if (typeof this.app.openBook === 'function') {
-                    await this.app.openBook(ref.bookId)
+                    const initLoc = ref.cfi ? { cfi: ref.cfi } : (typeof ref.pageIndex === 'number' ? { type: 'pdf', page: ref.pageIndex + 1, pageIndex: ref.pageIndex, yRatio: typeof ref.yRatio === 'number' ? ref.yRatio : 0 } : null)
+                    await this.app.openBook(ref.bookId, initLoc)
                     // Wait briefly for book renderer to mount
                     await new Promise(r => setTimeout(r, 450))
                 }
@@ -1621,6 +1731,19 @@ export class AiSidebarController {
         })
     }
 
+    async flushActiveStreamingMessage() {
+        if (!this.isGenerating || !this._activeAssistantMsg) return
+        const msg = this._activeAssistantMsg
+        if (msg.content && msg.content.trim()) {
+            msg.status = 'partial'
+            try {
+                await saveAiMessage(msg)
+            } catch (e) {
+                console.warn('[AiSidebar] Error flushing active streaming message:', e)
+            }
+        }
+    }
+
     async handleHistoryJumpToBook(convId) {
         const targetId = convId || this._selectedHistoryConvId || this._selectedWorkspaceConvId
         const conv = await getAiConversation(targetId)
@@ -1637,20 +1760,24 @@ export class AiSidebarController {
         const refToUse = refWithAnchor || { bookId: conv.bookId, cfi: conv.cfi }
         refToUse.bookId = conv.bookId
 
+        const initialLoc = refToUse.cfi || (typeof refToUse.pageIndex === 'number' ? refToUse.pageIndex : null)
         if (typeof this.app?.openBook === 'function') {
-            await this.app.openBook(conv.bookId)
-            // Wait for book renderer to be mounted
-            let attempts = 0
-            while (attempts < 25 && (!this.app.foliateView && !this.app.pdfViewport)) {
-                await new Promise(r => setTimeout(r, 100))
-                attempts++
-            }
-            await new Promise(r => setTimeout(r, 200))
-
-            if (refToUse.cfi || refToUse.pageIndex != null) {
-                await this.jumpToReference(refToUse)
+            await this.app.openBook(conv.bookId, initialLoc)
+            // If the book was opened in-place in the current window:
+            if (this.app.currentBookId === conv.bookId) {
+                let attempts = 0
+                while (attempts < 10 && (!this.app.foliateView && !this.app.pdfViewport)) {
+                    await new Promise(r => setTimeout(r, 100))
+                    attempts++
+                }
+                if (refToUse.cfi || refToUse.pageIndex != null) {
+                    await this.jumpToReference(refToUse)
+                } else {
+                    this.app?.showToast?.(`已打开图书《${conv.bookTitle || ''}》`, 'success')
+                }
             } else {
-                this.app?.showToast?.(`已打开图书《${conv.bookTitle || ''}》`, 'success')
+                // Book was opened or focused in satellite window; initialLoc already dispatched via openBook
+                this.app?.showToast?.(`已在阅读窗口定位《${conv.bookTitle || ''}》`, 'book')
             }
         }
     }
@@ -1792,16 +1919,41 @@ export class AiSidebarController {
             return match
         })
 
-        // Also search in message content and quote text
+        // P07: Cache searchable text for conversations to prevent N database reads on each keystroke
+        if (!this._convSearchTextCache) {
+            this._convSearchTextCache = new Map()
+        }
         const candidates = this._cachedWorkspaceList.filter(c => !directMatches.has(c.id))
         const deepMatches = []
-        for (let i = 0; i < candidates.length; i += 4) {
+        const missing = []
+
+        for (const conv of candidates) {
+            const cached = this._convSearchTextCache.get(conv.id)
+            const curTime = conv.updatedAt || conv.createdAt || 0
+            if (cached && cached.updatedAt === curTime) {
+                if (cached.text.includes(query)) {
+                    deepMatches.push(conv)
+                }
+            } else {
+                missing.push(conv)
+            }
+        }
+
+        for (let i = 0; i < missing.length; i += 4) {
             if (generation !== this._workspaceFilterGeneration) return
-            const matches = await Promise.all(candidates.slice(i, i + 4).map(async conv => {
+            const matches = await Promise.all(missing.slice(i, i + 4).map(async conv => {
                 try {
                     const msgs = await getAiMessages(conv.id)
-                    return msgs.some(m => (m.content || '').toLowerCase().includes(query) ||
-                        (m.quoteText || '').toLowerCase().includes(query)) ? conv : null
+                    const fullText = msgs.map(m => `${m.content || ''} ${m.quoteText || ''} ${m.referenceSnapshot?.selectedText || ''}`).join(' ').toLowerCase()
+                    if (this._convSearchTextCache.size > 500) {
+                        const firstKey = this._convSearchTextCache.keys().next().value
+                        this._convSearchTextCache.delete(firstKey)
+                    }
+                    this._convSearchTextCache.set(conv.id, {
+                        text: fullText,
+                        updatedAt: conv.updatedAt || conv.createdAt || 0
+                    })
+                    return fullText.includes(query) ? conv : null
                 } catch { return null }
             }))
             deepMatches.push(...matches.filter(Boolean))

@@ -412,7 +412,9 @@ html[data-anim-intensity="none"] *::after {
 }
 
 [data-theme="dark"] .pdf-highlight-rect,
-[data-theme="black"] .pdf-highlight-rect {
+[data-theme="black"] .pdf-highlight-rect,
+[data-theme="dark"] .pdf-highlight-poly,
+[data-theme="black"] .pdf-highlight-poly {
   mix-blend-mode: screen;
 }
 
@@ -2349,6 +2351,8 @@ html.satellite-reader-window #reader-view {
   cursor: pointer;
   max-width: 170px;
   width: 100%;
+  content-visibility: auto;
+  contain-intrinsic-size: 170px 285px;
   transition: transform 0.22s cubic-bezier(0.2, 0, 0, 1);
   animation: appleCardFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) backwards;
   animation-delay: min(calc(var(--card-index, 0) * 12ms), 120ms);
@@ -8937,4 +8941,16 @@ input[type="range"].control-input::-moz-range-thumb,
   .global-modal-backdrop { background: rgba(17, 17, 16, .44); }
   #panel-settings #adv-group-palette input[type="color"] { width: 30px !important; height: 28px; flex: 0 0 30px; padding: 2px; border: 1px solid var(--border-color); border-radius: 5px; background: var(--bg-input); }
   #panel-settings #adv-group-palette input[type="text"] { width: 88px !important; min-width: 88px; flex: 0 0 88px; padding: 5px 7px; font-size: 12px; }
+}
+
+/* F02 & F04 Reader Controls */
+#btn-nav-history-back:disabled,
+#btn-nav-history-forward:disabled {
+    opacity: 0.28;
+    cursor: default;
+    pointer-events: none;
+}
+#btn-toggle-pin-window.active {
+    color: var(--accent-purple, #9333ea);
+    background: rgba(147, 51, 234, 0.12);
 }
