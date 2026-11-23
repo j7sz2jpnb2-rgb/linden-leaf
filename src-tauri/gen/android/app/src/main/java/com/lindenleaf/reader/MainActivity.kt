@@ -365,13 +365,17 @@ class MainActivity : TauriActivity() {
     }
 
     fun exportBookFile(filePath: String, filename: String, share: Boolean, callback: (JSONObject) -> Unit) {
+        val en = LindenNativeBridge.isEnglishLocale()
         val source = File(filePath)
-        if (!source.isFile) { callback(JSONObject().put("success", false).put("error", "原始图书文件不存在")); return }
+        if (!source.isFile) {
+            callback(JSONObject().put("success", false).put("error", LindenNativeBridge.l10n(en, "原始图书文件不存在", "Source ebook file does not exist")))
+            return
+        }
         val booksDirCanon = File(filesDir, "books").canonicalPath
         val snapshotsDirCanon = File(filesDir, "pdf_snapshots").canonicalPath
         val sourceCanon = try { source.canonicalPath } catch (_: Exception) { "" }
         if (!sourceCanon.startsWith("$booksDirCanon/") && !sourceCanon.startsWith("$snapshotsDirCanon/")) {
-            callback(JSONObject().put("success", false).put("error", "安全限制：仅允许导出书库内的图书文件"))
+            callback(JSONObject().put("success", false).put("error", LindenNativeBridge.l10n(en, "安全限制：仅允许导出书库内的图书文件", "Security restriction: only library ebook files can be exported")))
             return
         }
         val name = filename.replace('\\', '/').substringAfterLast('/').replace(Regex("[^a-zA-Z0-9._\\-\\u4e00-\\u9fa5 ()\\[\\]]"), "_").ifBlank { "book.epub" }
@@ -392,7 +396,7 @@ class MainActivity : TauriActivity() {
                                 clipData = android.content.ClipData.newUri(contentResolver, name, uri)
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
-                            startActivity(Intent.createChooser(intent, "分享图书"))
+                            startActivity(Intent.createChooser(intent, LindenNativeBridge.l10n(en, "分享图书", "Share Ebook")))
                             callback(JSONObject().put("success", true).put("opened", true))
                         } catch (e: Exception) { callback(JSONObject().put("success", false).put("error", e.message)) }
                     }
@@ -400,7 +404,7 @@ class MainActivity : TauriActivity() {
             }
         } else runOnUiThread {
             if (pendingExportCallback != null) {
-                callback(JSONObject().put("success", false).put("error", "请先完成当前的文件保存"))
+                callback(JSONObject().put("success", false).put("error", LindenNativeBridge.l10n(en, "请先完成当前的文件保存", "Please finish the current file save first")))
                 return@runOnUiThread
             }
             pendingExportSource = source
@@ -424,13 +428,14 @@ class MainActivity : TauriActivity() {
             .ifBlank { "export.txt" }
         val baseMime = mimeType.substringBefore(';').trim().ifBlank { "text/plain" }
         runOnUiThread {
+            val en = LindenNativeBridge.isEnglishLocale()
             if (pendingTextExportCallback != null) {
                 callback(
                     JSONObject()
                         .put("saved", false)
                         .put("uri", JSONObject.NULL)
                         .put("cancelled", false)
-                        .put("error", "请先完成当前的文件保存")
+                        .put("error", LindenNativeBridge.l10n(en, "请先完成当前的文件保存", "Please finish the current file save first"))
                 )
                 return@runOnUiThread
             }
@@ -450,7 +455,7 @@ class MainActivity : TauriActivity() {
                         .put("saved", false)
                         .put("uri", JSONObject.NULL)
                         .put("cancelled", false)
-                        .put("error", e.message ?: "无法打开文件保存对话框")
+                        .put("error", e.message ?: LindenNativeBridge.l10n(en, "无法打开文件保存对话框", "Unable to open save file dialog"))
                 )
             }
         }
@@ -496,9 +501,11 @@ class MainActivity : TauriActivity() {
                 return
             }
             bookIo.execute {
+                val en = LindenNativeBridge.isEnglishLocale()
                 try {
                     source.inputStream().use { input ->
-                        val output = contentResolver.openOutputStream(uri, "wt") ?: error("无法写入所选位置")
+                        val output = contentResolver.openOutputStream(uri, "wt")
+                            ?: error(LindenNativeBridge.l10n(en, "无法写入所选位置", "Cannot write to the selected location"))
                         output.use { input.copyTo(it, 64 * 1024) }
                     }
                     callback?.invoke(JSONObject().put("success", true).put("path", uri.toString()))
@@ -520,8 +527,10 @@ class MainActivity : TauriActivity() {
                 return
             }
             bookIo.execute {
+                val en = LindenNativeBridge.isEnglishLocale()
                 try {
-                    val output = contentResolver.openOutputStream(uri, "wt") ?: error("无法写入所选位置")
+                    val output = contentResolver.openOutputStream(uri, "wt")
+                        ?: error(LindenNativeBridge.l10n(en, "无法写入所选位置", "Cannot write to the selected location"))
                     output.use { it.write(content.toByteArray(Charsets.UTF_8)) }
                     callback?.invoke(
                         JSONObject()
@@ -535,7 +544,7 @@ class MainActivity : TauriActivity() {
                             .put("saved", false)
                             .put("uri", JSONObject.NULL)
                             .put("cancelled", false)
-                            .put("error", e.message ?: "写入文件失败")
+                            .put("error", e.message ?: LindenNativeBridge.l10n(en, "写入文件失败", "Failed to write file"))
                     )
                 }
             }

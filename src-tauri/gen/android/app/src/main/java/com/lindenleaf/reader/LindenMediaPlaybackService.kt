@@ -171,7 +171,8 @@ class LindenMediaPlaybackService : Service() {
             locale: String = "zh-CN"
         ) {
             require(queueTexts.isNotEmpty() && queueTexts.any { it.isNotBlank() }) {
-                "$ERR_EMPTY_QUEUE: 没有可朗读的段落"
+                val en = LindenNativeBridge.isEnglishLocale(locale)
+                "$ERR_EMPTY_QUEUE: ${LindenNativeBridge.l10n(en, "没有可朗读的段落", "No readable paragraphs in queue")}"
             }
             val id = jobId.ifBlank { UUID.randomUUID().toString() }
             pendingQueues.clear()
@@ -568,7 +569,8 @@ class LindenMediaPlaybackService : Service() {
         ListeningJournal.pending(this)
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= 26) {
-            val channel = NotificationChannel(CHANNEL_ID, "听书播放", NotificationManager.IMPORTANCE_LOW)
+            val channelName = LindenNativeBridge.l10n(LindenNativeBridge.isEnglishLocale(), "听书播放", "Audio Playback")
+            val channel = NotificationChannel(CHANNEL_ID, channelName, NotificationManager.IMPORTANCE_LOW)
             channel.setShowBadge(false)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }

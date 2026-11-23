@@ -13,6 +13,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -26,6 +27,16 @@ object LindenNativeBridge {
     private val ALLOWED_BOOK_EXTENSIONS = setOf(
         "epub", "pdf", "docx", "txt", "md", "mobi", "azw", "azw3", "fb2", "cbz", "djvu"
     )
+
+    @JvmStatic
+    fun isEnglishLocale(localeArg: String? = null): Boolean {
+        val candidate = localeArg?.trim()?.takeIf { it.isNotEmpty() }
+            ?: Locale.getDefault().language
+        return candidate.startsWith("en", ignoreCase = true)
+    }
+
+    @JvmStatic
+    fun l10n(en: Boolean, zh: String, enText: String): String = if (en) enText else zh
 
     @JvmStatic
     fun resolveContentUri(context: Context, uriString: String): String {
@@ -46,7 +57,14 @@ object LindenNativeBridge {
                      targetCanon.startsWith("$filesCanon/") || targetCanon == filesCanon) &&
                     !targetCanon.startsWith("$booksCanon/")
                 ) {
-                    throw SecurityException("拒绝从应用私有沙盒目录导入内部文件")
+                    val en = isEnglishLocale()
+                    throw SecurityException(
+                        l10n(
+                            en,
+                            "拒绝从应用私有沙盒目录导入内部文件",
+                            "Refusing to import internal file from app private sandbox"
+                        )
+                    )
                 }
             }
 
@@ -73,7 +91,10 @@ object LindenNativeBridge {
             val filename: String = if (cleaned.isEmpty()) "imported_book" else cleaned
             val ext = filename.substringAfterLast('.', "").lowercase()
             if (ext.isNotEmpty() && !ALLOWED_BOOK_EXTENSIONS.contains(ext)) {
-                throw SecurityException("不支持的图书文件扩展名: .$ext")
+                val en = isEnglishLocale()
+                throw SecurityException(
+                    l10n(en, "不支持的图书文件扩展名: .$ext", "Unsupported ebook file extension: .$ext")
+                )
             }
 
             // 2. Prepare staging directory (files/staging/)
@@ -98,10 +119,14 @@ object LindenNativeBridge {
                     }
                     output.flush()
                 }
-            } ?: throw IllegalStateException("无法打开输入流读取: $uriString")
+            } ?: throw IllegalStateException(
+                l10n(isEnglishLocale(), "无法打开输入流读取: $uriString", "Cannot open input stream for: $uriString")
+            )
 
             if (totalBytes <= 0L || !stagingFile.exists() || stagingFile.length() == 0L) {
-                throw IllegalStateException("导入图书文件大小为0或读取失败")
+                throw IllegalStateException(
+                    l10n(isEnglishLocale(), "导入图书文件大小为0或读取失败", "Imported ebook file is empty or unreadable")
+                )
             }
 
             val hexHash = md.digest().joinToString("") { "%02x".format(it) }

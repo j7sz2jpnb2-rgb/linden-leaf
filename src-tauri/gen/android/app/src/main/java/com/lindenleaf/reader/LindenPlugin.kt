@@ -169,7 +169,13 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
             val cleanBase64 = if (base64Data.contains(",")) base64Data.substringAfter(",") else base64Data
             val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                ?: throw IllegalArgumentException("无法解码图片数据")
+                ?: throw IllegalArgumentException(
+                    LindenNativeBridge.l10n(
+                        LindenNativeBridge.isEnglishLocale(args.optString("locale", "")),
+                        "无法解码图片数据",
+                        "Unable to decode image data"
+                    )
+                )
 
             var savedUri: Uri? = null
             var outPath = ""
@@ -184,7 +190,13 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
 
                 val resolver = activity.contentResolver
                 val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                    ?: throw IllegalStateException("创建系统相册条目失败")
+                    ?: throw IllegalStateException(
+                        LindenNativeBridge.l10n(
+                            LindenNativeBridge.isEnglishLocale(args.optString("locale", "")),
+                            "创建系统相册条目失败",
+                            "Failed to create gallery entry"
+                        )
+                    )
 
                 resolver.openOutputStream(uri)?.use { out ->
                     bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
@@ -227,7 +239,12 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
             val base64Data = args.getString("base64")
             val rawFilename = args.optString("filename", "linden_share.png")
             val filename = File(rawFilename).name.replace(Regex("[/\\\\:*?\"<>|]"), "_").ifBlank { "linden_share.png" }
-            val title = args.optString("title", "分享图片")
+            val defaultShareTitle = LindenNativeBridge.l10n(
+                LindenNativeBridge.isEnglishLocale(args.optString("locale", "")),
+                "分享图片",
+                "Share Image"
+            )
+            val title = args.optString("title", "").ifBlank { defaultShareTitle }
 
             val cleanBase64 = if (base64Data.contains(",")) base64Data.substringAfter(",") else base64Data
             val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
@@ -504,13 +521,26 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
             val res = JSObject()
             res.put("value", true)
             invoke.resolve(res)
-        } catch (e: Exception) { invoke.reject(e.message ?: "听书记录确认失败") }
+        } catch (e: Exception) {
+            invoke.reject(
+                e.message ?: LindenNativeBridge.l10n(
+                    LindenNativeBridge.isEnglishLocale(),
+                    "听书记录确认失败",
+                    "Failed to acknowledge TTS listening progress"
+                )
+            )
+        }
     }
 
     @Command
     fun exportBookFile(invoke: Invoke) {
         val main = activity as? MainActivity
-        if (main == null) { invoke.reject("文件导出暂不可用"); return }
+        if (main == null) {
+            invoke.reject(
+                LindenNativeBridge.l10n(LindenNativeBridge.isEnglishLocale(), "文件导出暂不可用", "File export is unavailable")
+            )
+            return
+        }
         val args = invoke.getArgs()
         main.exportBookFile(args.getString("filePath"), args.optString("filename", "book.epub"),
             args.optBoolean("share", false)) { result -> invoke.resolve(JSObject(result.toString())) }
@@ -519,17 +549,18 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun exportTextFile(invoke: Invoke) {
         val main = activity as? MainActivity
+        val args = invoke.getArgs()
+        val en = LindenNativeBridge.isEnglishLocale(args.optString("locale", ""))
         if (main == null) {
-            invoke.reject("文件导出暂不可用")
+            invoke.reject(LindenNativeBridge.l10n(en, "文件导出暂不可用", "File export is unavailable"))
             return
         }
-        val args = invoke.getArgs()
         val filename = args.optString("filename", "export.txt").ifBlank { "export.txt" }
         val content = args.optString("content", "")
         val mimeType = args.optString("mimeType", "text/plain; charset=utf-8").ifBlank { "text/plain; charset=utf-8" }
         main.exportTextFile(filename, content, mimeType) { result ->
             if (result.has("error") && !result.optBoolean("saved", false) && !result.optBoolean("cancelled", false)) {
-                invoke.reject(result.optString("error", "文件导出失败"))
+                invoke.reject(result.optString("error", LindenNativeBridge.l10n(en, "文件导出失败", "File export failed")))
             } else {
                 invoke.resolve(JSObject(result.toString()))
             }
