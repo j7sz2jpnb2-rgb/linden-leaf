@@ -10,7 +10,6 @@
 
   <p>
     <em>Dedicated to Franz Schubert (1797–1828)</em><br/>
-    <sub><em>„Am Brunnen vor dem Tore, da steht ein Lindenbaum…“</em></sub>
   </p>
 
   <p>
