@@ -643,7 +643,12 @@ export const bindSavedPdfNativeSnapshot = async (snapshot, descriptor) => {
         const fr = files.get(snapshot.bookId), br = books.get(snapshot.bookId)
         fr.onsuccess = () => { file = fr.result; apply() }
         br.onsuccess = () => { book = br.result; apply() }
-        tx.oncomplete = () => resolve(bound)
+        tx.oncomplete = () => {
+            if (bound && file.nativeSnapshotPath !== descriptor.path) {
+                void reclaimUnusedBookSnapshot(database, file.nativeSnapshotPath)
+            }
+            resolve(bound)
+        }
         tx.onerror = () => reject(tx.error || new Error('Failed binding saved PDF snapshot'))
         tx.onabort = () => reject(tx.error || new Error('Saved PDF snapshot transaction aborted'))
     })

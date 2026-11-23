@@ -3,7 +3,7 @@ import { advancedSettings } from './advanced-settings.js'
 import { t } from './i18n.js'
 
 const GROUPS = {
-    appearance: { get title() { return t('mobileSettings.group.appearance.title') }, get note() { return t('mobileSettings.group.appearance.note') }, ids: ['book-override-section', 'theme-settings-section', 'pdf-paper-settings-section', 'font-settings-section', 'reading-presets-section', 'typography-settings-section', 'adv-group-typography'] },
+    appearance: { get title() { return t('mobileSettings.group.appearance.title') }, get note() { return t('mobileSettings.group.appearance.note') }, ids: ['book-override-section', 'theme-settings-section', 'pdf-paper-settings-section', 'android-pdf-engine-section', 'font-settings-section', 'reading-presets-section', 'typography-settings-section', 'adv-group-typography'] },
     tts: { get title() { return t('mobileSettings.group.tts.title') }, get note() { return t('mobileSettings.group.tts.note') }, ids: ['adv-group-tts'] },
     ai: { get title() { return t('mobileSettings.group.ai.title') }, get note() { return t('mobileSettings.group.ai.note') }, ids: ['ai-settings-section', 'adv-group-ai'] },
     translation: { get title() { return t('mobileSettings.group.translation.title') }, get note() { return t('mobileSettings.group.translation.note') }, ids: ['adv-group-translation'] },

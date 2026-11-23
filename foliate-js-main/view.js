@@ -225,7 +225,7 @@ const fetchFile = async url => {
     return new File([await res.blob()], new URL(res.url).pathname)
 }
 
-export const makeBook = async file => {
+export const makeBook = async (file, { txtLayoutVersion } = {}) => {
     if (typeof file === 'string') file = await fetchFile(file)
     let book
     if (file.isDirectory) {
@@ -262,10 +262,10 @@ export const makeBook = async file => {
         if (book && loader) book.loader = loader
     }
     else {
-        const { isTXT, makeTXT } = await import('./txt.js?v=20260926_gatsby_toc')
+        const { isTXT, makeTXT, TXT_LAYOUT_VERSION } = await import('./txt.js')
         const { isMOBI, MOBI } = await import('./mobi.js')
         if (isTXT(file)) {
-            book = await makeTXT(file)
+            book = await makeTXT(file, { legacyLayout: txtLayoutVersion != null && txtLayoutVersion !== TXT_LAYOUT_VERSION })
         }
         else if (await isMOBI(file)) {
             const fflate = await import('./vendor/fflate.js')
@@ -389,10 +389,10 @@ export class View extends HTMLElement {
             this.renderer.goTo(resolved)
         })
     }
-    async open(book) {
+    async open(book, options) {
         if (typeof book === 'string'
         || typeof book.arrayBuffer === 'function'
-        || book.isDirectory) book = await makeBook(book)
+        || book.isDirectory) book = await makeBook(book, options)
         this.book = book
         this.language = languageInfo(book.metadata?.language)
 

@@ -516,6 +516,17 @@ const formatContributor = contributor => {
 
             let initialCoverBlob = null
 
+            if (format === 'txt') {
+                const { readTxtMetadata, TXT_LAYOUT_VERSION } = await import('../foliate-js-main/txt.js')
+                metadata.txtLayoutVersion = TXT_LAYOUT_VERSION
+                metadata.language = 'und'
+                try {
+                    Object.assign(metadata, await readTxtMetadata(fileObj))
+                } catch (error) {
+                    console.warn('[ImportQueue] Text metadata extraction:', error)
+                }
+            }
+
             // For EPUB: read metadata and cover via zip loader & EPUB module
             if (format === 'epub' || format === 'cbz') {
                 try {
@@ -687,6 +698,7 @@ const formatContributor = contributor => {
                     title: metadata.title,
                     author: metadata.author,
                     language: metadata.language,
+                    ...(format === 'txt' ? { txtLayoutVersion: metadata.txtLayoutVersion } : {}),
                     format,
                     filename: fileName,
                     size: fileObj.size,

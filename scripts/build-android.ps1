@@ -259,7 +259,7 @@ $androidAssetsDir = Join-Path $androidGenRoot 'app\src\main\assets'
 New-Item -ItemType Directory -Force -Path $androidAssetsDir | Out-Null
 Copy-Item -LiteralPath $tauriConfPath -Destination (Join-Path $androidAssetsDir 'tauri.conf.json') -Force
 
-if ($NativePdf) {
+if ($NativePdf -or ($Mode -eq 'Release' -and -not $PSBoundParameters.ContainsKey('NativePdf'))) {
     & (Join-Path $PSScriptRoot 'build-mupdf-android.ps1') -NdkHome $ndkHome -BuildBase $buildBase
 }
 

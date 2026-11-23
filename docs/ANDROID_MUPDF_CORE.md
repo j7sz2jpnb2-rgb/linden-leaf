@@ -1,10 +1,11 @@
 # Android MuPDF native rendering core
 
-The standard Android build uses PDF.js. The optional ARM64 build links MuPDF
-into the shared Rust worker. A native open failure can fall back to PDF.js.
-Android PDF snapshots for this backend live in app data so they survive
-cache eviction. The mobile tile planner described below has its own verifier
-and awaits integration with the viewport scheduler.
+Release Android builds include both PDF.js (default) and MuPDF linked into the
+shared Rust worker, while Debug builds link MuPDF when run with `-NativePdf`. A
+native open failure automatically falls back to PDF.js. Android PDF snapshots for
+this backend live in app data so they survive cache eviction. The mobile tile
+planner described below has its own verifier and awaits integration with the
+viewport scheduler.
 
 ## Ownership and boundary
 
@@ -84,11 +85,14 @@ version greater than the package under test.
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Mode Debug -VersionCode 1000001 -Tag beta-upgrade-pdfjs -OfflineGradle
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Mode Debug -VersionCode 1000002 -Tag beta-mupdf -NativePdf -OfflineGradle
 
-In a debug Android WebView, set
-localStorage.setItem('linden_android_pdf_engine', 'mupdf') and reopen a
-local PDF imported from a file path. Remove the key and reopen to use PDF.js.
-Saved Blob-only books remain on PDF.js. The data model and reading history
-are shared between the engines.
+In an Android build with both engines, open **Settings → Appearance → PDF Rendering Engine**.
+PDF.js remains the default. Selecting an engine reopens the current PDF at its
+reading position. A previously saved PDF with only a Blob gets a reusable native
+snapshot the first time it needs MuPDF. The book identity and reading history
+are shared between the engines. PDF.js opens books that fail native staging or opening.
+
+Release builds include both engines by default. Debug builds include MuPDF
+when run with `-NativePdf`.
 
 Use a populated library to verify installing over the old APK. For the native
 trial, check CJK fonts, first page, scrolling, zoom, text selection, copying,

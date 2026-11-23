@@ -1,5 +1,9 @@
 // txt.js - Intelligent TXT/Markdown book parser with Poetry & Chapter detection for foliate-js
 import { runTxtRulesWorker } from '../js/txt-toc-worker.js'
+import { getLocale, t } from '../js/i18n.js'
+import { resolveBookTitle } from '../js/book-title.js'
+
+export const TXT_LAYOUT_VERSION = 2
 
 let mergeSoftBreaks = true
 export const setTxtMergeSoftBreaks = enabled => { mergeSoftBreaks = enabled !== false }
@@ -16,42 +20,74 @@ const escapeHTML = str => (str != null ? String(str) : '')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;')
 
-// Detect text encoding from Uint8Array
-const detectAndDecode = buffer => {
-    const arr = buffer instanceof Uint8Array ? buffer :
-                ArrayBuffer.isView(buffer) ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength) :
-                new Uint8Array(buffer)
-    
-    // Check BOMs
-    if (arr[0] === 0xEF && arr[1] === 0xBB && arr[2] === 0xBF) {
-        return new TextDecoder('utf-8').decode(arr.subarray(3))
-    }
-    if (arr[0] === 0xFE && arr[1] === 0xFF) {
-        return new TextDecoder('utf-16be').decode(arr.subarray(2))
-    }
-    if (arr[0] === 0xFF && arr[1] === 0xFE) {
-        return new TextDecoder('utf-16le').decode(arr.subarray(2))
-    }
+const TEXT_SAMPLE_BYTES = 64 * 1024
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u
+const LATIN = /\p{Script=Latin}/u
 
-    // Try UTF-8 with fatal error checking
+const CONTENT_LABELS = {
+    zh: { contents: '扉页 / 目录', front: '扉页 / 题记', end: '终章', continued: n => '（续 ' + n + '）' },
+    en: { contents: 'Front Matter / Contents', front: 'Front Matter', end: 'Final Chapter', continued: n => 'Continued ' + n },
+}
+
+const contentLabels = language =>
+    CONTENT_LABELS[language === 'zh-CN' || (language === 'und' && getLocale().startsWith('zh')) ? 'zh' : 'en']
+
+const detectAndDecode = (buffer, partial = false) => {
+    const bytes = new Uint8Array(buffer)
+    const bomEncoding = bytes[0] === 0xFE && bytes[1] === 0xFF ? 'utf-16be'
+        : bytes[0] === 0xFF && bytes[1] === 0xFE ? 'utf-16le'
+        : bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF ? 'utf-8' : null
+    if (bomEncoding) return new TextDecoder(bomEncoding).decode(bytes, { stream: partial })
     try {
-        const utf8Decoder = new TextDecoder('utf-8', { fatal: true })
-        return utf8Decoder.decode(arr)
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes, { stream: partial })
     } catch {
-        // Fallback to GB18030 / GBK (covers Chinese simplified and traditional)
-        try {
-            const gbkDecoder = new TextDecoder('gb18030')
-            return gbkDecoder.decode(arr)
-        } catch {
-            return new TextDecoder('utf-8').decode(arr)
-        }
+        // A GB18030 decoder can consume a Western smart quote plus the next
+        // Latin letter. Require evidence of Chinese prose before choosing it.
+        const start = bytes.findIndex(byte => byte >= 0x80)
+        const end = Math.min(bytes.length, start + TEXT_SAMPLE_BYTES)
+        const chinese = new TextDecoder('gb18030').decode(bytes.subarray(start, end), { stream: partial || end < bytes.length })
+        const han = (chinese.match(/\p{Script=Han}/gu) || []).length
+        const latin = (chinese.match(/\p{Script=Latin}/gu) || []).length
+        const useChinese = /\p{Script=Han}[\p{Script=Han}，。！？、]/u.test(chinese)
+            || (han > 0 && han * 4 >= latin && !chinese.includes('\uFFFD'))
+        return new TextDecoder(useChinese ? 'gb18030' : 'windows-1252').decode(bytes, { stream: partial })
     }
+}
+
+const detectLanguage = text => {
+    const sample = text.slice(0, 16000)
+    let cjk = 0
+    let latin = 0
+    for (const ch of sample) {
+        if (CJK.test(ch)) cjk++
+        else if (LATIN.test(ch)) latin++
+    }
+    if (cjk > 0 && cjk * 8 >= latin) return 'zh-CN'
+    return latin > 0 ? 'en' : 'und'
+}
+
+const txtMetadata = (name, text) => {
+    const stem = String(name || '').split(/[\\/]/).pop().replace(/\.[^/.]+$/, '').trim()
+    const authorParts = stem.match(/^(.+?)\s*[（(]?\s*作者[：:]\s*(.+?)\s*[）)]?$/)
+        || stem.match(/^(《[^》]+》)\s*[-–—]\s*(.+)$/)
+        || stem.match(/^(.+?)\s+(?:--?|[–—])\s+(.+)$/)
+        || stem.match(/^(.+?)\s+(?:by|By)\s+((?!(?:Me|You|Us|Him|Her|Them|It)$)\p{Lu}[\p{L}.'’-]*(?:\s+\p{Lu}[\p{L}.'’-]*)*)$/u)
+    return {
+        title: resolveBookTitle(authorParts?.[1] || stem),
+        author: authorParts?.[2].trim() || t('book.unknownAuthor'),
+        language: detectLanguage(text),
+    }
+}
+
+export const readTxtMetadata = async file => {
+    const sample = file.slice(0, TEXT_SAMPLE_BYTES)
+    return txtMetadata(file.name, detectAndDecode(await sample.arrayBuffer(), sample.size < file.size))
 }
 
 // Generate an artistic clean SVG book cover
 const generateCoverSVG = (title, author) => {
     const safeTitle = escapeHTML(title.length > 24 ? title.slice(0, 22) + '...' : title)
-    const safeAuthor = escapeHTML(author || '未知作者')
+    const safeAuthor = escapeHTML(author)
     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 900" width="600" height="900">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
@@ -108,7 +144,7 @@ export const setCustomTxtPatterns = (patterns) => {
 
 export const getCustomTxtPatterns = () => customTxtPatterns
 
-export const isChapterHeading = line => {
+const isLegacyChapterHeading = line => {
     const trimmed = (line || '').trim()
     if (!trimmed) return false
 
@@ -121,7 +157,44 @@ export const isChapterHeading = line => {
     return CHAPTER_PATTERNS.some(re => re.test(trimmed))
 }
 
-const isTOCMarker = line => {
+const EN_NUMBER_WORD = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[ -](?:one|two|three|four|five|six|seven|eight|nine))?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth'
+const EN_NUMBERED_HEADING = new RegExp(
+    '^(Chapter|Section|Book|Part|Act|Scene|Canto|Sonnet|Elegie|Elegy)\\s+(\\d{1,4}|[IVXLCDM]+|' + EN_NUMBER_WORD + ')(?=$|[\\s.:：—–-])',
+    'i'
+)
+const EN_STRUCTURE = /^(Prologue|Epilogue|Preface|Foreword|Introduction|Afterword|Appendix|Interlude|Notes|Acknowledg(?:e)?ments|Bibliography)(?:$|\s*[:：—–-]\s*.+$)/i
+const ROMAN = /^(?=[IVXLCDM])M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})$/
+const ROMAN_HEADING = /^([IVXLCDM]+)(?:\.|\.\s+.+|\s*[:—–-]\s*.+)?$/
+const ROMAN_VALUES = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 }
+
+const modernHeading = (line, markdown = false) => {
+    const trimmed = (line || '').trim()
+    if (!trimmed || trimmed.length > 120) return null
+    const markdownTitle = markdown && trimmed.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?$/)?.[1]
+    const title = markdownTitle || trimmed
+    const numbered = title.match(EN_NUMBERED_HEADING)
+    if (numbered) {
+        const number = numbered[2].toUpperCase()
+        if (!/^[IVXLCDM]+$/.test(number) || ROMAN.test(number)) {
+            return { title, key: numbered[1].toLowerCase() + ' ' + numbered[2].toLowerCase().replace(/-/g, ' ') }
+        }
+    }
+    const structure = title.match(EN_STRUCTURE)
+    if (structure) return { title, key: structure[1].toLowerCase() }
+    const roman = title.match(ROMAN_HEADING)
+    if (roman && ROMAN.test(roman[1])) {
+        const letters = roman[1]
+        const value = [...letters].reduce((sum, letter, i) =>
+            sum + ROMAN_VALUES[letter] * (ROMAN_VALUES[letter] < ROMAN_VALUES[letters[i + 1]] ? -1 : 1), 0)
+        return { title, key: 'roman ' + value, roman: value, bareRoman: !markdownTitle && title === letters }
+    }
+    if (markdownTitle || isLegacyChapterHeading(title)) return { title, key: extractChapterKey(title) }
+    return null
+}
+
+export const isChapterHeading = line => Boolean(modernHeading(line))
+
+const isLegacyTOCMarker = line => {
     const trimmed = (line || '').trim()
     if (!trimmed || trimmed.length > 25) return false
     return /^(?:目\s*录|目\s*次|Contents|Table\s+of\s+Contents|Index)\b/i.test(trimmed) ||
@@ -140,7 +213,38 @@ const extractChapterKey = title => {
 }
 
 // Render content lines with Poetry / Prose / TOC intelligence
-const renderContentToHTML = (linesWithMeta, isPoetryMode = false, tocLinkMap = null) => {
+const isTOCMarker = line => {
+    const trimmed = (line || '').trim()
+    return trimmed.length <= 32 && /^(?:目\s*录|目\s*次|Contents|Table\s+of\s+Contents|Index)\s*[:：]?$/i
+        .test(normalizeChapterTitle(trimmed.replace(/^#{1,6}[ \t]+/, '')))
+}
+
+const looksLikeEnglishVerse = blocks => {
+    const stanzas = blocks.filter(block => block.length >= 2 && block.length <= 12)
+    if (stanzas.length < 2 || stanzas.length * 2 < blocks.length) return false
+    let lines = 0, shortLines = 0, continued = 0, uppercase = 0
+    let shortest = Infinity, longest = 0
+    for (const stanza of stanzas) {
+        stanza.forEach(({ text }, index) => {
+            const line = text.trim()
+            lines++
+            if (line.length <= 68 && line.split(/\s+/).length <= 12) shortLines++
+            if (index > 0) {
+                continued++
+                if (/^\p{Lu}/u.test(line)) uppercase++
+            }
+            if (index < stanza.length - 1) {
+                shortest = Math.min(shortest, line.length)
+                longest = Math.max(longest, line.length)
+            }
+        })
+    }
+    return shortLines >= lines * 0.8 && (longest - shortest >= 12 || uppercase >= continued * 0.75)
+}
+
+const renderContentToHTML = (linesWithMeta, { isPoetryMode, tocLinkMap, language, legacyLayout }) => {
+    const tocMarker = legacyLayout ? isLegacyTOCMarker : isTOCMarker
+    const joinSoftBreaks = legacyLayout || mergeSoftBreaks
     // Group into stanzas / paragraphs by blank lines
     const blocks = []
     let curBlock = []
@@ -148,13 +252,14 @@ const renderContentToHTML = (linesWithMeta, isPoetryMode = false, tocLinkMap = n
     for (const item of linesWithMeta) {
         const text = typeof item === 'string' ? item : (item?.text ?? '')
         const trimmed = text.trim()
-        if (trimmed.length === 0) {
+        if (!trimmed || (!legacyLayout && (item.isTOC || tocMarker(text)))) {
             if (curBlock.length > 0) {
                 blocks.push(curBlock)
                 curBlock = []
             }
+            if (trimmed) blocks.push([item])
         } else {
-            curBlock.push(typeof item === 'string' ? { text: item, lineIndex: -1, isTOC: false } : item)
+            curBlock.push(item)
         }
     }
     if (curBlock.length > 0) blocks.push(curBlock)
@@ -170,7 +275,9 @@ const renderContentToHTML = (linesWithMeta, isPoetryMode = false, tocLinkMap = n
     }
     const avgLen = lineCount > 0 ? (totalLen / lineCount) : 50
     // Poetry requires short average line length and genuine multi-stanza structure
-    const isPoetry = isPoetryMode || (avgLen < 26 && lineCount >= 4 && blocks.length >= 2)
+    const isPoetry = isPoetryMode || (!legacyLayout && language === 'en'
+        ? looksLikeEnglishVerse(blocks)
+        : (avgLen < 26 && lineCount >= 4 && blocks.length >= 2))
 
     const htmlParts = []
     let inTOCBlock = false
@@ -184,7 +291,7 @@ const renderContentToHTML = (linesWithMeta, isPoetryMode = false, tocLinkMap = n
 
     for (const blk of blocks) {
         // If explicit TOC title marker (e.g. "目录" or "Contents")
-        if (blk.length === 1 && isTOCMarker(blk[0].text)) {
+        if (blk.length === 1 && tocMarker(blk[0].text)) {
             closeTOCBlock()
             htmlParts.push(`<h2 class="toc-marker">${escapeHTML(blk[0].text.trim())}</h2>`)
             continue
@@ -213,7 +320,7 @@ const renderContentToHTML = (linesWithMeta, isPoetryMode = false, tocLinkMap = n
             // Render as poetic stanza with natural line breaks
             const verseText = blk.map(item => escapeHTML(item.text.trim())).join('<br/>\n')
             htmlParts.push(`<p class="verse-stanza">\n${verseText}\n</p>`)
-        } else if (!mergeSoftBreaks) {
+        } else if (!joinSoftBreaks) {
             for (const item of blk) htmlParts.push(`<p class="prose-p">${escapeHTML(item.text.trim())}</p>`)
         } else {
             // Render as prose paragraph with smart spacing for English/Latin words
@@ -226,7 +333,9 @@ const renderContentToHTML = (linesWithMeta, isPoetryMode = false, tocLinkMap = n
                 } else {
                     const prevChar = paraText.slice(-1)
                     const nextChar = line.charAt(0)
-                    const needsSpace = /[a-zA-Z0-9,.:;!?)]/.test(prevChar) && /[a-zA-Z0-9(]/.test(nextChar)
+                    const needsSpace = !legacyLayout && language === 'en'
+                        ? !/[-\u00ad]$/.test(prevChar)
+                        : /[a-zA-Z0-9,.:;!?)]/.test(prevChar) && /[a-zA-Z0-9(]/.test(nextChar)
                     paraText += (needsSpace ? ' ' : '') + line
                 }
             }
@@ -248,50 +357,27 @@ const isDecorativeDividerOnly = line => {
     return trimmed.length > 0 && /^[-=_*#~`^/\\+|—\s]+$/.test(trimmed)
 }
 
-export const makeTXT = async file => {
-    const buffer = await file.arrayBuffer()
-    const rawText = detectAndDecode(buffer)
-    const fileName = file.name ? file.name.replace(/\.[^/.]+$/, '') : '未命名书籍'
-    
-    // Extract metadata
-    let title = fileName
-    let author = '未知作者'
-    
-    if (fileName.includes('-')) {
-        const parts = fileName.split('-')
-        if (parts.length === 2) {
-            title = parts[0].trim()
-            author = parts[1].trim()
-        }
-    } else if (fileName.includes('作者')) {
-        const match = fileName.match(/^(.*?)[（(]?\s*作者[：:]\s*(.*?)[)）]?$/)
-        if (match) {
-            title = match[1].trim()
-            author = match[2].trim()
-        }
-    }
+export const makeTXT = async (file, { filename = file.name, legacyLayout = false } = {}) => {
+    const rawText = detectAndDecode(await file.arrayBuffer())
+    const { title, author, language } = txtMetadata(filename, rawText)
+    const labels = contentLabels(language)
+    const lines = rawText.split(legacyLayout ? /\r?\n/ : /\r\n?|\n/)
+    const markdown = !legacyLayout && (file.type === 'text/markdown' || /\.md$/i.test(filename || ''))
+    const tocMarker = legacyLayout ? isLegacyTOCMarker : isTOCMarker
 
-    // Detect primary language from rawText sample
-    const sample = rawText.slice(0, 10000)
-    const cjkChars = (sample.match(/[\u4e00-\u9fa5\u3040-\u30ff]/g) || []).length
-    const latinChars = (sample.match(/[a-zA-Z]/g) || []).length
-    const detectedLanguage = (latinChars > 100 && cjkChars < latinChars * 0.1) ? 'en' : 'zh-CN'
+    const poetryTitle = legacyLayout
+        ? /哀歌|诗选|诗集|诗篇|诗歌|十四行诗|商籁|sonnet|elegy|poem/i
+        : /哀歌|诗选|诗集|诗篇|诗歌|十四行诗|商籁|\b(?:sonnets?|elegy|elegies|poems?|poetry)\b/i
+    const isBookPoetry = poetryTitle.test(title) || /哀歌|诗选|诗集/.test(rawText.slice(0, 200))
 
-    // Split text into lines
-    const lines = rawText.split(/\r?\n/)
-
-    // Detect if the whole book is poetry (e.g. 哀歌, 诗集)
-    const isBookPoetry = /哀歌|诗选|诗集|诗篇|诗歌|十四行诗|商籁|sonnet|elegy|poem/i.test(title) || /哀歌|诗选|诗集/i.test(rawText.slice(0, 200))
-    
-    // Pre-pass: scan all heading candidates and analyze chapter/TOC structure
-    const candidates = []
+    // Legacy layout retains the section and paragraph coordinates of older CFI anchors.
+    const activeRules = legacyLayout ? null : customTxtPatterns
     const customLineMatches = new Map()
-
-    if (customTxtPatterns && customTxtPatterns.length > 0) {
+    if (activeRules?.length) {
         try {
             const workerRes = await runTxtRulesWorker({
                 lines,
-                rules: customTxtPatterns,
+                rules: activeRules,
                 timeoutMs: 2500
             })
             for (const m of (workerRes.matches || [])) {
@@ -302,25 +388,37 @@ export const makeTXT = async file => {
         }
     }
 
-    const isStrictOnly = !!customTxtPatterns?.strictOnly
-
+    const isStrictOnly = activeRules?.strictOnly && customLineMatches.size > 0
+    let candidates = []
+    let fence = null
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
-        const customMatch = customLineMatches.get(i)
-        if (customMatch) {
-            candidates.push({
-                lineIndex: i,
-                text: customMatch.title || line.trim(),
-                key: extractChapterKey(customMatch.title || line)
-            })
-        } else if ((!isStrictOnly || customLineMatches.size === 0) && isChapterHeading(line)) {
-            candidates.push({
-                lineIndex: i,
-                text: line.trim(),
-                key: extractChapterKey(line)
-            })
+        const custom = customLineMatches.get(i)
+        if (custom) {
+            const title = custom.title || line.trim()
+            candidates.push({ lineIndex: i, title, key: extractChapterKey(title) })
+            continue
         }
+        if (isStrictOnly) continue
+        if (markdown) {
+            const marker = line.match(/^ {0,3}(\x60{3,}|~{3,})(.*)$/)
+            if (marker) {
+                if (!fence) fence = marker[1]
+                else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = null
+                continue
+            }
+            if (fence) continue
+        }
+        const heading = legacyLayout
+            ? (isLegacyChapterHeading(line) && { title: line.trim(), key: extractChapterKey(line) })
+            : modernHeading(line, markdown)
+        if (heading) candidates.push({ ...heading, lineIndex: i })
     }
+    const romanNumbers = new Set(candidates.filter(c => c.roman).map(c => c.roman))
+    candidates = candidates.filter(c => !c.bareRoman ||
+        ((!lines[c.lineIndex - 1]?.trim() || !lines[c.lineIndex + 1]?.trim()) &&
+            (romanNumbers.has(c.roman - 1) || romanNumbers.has(c.roman + 1))))
+    const headings = new Map(candidates.map(c => [c.lineIndex, c]))
 
     // Compute body size and line counts between consecutive heading candidates
     for (let i = 0; i < candidates.length; i++) {
@@ -343,7 +441,7 @@ export const makeTXT = async file => {
     // Detect explicit TOC marker near the start of the book (within first 300 lines)
     let explicitTOCLine = -1
     for (let i = 0; i < Math.min(lines.length, 300); i++) {
-        if (isTOCMarker(lines[i])) {
+        if (tocMarker(lines[i])) {
             explicitTOCLine = i
             break
         }
@@ -357,7 +455,7 @@ export const makeTXT = async file => {
     for (let i = 0; i < candidates.length; i++) {
         const c = candidates[i]
         const isRepeatedInCluster = clusterKeys.has(c.key)
-        const isMainBodyMarker = /^正文$/i.test(c.text.trim())
+        const isMainBodyMarker = /^正文$/i.test(c.title.trim())
 
         if (curCluster.length === 0) {
             if (!isMainBodyMarker) {
@@ -383,7 +481,10 @@ export const makeTXT = async file => {
     const tocCandidateIndices = new Set()
     for (const cluster of clusters) {
         if (cluster.length >= 1 && cluster[0].lineIndex < 800) {
-            const isAfterExplicitTOC = explicitTOCLine >= 0 && cluster[0].lineIndex > explicitTOCLine && cluster[0].lineIndex < explicitTOCLine + 50
+            const nearTOC = explicitTOCLine >= 0 && cluster[0].lineIndex > explicitTOCLine && cluster[0].lineIndex < explicitTOCLine + 50
+            const isAfterExplicitTOC = nearTOC && (legacyLayout ||
+                (cluster.length >= 2 && cluster.slice(0, -1).every(c => c.bodyLineCount === 0) &&
+                    lines.slice(explicitTOCLine + 1, cluster[0].lineIndex).every(line => !line.trim() || isDecorativeDividerOnly(line))))
             let repeatCount = 0
             for (const c of cluster) {
                 const laterMatch = candidates.find(other => other.lineIndex > c.lineIndex && other.key === c.key && other.bodyCharCount >= 150 && other.bodyCharCount > c.bodyCharCount * 1.5)
@@ -409,11 +510,10 @@ export const makeTXT = async file => {
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
         const isTOC = tocCandidateIndices.has(i)
-        const customMatch = customLineMatches.get(i)
-        const isHeading = customMatch ? true : ((!isStrictOnly || customLineMatches.size === 0) && isChapterHeading(line))
+        const heading = headings.get(i)
 
-        if (isHeading && !isTOC) {
-            const rawTitle = (customMatch?.title || line).trim().replace(/[\s\t\u3000\u00A0]+/g, ' ')
+        if (heading && !isTOC) {
+            const rawTitle = heading.title.trim().replace(/\s+/g, ' ')
             const hasStory = currentChapter.lines.some(l => {
                 const t = (typeof l === 'string' ? l : l.text).trim()
                 return t.length > 0 && !isDecorativeDividerOnly(t)
@@ -429,7 +529,7 @@ export const makeTXT = async file => {
             if (hasStory || currentChapter.isHeaderExplicit) {
                 if (!currentChapter.title) {
                     const containsTOC = currentChapter.lines.some(l => typeof l === 'object' && l.isTOC)
-                    currentChapter.title = containsTOC ? '扉页 / 目录' : (title || '扉页 / 题记')
+                    currentChapter.title = containsTOC ? labels.contents : (title || labels.front)
                 }
                 chapters.push(currentChapter)
             }
@@ -438,7 +538,8 @@ export const makeTXT = async file => {
                 title: rawTitle,
                 isHeaderExplicit: true,
                 lines: [],
-                startLine: i
+                startLine: i,
+                key: heading.key
             }
         } else {
             currentChapter.lines.push({
@@ -455,13 +556,13 @@ export const makeTXT = async file => {
     }) || currentChapter.isHeaderExplicit) {
         if (!currentChapter.title) {
             const containsTOC = currentChapter.lines.some(l => typeof l === 'object' && l.isTOC)
-            currentChapter.title = chapters.length === 0 ? (containsTOC ? '扉页 / 目录' : title) : '终章'
+            currentChapter.title = chapters.length === 0 ? (containsTOC ? labels.contents : title) : labels.end
         }
         chapters.push(currentChapter)
     }
 
     // If no chapters detected at all
-    if (chapters.length <= 1) {
+    if (legacyLayout ? chapters.length <= 1 : !chapters.some(chapter => chapter.isHeaderExplicit)) {
         chapters.length = 0
         if (lines.length > 2500) {
             // For huge files > 2500 lines with zero headings, split seamlessly without injecting ugly fake headers
@@ -469,7 +570,7 @@ export const makeTXT = async file => {
             for (let i = 0; i < lines.length; i += chunkSize) {
                 const chunkNum = Math.floor(i / chunkSize) + 1
                 chapters.push({
-                    title: chunkNum === 1 ? title : `（续 ${chunkNum}）`,
+                    title: chunkNum === 1 ? title : labels.continued(chunkNum),
                     isHeaderExplicit: false,
                     lines: lines.slice(i, i + chunkSize).map((l, offset) => ({ text: l, lineIndex: i + offset, isTOC: false })),
                     startLine: i
@@ -489,8 +590,8 @@ export const makeTXT = async file => {
     const tocLinkMap = new Map()
     for (const lineIdx of tocCandidateIndices) {
         const rawLine = lines[lineIdx].trim()
-        const key = extractChapterKey(rawLine)
-        const targetIdx = chapters.findIndex((ch, idx) => idx > 0 && extractChapterKey(ch.title) === key)
+        const key = headings.get(lineIdx).key
+        const targetIdx = chapters.findIndex((ch, idx) => idx > 0 && (legacyLayout ? extractChapterKey(ch.title) : ch.key) === key)
         if (targetIdx > 0) {
             tocLinkMap.set(lineIdx, { targetIdx, href: `${targetIdx}#heading`, title: rawLine })
         }
@@ -499,7 +600,7 @@ export const makeTXT = async file => {
     // Wrap section in elegant HTML
     const template = (chapterTitle, isHeaderExplicit, contentHtml) => `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="${language}" xml:lang="${language}">
 <head>
   <meta charset="utf-8"/>
   <title>${escapeHTML(chapterTitle)}</title>
@@ -552,14 +653,14 @@ export const makeTXT = async file => {
       border-bottom-color: #6366f1;
     }
     .prose-p {
-      text-indent: 2em;
+      text-indent: ${!legacyLayout && language === 'en' ? '0' : '2em'};
       margin: 0.85em 0;
       text-align: justify;
       line-height: inherit;
     }
     .verse-stanza {
       margin: 1.4em 0;
-      text-indent: 0;
+      text-indent: 0 !important;
       text-align: left;
       line-height: 1.75;
       word-break: break-word;
@@ -576,7 +677,7 @@ export const makeTXT = async file => {
 
     const urls = []
     const sectionData = chapters.map((chapter, index) => {
-        const htmlBody = renderContentToHTML(chapter.lines, isBookPoetry, tocLinkMap)
+        const htmlBody = renderContentToHTML(chapter.lines, { isPoetryMode: isBookPoetry, tocLinkMap, language, legacyLayout })
         const htmlStr = template(chapter.title, chapter.isHeaderExplicit, htmlBody)
         const blob = new Blob([htmlStr], { type: MIME.XHTML })
         const url = URL.createObjectURL(blob)
@@ -598,9 +699,10 @@ export const makeTXT = async file => {
         metadata: {
             title,
             author,
-            language: detectedLanguage,
+            language,
             identifier: null
         },
+        txtLayoutVersion: legacyLayout ? 1 : TXT_LAYOUT_VERSION,
         tocPreviewLines: lines.slice(0, 1000),
         sections: sectionData.map(s => ({
             id: s.id,

@@ -51,8 +51,8 @@ glyph edges, and also record RGB error. They do not claim exact pixel identity.
 - Changing books/modes, hiding the app and disposing an adapter clears texture
   work. WebGL context loss releases the new CPU cache as well as existing GPU
   resources and keeps the real reading view available.
-- Android MuPDF's algorithm remains separate and unconnected by design. This
-  work does not change the current Android PDF backend.
+- Page curl consumes the active PDF viewport canvas regardless of whether PDF.js
+  or MuPDF is selected in Android settings; it does not alter the PDF backend itself.
 
 ## Validation boundary
 

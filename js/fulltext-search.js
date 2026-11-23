@@ -378,8 +378,11 @@ export class FullTextSearchEngine {
         } else if (format === 'txt' || format === 'md') {
             let txtBook = null
             try {
-                const { makeBook } = await import('../foliate-js-main/txt.js')
-                txtBook = await makeBook(snapshot.blob)
+                const { makeTXT, TXT_LAYOUT_VERSION } = await import('../foliate-js-main/txt.js')
+                txtBook = await makeTXT(snapshot.blob, {
+                    filename: book.filename || snapshot.blob.name,
+                    legacyLayout: book.txtLayoutVersion !== TXT_LAYOUT_VERSION,
+                })
                 if (txtBook?.sections?.length) {
                     for (let i = 0; i < txtBook.sections.length; i++) {
                         if (signal?.aborted) return false

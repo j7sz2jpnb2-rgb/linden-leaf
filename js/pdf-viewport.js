@@ -1177,6 +1177,7 @@ export class PdfViewport {
         while (Math.max(this._activeDriverTasks.size, this._inFlightRenders.size) < this._renderConcurrency && this._renderQueue.length) {
             const peek = this._renderQueue[0]
             if (peek.tier > 0) {
+                if (this.driver?.parallelRendering && this._activeDriverTasks.size > 0) break
                 let hasActiveTier0 = false
                 for (const inflight of this._inFlightRenders.values()) {
                     if (inflight.tier === 0 && !inflight.abortController?.signal?.aborted) {
@@ -2652,10 +2653,8 @@ export class PdfViewport {
         }
         const maxBudget = this._budgetRenderConcurrency || 2
         if (this.driver?.kind === 'mupdf') {
-            // Adaptive concurrency:
-            // Single-page mode uses 1 concurrency so prefetch never competes with the visible page.
-            // Dual-spread mode uses up to 2 so left and right visible pages stay ahead of prefetch.
-            this._renderConcurrency = Math.min(maxBudget, (this.spreadMode === 'dual') ? 2 : 1)
+            const canSubmitTwo = this.spreadMode === 'dual' || this.driver.parallelRendering
+            this._renderConcurrency = Math.min(maxBudget, canSubmitTwo ? 2 : 1)
         } else {
             this._renderConcurrency = Math.min(maxBudget, 2)
         }
@@ -3507,6 +3506,16 @@ export class PdfViewport {
         this._navigationRenderPending = null
         if (!this._destroyed) this._renderVisibleSlots()
         this._notifyNavIdle(!this._destroyed)
+    }
+
+    getReadingLocation() {
+        const page = this.currentPage
+        const offset = this.pageOffsets[page]
+        const scrollTop = this.scrollArea.scrollTop
+        const yRatio = offset?.height && scrollTop > Math.max(0, offset.top - 8)
+            ? clamp((scrollTop - offset.top + this.scrollArea.clientHeight / 3) / offset.height, 0, 1)
+            : 0
+        return { page: page + 1, yRatio }
     }
 
     goToPage(page, yRatio = 0) {

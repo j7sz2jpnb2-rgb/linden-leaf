@@ -64,6 +64,8 @@ enum {
 LL_API void ll_set_max_store_mb(uint32_t max_mb);
 LL_API uint32_t ll_get_max_store_mb(void);
 LL_API ll_doc *ll_open(const char *path, const char *password, char *error, size_t error_size);
+LL_API ll_doc *ll_open_with_options(const char *path, const char *password, char *error, size_t error_size,
+                                   uint32_t max_store_mb, int parallel);
 LL_API void ll_close(ll_doc *doc);
 LL_API int ll_page_count(ll_doc *doc);
 LL_API const char *ll_error(ll_doc *doc);
@@ -90,6 +92,17 @@ LL_API int ll_render(ll_doc *doc, int page, float scale, float rotation,
 LL_API int ll_render_priority(ll_doc *doc, int page, float scale, float rotation,
                               const float *clip, ll_cancel *cancel, int priority, ll_image *out);
 LL_API void ll_free_image(ll_doc *doc, ll_image *out);
+
+#ifdef _WIN32
+/* Prepare on the document owner. Run and free on a separate thread, with the
+ * document open until the job and its image are released. */
+typedef struct ll_render_job ll_render_job;
+LL_API ll_render_job *ll_prepare_render_job(ll_doc *doc, int page, float scale, float rotation,
+                                           const float *clip, ll_cancel *cancel);
+LL_API int ll_run_render_job(ll_render_job *job, ll_cancel *cancel, ll_image *out,
+                             ll_render_timings *timings, char *error, size_t error_size);
+LL_API void ll_free_render_job(ll_render_job *job, ll_image *out);
+#endif
 
 LL_API int ll_get_text(ll_doc *doc, int page, ll_text *out);
 LL_API void ll_free_text(ll_text *out);

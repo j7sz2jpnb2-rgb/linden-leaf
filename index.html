@@ -1666,6 +1666,29 @@
                 <option value="512" data-i18n="settings.cache512">512 MB (高性能 / 巨型画册)</option>
               </select>
             </div>
+            <div id="pdf-parallel-settings" hidden>
+              <div class="control-row settings-row-pair">
+                <label class="control-label" for="setting-pdf-parallel" data-i18n="settings.pdfParallelTitle">PDF 多线程渲染</label>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="setting-pdf-parallel" aria-describedby="pdf-parallel-hint" />
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+              <p id="pdf-parallel-hint" class="setting-hint" data-i18n="settings.pdfParallelHint">允许 MuPDF 同时渲染两个可见页面。会增加短时 CPU 和内存占用，下次打开 PDF 生效。</p>
+            </div>
+          </div>
+
+          <div class="setting-section" id="android-pdf-engine-section" data-settings-domain="reading" hidden>
+            <div class="control-row settings-row-pair">
+              <label class="control-label" for="setting-android-pdf-engine" data-i18n="settings.pdfEngineTitle">PDF 渲染引擎</label>
+              <select id="setting-android-pdf-engine" class="setting-select" aria-describedby="android-pdf-engine-hint" disabled>
+                <option value="pdfjs">PDF.js</option>
+                <option value="mupdf">MuPDF</option>
+              </select>
+            </div>
+            <p id="android-pdf-engine-hint" class="setting-hint" data-i18n="settings.pdfEngineHint">选择后会在当前位置重新打开正在阅读的 PDF。MuPDF 无法处理的文件会尝试用 PDF.js 打开。</p>
+            <p id="android-pdf-engine-unavailable" class="setting-hint" data-i18n="settings.pdfEngineUnavailable" hidden>此安装包仅包含 PDF.js。</p>
+            <p id="android-pdf-engine-fallback" class="setting-hint" data-i18n="settings.pdfEngineFallback" hidden>本书当前由 PDF.js 渲染。</p>
           </div>
 
           <!-- Self-Configured AI Assistant -->
@@ -1923,7 +1946,7 @@
                 </div>
                 <div class="control-row settings-row-stacked">
                   <span class="control-label" data-i18n="settings.txtTocRegex">匹配表达式</span>
-                  <input type="text" id="setting-txt-regex-pattern" class="leaf-modal-input" value="^第s*[0-9一二三四五六七八九十百千万零两]+s*[首章节回卷集部篇幕话诗歌曲折出段讲场辑案].*" style="font-family: var(--font-mono, monospace); box-sizing: border-box;" />
+                  <input type="text" id="setting-txt-regex-pattern" class="leaf-modal-input" style="font-family: var(--font-mono, monospace); box-sizing: border-box;" />
                 </div>
                 <div class="txt-rules-actions">
                   <button type="button" id="btn-test-txt-rules" class="btn-secondary-action" data-i18n="settings.testBookBtn">测试当前图书</button>

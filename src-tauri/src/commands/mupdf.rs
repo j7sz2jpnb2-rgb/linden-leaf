@@ -16,6 +16,8 @@ pub struct DocumentMetadata {
     pub format: String,
     #[serde(rename = "nativeBackend")]
     pub native_backend: bool,
+    #[serde(default, rename = "parallelRendering")]
+    pub parallel_rendering: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -86,13 +88,14 @@ mod imp {
         ptr::NonNull,
         sync::{atomic::Ordering, mpsc, Arc, Mutex, OnceLock},
         thread,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Instant, SystemTime, UNIX_EPOCH},
     };
     use tauri::Manager;
     use tokio::sync::oneshot;
 
     const LL_OK: i32 = 0;
     const LL_CANCELLED: i32 = 1;
+    static DEFAULT_STORE_MB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(256);
 
     #[repr(C)]
     struct LlDoc { _private: [u8; 0] }
@@ -167,11 +170,23 @@ mod imp {
         width: f32,
     }
 
+    #[cfg(target_os = "windows")]
+    #[repr(C)]
+    struct LlRenderJob { _private: [u8; 0] }
+
     extern "C" {
-        fn ll_set_max_store_mb(max_mb: u32);
-        #[allow(dead_code)]
-        fn ll_get_max_store_mb() -> u32;
+        #[cfg(test)]
         fn ll_open(path: *const c_char, password: *const c_char, error: *mut c_char, error_size: usize) -> *mut LlDoc;
+        fn ll_open_with_options(path: *const c_char, password: *const c_char, error: *mut c_char,
+                                error_size: usize, max_store_mb: u32, parallel: c_int) -> *mut LlDoc;
+        #[cfg(target_os = "windows")]
+        fn ll_prepare_render_job(doc: *mut LlDoc, page: c_int, scale: c_float, rotation: c_float,
+                                 clip: *const c_float, cancel: *mut LlCancel) -> *mut LlRenderJob;
+        #[cfg(target_os = "windows")]
+        fn ll_run_render_job(job: *mut LlRenderJob, cancel: *mut LlCancel, out: *mut LlImage,
+                             timings: *mut LlRenderTimings, error: *mut c_char, error_size: usize) -> c_int;
+        #[cfg(target_os = "windows")]
+        fn ll_free_render_job(job: *mut LlRenderJob, out: *mut LlImage);
         fn ll_close(doc: *mut LlDoc);
         fn ll_page_count(doc: *mut LlDoc) -> c_int;
         fn ll_error(doc: *mut LlDoc) -> *const c_char;
@@ -244,10 +259,12 @@ mod imp {
         fn drop(&mut self) { unsafe { ll_cancel_free(self.0.as_ptr()) } }
     }
 
+    type CancellationMap = Arc<Mutex<HashMap<String, Arc<CancelHandle>>>>;
+
     #[derive(Clone)]
     struct DocumentSession {
         tx: mpsc::Sender<DocCommand>,
-        cancels: Arc<Mutex<HashMap<String, Arc<CancelHandle>>>>,
+        cancels: CancellationMap,
         num_pages: usize,
         file_path: PathBuf,
         password: Option<String>,
@@ -281,19 +298,188 @@ mod imp {
             page: usize,
             reply: oneshot::Sender<Result<String, String>>,
         },
-        Render {
-            page: usize,
-            scale: f32,
-            rotation: f32,
-            clip: Option<[f32; 4]>,
-            cancel: Arc<CancelHandle>,
-            request_id: String,
-            priority: u8,
-            generation: u32,
-            enqueued_at: std::time::Instant,
-            reply: oneshot::Sender<Result<Vec<u8>, String>>,
-        },
+        Render(RenderRequest),
         Close,
+    }
+
+    struct RenderRequest {
+        page: usize,
+        scale: f32,
+        rotation: f32,
+        clip: Option<[f32; 4]>,
+        cancel: Arc<CancelHandle>,
+        request_id: String,
+        priority: u8,
+        generation: u32,
+        enqueued_at: Instant,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    }
+
+    impl RenderRequest {
+        fn clip_ptr(&self) -> *const f32 {
+            self.clip.as_ref().map_or(std::ptr::null(), |clip| clip.as_ptr())
+        }
+
+        fn finish(self, cancels: &CancellationMap, result: Result<Vec<u8>, String>) {
+            if let Ok(mut map) = cancels.lock() { map.remove(&self.request_id); }
+            let _ = self.reply.send(result);
+        }
+
+        fn cancel(self, cancels: &CancellationMap, message: &str) {
+            self.cancel.abort();
+            self.finish(cancels, Err(message.into()));
+        }
+    }
+
+    impl LlImage {
+        fn empty() -> Self {
+            Self {
+                samples: std::ptr::null_mut(), length: 0, width: 0, height: 0,
+                stride: 0, x: 0, y: 0, matrix: [0.0; 6], pixmap_owner: std::ptr::null_mut(),
+            }
+        }
+    }
+
+    enum RasterTarget {
+        Document(*mut LlDoc),
+        #[cfg(target_os = "windows")]
+        Auxiliary(PreparedRaster),
+    }
+
+    #[cfg(target_os = "windows")]
+    struct PreparedRaster {
+        job: NonNull<LlRenderJob>,
+        image: LlImage,
+    }
+
+    // The job holds its own context and a retained display list. Only the receiving
+    // thread uses it, and the owner waits for that thread before dropping shared locks.
+    #[cfg(target_os = "windows")]
+    unsafe impl Send for PreparedRaster {}
+    #[cfg(target_os = "windows")]
+    impl Drop for PreparedRaster {
+        fn drop(&mut self) {
+            unsafe { ll_free_render_job(self.job.as_ptr(), &mut self.image) };
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    struct RasterWork {
+        request: RenderRequest,
+        prepared: PreparedRaster,
+        started: Instant,
+    }
+
+    #[cfg(target_os = "windows")]
+    struct RasterLane {
+        sender: mpsc::SyncSender<RasterWork>,
+        thread: thread::JoinHandle<()>,
+        busy: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(target_os = "windows")]
+    impl RasterLane {
+        fn new(cancels: CancellationMap) -> Option<Self> {
+            let (sender, receiver) = mpsc::sync_channel::<RasterWork>(1);
+            let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker_busy = busy.clone();
+            let thread = thread::Builder::new().name("ll-mupdf-raster".into()).spawn(move || {
+                while let Ok(work) = receiver.recv() {
+                    render_request(work.request, RasterTarget::Auxiliary(work.prepared), &cancels, work.started);
+                    worker_busy.store(false, Ordering::Release);
+                }
+            }).ok()?;
+            Some(Self { sender, thread, busy })
+        }
+
+        fn dispatch(&self, doc: *mut LlDoc, request: RenderRequest, started: Instant) -> Option<RenderRequest> {
+            if request.priority != 0 || self.busy.load(Ordering::Acquire) || request.cancel.is_aborted() {
+                return Some(request);
+            }
+            let job = unsafe {
+                ll_prepare_render_job(doc, request.page as i32, request.scale, request.rotation,
+                                      request.clip_ptr(), request.cancel.ptr())
+            };
+            let Some(job) = NonNull::new(job) else { return Some(request); };
+            let prepared = PreparedRaster { job, image: LlImage::empty() };
+            self.busy.store(true, Ordering::Release);
+            match self.sender.send(RasterWork { request, prepared, started }) {
+                Ok(()) => None,
+                Err(error) => {
+                    self.busy.store(false, Ordering::Release);
+                    Some(error.0.request)
+                }
+            }
+        }
+
+        fn finish(self) {
+            drop(self.sender);
+            let _ = self.thread.join();
+        }
+    }
+
+    fn render_request(request: RenderRequest, mut target: RasterTarget, cancels: &CancellationMap, started: Instant) {
+        if request.cancel.is_aborted() {
+            request.finish(cancels, Err("render cancelled".into()));
+            return;
+        }
+        let mut serial_image = LlImage::empty();
+        let (status, timings, image, error) = match &mut target {
+            RasterTarget::Document(doc) => {
+                let status = unsafe {
+                    ll_render_priority(*doc, request.page as i32, request.scale, request.rotation,
+                                       request.clip_ptr(), request.cancel.ptr(), request.priority as c_int,
+                                       &mut serial_image)
+                };
+                let error = (status < LL_OK).then(|| native_error(*doc));
+                (status, unsafe { ll_get_last_render_timings(*doc) }, &serial_image, error)
+            }
+            #[cfg(target_os = "windows")]
+            RasterTarget::Auxiliary(prepared) => {
+                let mut timings = LlRenderTimings::default();
+                let mut message = [0 as c_char; 512];
+                let status = unsafe {
+                    ll_run_render_job(prepared.job.as_ptr(), request.cancel.ptr(), &mut prepared.image,
+                                      &mut timings, message.as_mut_ptr(), message.len())
+                };
+                let error = (status < LL_OK).then(|| {
+                    unsafe { CStr::from_ptr(message.as_ptr()) }.to_string_lossy().into_owned()
+                });
+                (status, timings, &prepared.image, error)
+            }
+        };
+        let c_total_us = started.elapsed().as_micros() as u64;
+        let packet_start = Instant::now();
+        let result = if status == LL_CANCELLED || request.cancel.is_aborted() {
+            Err("render cancelled".into())
+        } else if let Some(error) = error {
+            Err(error)
+        } else {
+            let packet = render_packet(image);
+            if packet.is_ok() && request.cancel.is_aborted() { Err("render cancelled".into()) } else { packet }
+        };
+        if DIAGNOSTICS_ENABLED.load(Ordering::Relaxed) {
+            if let Ok(mut diag) = diagnostics_store().lock() {
+                if diag.len() >= 200 { diag.pop_front(); }
+                diag.push_back(RenderDiagnostics {
+                    request_id: request.request_id.clone(),
+                    queue_wait_us: started.duration_since(request.enqueued_at).as_micros() as u64,
+                    c_list_us: timings.list_time_us,
+                    c_raster_us: timings.raster_time_us,
+                    c_pixmap_us: timings.pixmap_time_us,
+                    c_list_hit: timings.list_hit != 0,
+                    c_total_us,
+                    packet_us: packet_start.elapsed().as_micros() as u64,
+                    packet_bytes: result.as_ref().map(|v| v.len()).unwrap_or(0),
+                });
+            }
+        }
+        match target {
+            RasterTarget::Document(doc) => unsafe { ll_free_image(doc, &mut serial_image) },
+            #[cfg(target_os = "windows")]
+            RasterTarget::Auxiliary(prepared) => drop(prepared),
+        }
+        request.finish(cancels, result);
     }
 
     fn store() -> &'static Mutex<HashMap<String, DocumentSession>> {
@@ -343,17 +529,27 @@ mod imp {
         format!("mupdf_{ns}")
     }
 
-    fn worker(path: String, password: String,
-              rx: mpsc::Receiver<DocCommand>,
-              cancels: Arc<Mutex<HashMap<String, Arc<CancelHandle>>>>,
-              ready: oneshot::Sender<Result<(usize, [f32; 4], Option<String>, Option<String>), String>>) {
+    struct OpenDocument {
+        pages: usize,
+        first: [f32; 4],
+        title: Option<String>,
+        author: Option<String>,
+        parallel: bool,
+    }
+
+    fn worker(path: String, password: String, max_store_mb: u32, parallel: bool,
+              rx: mpsc::Receiver<DocCommand>, cancels: CancellationMap,
+              ready: oneshot::Sender<Result<OpenDocument, String>>) {
         let c_path = match CString::new(path) {
             Ok(v) => v,
             Err(_) => { let _ = ready.send(Err("File path contains NUL".into())); return; }
         };
         let c_password = CString::new(password).unwrap_or_else(|_| CString::new("").expect("empty CString"));
         let mut err = [0 as c_char; 512];
-        let doc = unsafe { ll_open(c_path.as_ptr(), c_password.as_ptr(), err.as_mut_ptr(), err.len()) };
+        let doc = unsafe {
+            ll_open_with_options(c_path.as_ptr(), c_password.as_ptr(), err.as_mut_ptr(), err.len(),
+                                 max_store_mb, i32::from(parallel))
+        };
         if doc.is_null() {
             let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned();
             let _ = ready.send(Err(if msg.is_empty() { "MuPDF failed to open document".into() } else { msg }));
@@ -371,7 +567,13 @@ mod imp {
         }
         let title = native_metadata(doc, "info:Title");
         let author = native_metadata(doc, "info:Author");
-        if ready.send(Ok((pages, first, title, author))).is_err() {
+        #[cfg(target_os = "windows")]
+        let raster = if parallel { RasterLane::new(cancels.clone()) } else { None };
+        #[cfg(target_os = "windows")]
+        let parallel = raster.is_some();
+        if ready.send(Ok(OpenDocument { pages, first, title, author, parallel })).is_err() {
+            #[cfg(target_os = "windows")]
+            if let Some(raster) = raster { raster.finish(); }
             unsafe { ll_close(doc) };
             return;
         }
@@ -399,10 +601,10 @@ mod imp {
 
             let mut i = 0;
             while i < pending.len() {
-                let should_cancel = if let DocCommand::Render { page, generation, cancel, .. } = &pending[i] {
+                let should_cancel = if let DocCommand::Render(RenderRequest { page, generation, cancel, .. }) = &pending[i] {
                     cancel.is_aborted() ||
                     pending.iter().skip(i + 1).any(|later| {
-                        if let DocCommand::Render { page: later_page, generation: later_gen, .. } = later {
+                        if let DocCommand::Render(RenderRequest { page: later_page, generation: later_gen, .. }) = later {
                             *later_page == *page && *later_gen > *generation
                         } else {
                             false
@@ -414,10 +616,8 @@ mod imp {
 
                 if should_cancel {
                     let cmd = pending.remove(i);
-                    if let DocCommand::Render { cancel, request_id, reply, .. } = cmd {
-                        cancel.abort();
-                        if let Ok(mut map) = cancels.lock() { map.remove(&request_id); }
-                        let _ = reply.send(Err("render cancelled".into()));
+                    if let DocCommand::Render(request) = cmd {
+                        request.cancel(&cancels, "render cancelled");
                     }
                 } else {
                     i += 1;
@@ -435,10 +635,10 @@ mod imp {
                     let score = match c {
                         DocCommand::Close => 0,
                         DocCommand::Select { .. } => 1,
-                        DocCommand::Render { priority: 0, .. } => 2,
+                        DocCommand::Render(RenderRequest { priority: 0, .. }) => 2,
                         DocCommand::Text { .. } => 3,
                         DocCommand::Bounds { .. } => 4,
-                        DocCommand::Render { priority, .. } => 10 + (*priority as i32),
+                        DocCommand::Render(RenderRequest { priority, .. }) => 10 + (*priority as i32),
                         DocCommand::PlainText { .. } => 25,
                         DocCommand::Outline { .. } | DocCommand::Links { .. } => 26,
                     };
@@ -554,61 +754,18 @@ mod imp {
                     unsafe { ll_free_links(&mut raw) };
                     let _ = reply.send(result);
                 }
-                DocCommand::Render { page, scale, rotation, clip, cancel, request_id, priority, generation: _, enqueued_at, reply } => {
-                    let queue_wait_us = enqueued_at.elapsed().as_micros() as u64;
-                    if cancel.is_aborted() {
-                        if let Ok(mut map) = cancels.lock() { map.remove(&request_id); }
-                        let _ = reply.send(Err("render cancelled".into()));
-                        continue;
-                    }
-                    let mut raw = LlImage {
-                        samples: std::ptr::null_mut(), length: 0, width: 0, height: 0,
-                        stride: 0, x: 0, y: 0, matrix: [0.0; 6], pixmap_owner: std::ptr::null_mut(),
-                    };
-                    let clip_ptr = clip.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
-                    let t0_c = std::time::Instant::now();
-                    let status = unsafe {
-                        ll_render_priority(doc, page as i32, scale, rotation, clip_ptr, cancel.ptr(), priority as c_int, &mut raw)
-                    };
-                    let c_total_us = t0_c.elapsed().as_micros() as u64;
-                    let c_timings = unsafe { ll_get_last_render_timings(doc) };
-
-                    let t0_packet = std::time::Instant::now();
-                    let result = if status == LL_CANCELLED || cancel.is_aborted() {
-                        Err("render cancelled".into())
-                    } else if status != LL_OK {
-                        Err(native_error(doc))
+                DocCommand::Render(request) => {
+                    let started = Instant::now();
+                    #[cfg(target_os = "windows")]
+                    let request = if let Some(raster) = &raster {
+                        match raster.dispatch(doc, request, started) {
+                            Some(request) => request,
+                            None => continue,
+                        }
                     } else {
-                        let pkt = render_packet(&raw);
-                        if pkt.is_ok() && cancel.is_aborted() {
-                            Err("render cancelled".into())
-                        } else {
-                            pkt
-                        }
+                        request
                     };
-                    let packet_us = t0_packet.elapsed().as_micros() as u64;
-                    let packet_bytes = result.as_ref().map(|v| v.len()).unwrap_or(0);
-
-                    if DIAGNOSTICS_ENABLED.load(Ordering::Relaxed) {
-                        if let Ok(mut diag) = diagnostics_store().lock() {
-                            if diag.len() >= 200 { diag.pop_front(); }
-                            diag.push_back(RenderDiagnostics {
-                                request_id: request_id.clone(),
-                                queue_wait_us,
-                                c_list_us: c_timings.list_time_us,
-                                c_raster_us: c_timings.raster_time_us,
-                                c_pixmap_us: c_timings.pixmap_time_us,
-                                c_list_hit: c_timings.list_hit != 0,
-                                c_total_us,
-                                packet_us,
-                                packet_bytes,
-                            });
-                        }
-                    }
-
-                    unsafe { ll_free_image(doc, &mut raw) };
-                    if let Ok(mut map) = cancels.lock() { map.remove(&request_id); }
-                    let _ = reply.send(result);
+                    render_request(request, RasterTarget::Document(doc), &cancels, started);
                 }
                 DocCommand::Close => break,
             }
@@ -622,11 +779,7 @@ mod imp {
                 DocCommand::Outline { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
                 DocCommand::PlainText { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
                 DocCommand::Links { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
-                DocCommand::Render { cancel, reply, request_id, .. } => {
-                    cancel.abort();
-                    if let Ok(mut map) = cancels.lock() { map.remove(&request_id); }
-                    let _ = reply.send(Err("Document closed".into()));
-                }
+                DocCommand::Render(request) => request.cancel(&cancels, "Document closed"),
                 DocCommand::Close => {}
             }
         }
@@ -635,6 +788,8 @@ mod imp {
             for handle in map.values() { handle.abort(); }
             map.clear();
         }
+        #[cfg(target_os = "windows")]
+        if let Some(raster) = raster { raster.finish(); }
         unsafe { ll_close(doc) };
     }
 
@@ -878,10 +1033,10 @@ mod imp {
         expected_size: Option<u64>,
         max_store_mb: Option<u32>,
         window_label: Option<String>,
+        parallel_rendering: Option<bool>,
     ) -> Result<DocumentMetadata, String> {
-        if let Some(mb) = max_store_mb {
-            unsafe { ll_set_max_store_mb(mb) };
-        }
+        let max_store_mb = max_store_mb.unwrap_or_else(|| DEFAULT_STORE_MB.load(Ordering::Relaxed)).clamp(32, 1024);
+        let parallel = cfg!(target_os = "windows") && parallel_rendering.unwrap_or(false);
         let size = expected_size.ok_or_else(|| "Native PDF open requires expectedSize to verify snapshot boundary".to_string())?;
         if size == 0 {
             return Err("Native PDF snapshot size cannot be zero".into());
@@ -922,11 +1077,11 @@ mod imp {
         let worker_path = actual_path.to_string_lossy().into_owned();
         let pw_clone = password.clone();
         thread::Builder::new().name(format!("ll-mupdf-{doc_id}")).spawn(move || {
-            worker(worker_path, pw_clone.unwrap_or_default(), rx, worker_cancels, ready_tx)
+            worker(worker_path, pw_clone.unwrap_or_default(), max_store_mb, parallel, rx, worker_cancels, ready_tx)
         }).map_err(|e| format!("Failed to start MuPDF worker: {e}"))?;
 
         let open_res = ready_rx.await.map_err(|_| "MuPDF worker exited during open".to_string())?;
-        let (num_pages, bounds, native_title, native_author) = match open_res {
+        let OpenDocument { pages: num_pages, first: bounds, title: native_title, author: native_author, parallel } = match open_res {
             Ok(data) => data,
             Err(e) => {
                 if let Some(ref win) = window_label {
@@ -960,7 +1115,7 @@ mod imp {
         let title = native_title.or_else(|| actual_path.file_stem().map(|x| x.to_string_lossy().into_owned()));
         Ok(DocumentMetadata {
             doc_id, num_pages, default_width: width, default_height: height,
-            title, author: native_author, format: "PDF".into(), native_backend: true,
+            title, author: native_author, format: "PDF".into(), native_backend: true, parallel_rendering: parallel,
         })
     }
 
@@ -1011,14 +1166,14 @@ mod imp {
         let cancel_check = cancel.clone();
         s.cancels.lock().map_err(|e| e.to_string())?.insert(request_id.clone(), cancel.clone());
         let (tx, rx) = oneshot::channel();
-        if s.tx.send(DocCommand::Render {
+        if s.tx.send(DocCommand::Render(RenderRequest {
             page: page_index, scale, rotation: rotation.unwrap_or(0.0), clip,
             cancel, request_id: request_id.clone(),
             priority: priority.unwrap_or(0),
             generation: generation.unwrap_or(0),
-            enqueued_at: std::time::Instant::now(),
+            enqueued_at: Instant::now(),
             reply: tx,
-        }).is_err() {
+        })).is_err() {
             if let Ok(mut m) = s.cancels.lock() { m.remove(&request_id); }
             return Err("MuPDF worker is closed".into());
         }
@@ -1149,10 +1304,8 @@ mod imp {
     #[tauri::command]
     pub fn mupdf_set_store_limit(max_mb: u32) -> Result<u32, String> {
         let clamped = max_mb.clamp(32, 1024);
-        unsafe {
-            ll_set_max_store_mb(clamped);
-            Ok(ll_get_max_store_mb())
-        }
+        DEFAULT_STORE_MB.store(clamped, Ordering::Relaxed);
+        Ok(clamped)
     }
 
     #[tauri::command]
@@ -1560,7 +1713,7 @@ mod imp {
     #[tauri::command] pub fn mupdf_set_store_limit(_max_mb: u32) -> Result<u32, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_stage_pdf_bytes(_app: tauri::AppHandle, _request: tauri::ipc::Request<'_>) -> Result<String, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_stage_pdf(_app: tauri::AppHandle, _file_path: String) -> Result<String, String> { unavailable() }
-    #[tauri::command] pub async fn mupdf_open_document(_app: tauri::AppHandle, _file_path: String, _password: Option<String>, _expected_size: Option<u64>, _max_store_mb: Option<u32>, _window_label: Option<String>) -> Result<DocumentMetadata, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_open_document(_app: tauri::AppHandle, _file_path: String, _password: Option<String>, _expected_size: Option<u64>, _max_store_mb: Option<u32>, _window_label: Option<String>, _parallel_rendering: Option<bool>) -> Result<DocumentMetadata, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_bounds_range(_doc_id: String, _start_page: usize, _count: usize) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_sizes(_doc_id: String) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_text_layer(_doc_id: String, _page_index: usize) -> Result<TextLayerResponse, String> { unavailable() }
@@ -1634,34 +1787,138 @@ mod header_tests {
     }
 }
 
+struct SavedPdfWriter {
+    output: Option<std::fs::File>,
+    final_path: std::path::PathBuf,
+    part_path: std::path::PathBuf,
+    hasher: crate::content_hash::ContentHasher,
+    written: u64,
+}
+
+impl SavedPdfWriter {
+    fn new(root: &std::path::Path, tag: &str) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::fs::create_dir_all(root).map_err(|e| format!("Cannot create PDF cache: {e}"))?;
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let final_path = root.join(format!("snapshot-{tag}-{}-{nanos}-{sequence}.pdf", std::process::id()));
+        let part_path = final_path.with_extension("part");
+        let output = std::fs::OpenOptions::new().write(true).create_new(true).open(&part_path)
+            .map_err(|e| format!("Cannot create PDF snapshot: {e}"))?;
+        Ok(Self {
+            output: Some(output), final_path, part_path,
+            hasher: crate::content_hash::ContentHasher::new(), written: 0,
+        })
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), String> {
+        use std::io::Write;
+        self.output.as_mut().expect("staging file").write_all(bytes)
+            .map_err(|e| format!("Cannot write PDF snapshot: {e}"))?;
+        for chunk in bytes.chunks(64 * 1024) { self.hasher.update(chunk); }
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<String, String> {
+        let file = self.output.take().expect("staging file");
+        file.sync_all().map_err(|e| format!("Cannot flush PDF snapshot: {e}"))?;
+        drop(file);
+        std::fs::rename(&self.part_path, &self.final_path)
+            .map_err(|e| format!("Cannot publish PDF snapshot: {e}"))?;
+        self.part_path.clear();
+        let hasher = std::mem::replace(&mut self.hasher, crate::content_hash::ContentHasher::new());
+        let (document_hash, legacy_hash) = hasher.finish(self.written);
+        Ok(serde_json::json!({"path": self.final_path.to_string_lossy(), "size": self.written,
+            "documentHash": document_hash, "legacyDocumentHash": legacy_hash}).to_string())
+    }
+}
+
+impl Drop for SavedPdfWriter {
+    fn drop(&mut self) {
+        drop(self.output.take());
+        if !self.part_path.as_os_str().is_empty() { let _ = std::fs::remove_file(&self.part_path); }
+    }
+}
+
 pub(crate) fn write_saved_pdf_snapshot(root: &std::path::Path, bytes: &[u8]) -> Result<String, String> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
     if bytes.is_empty() || bytes.len() > 128 * 1024 * 1024 || !has_pdf_header_prefix(bytes) {
         return Err("Saved data is not a supported PDF binary payload".into());
     }
-    std::fs::create_dir_all(root).map_err(|e| format!("Cannot create PDF cache: {e}"))?;
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let name = format!("snapshot-blob-{}-{nanos}-{}.pdf", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
-    let final_path = root.join(name);
-    let temp_path = final_path.with_extension("part");
-    let result = (|| -> Result<(), String> {
-        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_path)
-            .map_err(|e| format!("Cannot create PDF snapshot: {e}"))?;
-        output.write_all(bytes).map_err(|e| format!("Cannot write PDF snapshot: {e}"))?;
-        output.sync_all().map_err(|e| format!("Cannot flush PDF snapshot: {e}"))?;
-        drop(output);
-        std::fs::rename(&temp_path, &final_path).map_err(|e| format!("Cannot publish PDF snapshot: {e}"))
-    })();
-    if result.is_err() { let _ = std::fs::remove_file(&temp_path); }
-    result?;
-    let mut hasher = crate::content_hash::ContentHasher::new();
-    for chunk in bytes.chunks(64 * 1024) { hasher.update(chunk); }
-    let (document_hash, legacy_hash) = hasher.finish(bytes.len() as u64);
-    Ok(serde_json::json!({"path": final_path.to_string_lossy(), "size": bytes.len(),
-        "documentHash": document_hash, "legacyDocumentHash": legacy_hash}).to_string())
+    let mut snapshot = SavedPdfWriter::new(root, "blob")?;
+    snapshot.append(bytes)?;
+    snapshot.finish()
+}
+
+#[cfg(all(target_os = "android", ll_mupdf))]
+#[tauri::command]
+pub async fn mupdf_stage_pdf_chunk(
+    app: tauri::AppHandle, upload_id: String, offset: u64, size: u64, data: Option<String>,
+) -> Result<Option<String>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use std::{collections::HashMap, sync::{Mutex, Once, OnceLock}};
+
+    const CHUNK_SIZE: u64 = 256 * 1024;
+    static UPLOADS: OnceLock<Mutex<HashMap<String, (SavedPdfWriter, u64)>>> = OnceLock::new();
+    static CLEANUP: Once = Once::new();
+    if upload_id.len() != 32 || !upload_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Invalid PDF upload ID".into());
+    }
+    let root = imp::native_snapshot_dir_public(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut uploads = UPLOADS.get_or_init(|| Mutex::new(HashMap::new())).lock()
+            .map_err(|e| e.to_string())?;
+        let mut existing = uploads.remove(&upload_id);
+        let Some(data) = data else { return Ok(None); };
+
+        // Android's bridge accepts JSON. Decode only a single bounded chunk.
+        let expected = size.checked_sub(offset).unwrap_or(0).min(CHUNK_SIZE);
+        if expected == 0 || data.len() != (expected as usize).div_ceil(3) * 4 {
+            return Err("Invalid PDF snapshot chunk length".into());
+        }
+        let bytes = STANDARD.decode(data).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 != expected { return Err("Invalid PDF snapshot chunk length".into()); }
+
+        let mut snapshot = if offset == 0 && existing.is_none() {
+            if !has_pdf_header_prefix(&bytes) { return Err("Saved data is not a PDF".into()); }
+            CLEANUP.call_once(|| {
+                if let Ok(entries) = std::fs::read_dir(&root) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with("snapshot-blob-android-") && name.ends_with(".part") {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            });
+            SavedPdfWriter::new(&root, "blob-android")?
+        } else {
+            let (snapshot, original_size) = existing.take().ok_or("PDF snapshot upload is closed")?;
+            if snapshot.written != offset || original_size != size {
+                return Err("PDF snapshot chunk is out of sequence".into());
+            }
+            snapshot
+        };
+
+        snapshot.append(&bytes)?;
+        if snapshot.written == size {
+            snapshot.finish().map(Some)
+        } else {
+            uploads.insert(upload_id, (snapshot, size));
+            Ok(None)
+        }
+    }).await.map_err(|e| format!("PDF snapshot worker failed: {e}"))?
+}
+
+#[cfg(not(all(target_os = "android", ll_mupdf)))]
+#[tauri::command]
+pub async fn mupdf_stage_pdf_chunk(
+    _app: tauri::AppHandle, _upload_id: String, _offset: u64, _size: u64, _data: Option<String>,
+) -> Result<Option<String>, String> {
+    Err("Native Android PDF staging is unavailable".into())
 }
 
 pub use imp::*;

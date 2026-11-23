@@ -304,6 +304,7 @@ pub fn run() {
             mupdf_set_store_limit,
             mupdf_stage_pdf,
             mupdf_stage_pdf_bytes,
+            mupdf_stage_pdf_chunk,
             mupdf_open_document,
             mupdf_get_page_sizes,
             mupdf_get_page_bounds_range,

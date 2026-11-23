@@ -2819,6 +2819,15 @@ class UniversalReaderApp {
         return false
     }
 
+    async reopenAndroidPdfWithPreferredEngine() {
+        const session = this._activeSession
+        if (!platformBridge.isAndroid || !session?.isCurrent() || !session.viewport?.numPages ||
+            session.driver?.kind === platformBridge.getAndroidPdfEngine()) return
+        const location = session.viewport.getReadingLocation()
+        if (session.location) session.location = { ...session.location, ...location }
+        await this.openBook(session.bookId, location, { forceInPlace: true, password: session.pdfPassword })
+    }
+
     async openBook(bookOrId, initialLocation = null, options = {}) {
         const bookId = (typeof bookOrId === 'object' && bookOrId !== null) ? bookOrId.id : bookOrId
         if (!bookId) return this.dialogs.showToast(t('app.bookNotFound'), 'warning')
@@ -3300,8 +3309,11 @@ class UniversalReaderApp {
                     }
                 })
 
+                const pdfBudget = platformBridge.getPdfRenderBudget()
+                sessionViewport.setResourceBudget(pdfBudget)
                 readerSession.driver = sessionDriver
                 readerSession.viewport = sessionViewport
+                readerSession.pdfPassword = options.password || null
                 this.pdfDriver = sessionDriver
                 this.pdfViewport = sessionViewport
 
@@ -3363,6 +3375,7 @@ this.pdfTools.applyPdfPageAppearance()
                     return
                 }
 
+                this.appearance.updatePdfEngineSettingsUI()
                 this.currentPdfTOC = docInfo.toc || []
                 readerSession.toc = docInfo.toc || []
 
@@ -3387,27 +3400,10 @@ this.pdfTools.applyPdfPageAppearance()
                     sessionViewport.pulseHighlight?.(initialLocation.page - 1, initialLocation.highlightId, initialLocation.rects)
                 }
 
-                // Apply platform resource budget & connect PageTurnController
-                const currentBudget = platformBridge.getResourceBudget()
-                const isConstrained = Boolean(
-                    currentBudget.isLowMemoryDevice ||
-                    !platformBridge.getCapabilities().isWindows ||
-                    (typeof navigator !== 'undefined' && typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 6)
-                )
-                const normalCacheBytes = isConstrained
-                    ? 32 * 1024 * 1024
-                    : Math.round(currentBudget.maxCacheMb * 1024 * 1024 / 2)
-                sessionViewport.setResourceBudget({
-                    isLowMemoryDevice: isConstrained,
-                    bitmapCacheLimitBytes: normalCacheBytes,
-                    bufferPages: isConstrained ? 1 : 2,
-                    renderConcurrency: isConstrained ? 1 : (currentBudget.maxConcurrent || 2)
-                })
-
                 const updateVisibilityBudget = () => {
                     sessionViewport.setResourceBudget({
-                        bufferPages: document.hidden ? 0 : (isConstrained ? 1 : 2),
-                        bitmapCacheLimitBytes: document.hidden ? 16 * 1024 * 1024 : normalCacheBytes
+                        bufferPages: document.hidden ? 0 : pdfBudget.bufferPages,
+                        bitmapCacheLimitBytes: document.hidden ? 16 * 1024 * 1024 : pdfBudget.bitmapCacheLimitBytes
                     })
                 }
                 document.addEventListener('visibilitychange', updateVisibilityBudget, {
@@ -3675,7 +3671,16 @@ const sessionView = document.createElement('foliate-view')
                 this.annotations.onHighlightClicked(value, range)
             })
 
-            await sessionView.open(takePreparedEpub?.(snapshot) || fileObj)
+            await sessionView.open(takePreparedEpub?.(snapshot) || fileObj, {
+                txtLayoutVersion: bookData.txtLayoutVersion ?? 1,
+            })
+            const textLanguage = sessionView.book?.txtLayoutVersion && sessionView.book.metadata?.language
+            if (readerSession.isCurrent() && textLanguage && bookData.language !== textLanguage) {
+                bookData.language = textLanguage
+                db.saveBook({ id: bookId, language: textLanguage }).catch(error => {
+                    console.warn('[TXT] Could not save detected book language:', error)
+                })
+            }
             if (!this._bootStagesSealed && this.bootStageTimings) {
                 this.bootStageTimings.bookFormat = bookData?.format || 'epub'
                 this.bootStageTimings.readerBackend = 'foliate'

@@ -24,15 +24,12 @@
 #include <windows.h>
 
 static uint64_t ll_now_us(void) {
-    static LARGE_INTEGER freq;
-    static int initialized = 0;
-    if (!initialized) {
-        QueryPerformanceFrequency(&freq);
-        initialized = 1;
-    }
-    LARGE_INTEGER counter;
+    LARGE_INTEGER freq, counter;
+    QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&counter);
-    return (uint64_t)((counter.QuadPart * 1000000ULL) / freq.QuadPart);
+    uint64_t ticks = (uint64_t)counter.QuadPart;
+    uint64_t rate = (uint64_t)freq.QuadPart;
+    return (ticks / rate) * 1000000 + ((ticks % rate) * 1000000) / rate;
 }
 #else
 #include <time.h>
@@ -68,6 +65,23 @@ struct ll_doc {
     uint64_t clock;
     ll_stats stats;
     ll_render_timings last_render_timings;
+#ifdef _WIN32
+    int parallel;
+    CRITICAL_SECTION locks[FZ_LOCK_MAX];
+#endif
+};
+
+typedef struct {
+    fz_display_list *list;
+    fz_matrix matrix;
+    fz_rect box;
+    fz_irect bbox;
+    ll_render_timings timings;
+} ll_render_plan;
+
+struct ll_render_job {
+    fz_context *ctx;
+    ll_render_plan plan;
 };
 
 struct ll_cancel {
@@ -92,6 +106,7 @@ static void drop_page(ll_doc *d, ll_page *p) {
 }
 
 static ll_page *get_page_internal(ll_doc *d, int number, int *hit, int priority) {
+    (void)priority;
     if (hit) *hit = 0;
     if (number < 0 || number >= d->count)
         fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Page index out of range");
@@ -312,6 +327,21 @@ uint32_t ll_get_max_store_mb(void) {
 }
 
 ll_doc *ll_open(const char *path, const char *password, char *error, size_t n) {
+    return ll_open_with_options(path, password, error, n, g_max_store_mb, 0);
+}
+
+#ifdef _WIN32
+static void ll_lock(void *user, int lock) {
+    EnterCriticalSection(&((ll_doc *)user)->locks[lock]);
+}
+
+static void ll_unlock(void *user, int lock) {
+    LeaveCriticalSection(&((ll_doc *)user)->locks[lock]);
+}
+#endif
+
+ll_doc *ll_open_with_options(const char *path, const char *password, char *error, size_t n,
+                             uint32_t max_store_mb, int parallel) {
     ll_doc *d = calloc(1, sizeof(*d));
     fz_var(d);
     if (!d) {
@@ -320,10 +350,21 @@ ll_doc *ll_open(const char *path, const char *password, char *error, size_t n) {
     }
     for (int i = 0; i < CACHE_PAGES; ++i) d->pages[i].page = -1;
 
-    size_t store_bytes = ((size_t)g_max_store_mb) * 1024 * 1024;
-    d->ctx = fz_new_context(NULL, NULL, store_bytes);
+    size_t store_bytes = ((size_t)max_store_mb) * 1024 * 1024;
+    const fz_locks_context *locks = NULL;
+#ifdef _WIN32
+    fz_locks_context callbacks = {d, ll_lock, ll_unlock};
+    if (parallel) {
+        for (int i = 0; i < FZ_LOCK_MAX; ++i) InitializeCriticalSection(&d->locks[i]);
+        d->parallel = 1;
+        locks = &callbacks;
+    }
+#else
+    (void)parallel;
+#endif
+    d->ctx = fz_new_context(NULL, locks, store_bytes);
     if (!d->ctx) {
-        free(d);
+        ll_close(d);
         if (n) snprintf(error, n, "Context allocation failed");
         return NULL;
     }
@@ -347,11 +388,16 @@ ll_doc *ll_open(const char *path, const char *password, char *error, size_t n) {
 
 void ll_close(ll_doc *d) {
     if (!d) return;
-    for (int i = 0; i < CACHE_PAGES; ++i) drop_page(d, &d->pages[i]);
     if (d->ctx) {
+        for (int i = 0; i < CACHE_PAGES; ++i) drop_page(d, &d->pages[i]);
         fz_drop_document(d->ctx, d->document);
         fz_drop_context(d->ctx);
     }
+#ifdef _WIN32
+    if (d->parallel) {
+        for (int i = 0; i < FZ_LOCK_MAX; ++i) DeleteCriticalSection(&d->locks[i]);
+    }
+#endif
     free(d);
 }
 
@@ -552,128 +598,147 @@ void ll_cancel_free(ll_cancel *cancel) {
     free(cancel);
 }
 
-int ll_render_priority(ll_doc *d, int number, float scale, float rotation,
-                      const float *clip, ll_cancel *cancel, int priority, ll_image *out) {
-    if (!d || !out) return LL_ERROR;
+static int prepare_render(ll_doc *d, int number, float scale, float rotation,
+                          const float *clip, ll_cancel *cancel, int priority, ll_render_plan *plan) {
+    if (cancel && cancel->cookie.abort) return LL_CANCELLED;
     clear_error(d);
-    memset(out, 0, sizeof(*out));
-
-    fz_pixmap *pix = NULL;
-    fz_device *dev = NULL;
-    int was_cancelled = 0;
-    fz_var(pix);
-    fz_var(dev);
-    fz_var(was_cancelled);
-
+    memset(plan, 0, sizeof(*plan));
     fz_try(d->ctx) {
         if (!ll_isfinite(scale) || scale <= 0 || !ll_isfinite(rotation))
             fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Invalid render transform");
-        if (cancel && cancel->cookie.abort) {
-            was_cancelled = 1;
-        } else {
-            uint64_t t_list_start = ll_now_us();
-            int list_hit = 0;
-            ll_page *page = get_page_internal(d, number, &list_hit, priority);
-            uint64_t list_time_us = ll_now_us() - t_list_start;
 
-            fz_matrix m = fz_concat(fz_rotate(rotation), fz_scale(scale, scale));
-            fz_rect box = fz_transform_rect(page->bounds, m);
-            m = fz_concat(m, fz_translate(-box.x0, -box.y0));
-            box = fz_transform_rect(page->bounds, m);
-            if (clip) {
-                for (int i = 0; i < 4; ++i)
-                    if (!ll_isfinite(clip[i]))
-                        fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Invalid render clip");
-                box = fz_intersect_rect(box, (fz_rect){clip[0], clip[1], clip[2], clip[3]});
-            }
-            /* Check before fz_round_rect and the pixmap allocation. A corrupt
-             * MediaBox or extreme zoom must not allocate an unbounded bitmap. */
-            double box_width = (double)box.x1 - (double)box.x0;
-            double box_height = (double)box.y1 - (double)box.y0;
-            if (!ll_isfinite(box.x0) || !ll_isfinite(box.y0) ||
-                !ll_isfinite(box.x1) || !ll_isfinite(box.y1) ||
-                box.x0 < -INT_MAX / 4 || box.y0 < -INT_MAX / 4 ||
-                box.x1 > INT_MAX / 4 || box.y1 > INT_MAX / 4 ||
-                !ll_isfinite(box_width) || !ll_isfinite(box_height) ||
-                box_width <= 0 || box_height <= 0 ||
-                box_width > LL_MAX_RENDER_EDGE || box_height > LL_MAX_RENDER_EDGE ||
-                box_width * box_height > LL_MAX_RENDER_PIXELS)
-                fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
-            fz_irect bbox = fz_round_rect(box);
-            int width = bbox.x1 - bbox.x0;
-            int height = bbox.y1 - bbox.y0;
-            if (width <= 0 || height <= 0)
-                fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Empty render region");
-            if (width > LL_MAX_RENDER_EDGE || height > LL_MAX_RENDER_EDGE ||
-                (size_t)width * (size_t)height > LL_MAX_RENDER_PIXELS ||
-                width > INT_MAX / 4)
-                fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
+        uint64_t list_start = ll_now_us();
+        ll_page *page = get_page_internal(d, number, &plan->timings.list_hit, priority);
+        plan->timings.list_time_us = ll_now_us() - list_start;
+        plan->list = page->list;
 
-            pix = fz_new_pixmap_with_bbox(d->ctx, fz_device_rgb(d->ctx), bbox, NULL, 1);
-            fz_clear_pixmap_with_value(d->ctx, pix, 255);
-
-            uint64_t t_raster_start = ll_now_us();
-            dev = fz_new_draw_device(d->ctx, fz_identity, pix);
-            fz_run_display_list(d->ctx, page->list, dev, m, box,
-                                cancel ? &cancel->cookie : NULL);
-            fz_close_device(d->ctx, dev);
-            uint64_t raster_time_us = ll_now_us() - t_raster_start;
-
-            if (cancel && cancel->cookie.abort) {
-                was_cancelled = 1;
-            } else {
-                uint64_t t_pixmap_start = ll_now_us();
-                out->width = fz_pixmap_width(d->ctx, pix);
-                out->height = fz_pixmap_height(d->ctx, pix);
-                out->stride = out->width * 4;
-                out->x = bbox.x0;
-                out->y = bbox.y0;
-                out->length = (size_t)out->stride * (size_t)out->height;
-                unsigned char *src = fz_pixmap_samples(d->ctx, pix);
-                int stride = fz_pixmap_stride(d->ctx, pix);
-                if (!src || stride < out->stride)
-                    fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Invalid pixmap storage");
-                if (stride == out->stride) {
-                    /* Keep the pixmap alive through Rust packet assembly.
-                     * This removes a full-page C malloc and pixel copy. */
-                    out->samples = src;
-                    out->pixmap_owner = pix;
-                    pix = NULL;
-                } else {
-                    out->samples = malloc(out->length);
-                    if (!out->samples)
-                        fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
-                    for (int y = 0; y < out->height; ++y)
-                        memcpy(out->samples + (size_t)y * (size_t)out->stride,
-                               src + (size_t)y * (size_t)stride,
-                               (size_t)out->stride);
-                }
-                float matrix[6] = {m.a, m.b, m.c, m.d, m.e, m.f};
-                memcpy(out->matrix, matrix, sizeof(matrix));
-                uint64_t pixmap_time_us = ll_now_us() - t_pixmap_start;
-
-                d->last_render_timings.list_time_us = list_time_us;
-                d->last_render_timings.raster_time_us = raster_time_us;
-                d->last_render_timings.pixmap_time_us = pixmap_time_us;
-                d->last_render_timings.list_hit = list_hit;
-            }
+        fz_matrix m = fz_concat(fz_rotate(rotation), fz_scale(scale, scale));
+        fz_rect box = fz_transform_rect(page->bounds, m);
+        m = fz_concat(m, fz_translate(-box.x0, -box.y0));
+        box = fz_transform_rect(page->bounds, m);
+        if (clip) {
+            for (int i = 0; i < 4; ++i)
+                if (!ll_isfinite(clip[i]))
+                    fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Invalid render clip");
+            box = fz_intersect_rect(box, (fz_rect){clip[0], clip[1], clip[2], clip[3]});
         }
-    }
-    fz_always(d->ctx) {
-        fz_drop_device(d->ctx, dev);
-        fz_drop_pixmap(d->ctx, pix);
+        /* Bound coordinates before rounding or allocating the pixmap. */
+        double box_width = (double)box.x1 - (double)box.x0;
+        double box_height = (double)box.y1 - (double)box.y0;
+        if (!ll_isfinite(box.x0) || !ll_isfinite(box.y0) ||
+            !ll_isfinite(box.x1) || !ll_isfinite(box.y1) ||
+            (double)box.x0 < -INT_MAX / 4.0 || (double)box.y0 < -INT_MAX / 4.0 ||
+            (double)box.x1 > INT_MAX / 4.0 || (double)box.y1 > INT_MAX / 4.0 ||
+            !ll_isfinite(box_width) || !ll_isfinite(box_height) ||
+            box_width <= 0 || box_height <= 0 ||
+            box_width > LL_MAX_RENDER_EDGE || box_height > LL_MAX_RENDER_EDGE ||
+            box_width * box_height > LL_MAX_RENDER_PIXELS)
+            fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
+        fz_irect bbox = fz_round_rect(box);
+        int width = bbox.x1 - bbox.x0;
+        int height = bbox.y1 - bbox.y0;
+        if (width <= 0 || height <= 0)
+            fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Empty render region");
+        if (width > LL_MAX_RENDER_EDGE || height > LL_MAX_RENDER_EDGE ||
+            (size_t)width * (size_t)height > LL_MAX_RENDER_PIXELS || width > INT_MAX / 4)
+            fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
+        plan->matrix = m;
+        plan->box = box;
+        plan->bbox = bbox;
     }
     fz_catch(d->ctx) {
         caught(d);
-        ll_free_image(d, out);
+        return LL_ERROR;
+    }
+    return LL_OK;
+}
+
+static void free_image(fz_context *ctx, ll_image *out) {
+    if (!out) return;
+    if (out->pixmap_owner) {
+        if (ctx) fz_drop_pixmap(ctx, (fz_pixmap *)out->pixmap_owner);
+    } else {
+        free(out->samples);
+    }
+    memset(out, 0, sizeof(*out));
+}
+
+static int rasterize(fz_context *ctx, const ll_render_plan *plan, ll_cancel *cancel,
+                     ll_image *out, ll_render_timings *timings, char *error, size_t n) {
+    *timings = plan->timings;
+    if (cancel && cancel->cookie.abort) return LL_CANCELLED;
+
+    fz_pixmap *pix = NULL;
+    fz_device *dev = NULL;
+    fz_var(pix);
+    fz_var(dev);
+    fz_try(ctx) {
+        pix = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), plan->bbox, NULL, 1);
+        fz_clear_pixmap_with_value(ctx, pix, 255);
+
+        uint64_t raster_start = ll_now_us();
+        dev = fz_new_draw_device(ctx, fz_identity, pix);
+        fz_run_display_list(ctx, plan->list, dev, plan->matrix, plan->box,
+                            cancel ? &cancel->cookie : NULL);
+        fz_close_device(ctx, dev);
+        timings->raster_time_us = ll_now_us() - raster_start;
+
+        if (!cancel || !cancel->cookie.abort) {
+            uint64_t pixmap_start = ll_now_us();
+            out->width = fz_pixmap_width(ctx, pix);
+            out->height = fz_pixmap_height(ctx, pix);
+            out->stride = out->width * 4;
+            out->x = plan->bbox.x0;
+            out->y = plan->bbox.y0;
+            out->length = (size_t)out->stride * (size_t)out->height;
+            unsigned char *src = fz_pixmap_samples(ctx, pix);
+            int stride = fz_pixmap_stride(ctx, pix);
+            if (!src || stride < out->stride)
+                fz_throw(ctx, FZ_ERROR_SYSTEM, "Invalid pixmap storage");
+            if (stride == out->stride) {
+                /* Keep the pixmap alive through Rust packet assembly. */
+                out->samples = src;
+                out->pixmap_owner = pix;
+                pix = NULL;
+            } else {
+                out->samples = malloc(out->length);
+                if (!out->samples) fz_throw(ctx, FZ_ERROR_SYSTEM, "Allocation failed");
+                for (int y = 0; y < out->height; ++y)
+                    memcpy(out->samples + (size_t)y * (size_t)out->stride,
+                           src + (size_t)y * (size_t)stride, (size_t)out->stride);
+            }
+            fz_matrix m = plan->matrix;
+            float matrix[6] = {m.a, m.b, m.c, m.d, m.e, m.f};
+            memcpy(out->matrix, matrix, sizeof(matrix));
+            timings->pixmap_time_us = ll_now_us() - pixmap_start;
+        }
+    }
+    fz_always(ctx) {
+        fz_drop_device(ctx, dev);
+        fz_drop_pixmap(ctx, pix);
+    }
+    fz_catch(ctx) {
+        if (n) snprintf(error, n, "%s", fz_caught_message(ctx));
+        free_image(ctx, out);
         return LL_ERROR;
     }
 
-    if (was_cancelled) {
-        ll_free_image(d, out);
+    if (cancel && cancel->cookie.abort) {
+        free_image(ctx, out);
         return LL_CANCELLED;
     }
     return LL_OK;
+}
+
+int ll_render_priority(ll_doc *d, int number, float scale, float rotation,
+                       const float *clip, ll_cancel *cancel, int priority, ll_image *out) {
+    if (!d || !out) return LL_ERROR;
+    memset(out, 0, sizeof(*out));
+    memset(&d->last_render_timings, 0, sizeof(d->last_render_timings));
+    ll_render_plan plan;
+    int status = prepare_render(d, number, scale, rotation, clip, cancel, priority, &plan);
+    if (status != LL_OK) return status;
+    return rasterize(d->ctx, &plan, cancel, out, &d->last_render_timings, d->error, sizeof(d->error));
 }
 
 int ll_render(ll_doc *d, int number, float scale, float rotation,
@@ -682,14 +747,42 @@ int ll_render(ll_doc *d, int number, float scale, float rotation,
 }
 
 void ll_free_image(ll_doc *d, ll_image *out) {
-    if (!out) return;
-    if (out->pixmap_owner) {
-        if (d) fz_drop_pixmap(d->ctx, (fz_pixmap *)out->pixmap_owner);
-    } else {
-        free(out->samples);
-    }
-    memset(out, 0, sizeof(*out));
+    free_image(d ? d->ctx : NULL, out);
 }
+
+#ifdef _WIN32
+ll_render_job *ll_prepare_render_job(ll_doc *d, int number, float scale, float rotation,
+                                    const float *clip, ll_cancel *cancel) {
+    if (!d || !d->parallel) return NULL;
+    ll_render_plan plan;
+    if (prepare_render(d, number, scale, rotation, clip, cancel, 0, &plan) != LL_OK)
+        return NULL;
+
+    ll_render_job *job = malloc(sizeof(*job));
+    if (!job) return NULL;
+    job->ctx = fz_clone_context(d->ctx);
+    if (!job->ctx) {
+        free(job);
+        return NULL;
+    }
+    job->plan = plan;
+    job->plan.list = fz_keep_display_list(job->ctx, plan.list);
+    return job;
+}
+
+int ll_run_render_job(ll_render_job *job, ll_cancel *cancel, ll_image *out,
+                      ll_render_timings *timings, char *error, size_t n) {
+    memset(out, 0, sizeof(*out));
+    return rasterize(job->ctx, &job->plan, cancel, out, timings, error, n);
+}
+
+void ll_free_render_job(ll_render_job *job, ll_image *out) {
+    free_image(job->ctx, out);
+    fz_drop_display_list(job->ctx, job->plan.list);
+    fz_drop_context(job->ctx);
+    free(job);
+}
+#endif
 
 int ll_get_text(ll_doc *d, int number, ll_text *out) {
     if (!d || !out) return LL_ERROR;

@@ -30,6 +30,13 @@ export class ReaderAppearanceController {
             settingGoalMonth: document.getElementById('setting-goal-month'),
             settingGoalToday: document.getElementById('setting-goal-today'),
             settingPdfStoreMb: document.getElementById('setting-pdf-store-mb'),
+            pdfParallelSettings: document.getElementById('pdf-parallel-settings'),
+            settingPdfParallel: document.getElementById('setting-pdf-parallel'),
+            pdfParallelHint: document.getElementById('pdf-parallel-hint'),
+            androidPdfEngineSection: document.getElementById('android-pdf-engine-section'),
+            settingAndroidPdfEngine: document.getElementById('setting-android-pdf-engine'),
+            androidPdfEngineUnavailable: document.getElementById('android-pdf-engine-unavailable'),
+            androidPdfEngineFallback: document.getElementById('android-pdf-engine-fallback'),
             themeButtons: document.querySelectorAll('.theme-btn'),
             publisherStylesSwitch: document.getElementById('setting-publisher-styles'),
             publisherStylesHint: document.getElementById('publisher-styles-hint'),
@@ -315,6 +322,30 @@ export class ReaderAppearanceController {
                 } catch (_) {}
             }
         });
+        const isAndroid = platformBridge.isTauri && platformBridge.isAndroid
+        const isWindows = platformBridge.isTauri && platformBridge.getOS() === 'windows'
+        if (this.dom.androidPdfEngineSection) this.dom.androidPdfEngineSection.hidden = !isAndroid
+        if (isAndroid || isWindows) {
+            platformBridge.hasNativePdfBackend().then(available => {
+                this.nativePdfAvailable = available
+                if (this.dom.pdfParallelSettings) this.dom.pdfParallelSettings.hidden = !isWindows || !available
+                this.updatePdfEngineSettingsUI()
+            })
+        }
+        this.events.on(this.dom.settingPdfParallel, 'change', e => {
+            platformBridge.setPdfParallelRendering(e.target.checked)
+        })
+        this.events.on(this.dom.settingAndroidPdfEngine, 'change', async e => {
+            this.switchingPdfEngine = true
+            try {
+                platformBridge.setAndroidPdfEngine(e.target.value)
+                this.updatePdfEngineSettingsUI()
+                await this.app.reopenAndroidPdfWithPreferredEngine()
+            } finally {
+                this.switchingPdfEngine = false
+                this.updatePdfEngineSettingsUI()
+            }
+        })
         this.events.on(this.dom.settingPdfStoreMb, 'change', (e) => {
             const val = e.target.value
             try { localStorage.setItem('linden_pdf_store_mb', val) } catch (err) {}
@@ -396,7 +427,31 @@ export class ReaderAppearanceController {
         }
     }
 
+    updatePdfEngineSettingsUI() {
+        if (this.dom.settingPdfParallel) {
+            const canUseParallel = platformBridge.canUseParallelPdfRendering()
+            this.dom.settingPdfParallel.checked = platformBridge.getPdfParallelRendering()
+            this.dom.settingPdfParallel.disabled = !canUseParallel
+            if (this.dom.pdfParallelHint) {
+                const key = canUseParallel ? 'settings.pdfParallelHint' : 'settings.pdfParallelLimited'
+                this.dom.pdfParallelHint.dataset.i18n = key
+                this.dom.pdfParallelHint.textContent = t(key)
+            }
+        }
+        const select = this.dom.settingAndroidPdfEngine
+        if (!select || this.dom.androidPdfEngineSection.hidden) return
+        const canUseNative = this.nativePdfAvailable === true
+        const preferred = platformBridge.getAndroidPdfEngine()
+        const switching = this.switchingPdfEngine === true
+        select.value = canUseNative ? preferred : 'pdfjs'
+        select.disabled = !canUseNative || switching
+        this.dom.androidPdfEngineUnavailable.hidden = this.nativePdfAvailable !== false
+        this.dom.androidPdfEngineFallback.hidden =
+            !canUseNative || switching || preferred !== 'mupdf' || this.app.pdfDriver?.kind !== 'pdfjs'
+    }
+
     updateSettingsUI() {
+        this.updatePdfEngineSettingsUI()
         // Theme active state
         this.dom.themeButtons = document.querySelectorAll('.theme-btn')
         this.dom.themeButtons.forEach(btn => {

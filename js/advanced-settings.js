@@ -19,7 +19,8 @@ import * as backups from './backup-service.js'
  * Advanced reader and AI settings.
  */
 
-import { setCustomTxtPatterns, setTxtMergeSoftBreaks } from '../foliate-js-main/txt.js'
+import { setCustomTxtPatterns, setTxtMergeSoftBreaks, TXT_LAYOUT_VERSION } from '../foliate-js-main/txt.js'
+import { fullTextSearchEngine } from './fulltext-search.js'
 import { getChapterTranslationsStats, clearAllChapterTranslations } from './db.js'
 import * as db from './db.js'
 import { runTxtRulesWorker } from './txt-toc-worker.js'
@@ -28,7 +29,7 @@ import { ttsPlayer } from './tts-player.js'
 import { platformBridge } from './platformBridge.js'
 
 const TXT_RULE_TEMPLATES = Object.freeze({
-    zh_chapter: '^第\\s*[0-9一二三四五六七八九十百千万零两]+\\s*[首章节回卷集部篇幕话诗歌曲折出段讲场辑案].*',
+    zh_chapter: DEFAULT_ADVANCED_SETTINGS.txtRegexPattern,
     en_chapter: '^(?:Chapter|Section|Book|Part|Act|Scene)\\s+[0-9IVXLCDMivxlcdm]+.*',
     num_heading: '^[0-9]{1,4}[、.\\s]+[\\u4e00-\\u9fa5a-zA-Z0-9].*'
 })
@@ -268,7 +269,7 @@ export class AdvancedSettingsManager {
         const txtEnable = document.getElementById('setting-txt-custom-rules-enable')
         if (txtEnable) txtEnable.checked = !!this.config.txtCustomRulesEnable
         const txtPattern = document.getElementById('setting-txt-regex-pattern')
-        if (txtPattern && this.config.txtRegexPattern) txtPattern.value = this.config.txtRegexPattern
+        if (txtPattern) txtPattern.value = this.config.txtRegexPattern || TXT_RULE_TEMPLATES.zh_chapter
         const txtTemplate = document.getElementById('setting-txt-template-select')
         if (txtTemplate && txtPattern) {
             const matchingTemplate = Object.entries(TXT_RULE_TEMPLATES).find(([, value]) => value === txtPattern.value)
@@ -667,7 +668,7 @@ export class AdvancedSettingsManager {
         })
 
         document.getElementById('btn-apply-txt-rules')?.addEventListener('click', () => {
-            this.applyTxtRulesAndReload()
+            this.applyTxtRulesAndReload({ upgradeLegacy: true })
         })
 
         // Typography settings (routed through single-path app.setSetting)
@@ -1316,18 +1317,29 @@ export class AdvancedSettingsManager {
         }
     }
 
-    async applyTxtRulesAndReload() {
+    async applyTxtRulesAndReload({ upgradeLegacy = false } = {}) {
         this.applyRuntimeConfig()
-        if (!this.app?.foliateView?.book?.tocPreviewLines) {
+        const txtBook = this.app?.foliateView?.book
+        if (!txtBook?.tocPreviewLines) {
             this.app?.showToast?.(t('adv.txtRebuild.savedForNext'), 'info')
             return
         }
-        const bookId = this.app?.currentBookId
+        const bookId = this.app.currentBookId
         if (!bookId || typeof this.app.openBook !== 'function') return
-        const fraction = this.app?.currentLocation?.fraction
+        const isLegacy = txtBook.txtLayoutVersion !== TXT_LAYOUT_VERSION
+        if (isLegacy && !upgradeLegacy) return
+        const fraction = this.app.currentLocation?.fraction
         try {
-            await this.app.openBook(bookId, Number.isFinite(fraction) ? { fraction } : null)
-            this.app?.showToast?.(t('adv.txtRebuild.success'), 'info')
+            if (isLegacy) {
+                const confirmed = await this.app.showConfirmDialog(t('adv.txtRebuild.upgradeTitle'), t('adv.txtRebuild.upgradeMessage'))
+                if (!confirmed || this.app.currentBookId !== bookId) return
+                await db.saveBook({ id: bookId, txtLayoutVersion: TXT_LAYOUT_VERSION })
+            }
+            await fullTextSearchEngine.invalidate(bookId)
+            await this.app.openBook(bookId, Number.isFinite(fraction) ? { fraction } : null, { forceInPlace: true })
+            if (this.app.currentBookId === bookId && this.app.foliateView?.book?.txtLayoutVersion === TXT_LAYOUT_VERSION) {
+                this.app.showToast?.(t('adv.txtRebuild.success'), 'info')
+            }
         } catch (error) {
             console.warn('[AdvancedSettings] TXT directory rebuild failed:', error)
             this.app?.showToast?.(t('adv.txtRebuild.failed'), 'warn')

@@ -2303,6 +2303,280 @@ await runAsyncTest('M09: decodeQoiRgbaPayload losslessly decodes QOI runs, index
     assert.deepStrictEqual(decoded, rgba)
 })
 
+await runAsyncTest('PDF settings: Android preference and bounded legacy snapshot staging', async () => {
+    const { platformBridge } = await import('../js/platformBridge.js')
+    const bridge = Object.create(platformBridge, { isTauri: { value: true }, isAndroid: { value: true } })
+    const savedStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    const savedFileReader = globalThis.FileReader
+    const calls = []
+    const prefs = new Map()
+    Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true, value: { getItem: key => prefs.get(key), setItem: (key, value) => prefs.set(key, value) }
+    })
+    globalThis.FileReader = class {
+        async readAsDataURL(blob) {
+            this.result = 'data:application/octet-stream;base64,' + Buffer.from(await blob.arrayBuffer()).toString('base64')
+            this.onload()
+        }
+    }
+    let chunkFailure = false
+    bridge._invokeTauri = async (name, args) => {
+        calls.push({ name, args })
+        if (name === 'mupdf_is_available') return true
+        if (args.data === null) return null
+        if (chunkFailure) throw new Error('no space')
+        const bytes = Buffer.from(args.data, 'base64').length
+        return args.offset + bytes === args.size ? { path: 'snapshot.pdf', size: args.size } : null
+    }
+    try {
+        assert.strictEqual(await bridge.hasNativePdfBackend(), true)
+        assert.strictEqual(bridge.getAndroidPdfEngine(), 'pdfjs')
+        assert.strictEqual(await bridge.isNativePdfAvailable(), false)
+        assert.strictEqual(calls.length, 1, 'PDF.js does not invoke the native engine or stage a copy')
+        bridge.setAndroidPdfEngine('mupdf')
+        assert.strictEqual(prefs.get('linden_android_pdf_engine'), 'mupdf')
+        assert.strictEqual(await bridge.isNativePdfAvailable(), true)
+        assert.strictEqual(bridge.getPdfParallelRendering(), false)
+        const bytes = Buffer.alloc(256 * 1024 + 15, 0xa7)
+        const blob = new Blob([bytes])
+        assert.deepStrictEqual(await bridge.stageSavedPdfBlob(blob), { path: 'snapshot.pdf', size: blob.size })
+        const chunks = calls.filter(call => call.name === 'mupdf_stage_pdf_chunk').map(call => call.args)
+        assert.deepStrictEqual(chunks.map(chunk => chunk.offset), [0, 256 * 1024])
+        assert.strictEqual(chunks[0].uploadId, chunks[1].uploadId)
+        assert.deepStrictEqual(Buffer.concat(chunks.map(chunk => Buffer.from(chunk.data, 'base64'))), bytes)
+
+        chunkFailure = true
+        await assert.rejects(bridge.stageSavedPdfBlob(blob), /no space/)
+        assert.strictEqual(calls.at(-1).args.data, null, 'A failed transfer cancels partial staging')
+        bridge.setAndroidPdfEngine('pdfjs')
+        assert.strictEqual(await bridge.isNativePdfAvailable(), false)
+    } finally {
+        if (savedStorage) Object.defineProperty(globalThis, 'localStorage', savedStorage)
+        else delete globalThis.localStorage
+        if (savedFileReader === undefined) delete globalThis.FileReader
+        else globalThis.FileReader = savedFileReader
+    }
+})
+
+await runAsyncTest('PDF switching reuses a native-only book and falls back on native open errors', async () => {
+    const { AdaptivePdfDriver, MuPdfTauriDriver, PdfJsDriver } = await import('../js/pdf-driver.js')
+    const { platformBridge } = await import('../js/platformBridge.js')
+    const original = {
+        availability: MuPdfTauriDriver.isAvailable,
+        nativeOpen: MuPdfTauriDriver.prototype.open,
+        jsOpen: PdfJsDriver.prototype.open,
+        readFile: platformBridge.readFileBuffer,
+    }
+    const blob = { isLazySnapshot: true, size: 4096, arrayBuffer() {} }
+    const snapshot = {
+        nativeSnapshotOnly: true, nativeSnapshotPath: '/cache/snapshot.pdf', nativeSnapshotSize: blob.size, blob,
+    }
+    const calls = []
+    let nativeRequested = true
+    let nativeFailure = null
+    MuPdfTauriDriver.isAvailable = async () => nativeRequested
+    MuPdfTauriDriver.prototype.open = async args => {
+        calls.push('mupdf')
+        assert.strictEqual(args.nativePath, snapshot.nativeSnapshotPath)
+        assert.strictEqual(args.expectedSize, blob.size)
+        if (nativeFailure) throw nativeFailure
+        return { numPages: 10 }
+    }
+    PdfJsDriver.prototype.open = async args => {
+        calls.push('pdfjs')
+        assert.strictEqual(args.blob, blob)
+        return { numPages: 10 }
+    }
+    platformBridge.readFileBuffer = async () => assert.fail('The driver should reuse the book’s lazy source')
+
+    try {
+        const native = new AdaptivePdfDriver({ snapshot })
+        await native.open({})
+        assert.strictEqual(native.kind, 'mupdf')
+        native.destroy()
+        nativeRequested = false
+        const js = new AdaptivePdfDriver({ snapshot })
+        await js.open({})
+        assert.strictEqual(js.kind, 'pdfjs')
+        js.destroy()
+        nativeRequested = true
+        nativeFailure = new Error('Unreadable native snapshot')
+        const fallback = new AdaptivePdfDriver({ snapshot })
+        await fallback.open({})
+        assert.strictEqual(fallback.kind, 'pdfjs')
+        fallback.destroy()
+        assert.deepStrictEqual(calls, ['mupdf', 'pdfjs', 'mupdf', 'pdfjs'])
+    } finally {
+        MuPdfTauriDriver.isAvailable = original.availability
+        MuPdfTauriDriver.prototype.open = original.nativeOpen
+        PdfJsDriver.prototype.open = original.jsOpen
+        platformBridge.readFileBuffer = original.readFile
+    }
+})
+
+await runAsyncTest('PDF settings respect a one-thread Windows budget and survive blocked storage', async () => {
+    const { platformBridge } = await import('../js/platformBridge.js')
+    const bridge = Object.create(platformBridge, {
+        isTauri: { value: true }, isAndroid: { value: false }, getOS: { value: () => 'windows' },
+    })
+    const savedStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true, get() { throw new Error('Storage unavailable') },
+    })
+    try {
+        bridge.setResourceBudget({ isLowMemoryDevice: false, maxConcurrent: 2 })
+        assert.strictEqual(bridge.getAndroidPdfEngine(), 'pdfjs')
+        assert.strictEqual(bridge.getPdfParallelRendering(), false)
+        bridge.setAndroidPdfEngine('mupdf')
+        bridge.setPdfParallelRendering(true)
+        assert.strictEqual(bridge.getAndroidPdfEngine(), 'mupdf')
+        assert.strictEqual(bridge.getPdfParallelRendering(), true)
+        bridge.setResourceBudget({ isLowMemoryDevice: true, maxConcurrent: 2 })
+        assert.strictEqual(bridge.getPdfRenderBudget().renderConcurrency, 1)
+        assert.strictEqual(bridge.getPdfParallelRendering(), false)
+        bridge.setResourceBudget({ isLowMemoryDevice: false, maxConcurrent: 1 })
+        assert.strictEqual(bridge.getPdfParallelRendering(), false)
+        bridge.setResourceBudget({ isLowMemoryDevice: false, maxConcurrent: 2 })
+        assert.strictEqual(bridge.getPdfParallelRendering(), true)
+    } finally {
+        if (savedStorage) Object.defineProperty(globalThis, 'localStorage', savedStorage)
+        else delete globalThis.localStorage
+    }
+})
+
+await runAsyncTest('PDF fallback appears after engine switching has settled', async () => {
+    const { ReaderAppearanceController } = await import('../js/reader-appearance-controller.js')
+    const { platformBridge } = await import('../js/platformBridge.js')
+    const savedEngine = platformBridge.getAndroidPdfEngine
+    const controller = Object.create(ReaderAppearanceController.prototype)
+    controller.dom = {
+        settingAndroidPdfEngine: {}, androidPdfEngineSection: { hidden: false },
+        androidPdfEngineUnavailable: {}, androidPdfEngineFallback: {},
+    }
+    controller.nativePdfAvailable = true
+    controller.app = { pdfDriver: { kind: 'pdfjs' } }
+    try {
+        platformBridge.getAndroidPdfEngine = () => 'mupdf'
+        controller.switchingPdfEngine = true
+        controller.updatePdfEngineSettingsUI()
+        assert.strictEqual(controller.dom.settingAndroidPdfEngine.disabled, true)
+        assert.strictEqual(controller.dom.androidPdfEngineFallback.hidden, true)
+        controller.switchingPdfEngine = false
+        controller.updatePdfEngineSettingsUI()
+        assert.strictEqual(controller.dom.androidPdfEngineFallback.hidden, false)
+        controller.app.pdfDriver.kind = 'mupdf'
+        controller.updatePdfEngineSettingsUI()
+        assert.strictEqual(controller.dom.androidPdfEngineFallback.hidden, true)
+    } finally {
+        platformBridge.getAndroidPdfEngine = savedEngine
+    }
+})
+
+await runAsyncTest('TXT import metadata follows the text in either UI language', async () => {
+    const { readTxtMetadata } = await import('../foliate-js-main/txt.js')
+    const { getLocale, setLocale } = await import('../js/i18n.js')
+    const options = { persist: false, broadcast: false, applyDom: false }
+    const previous = getLocale()
+    try {
+        for (const locale of ['zh-CN', 'en']) {
+            setLocale(locale, options)
+            const english = new File(['An English chapter with a short opening.'], 'Catch-22.txt')
+            const chinese = new File(['第一章\n\n这是用于检查图书语言的一段中文。'], '《城南旧事》-林海音.txt')
+            assert.strictEqual((await readTxtMetadata(english)).title, 'Catch-22')
+            assert.strictEqual((await readTxtMetadata(english)).language, 'en')
+            assert.strictEqual((await readTxtMetadata(chinese)).language, 'zh-CN')
+            assert.strictEqual((await readTxtMetadata(chinese)).author, '林海音')
+            const author = await readTxtMetadata(new File(['A tale.'], 'A Story by Jane Austen.md'))
+            assert.deepStrictEqual(author, { title: 'A Story', author: 'Jane Austen', language: 'en' })
+            assert.strictEqual((await readTxtMetadata(new File(['Words.'], 'Odyssey by Homer.txt'))).author, 'Homer')
+            assert.strictEqual((await readTxtMetadata(new File(['Words.'], 'Stand by Me.txt'))).title, 'Stand by Me')
+        }
+    } finally {
+        setLocale(previous, options)
+    }
+})
+
+await runAsyncTest('TXT recognizes English headings and a linked contents list', async () => {
+    const { makeTXT, isChapterHeading } = await import('../foliate-js-main/txt.js')
+    for (const heading of ['Prologue', 'Preface', 'Epilogue', 'Afterword', 'Notes', 'Part Two', 'Book Three',
+        "Chapter One: The King's Gambit", 'Chapter 12: The Return of the Shadow', 'Chapter 7: Murder, She Wrote', 'IV — The Return']) {
+        assert.strictEqual(isChapterHeading(heading), true, heading)
+    }
+    const text = [
+        'Contents', 'Prologue', "Chapter One: The King's Gambit", 'Epilogue',
+        '', 'Prologue', '', 'There was a long road at the start of the story.',
+        '', "Chapter One: The King's Gambit", '', 'The king made his first move after the sun rose.',
+        '', 'Epilogue', '', 'The story came to an end on the familiar road.',
+    ].join('\n')
+    const english = await makeTXT(new File([text], 'The Story.txt'))
+    const roman = await makeTXT(new File(['I\n\nA traveller enters the valley.\n\nII.\n\nThe lantern went out.\n\nIV — The Return\n\nHe returns at last.'], 'Journey.txt'))
+    const markdown = await makeTXT(new File(['# First part\n\nA real section.\n\n\x60\x60\x60txt\n# inside a fence\n\x60\x60\x60\n\n## Next part\n\nAnother section.'], 'Notes.md'))
+    try {
+        assert.deepStrictEqual(english.toc.map(item => item.label), [
+            'Front Matter / Contents', 'Prologue', "Chapter One: The King's Gambit", 'Epilogue',
+        ])
+        const front = await (await fetch(english.sections[0].load())).text()
+        assert.match(front, /xml:lang="en"/)
+        assert.match(front, /href="2#heading"/)
+        assert.deepStrictEqual(roman.toc.map(item => item.label), ['I', 'II.', 'IV — The Return'])
+        assert.deepStrictEqual(markdown.toc.map(item => item.label), ['First part', 'Next part'])
+    } finally {
+        for (const book of [english, roman, markdown]) book.destroy()
+    }
+})
+
+await runAsyncTest('TXT supports legacy encodings and preserves English verse and old chapter coordinates', async () => {
+    const { makeTXT, readTxtMetadata } = await import('../foliate-js-main/txt.js')
+    const westernBytes = Buffer.concat([
+        Buffer.from('Preface\n\nA caf'), Buffer.from([0xe9]), Buffer.from(' with '),
+        Buffer.from([0x93]), Buffer.from('warm tea'), Buffer.from([0x94]),
+    ])
+    const chineseBytes = Buffer.from([0xb5, 0xda, 0xd2, 0xbb, 0xd5, 0xc2, 10, 10, 0xc4, 0xe3, 0xba, 0xc3, 0xa3, 0xac, 0xca, 0xc0, 0xbd, 0xe7])
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('序言\n\n这是一段中文。', 'utf16le')])
+    const western = await makeTXT(new File([westernBytes], 'Cafe.txt'))
+    const chinese = await makeTXT(new File([chineseBytes], '故事.txt'))
+    const unicode = await makeTXT(new File([utf16], '前言.txt'))
+    const verse = await makeTXT(new File([
+        'Beneath the quiet moon the mountains dream,\nThe river sings against the fading light.\n\nAcross the fields I watch the silver stream,\nAnd carry home the stillness of the night.',
+    ], 'Evening.txt'))
+    const prose = await makeTXT(new File([
+        'The river was still as we turned the corner\nand walked down the lane without a word.\n\nWe had been going for a long time before\nwe heard the first sounds from the valley.',
+    ], 'Journey.txt'))
+    const sample = new File(['Prologue\n\nAn opening paragraph with enough text to be clear.\n\nChapter 1\n\nThe first chapter begins here.'], 'Existing book.txt')
+    const legacy = await makeTXT(sample, { legacyLayout: true })
+    const current = await makeTXT(sample)
+    try {
+        assert.match(western.tocPreviewLines.join(' '), /café with “warm tea”/)
+        assert.strictEqual(chinese.metadata.language, 'zh-CN')
+        assert.strictEqual(chinese.toc[0].label, '第一章')
+        assert.match(chinese.tocPreviewLines.join(' '), /你好，世界/)
+        assert.strictEqual(unicode.toc[0].label, '序言')
+        const longBoundary = new File(['a'.repeat(65535), 'é', ' and more'], 'Cut.txt')
+        assert.strictEqual((await readTxtMetadata(longBoundary)).language, 'en')
+        const verseHtml = await (await fetch(verse.sections[0].load())).text()
+        const proseHtml = await (await fetch(prose.sections[0].load())).text()
+        assert.match(verseHtml, /class="verse-stanza"[^>]*>[^<]+<br\/>/)
+        assert.doesNotMatch(proseHtml, /class="verse-stanza"/)
+        assert.match(proseHtml, /corner and walked/)
+        assert.deepStrictEqual(legacy.toc.map(item => item.label), ['Existing book', 'Chapter 1'])
+        assert.deepStrictEqual(current.toc.map(item => item.label), ['Prologue', 'Chapter 1'])
+        assert.strictEqual(legacy.toc[1].href, '1#heading')
+    } finally {
+        for (const book of [western, chinese, unicode, verse, prose, legacy, current]) book.destroy()
+    }
+})
+
+await runAsyncTest('PDF switching preserves the current page and within-page position', async () => {
+    const { PdfViewport } = await import('../js/pdf-viewport.js')
+    const vp = Object.create(PdfViewport.prototype)
+    vp.currentPage = 6
+    vp.pageOffsets = { 6: { top: 4800, height: 1000 } }
+    vp.scrollArea = { scrollTop: 5050, clientHeight: 600 }
+    assert.deepStrictEqual(vp.getReadingLocation(), { page: 7, yRatio: 0.45 })
+    vp.scrollArea.scrollTop = 4792
+    assert.deepStrictEqual(vp.getReadingLocation(), { page: 7, yRatio: 0 })
+})
+
 await runAsyncTest('M10: PdfViewport enforces single-page concurrency=1 and blocks Tier-1 prefetch while Tier-0 is active', async () => {
     const { PdfViewport } = await import('../js/pdf-viewport.js')
     const vp = Object.create(PdfViewport.prototype)
@@ -2320,6 +2594,14 @@ await runAsyncTest('M10: PdfViewport enforces single-page concurrency=1 and bloc
     vp.spreadMode = 'dual'
     vp._updateRenderConcurrency()
     assert.strictEqual(vp._renderConcurrency, 2, 'Dual-spread MuPDF allows concurrency=2')
+    vp.spreadMode = 'none'
+    vp.driver.parallelRendering = true
+    vp._updateRenderConcurrency()
+    assert.strictEqual(vp._renderConcurrency, 2, 'Opt-in MuPDF can submit two visible pages')
+    vp._budgetRenderConcurrency = 1
+    vp._updateRenderConcurrency()
+    assert.strictEqual(vp._renderConcurrency, 1, 'The resource budget can still limit native rendering')
+    vp.setResourceBudget({ renderConcurrency: 2 })
 
     // Verify Strict Tier-0 Barrier stops Tier-1 dispatch when a Tier-0 visible task is in flight
     vp._destroyed = false

@@ -60,6 +60,10 @@ export const buildBookSyncMeta = (b) => {
         customTitle: b.customTitle || null,
         customAuthor: b.customAuthor || null,
         format: b.format,
+        ...(['txt', 'md'].includes(b.format) ? {
+            language: b.language || null,
+            txtLayoutVersion: b.txtLayoutVersion || null,
+        } : {}),
         size: b.size,
         cover: b.cover || null,
         isFavorite: !!b.isFavorite,

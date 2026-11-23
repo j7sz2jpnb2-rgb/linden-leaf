@@ -1,6 +1,6 @@
 # Linden Leaf：模块职责与验证入口
 
-当前 Windows 版本为 1.0.0。以 Tauri + MuPDF 为 PDF 主路径，PDF.js 是同一驱动接口下的备用后端；流式电子书继续使用 Foliate。`app.js` 负责界面编排，不应重新实现持久化、内容判等或合并算法。
+当前跨平台（Windows x64 & Android arm64）版本为 1.0.0。Windows 端以 Tauri + MuPDF（支持可选双页多线程渲染）为 PDF 主路径，PDF.js 为同一驱动接口下的备用后端；Android Release 包内置 PDF.js（默认）与 MuPDF 双引擎并支持原位切换；流式电子书统一使用 Foliate。`app.js` 负责界面编排，不应重新实现持久化、内容判等或合并算法。
 
 ## 修改一个功能时应到哪里
 
@@ -76,10 +76,15 @@ node scripts/test-data-contracts.mjs
 node scripts/test-app-composition.mjs
 node scripts/test-reader-search.mjs
 node scripts/test-android-tts.mjs
+node scripts/test-prebeta-hardening.mjs
+node scripts/test-i18n.mjs
+node scripts/test-i18n-interactions.mjs
+node scripts/test-ui-output-safety.mjs
 node scripts/test-regression-suite.mjs
 
 . .\scripts\env.ps1
 cargo check --offline --manifest-path src-tauri/Cargo.toml
+cargo test --lib --locked --offline --manifest-path src-tauri/Cargo.toml
 ```
 
 结构检查使用开发用 Node 内置 Acorn，检查重复类成员和纯模型依赖；解析器不会打包进阅读器。`--check-runner` 会故意制造错误并返回 1，用于检查运行器。

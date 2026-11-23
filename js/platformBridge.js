@@ -200,6 +200,21 @@ class PlatformBridge {
         return this._resourceBudget;
     }
 
+    getPdfRenderBudget() {
+        const budget = this.getResourceBudget()
+        const isLowMemoryDevice = this.getOS() !== 'windows' || Boolean(budget.isLowMemoryDevice)
+        return {
+            isLowMemoryDevice,
+            bitmapCacheLimitBytes: isLowMemoryDevice ? 32 * 1024 * 1024 : Math.round(budget.maxCacheMb * 1024 * 1024 / 2),
+            bufferPages: isLowMemoryDevice ? 1 : 2,
+            renderConcurrency: isLowMemoryDevice ? 1 : Math.min(budget.maxConcurrent || 2, 2),
+        }
+    }
+
+    canUseParallelPdfRendering() {
+        return this.isTauri && this.getPdfRenderBudget().renderConcurrency > 1
+    }
+
     /**
      * Check if a given string or path is an Android content:// URI
      * @param {string} uriString
@@ -477,14 +492,49 @@ class PlatformBridge {
         return null;
     }
 
-    async isNativePdfAvailable() {
+    _readPdfPreference(key) {
+        const temporary = this._temporaryPdfPreferences?.get(key)
+        if (temporary !== undefined) return temporary
+        try { return globalThis.localStorage?.getItem(key) } catch { return null }
+    }
+
+    _writePdfPreference(key, value) {
+        try {
+            globalThis.localStorage.setItem(key, value)
+            this._temporaryPdfPreferences?.delete(key)
+        } catch {
+            this._temporaryPdfPreferences ??= new Map()
+            this._temporaryPdfPreferences.set(key, value)
+        }
+    }
+
+    getAndroidPdfEngine() {
+        return this._readPdfPreference('linden_android_pdf_engine') === 'mupdf' ? 'mupdf' : 'pdfjs'
+    }
+
+    setAndroidPdfEngine(engine) {
+        this._writePdfPreference('linden_android_pdf_engine', engine === 'mupdf' ? 'mupdf' : 'pdfjs')
+    }
+
+    getPdfParallelRendering() {
+        return this.canUseParallelPdfRendering() && this._readPdfPreference('linden_pdf_parallel_rendering') === '1'
+    }
+
+    setPdfParallelRendering(enabled) {
+        this._writePdfPreference('linden_pdf_parallel_rendering', enabled ? '1' : '0')
+    }
+
+    async hasNativePdfBackend() {
         if (!this.isTauri) return false
         try {
-            if (this.isAndroid && localStorage.getItem('linden_android_pdf_engine') !== 'mupdf') return false
             return Boolean(await this._invokeTauri('mupdf_is_available'))
         } catch {
             return false
         }
+    }
+
+    async isNativePdfAvailable() {
+        return (!this.isAndroid || this.getAndroidPdfEngine() === 'mupdf') && await this.hasNativePdfBackend()
     }
 
     /** Copy a local PDF once into the app-owned native cache. The caller must
@@ -517,12 +567,40 @@ class PlatformBridge {
     }
 
     async stageSavedPdfBlob(blob) {
-        if (!this.isTauri || this.isAndroid || !(blob instanceof Blob) || !blob.size || blob.size > 128 * 1024 * 1024) return null
-        const bytes = new Uint8Array(await blob.arrayBuffer())
-        const raw = await this._invokeTauri('mupdf_stage_pdf_bytes', bytes)
+        if (!this.isTauri || !(blob instanceof Blob) || blob.isLazySnapshot || !blob.size) return null
+        if (!this.isAndroid && blob.size > 128 * 1024 * 1024) return null
+        const raw = this.isAndroid
+            ? await this._stageAndroidPdfBlob(blob)
+            : await this._invokeTauri('mupdf_stage_pdf_bytes', new Uint8Array(await blob.arrayBuffer()))
         const descriptor = typeof raw === 'string' ? JSON.parse(raw) : raw
         if (!descriptor?.path || descriptor.size !== blob.size) throw new Error('Saved PDF snapshot size mismatch')
         return descriptor
+    }
+
+    async _stageAndroidPdfBlob(blob) {
+        // Android Tauri sends requests as JSON. Encode one Blob slice at a time.
+        const chunkSize = 256 * 1024
+        const uploadId = Array.from(crypto.getRandomValues(new Uint32Array(4)),
+            n => n.toString(16).padStart(8, '0')).join('')
+        const size = blob.size
+        let descriptor = null
+        try {
+            for (let offset = 0; offset < size; offset += chunkSize) {
+                const chunk = blob.slice(offset, offset + chunkSize, 'application/octet-stream')
+                const data = await new Promise((resolve, reject) => {
+                    const reader = new FileReader()
+                    reader.onerror = () => reject(reader.error)
+                    reader.onload = () => resolve(reader.result.split(',', 2)[1])
+                    reader.readAsDataURL(chunk)
+                })
+                descriptor = await this._invokeTauri('mupdf_stage_pdf_chunk', { uploadId, offset, size, data })
+            }
+            return descriptor
+        } finally {
+            if (!descriptor) {
+                await this._invokeTauri('mupdf_stage_pdf_chunk', { uploadId, offset: 0, size, data: null }).catch(() => {})
+            }
+        }
     }
 
     async stageEpubSnapshot(filePath) {

@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); return 0; } } while (0)
 
@@ -171,6 +175,69 @@ static int compare_tiles(ll_doc *doc, int page, float scale, float rotation,
     return 1;
 }
 
+#ifdef _WIN32
+typedef struct {
+    ll_render_job *job;
+    ll_cancel *cancel;
+    ll_image image;
+    int result;
+} raster_work;
+
+static DWORD WINAPI run_prepared(void *data) {
+    raster_work *work = data;
+    ll_render_timings timings = {0};
+    char error[256];
+    work->result = ll_run_render_job(work->job, work->cancel, &work->image,
+                                    &timings, error, sizeof(error));
+    return 0;
+}
+
+static int compare_parallel(const char *path) {
+    char error[256] = {0};
+    ll_doc *doc = ll_open_with_options(path, NULL, error, sizeof(error), 64, 1);
+    if (!doc) fprintf(stderr, "%s\n", error);
+    CHECK(doc);
+    int last = ll_page_count(doc) - 1;
+    float clip[] = {20, 20, 600, 750};
+    raster_work work = {0};
+    work.job = ll_prepare_render_job(doc, 0, 3, 33, clip, NULL);
+    CHECK(work.job);
+    HANDLE thread = CreateThread(NULL, 0, run_prepared, &work, 0, NULL);
+    CHECK(thread);
+    ll_image independent = {0};
+    float independent_clip[] = {0, 0, 400, 580};
+    int independent_result = ll_render(doc, last, 2, 90, independent_clip, NULL, &independent);
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+    ll_free_image(doc, &independent);
+    CHECK(independent_result == LL_OK && work.result == LL_OK);
+
+    ll_image serial = {0};
+    CHECK(ll_render(doc, 0, 3, 33, clip, NULL, &serial) == LL_OK);
+    CHECK(serial.x == work.image.x && serial.y == work.image.y);
+    CHECK(serial.width == work.image.width && serial.height == work.image.height);
+    CHECK(serial.length == work.image.length && serial.stride == work.image.stride);
+    CHECK(memcmp(serial.matrix, work.image.matrix, sizeof(serial.matrix)) == 0);
+    CHECK(memcmp(serial.samples, work.image.samples, serial.length) == 0);
+    ll_free_image(doc, &serial);
+    ll_free_render_job(work.job, &work.image);
+
+    raster_work cancelled = {0};
+    cancelled.cancel = ll_cancel_new();
+    CHECK(cancelled.cancel);
+    cancelled.job = ll_prepare_render_job(doc, 0, 1, 0, NULL, cancelled.cancel);
+    CHECK(cancelled.job);
+    ll_cancel_abort(cancelled.cancel);
+    run_prepared(&cancelled);
+    CHECK(cancelled.result == LL_CANCELLED && !cancelled.image.samples);
+    ll_free_render_job(cancelled.job, &cancelled.image);
+    ll_cancel_free(cancelled.cancel);
+    ll_close(doc);
+    printf("parallel_raster_pixel_identity_and_cancellation: PASS\n");
+    return 1;
+}
+#endif
+
 static int native_tests(const char *fixture, const char *book) {
     CHECK(write_fixture(fixture));
     char error[256] = {0};
@@ -189,9 +256,15 @@ static int native_tests(const char *fixture, const char *book) {
     ll_stats stats = ll_get_stats(doc);
     CHECK(stats.list_builds == 1 && stats.list_hits > 1 && stats.text_builds == 0);
     ll_close(doc);
+#ifdef _WIN32
+    CHECK(compare_parallel(fixture));
+#endif
     remove(fixture);
     printf("shared_display_list_no_text_work: PASS\n");
     if (book && book[0]) {
+#ifdef _WIN32
+        CHECK(compare_parallel(book));
+#endif
         doc = ll_open(book, NULL, error, sizeof(error));
         if (!doc) fprintf(stderr, "%s\n", error);
         CHECK(doc && ll_page_count(doc) > 0);
