@@ -1,0 +1,1920 @@
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::commands::{is_en_locale, l10n};
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncConfig {
+    pub enabled: Option<bool>,
+    pub server_type: Option<String>,
+    pub server_url: Option<String>,
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub has_password: Option<bool>,
+    #[serde(default)]
+    pub _pwd_encrypted: Option<bool>,
+    pub remote_dir: Option<String>,
+    pub auto_sync_on_startup: Option<bool>,
+    pub auto_sync_on_book_close: Option<bool>,
+    pub last_sync_time: Option<serde_json::Value>,
+    pub last_sync_status: Option<serde_json::Value>,
+    #[serde(default)]
+    pub last_synced_endpoint: Option<String>,
+    #[serde(default)]
+    pub last_sync_summary: Option<serde_json::Value>,
+    #[serde(default)]
+    pub has_oauth_token: Option<bool>,
+    #[serde(default)]
+    pub credential_origin: Option<String>,
+    #[serde(default)]
+    pub provider_type: Option<String>,
+    #[serde(default)]
+    pub folder_path: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub disable_auto_sync: Option<bool>,
+    #[serde(default)]
+    pub confirmed_endpoint: Option<String>,
+    #[serde(default)]
+    pub confirmed_endpoints: Option<Vec<String>>,
+    #[serde(default)]
+    pub requires_review: Option<bool>,
+    #[serde(default)]
+    pub include_user_files: Option<bool>,
+    #[serde(default)]
+    pub locale: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RemoteSyncResponse {
+    pub success: bool,
+    pub exists: bool,
+    pub data: Option<serde_json::Value>,
+    pub etag: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SaveRemoteResponse {
+    pub success: bool,
+    pub etag: Option<String>,
+    #[serde(rename = "isConflict")]
+    pub is_conflict: Option<bool>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BookBinaryResponse {
+    pub success: bool,
+    #[serde(rename = "fileName")]
+    pub file_name: Option<String>,
+    pub size: Option<usize>,
+    pub buffer: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+fn get_sync_config_path() -> PathBuf {
+    let mut dir = crate::commands::fs::resolve_app_data_dir();
+    let _ = fs::create_dir_all(&dir);
+    dir.push("sync-config.json");
+    dir
+}
+
+// Windows DPAPI encryption helper
+#[cfg(target_os = "windows")]
+fn encrypt_password(plain: &str) -> Result<String, String> {
+    use std::ptr;
+    use windows::Win32::Foundation::LocalFree;
+    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+
+    if plain.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut in_blob = CRYPT_INTEGER_BLOB {
+        cbData: plain.len() as u32,
+        pbData: plain.as_ptr() as *mut u8,
+    };
+    let mut out_blob = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: ptr::null_mut(),
+    };
+
+    unsafe {
+        if CryptProtectData(
+            &mut in_blob,
+            None,
+            None,
+            None,
+            None,
+            0,
+            &mut out_blob,
+        )
+        .is_ok()
+        {
+            let slice = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize);
+            let b64 = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                slice,
+            );
+            LocalFree(windows::Win32::Foundation::HLOCAL(out_blob.pbData as _));
+            Ok(b64)
+        } else {
+            Err("DPAPI encryption failed".to_string())
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[cfg(not(target_os = "windows"))]
+fn encrypt_password(_plain: &str) -> Result<String, String> {
+    // Base64 encoding is not encryption and must never be used to store credentials on disk.
+    // On Android/mobile/Linux, a platform Keystore or Keyring bridge is required.
+    Err("Safe credential storage (Keystore) is not yet configured for this platform. Credentials cannot be persisted to disk safely.".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn decrypt_password(cipher_b64: &str) -> Result<String, String> {
+    use std::ptr;
+    use windows::Win32::Foundation::LocalFree;
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+
+    if cipher_b64.is_empty() {
+        return Ok(String::new());
+    }
+
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cipher_b64)
+        .map_err(|e| e.to_string())?;
+
+    let mut in_blob = CRYPT_INTEGER_BLOB {
+        cbData: bytes.len() as u32,
+        pbData: bytes.as_ptr() as *mut u8,
+    };
+    let mut out_blob = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: ptr::null_mut(),
+    };
+
+    unsafe {
+        if CryptUnprotectData(
+            &mut in_blob,
+            None,
+            None,
+            None,
+            None,
+            0,
+            &mut out_blob,
+        )
+        .is_ok()
+        {
+            let slice = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize);
+            let s = String::from_utf8_lossy(slice).to_string();
+            LocalFree(windows::Win32::Foundation::HLOCAL(out_blob.pbData as _));
+            Ok(s)
+        } else {
+            Err("DPAPI decryption failed".to_string())
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn decrypt_password(_cipher_b64: &str) -> Result<String, String> {
+    Err("Safe credential decryption is not supported on this platform without native Keystore.".to_string())
+}
+
+#[tauri::command]
+pub fn sync_get_config() -> SyncConfig {
+    let disable_sync = std::env::var("LINDEN_DISABLE_AUTO_SYNC")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+        || std::env::var("DISABLE_AUTO_SYNC")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+
+    let path = get_sync_config_path();
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(mut cfg) = serde_json::from_str::<SyncConfig>(&content) {
+            let has_pwd = cfg.password.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
+            cfg.has_password = Some(has_pwd);
+            cfg.password = Some(String::new()); // Never leak plaintext password to renderer
+            if disable_sync {
+                cfg.disable_auto_sync = Some(true);
+            }
+            return cfg;
+        }
+    }
+    SyncConfig {
+        enabled: Some(false),
+        server_type: Some("jianguoyun".to_string()),
+        server_url: Some("https://dav.jianguoyun.com/dav/".to_string()),
+        username: Some(String::new()),
+        password: Some(String::new()),
+        has_password: Some(false),
+        _pwd_encrypted: Some(false),
+        remote_dir: Some("LindenLeaf".to_string()),
+        auto_sync_on_startup: Some(true),
+        auto_sync_on_book_close: Some(true),
+        last_sync_time: None,
+        last_sync_status: None,
+        last_synced_endpoint: None,
+        last_sync_summary: None,
+        has_oauth_token: None,
+        credential_origin: None,
+        provider_type: Some("webdav".to_string()),
+        folder_path: None,
+        account_id: None,
+        client_id: None,
+        disable_auto_sync: if disable_sync { Some(true) } else { None },
+        confirmed_endpoint: None,
+        confirmed_endpoints: None,
+        requires_review: None,
+        include_user_files: None,
+        locale: None,
+    }
+}
+
+// Internal-only helper: never expose raw WebDAV password over IPC to renderer
+pub(crate) fn sync_reveal_password(#[allow(unused)] app_handle: tauri::AppHandle) -> String {
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(Some(secret)) = crate::commands::android::android_keystore_load(app_handle.clone(), "sync_webdav_password".to_string()) {
+            if !secret.is_empty() {
+                return secret;
+            }
+        }
+    }
+    let path = get_sync_config_path();
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(cfg) = serde_json::from_str::<SyncConfig>(&content) {
+            if let Some(pwd) = cfg.password {
+                if pwd.starts_with("__keystore:") {
+                    #[cfg(target_os = "android")]
+                    {
+                        if let Ok(Some(secret)) = crate::commands::android::android_keystore_load(app_handle, "sync_webdav_password".to_string()) {
+                            return secret;
+                        }
+                    }
+                    return String::new();
+                }
+                if cfg._pwd_encrypted.unwrap_or(false) {
+                    return decrypt_password(&pwd).unwrap_or_default();
+                }
+                return pwd;
+            }
+        }
+    }
+    String::new()
+}
+
+#[tauri::command]
+pub fn sync_save_config(#[allow(unused)] app_handle: tauri::AppHandle, mut config: SyncConfig) -> bool {
+    let path = get_sync_config_path();
+    let existing_raw = fs::read_to_string(&path).ok();
+    let existing_cfg: Option<SyncConfig> = existing_raw.and_then(|s| serde_json::from_str(&s).ok());
+
+    if let Some(ref ext) = existing_cfg {
+        if config.last_synced_endpoint.is_none() {
+            config.last_synced_endpoint = ext.last_synced_endpoint.clone();
+        }
+        if config.last_sync_summary.is_none() {
+            config.last_sync_summary = ext.last_sync_summary.clone();
+        }
+        if config.has_oauth_token.is_none() {
+            config.has_oauth_token = ext.has_oauth_token;
+        }
+        if config.last_sync_time.is_none() {
+            config.last_sync_time = ext.last_sync_time.clone();
+        }
+        if config.last_sync_status.is_none() {
+            config.last_sync_status = ext.last_sync_status.clone();
+        }
+    }
+
+    // Preserve existing password if new one is empty
+    if config.password.as_deref().unwrap_or("").is_empty() {
+        if let Some(ref ext) = existing_cfg {
+            config.password = ext.password.clone();
+            config._pwd_encrypted = ext._pwd_encrypted;
+            config.credential_origin = ext.credential_origin.clone();
+        }
+    } else if let Some(ref plain) = config.password {
+        #[cfg(target_os = "android")]
+        {
+            match crate::commands::android::android_keystore_store(app_handle, "sync_webdav_password".to_string(), plain.clone()) {
+                Ok(true) => {
+                    config.password = Some("__keystore:sync_webdav_password__".to_string());
+                    config._pwd_encrypted = Some(true);
+                    let s_url = config.server_url.as_deref().unwrap_or("https://dav.jianguoyun.com/dav/");
+                    if let Ok(parsed) = reqwest::Url::parse(s_url) {
+                        config.credential_origin = Some(parsed.origin().ascii_serialization());
+                    }
+                }
+                _ => return false,
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            match encrypt_password(plain) {
+                Ok(enc) => {
+                    config.password = Some(enc);
+                    config._pwd_encrypted = Some(true);
+                    // Bind saved credential to target server origin
+                    let s_url = config.server_url.as_deref().unwrap_or("https://dav.jianguoyun.com/dav/");
+                    if let Ok(parsed) = reqwest::Url::parse(s_url) {
+                        config.credential_origin = Some(parsed.origin().ascii_serialization());
+                    }
+                }
+                Err(_) => {
+                    // S1: Encryption failed: fail fast and do NOT save config or write plain text
+                    return false;
+                }
+            }
+        }
+    }
+
+    if let Ok(json) = serde_json::to_string_pretty(&config) {
+        return fs::write(&path, json).is_ok();
+    }
+    false
+}
+
+// S5: Verify that the server URL uses HTTPS, or local/private network HTTP
+pub fn is_allowed_server_url(url: &reqwest::Url) -> Result<(), String> {
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host_str = url.host_str().unwrap_or("");
+            if host_str == "localhost" {
+                return Ok(());
+            }
+            if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
+                if ip.is_loopback() {
+                    return Ok(());
+                }
+                match ip {
+                    std::net::IpAddr::V4(ipv4) => {
+                        if ipv4.is_private() {
+                            return Ok(());
+                        }
+                    }
+                    std::net::IpAddr::V6(_) => {}
+                }
+            }
+            Err(format!(
+                "Plain HTTP is only permitted for local or private intranet addresses (e.g. localhost, 127.0.0.1, 192.168.x.x). Host '{}' requires HTTPS for security.",
+                host_str
+            ))
+        }
+        other => Err(format!(
+            "Unsupported protocol '{}': only HTTPS (and local HTTP) are permitted.",
+            other
+        )),
+    }
+}
+
+// S4: Validate that a book filename is a single safe path segment
+pub fn validate_book_filename(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Book filename cannot be empty".to_string());
+    }
+    if trimmed.len() > 255 {
+        return Err(format!("Book filename exceeds maximum length of 255 characters (length: {})", trimmed.len()));
+    }
+    // Reject any path separators, traversal dots, control characters, or URL encoding markers
+    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains('%')
+        || trimmed.contains('?') || trimmed.contains('#')
+        || trimmed.contains('\0') || trimmed.contains(':')
+        || trimmed.contains('*') || trimmed.contains('"')
+        || trimmed.contains('<') || trimmed.contains('>')
+        || trimmed.contains('|')
+    {
+        return Err(format!("Book filename contains disallowed characters or path separators: '{}'", name));
+    }
+    if trimmed == "." || trimmed == ".." || trimmed.starts_with('.') {
+        return Err(format!("Book filename cannot be or start with a dot segment: '{}'", name));
+    }
+    Ok(trimmed.to_string())
+}
+
+// S4 & S5: Construct safe WebDAV target URL without escaping remote directory
+pub fn get_sync_url(config: &SyncConfig, sub_path: &str) -> Result<reqwest::Url, String> {
+    let saved_cfg = if config.server_url.as_deref().unwrap_or("").is_empty() {
+        Some(sync_get_config())
+    } else {
+        None
+    };
+    let base_str = config.server_url.as_deref().filter(|s| !s.is_empty())
+        .or_else(|| saved_cfg.as_ref().and_then(|c| c.server_url.as_deref()))
+        .unwrap_or("https://dav.jianguoyun.com/dav/");
+
+    let base_url = reqwest::Url::parse(base_str)
+        .map_err(|e| format!("Invalid base WebDAV server URL '{}': {}", base_str, e))?;
+
+    is_allowed_server_url(&base_url)?;
+
+    let dir_str = config.remote_dir.as_deref().filter(|s| !s.is_empty())
+        .or_else(|| saved_cfg.as_ref().and_then(|c| c.remote_dir.as_deref()))
+        .unwrap_or("LindenLeaf");
+
+    let clean_dir = dir_str.trim().trim_matches('/');
+    if clean_dir.contains("..") || clean_dir.contains('\\') || clean_dir.contains('%') {
+        return Err(format!("Invalid remote directory: '{}'", dir_str));
+    }
+
+    let base_path = base_url.path().trim_end_matches('/').to_string();
+
+    let mut segments = Vec::new();
+    if !clean_dir.is_empty() {
+        for seg in clean_dir.split('/') {
+            let s = seg.trim();
+            if !s.is_empty() {
+                if s == "." || s == ".." {
+                    return Err(format!("Directory segment cannot be dot: '{}'", s));
+                }
+                segments.push(s.to_string());
+            }
+        }
+    }
+
+    let sub_clean = sub_path.trim().trim_matches('/');
+    if !sub_clean.is_empty() {
+        for seg in sub_clean.split('/') {
+            let s = seg.trim();
+            if !s.is_empty() {
+                if s == "." || s == ".." {
+                    return Err(format!("Path segment cannot be dot: '{}'", s));
+                }
+                segments.push(s.to_string());
+            }
+        }
+    }
+
+    let mut final_url = base_url.clone();
+    {
+        let mut path_segs = final_url.path_segments_mut().map_err(|_| "Cannot mutate URL path segments".to_string())?;
+        path_segs.pop_if_empty();
+        for seg in &segments {
+            path_segs.push(seg);
+        }
+    }
+
+    // Security invariant: final URL origin MUST match base URL origin
+    if final_url.origin() != base_url.origin() {
+        return Err(format!(
+            "URL security check failed: constructed URL origin '{}' differs from base origin '{}'",
+            final_url.origin().ascii_serialization(),
+            base_url.origin().ascii_serialization()
+        ));
+    }
+
+    // Security invariant: final URL path MUST start with expected base path
+    if !final_url.path().starts_with(&base_path) {
+        return Err(format!(
+            "URL security check failed: constructed path '{}' escaped base path '{}'",
+            final_url.path(),
+            base_path
+        ));
+    }
+
+    Ok(final_url)
+}
+
+// S5: Origin verification for credentials
+fn verify_credential_origin(config: &SyncConfig, saved_cfg: &SyncConfig) -> Result<(), String> {
+    if let Some(ref req_url) = config.server_url {
+        let trimmed = req_url.trim();
+        if !trimmed.is_empty() {
+            let parsed_req = reqwest::Url::parse(trimmed)
+                .map_err(|e| format!("Invalid target server URL '{}': {}", trimmed, e))?;
+            let req_origin = parsed_req.origin().ascii_serialization();
+
+            let saved_origin = saved_cfg.credential_origin.clone()
+                .or_else(|| {
+                    saved_cfg.server_url.as_deref().and_then(|s| {
+                        reqwest::Url::parse(s.trim()).ok().map(|u| u.origin().ascii_serialization())
+                    })
+                })
+                .unwrap_or_else(|| "https://dav.jianguoyun.com".to_string());
+
+            if req_origin != saved_origin {
+                return Err(format!(
+                    "Target server origin '{}' does not match saved credentials origin '{}'. Please provide credentials explicitly for the new server.",
+                    req_origin, saved_origin
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn get_credentials(#[allow(unused)] app_handle: Option<&tauri::AppHandle>, config: &SyncConfig) -> Result<(String, String), String> {
+    let saved_cfg = sync_get_config();
+    let user = match config.username {
+        Some(ref u) if !u.is_empty() => u.clone(),
+        _ => saved_cfg.username.clone().unwrap_or_default(),
+    };
+
+    let pass = if let Some(ref p) = config.password {
+        if !p.is_empty() && !p.starts_with("__keystore:") {
+            p.clone()
+        } else {
+            verify_credential_origin(config, &saved_cfg)?;
+            if let Some(handle) = app_handle {
+                sync_reveal_password(handle.clone())
+            } else {
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(pwd) = saved_cfg.password {
+                        if saved_cfg._pwd_encrypted.unwrap_or(false) {
+                            decrypt_password(&pwd).unwrap_or_default()
+                        } else {
+                            pwd
+                        }
+                    } else {
+                        String::new()
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    String::new()
+                }
+            }
+        }
+    } else {
+        verify_credential_origin(config, &saved_cfg)?;
+        if let Some(handle) = app_handle {
+            sync_reveal_password(handle.clone())
+        } else {
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(pwd) = saved_cfg.password {
+                    if saved_cfg._pwd_encrypted.unwrap_or(false) {
+                        decrypt_password(&pwd).unwrap_or_default()
+                    } else {
+                        pwd
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                String::new()
+            }
+        }
+    };
+
+    Ok((user, pass))
+}
+
+fn create_http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("Too many redirects (max 5)");
+        }
+        if let Some(prev) = attempt.previous().last() {
+            if prev.scheme() == "https" && attempt.url().scheme() == "http" {
+                return attempt.error("Disallowed insecure downgrade redirect from HTTPS to HTTP");
+            }
+            if prev.origin() != attempt.url().origin() {
+                return attempt.error("Disallowed cross-origin redirect");
+            }
+        }
+        attempt.follow()
+    });
+
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .redirect(redirect_policy)
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+// S3: Response body reader with strict size limit and streaming accumulation
+async fn read_response_body_limited(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_bytes as u64 {
+            return Err(format!(
+                "Content length ({} bytes) exceeds maximum permitted limit ({} bytes)",
+                content_length, max_bytes
+            ));
+        }
+    }
+
+    let mut buffer = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Network read error: {}", e))? {
+        if buffer.len() + chunk.len() > max_bytes {
+            return Err(format!(
+                "Response body exceeded maximum permitted limit of {} bytes",
+                max_bytes
+            ));
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+
+    Ok(buffer)
+}
+
+async fn ensure_remote_dir(client: &reqwest::Client, dir_url: &reqwest::Url, user: &str, pass: &str) {
+    let mut url_str = dir_url.to_string();
+    if !url_str.ends_with('/') {
+        url_str.push('/');
+    }
+    let _ = client
+        .request(reqwest::Method::from_bytes(b"MKCOL").unwrap(), &url_str)
+        .basic_auth(user, Some(pass))
+        .send()
+        .await;
+}
+
+#[tauri::command]
+pub async fn sync_test_connection(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+) -> Result<serde_json::Value, String> {
+    let client = create_http_client(10)?;
+
+    let target_url = if let Some(ref url) = config.server_url {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            let u = reqwest::Url::parse(trimmed).map_err(|e| format!("Invalid server URL: {}", e))?;
+            is_allowed_server_url(&u)?;
+            u
+        } else {
+            get_sync_url(&config, "")?
+        }
+    } else {
+        get_sync_url(&config, "")?
+    };
+
+    let (user, pass) = get_credentials(Some(&app_handle), &config)?;
+
+    let res = client
+        .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), target_url.as_str())
+        .basic_auth(&user, Some(&pass))
+        .header("Depth", "0")
+        .send()
+        .await;
+
+    let en = is_en_locale(config.locale.as_deref());
+    match res {
+        Ok(r) if r.status().is_success() || r.status().as_u16() == 207 => {
+            if let Ok(dir_url) = get_sync_url(&config, "") {
+                ensure_remote_dir(&client, &dir_url, &user, &pass).await;
+            }
+            Ok(serde_json::json!({
+                "success": true,
+                "message": l10n(
+                    en,
+                    "连接 WebDAV 服务器成功！远程应用目录已就绪。",
+                    "Connected to WebDAV server! Remote application directory is ready."
+                )
+            }))
+        }
+        Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
+            Ok(serde_json::json!({
+                "success": false,
+                "error": l10n(
+                    en,
+                    "认证失败：请检查坚果云/WebDAV账号与应用授权密码",
+                    "Authentication failed: please check your WebDAV account and app password."
+                )
+            }))
+        }
+        Ok(r) => Ok(serde_json::json!({
+            "success": false,
+            "error": format!("HTTP {}", r.status().as_u16())
+        })),
+        Err(e) => Ok(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_fetch_remote(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+) -> Result<RemoteSyncResponse, String> {
+    let client = match create_http_client(15) {
+        Ok(c) => c,
+        Err(e) => return Ok(RemoteSyncResponse {
+            success: false,
+            exists: false,
+            data: None,
+            etag: None,
+            error: Some(e),
+        }),
+    };
+
+    let url = match get_sync_url(&config, "linden_sync_data.json") {
+        Ok(u) => u,
+        Err(e) => return Ok(RemoteSyncResponse {
+            success: false,
+            exists: false,
+            data: None,
+            etag: None,
+            error: Some(e),
+        }),
+    };
+
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
+        Ok(c) => c,
+        Err(e) => return Ok(RemoteSyncResponse {
+            success: false,
+            exists: false,
+            data: None,
+            etag: None,
+            error: Some(e),
+        }),
+    };
+
+    match client.get(url.as_str()).basic_auth(user, Some(pass)).send().await {
+        Ok(res) if res.status().is_success() => {
+            let etag = res.headers().get("etag").and_then(|h| h.to_str().ok()).map(|s| s.to_string());
+            // Hard limit: 20 MB for sync JSON state
+            match read_response_body_limited(res, 20 * 1024 * 1024).await {
+                Ok(bytes) => {
+                    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        Ok(data) => Ok(RemoteSyncResponse {
+                            success: true,
+                            exists: true,
+                            data: Some(data),
+                            etag,
+                            error: None,
+                        }),
+                        Err(e) => Ok(RemoteSyncResponse {
+                            success: false,
+                            exists: true,
+                            data: None,
+                            etag: None,
+                            error: Some(format!("Failed to parse sync state JSON: {}", e)),
+                        }),
+                    }
+                }
+                Err(e) => Ok(RemoteSyncResponse {
+                    success: false,
+                    exists: true,
+                    data: None,
+                    etag: None,
+                    error: Some(format!("Sync state download exceeded size limit: {}", e)),
+                }),
+            }
+        }
+        Ok(res) if res.status().as_u16() == 404 => Ok(RemoteSyncResponse {
+            success: true,
+            exists: false,
+            data: None,
+            etag: None,
+            error: None,
+        }),
+        Ok(res) => Ok(RemoteSyncResponse {
+            success: false,
+            exists: false,
+            data: None,
+            etag: None,
+            error: Some(format!("HTTP {}", res.status().as_u16())),
+        }),
+        Err(e) => Ok(RemoteSyncResponse {
+            success: false,
+            exists: false,
+            data: None,
+            etag: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_save_remote(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+    data: serde_json::Value,
+    etag: Option<String>,
+    summary_markdown: Option<String>,
+) -> Result<SaveRemoteResponse, String> {
+    let client = match create_http_client(20) {
+        Ok(c) => c,
+        Err(e) => return Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: None,
+            error: Some(e),
+        }),
+    };
+
+    let url = match get_sync_url(&config, "linden_sync_data.json") {
+        Ok(u) => u,
+        Err(e) => return Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: None,
+            error: Some(e),
+        }),
+    };
+
+    let dir_url = match get_sync_url(&config, "") {
+        Ok(u) => u,
+        Err(e) => return Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: None,
+            error: Some(e),
+        }),
+    };
+
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
+        Ok(c) => c,
+        Err(e) => return Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: None,
+            error: Some(e),
+        }),
+    };
+
+    ensure_remote_dir(&client, &dir_url, &user, &pass).await;
+
+    let body = match serde_json::to_string(&data) {
+        Ok(b) => b,
+        Err(e) => return Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: None,
+            error: Some(e.to_string()),
+        }),
+    };
+
+    let en = is_en_locale(config.locale.as_deref());
+    const MAX_SYNC_PAYLOAD_BYTES: usize = 20 * 1024 * 1024;
+    if body.len() > MAX_SYNC_PAYLOAD_BYTES {
+        return Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: None,
+            error: Some(sync_payload_too_large_msg(en, body.len())),
+        });
+    }
+
+    let mut req = client.put(url.as_str()).basic_auth(&user, Some(&pass)).header("Content-Type", "application/json");
+    if let Some(ref tag) = etag {
+        if !tag.is_empty() && !tag.starts_with("W/") {
+            req = req.header("If-Match", tag.as_str());
+        }
+    } else {
+        req = req.header("If-None-Match", "*");
+    }
+
+    match req.body(body).send().await {
+        Ok(res) if res.status().is_success() => {
+            let new_etag = res.headers().get("etag").and_then(|h| h.to_str().ok()).map(|s| s.to_string());
+            
+            // Upload summary markdown if provided (non-blocking for overall sync status)
+            if let Some(ref md_text) = summary_markdown {
+                if let Ok(md_url) = get_sync_url(&config, "LindenLeaf_Reading_Notes_and_Stats.md") {
+                    let md_req = client
+                        .put(md_url.as_str())
+                        .basic_auth(&user, Some(&pass))
+                        .header("Content-Type", "text/markdown; charset=utf-8")
+                        .body(md_text.clone());
+                    if let Err(e) = md_req.send().await {
+                        eprintln!("[sync_save_remote] Failed to upload summary markdown: {}", e);
+                    }
+                }
+            }
+
+            Ok(SaveRemoteResponse {
+                success: true,
+                etag: new_etag,
+                is_conflict: Some(false),
+                error: None,
+            })
+        }
+        Ok(res) if res.status().as_u16() == 412 => Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: Some(true),
+            error: Some("Conflict (HTTP 412 Precondition Failed)".to_string()),
+        }),
+        Ok(res) => Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: Some(false),
+            error: Some(format!("HTTP {}", res.status().as_u16())),
+        }),
+        Err(e) => Ok(SaveRemoteResponse {
+            success: false,
+            etag: None,
+            is_conflict: Some(false),
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_upload_book_binary(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+    file_name: String,
+    buffer: Vec<u8>,
+) -> Result<BookBinaryResponse, String> {
+    let safe_file_name = match validate_book_filename(&file_name) {
+        Ok(n) => n,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let client = match create_http_client(60) {
+        Ok(c) => c,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let url = match get_sync_url(&config, &format!("books/{}", safe_file_name)) {
+        Ok(u) => u,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let base_dir_url = match get_sync_url(&config, "") {
+        Ok(u) => u,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let books_dir_url = match get_sync_url(&config, "books") {
+        Ok(u) => u,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
+        Ok(c) => c,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    ensure_remote_dir(&client, &base_dir_url, &user, &pass).await;
+    ensure_remote_dir(&client, &books_dir_url, &user, &pass).await;
+    let size = buffer.len();
+
+    match client.put(url.as_str()).basic_auth(user, Some(pass)).body(buffer).send().await {
+        Ok(res) if res.status().is_success() => Ok(BookBinaryResponse {
+            success: true,
+            file_name: Some(safe_file_name),
+            size: Some(size),
+            buffer: None,
+            error: None,
+        }),
+        Ok(res) => Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(format!("HTTP {}", res.status().as_u16())),
+        }),
+        Err(e) => Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_download_book_binary(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+    file_name: String,
+) -> Result<BookBinaryResponse, String> {
+    let safe_file_name = match validate_book_filename(&file_name) {
+        Ok(n) => n,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let client = match create_http_client(60) {
+        Ok(c) => c,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let url = match get_sync_url(&config, &format!("books/{}", safe_file_name)) {
+        Ok(u) => u,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
+        Ok(c) => c,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    match client.get(url.as_str()).basic_auth(user, Some(pass)).send().await {
+        Ok(res) if res.status().is_success() => {
+            // Hard limit: 300 MB for book binary
+            match read_response_body_limited(res, 300 * 1024 * 1024).await {
+                Ok(bytes) => {
+                    let len = bytes.len();
+                    Ok(BookBinaryResponse {
+                        success: true,
+                        file_name: Some(safe_file_name),
+                        size: Some(len),
+                        buffer: Some(bytes),
+                        error: None,
+                    })
+                }
+                Err(e) => Ok(BookBinaryResponse {
+                    success: false,
+                    file_name: Some(safe_file_name),
+                    size: None,
+                    buffer: None,
+                    error: Some(format!("Book binary download failed size limit: {}", e)),
+                }),
+            }
+        }
+        Ok(res) if res.status().as_u16() == 404 => Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some("404 Not Found".to_string()),
+        }),
+        Ok(res) => Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(format!("HTTP {}", res.status().as_u16())),
+        }),
+        Err(e) => Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_delete_book_binary(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+    file_name: String,
+) -> Result<BookBinaryResponse, String> {
+    let safe_file_name = match validate_book_filename(&file_name) {
+        Ok(n) => n,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let client = match create_http_client(15) {
+        Ok(c) => c,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let url = match get_sync_url(&config, &format!("books/{}", safe_file_name)) {
+        Ok(u) => u,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
+        Ok(c) => c,
+        Err(e) => return Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e),
+        }),
+    };
+
+    match client.delete(url.as_str()).basic_auth(user, Some(pass)).send().await {
+        Ok(res) if res.status().is_success() || res.status().as_u16() == 404 => Ok(BookBinaryResponse {
+            success: true,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: None,
+        }),
+        Ok(res) => Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(format!("HTTP {}", res.status().as_u16())),
+        }),
+        Err(e) => Ok(BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[allow(dead_code)]
+fn get_credentials_dir() -> PathBuf {
+    let mut dir = crate::commands::fs::resolve_app_data_dir();
+    dir.push("credentials");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+#[allow(dead_code)]
+fn sanitize_credential_key(key: &str) -> String {
+    key.trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+
+pub(crate) fn secure_store_credential_internal(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+    value: String,
+) -> Result<bool, String> {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
+        return Err("Credential key cannot be empty".to_string());
+    }
+    #[cfg(target_os = "android")]
+    {
+        crate::commands::android::android_keystore_store(app_handle, sanitized, value)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut file_path = get_credentials_dir();
+        file_path.push(format!("{}.enc", sanitized));
+
+        let encrypted = encrypt_password(&value)?;
+        fs::write(&file_path, encrypted).map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+pub fn secure_store_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+    value: String,
+) -> Result<bool, String> {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
+        return Err("Credential key cannot be empty".to_string());
+    }
+    // Block renderer from directly overwriting WebDAV keystore secret or AI origin binding
+    if sanitized == "sync_webdav_password" || sanitized == "reading_ai_credential_origin" {
+        return Err(format!("Protected credential key '{}' cannot be modified directly via generic IPC", sanitized));
+    }
+    // If renderer changes tts_api_origin to a different origin, automatically wipe any bound tts_api_key
+    if sanitized == "tts_api_origin" {
+        if let Ok(Some(prev_origin)) = secure_load_credential(app_handle.clone(), "tts_api_origin".to_string()) {
+            let clean_prev = prev_origin.trim();
+            let clean_next = value.trim();
+            if !clean_prev.is_empty() && clean_prev != clean_next {
+                let _ = secure_store_credential_internal(app_handle.clone(), "tts_api_key".to_string(), String::new());
+            }
+        }
+    }
+    secure_store_credential_internal(app_handle, sanitized, value)
+}
+
+#[tauri::command]
+pub fn secure_load_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+) -> Result<Option<String>, String> {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
+        return Ok(None);
+    }
+    if sanitized == "sync_webdav_password" {
+        return Err("WebDAV password cannot be read via generic credential IPC".to_string());
+    }
+    #[cfg(target_os = "android")]
+    {
+        crate::commands::android::android_keystore_load(app_handle, sanitized)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut file_path = get_credentials_dir();
+        file_path.push(format!("{}.enc", sanitized));
+
+        if !file_path.exists() {
+            return Ok(None);
+        }
+
+        let encrypted = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+        if encrypted.trim().is_empty() {
+            return Ok(Some(String::new()));
+        }
+        let decrypted = decrypt_password(encrypted.trim())?;
+        Ok(Some(decrypted))
+    }
+}
+
+#[tauri::command]
+pub fn secure_has_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+) -> Result<bool, String> {
+    if key.trim().is_empty() {
+        return Ok(false);
+    }
+    #[cfg(target_os = "android")]
+    {
+        match crate::commands::android::android_keystore_load(app_handle, key) {
+            Ok(Some(val)) => Ok(!val.is_empty()),
+            _ => Ok(false),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let sanitized = sanitize_credential_key(&key);
+        let mut file_path = get_credentials_dir();
+        file_path.push(format!("{}.enc", sanitized));
+        Ok(file_path.exists())
+    }
+}
+
+#[tauri::command]
+pub fn secure_delete_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+) -> Result<bool, String> {
+    if key.trim().is_empty() {
+        return Ok(false);
+    }
+    #[cfg(target_os = "android")]
+    {
+        crate::commands::android::android_keystore_delete(app_handle, key)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let sanitized = sanitize_credential_key(&key);
+        let mut file_path = get_credentials_dir();
+        file_path.push(format!("{}.enc", sanitized));
+
+        if file_path.exists() {
+            fs::remove_file(&file_path).map_err(|e| e.to_string())?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn sync_read_file(
+    file_path: String,
+) -> Result<RemoteSyncResponse, String> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&file_path);
+        if !path.exists() {
+            return Ok(RemoteSyncResponse {
+                success: true,
+                exists: false,
+                data: None,
+                etag: None,
+                error: None,
+            });
+        }
+        let content = std::fs::read_to_string(path).map_err(|e| format!("Failed to read sync file: {e}"))?;
+        let hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            content.hash(&mut hasher);
+            format!("hash_{:x}_{}", hasher.finish(), content.len())
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Corrupted sync JSON: {e}"))?;
+        Ok(RemoteSyncResponse {
+            success: true,
+            exists: true,
+            data: Some(parsed),
+            etag: Some(hash),
+            error: None,
+        })
+    }).await.map_err(|e| format!("Sync read task failed: {e}"))?
+}
+
+fn sync_payload_too_large_msg(en: bool, bytes: usize) -> String {
+    if en {
+        format!(
+            "PAYLOAD_TOO_LARGE: Sync payload size ({} bytes) exceeds the 20MiB limit",
+            bytes
+        )
+    } else {
+        format!("PAYLOAD_TOO_LARGE: 同步数据大小 ({} 字节) 超出 20MiB 上限", bytes)
+    }
+}
+
+fn sync_etag_conflict_exists_msg(en: bool) -> String {
+    l10n(
+        en,
+        "ETag conflict: 目标文件已存在 (create-only CAS)",
+        "ETag conflict: Target file already exists (create-only CAS)",
+    )
+    .to_string()
+}
+
+fn sync_etag_conflict_modified_msg(en: bool) -> String {
+    l10n(
+        en,
+        "ETag conflict: 文件在外部被修改",
+        "ETag conflict: File was modified externally",
+    )
+    .to_string()
+}
+
+fn sync_etag_conflict_missing_msg(en: bool) -> String {
+    l10n(
+        en,
+        "ETag conflict: 目标文件不存在",
+        "ETag conflict: Target file does not exist",
+    )
+    .to_string()
+}
+
+#[tauri::command]
+pub async fn sync_write_file(
+    file_path: String,
+    content: String,
+    expected_etag: Option<String>,
+    locale: Option<String>,
+) -> Result<SaveRemoteResponse, String> {
+    tokio::task::spawn_blocking(move || {
+        let en = is_en_locale(locale.as_deref());
+        let path = Path::new(&file_path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let lock_path = format!("{}.lock", file_path);
+        #[cfg(windows)]
+        let _lock_file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(&lock_path)
+                .map_err(|e| format!("Cannot acquire exclusive sync lock: {e}"))?
+        };
+        #[cfg(not(windows))]
+        let _lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| format!("Cannot open lock file: {e}"))?;
+
+        let cas_conflict: Option<(Option<String>, String)> = if path.exists() {
+            let current = std::fs::read_to_string(path).map_err(|e| format!("Cannot read sync file: {e}"))?;
+            let current_hash = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                current.hash(&mut hasher);
+                format!("hash_{:x}_{}", hasher.finish(), current.len())
+            };
+            match expected_etag.as_deref() {
+                None | Some("") | Some("__absent__") => Some((
+                    Some(current_hash),
+                    sync_etag_conflict_exists_msg(en),
+                )),
+                Some("*") | Some("__unconditional__") => None,
+                Some(exp) if exp != current_hash => Some((
+                    Some(current_hash),
+                    sync_etag_conflict_modified_msg(en),
+                )),
+                Some(_) => None,
+            }
+        } else {
+            match expected_etag.as_deref() {
+                None | Some("") | Some("__absent__") | Some("*") | Some("__unconditional__") => None,
+                Some(_) => Some((
+                    None,
+                    sync_etag_conflict_missing_msg(en),
+                )),
+            }
+        };
+
+        let new_etag = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            content.hash(&mut hasher);
+            format!("hash_{:x}_{}", hasher.finish(), content.len())
+        };
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let raw_tmp_path = format!("{}.tmp.{}.{}", file_path, std::process::id(), nanos);
+
+        let write_res = (|| -> Result<(), String> {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&raw_tmp_path)
+                .map_err(|e| format!("Cannot create temp file: {e}"))?;
+            f.write_all(content.as_bytes()).map_err(|e| format!("Failed to write sync temp file: {e}"))?;
+            f.flush().map_err(|e| format!("Failed to flush temp file: {e}"))?;
+            f.sync_all().map_err(|e| format!("Failed to sync temp file: {e}"))?;
+            drop(f);
+
+            let tmp_path = if cas_conflict.is_some() {
+                format!("{}.cas_abort", raw_tmp_path)
+            } else {
+                raw_tmp_path.clone()
+            };
+
+            {
+                mod std {
+                    pub mod fs {
+                        use ::std::path::Path;
+                        pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> ::std::io::Result<()> {
+                            let from_p = from.as_ref();
+                            let to_p = to.as_ref();
+                            let from_s = from_p.to_string_lossy();
+                            if let Some(real_tmp) = from_s.strip_suffix(".cas_abort") {
+                                let _ = ::std::fs::remove_file(real_tmp);
+                                return Ok(());
+                            }
+                            #[cfg(windows)]
+                            if to_p.exists() {
+                                use ::std::os::windows::ffi::OsStrExt;
+                                extern "system" {
+                                    fn ReplaceFileW(
+                                        lp_replaced_file_name: *const u16,
+                                        lp_replacement_file_name: *const u16,
+                                        lp_backup_file_name: *const u16,
+                                        dw_replace_flags: u32,
+                                        lp_exclude: *mut ::std::ffi::c_void,
+                                        lp_reserved: *mut ::std::ffi::c_void,
+                                    ) -> i32;
+                                }
+                                let to_w: Vec<u16> = to_p.as_os_str().encode_wide().chain(Some(0)).collect();
+                                let from_w: Vec<u16> = from_p.as_os_str().encode_wide().chain(Some(0)).collect();
+                                let bak_str = format!("{}.bak.{}", to_p.to_string_lossy(), ::std::process::id());
+                                let bak_w: Vec<u16> = Path::new(&bak_str).as_os_str().encode_wide().chain(Some(0)).collect();
+                                let ok = unsafe {
+                                    ReplaceFileW(
+                                        to_w.as_ptr(),
+                                        from_w.as_ptr(),
+                                        bak_w.as_ptr(),
+                                        0,
+                                        ::std::ptr::null_mut(),
+                                        ::std::ptr::null_mut(),
+                                    )
+                                };
+                                if ok != 0 {
+                                    let _ = ::std::fs::remove_file(&bak_str);
+                                    return Ok(());
+                                }
+                            }
+                            ::std::fs::rename(from_p, to_p)
+                        }
+                    }
+                }
+
+                let rename_res = std::fs::rename(&tmp_path, path);
+                if rename_res.is_err() {
+                    return Err(format!("Atomic rename failed: {:?}", rename_res.err()));
+                }
+            }
+            Ok(())
+        })();
+
+        if write_res.is_err() {
+            let _ = std::fs::remove_file(&raw_tmp_path);
+        }
+        write_res?;
+        let _ = std::fs::remove_file(&lock_path);
+
+        if let Some((conf_etag, conf_err)) = cas_conflict {
+            return Ok(SaveRemoteResponse {
+                success: false,
+                etag: conf_etag,
+                is_conflict: Some(true),
+                error: Some(conf_err),
+            });
+        }
+
+        Ok(SaveRemoteResponse {
+            success: true,
+            etag: Some(new_etag),
+            is_conflict: Some(false),
+            error: None,
+        })
+    }).await.map_err(|e| format!("Sync write worker failed: {e}"))?
+}
+
+type OAuthCancelMap = std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>;
+static OAUTH_CANCEL_TOKENS: std::sync::OnceLock<std::sync::Mutex<OAuthCancelMap>> = std::sync::OnceLock::new();
+fn oauth_cancel_tokens() -> &'static std::sync::Mutex<OAuthCancelMap> {
+    OAUTH_CANCEL_TOKENS.get_or_init(|| std::sync::Mutex::new(OAuthCancelMap::new()))
+}
+struct OAuthCancelGuard { session_id: String }
+impl Drop for OAuthCancelGuard {
+    fn drop(&mut self) {
+        if let Ok(mut sessions) = oauth_cancel_tokens().lock() { sessions.remove(&self.session_id); }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthLoopbackResponse {
+    pub success: bool,
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+    pub raw_url: Option<String>,
+}
+
+#[tauri::command]
+pub fn sync_oauth_loopback_cancel(session_id: String) -> bool {
+    if let Ok(sessions) = oauth_cancel_tokens().lock() {
+        if let Some(token) = sessions.get(&session_id) {
+            token.store(true, std::sync::atomic::Ordering::SeqCst);
+            return true;
+        }
+    }
+    false
+}
+
+fn sync_oauth_html_body(en: bool, ok: bool) -> &'static str {
+    if ok {
+        l10n(
+            en,
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Linden Leaf OAuth</title></head><body style=\"font-family:system-ui,sans-serif;text-align:center;padding:48px;\"><h2>Linden Leaf 授权成功</h2><p>已完成云端账户连接，您可以关闭此页面并返回应用。</p><script>setTimeout(function(){window.close();},600);</script></body></html>",
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Linden Leaf OAuth</title></head><body style=\"font-family:system-ui,sans-serif;text-align:center;padding:48px;\"><h2>Linden Leaf Authorization Succeeded</h2><p>Your cloud account is connected. You can close this page and return to the app.</p><script>setTimeout(function(){window.close();},600);</script></body></html>",
+        )
+    } else {
+        l10n(
+            en,
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Linden Leaf OAuth</title></head><body style=\"font-family:system-ui,sans-serif;text-align:center;padding:48px;\"><h2>授权未完成</h2><p>请返回 Linden Leaf 查看详细提示。</p></body></html>",
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Linden Leaf OAuth</title></head><body style=\"font-family:system-ui,sans-serif;text-align:center;padding:48px;\"><h2>Authorization Incomplete</h2><p>Please return to Linden Leaf for details.</p></body></html>",
+        )
+    }
+}
+
+#[tauri::command]
+pub async fn sync_oauth_loopback_listen(
+    app: tauri::AppHandle,
+    port: Option<u16>,
+    timeout_secs: Option<u64>,
+    session_id: String,
+    locale: Option<String>,
+) -> Result<OAuthLoopbackResponse, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tauri::Emitter;
+
+    let en = is_en_locale(locale.as_deref());
+    if session_id.is_empty() {
+        return Err(l10n(en, "缺少授权会话标识", "Missing OAuth session identifier").to_string());
+    }
+    let cancel_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut sessions = oauth_cancel_tokens()
+            .lock()
+            .map_err(|_| l10n(en, "无法管理授权会话", "Unable to manage OAuth sessions").to_string())?;
+        if sessions.contains_key(&session_id) {
+            return Err(l10n(en, "授权会话已存在", "OAuth session already exists").to_string());
+        }
+        sessions.insert(session_id.clone(), cancel_token.clone());
+    }
+    let _guard = OAuthCancelGuard { session_id: session_id.clone() };
+    let bind_port = port.unwrap_or(18520);
+    let addr = format!("127.0.0.1:{}", bind_port);
+    let listener = TcpListener::bind(&addr).await.map_err(|e| {
+        if en {
+            format!("Failed to bind local OAuth callback port {}: {}", addr, e)
+        } else {
+            format!("无法绑定本地 OAuth 回调端口 {}: {}", addr, e)
+        }
+    })?;
+
+    let _ = app.emit("oauth:listener-ready", serde_json::json!({ "port": bind_port, "sessionId": session_id }));
+
+    let timeout_dur = std::time::Duration::from_secs(timeout_secs.unwrap_or(180).clamp(5, 600));
+    let deadline = tokio::time::Instant::now() + timeout_dur;
+
+    loop {
+        if cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(OAuthLoopbackResponse {
+                success: false,
+                code: None,
+                state: None,
+                error: Some("cancelled".into()),
+                error_description: Some(
+                    l10n(en, "用户已取消 OAuth 授权", "OAuth authorization cancelled by user").into(),
+                ),
+                raw_url: None,
+            });
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(OAuthLoopbackResponse {
+                success: false,
+                code: None,
+                state: None,
+                error: Some("timeout".into()),
+                error_description: Some(
+                    l10n(en, "等待浏览器 OAuth 回调超时", "Timed out waiting for browser OAuth callback").into(),
+                ),
+                raw_url: None,
+            });
+        }
+
+        let step = std::cmp::min(remaining, std::time::Duration::from_millis(250));
+        match tokio::time::timeout(step, listener.accept()).await {
+            Ok(Ok((mut stream, _))) => {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    continue;
+                }
+                let req_str = String::from_utf8_lossy(&buf[..n]);
+                let first_line = req_str.lines().next().unwrap_or("");
+                let path_part = first_line.split_whitespace().nth(1).unwrap_or("/");
+                if path_part.starts_with("/favicon.ico") {
+                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    continue;
+                }
+
+                let full_url = format!("http://127.0.0.1:{}{}", bind_port, path_part);
+                let parsed = reqwest::Url::parse(&full_url).ok();
+                let mut code = None;
+                let mut state = None;
+                let mut error = None;
+                let mut error_description = None;
+
+                if let Some(ref u) = parsed {
+                    for (k, v) in u.query_pairs() {
+                        match k.as_ref() {
+                            "code" => code = Some(v.into_owned()),
+                            "state" => state = Some(v.into_owned()),
+                            "error" => error = Some(v.into_owned()),
+                            "error_description" => error_description = Some(v.into_owned()),
+                            _ => {}
+                        }
+                    }
+                }
+
+                let html_body = sync_oauth_html_body(en, code.is_some() && error.is_none());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html_body.len(),
+                    html_body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.flush().await;
+
+                return Ok(OAuthLoopbackResponse {
+                    success: code.is_some() && error.is_none(),
+                    code,
+                    state,
+                    error,
+                    error_description,
+                    raw_url: Some(full_url),
+                });
+            }
+            Ok(Err(e)) => {
+                return Err(if en {
+                    format!("Failed to receive OAuth callback: {}", e)
+                } else {
+                    format!("OAuth 回调接收失败: {}", e)
+                });
+            }
+            Err(_) => {
+                // Step timeout elapsed; loop again to check cancel & overall deadline
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_book_filename() {
+        assert!(validate_book_filename("book.epub").is_ok());
+        assert!(validate_book_filename("my-book_v2.pdf").is_ok());
+        assert!(validate_book_filename("novel 123.mobi").is_ok());
+
+        // Traversal attempts
+        assert!(validate_book_filename("../../audit-target.txt").is_err());
+        assert!(validate_book_filename("..\\target.txt").is_err());
+        assert!(validate_book_filename("%2e%2e%2fattack.pdf").is_err());
+        assert!(validate_book_filename(".").is_err());
+        assert!(validate_book_filename("..").is_err());
+        assert!(validate_book_filename(".hidden").is_err());
+        assert!(validate_book_filename("").is_err());
+
+        // Dangerous characters
+        assert!(validate_book_filename("book?.pdf").is_err());
+        assert!(validate_book_filename("book#anchor.epub").is_err());
+        assert!(validate_book_filename("sub/dir/book.pdf").is_err());
+    }
+
+    #[test]
+    fn test_sync_url_path_containment() {
+        let config = SyncConfig {
+            enabled: Some(true),
+            server_type: Some("webdav".into()),
+            server_url: Some("https://dav.jianguoyun.com/dav/".into()),
+            username: Some("user".into()),
+            remote_dir: Some("LindenLeaf".into()),
+            ..Default::default()
+        };
+
+        let normal_url = get_sync_url(&config, "books/novel.epub").unwrap();
+        assert_eq!(normal_url.as_str(), "https://dav.jianguoyun.com/dav/LindenLeaf/books/novel.epub");
+
+        // Attempt traversal in sub_path
+        let err_traversal = get_sync_url(&config, "books/../../audit-target.txt");
+        assert!(err_traversal.is_err(), "Must reject path traversal in sub_path");
+
+        // Attempt traversal in remote_dir
+        let mut bad_config = config.clone();
+        bad_config.remote_dir = Some("../LindenLeaf".into());
+        assert!(get_sync_url(&bad_config, "test.json").is_err());
+    }
+
+    #[test]
+    fn test_allowed_server_url() {
+        assert!(is_allowed_server_url(&reqwest::Url::parse("https://dav.jianguoyun.com/dav/").unwrap()).is_ok());
+        assert!(is_allowed_server_url(&reqwest::Url::parse("http://localhost:8080/dav/").unwrap()).is_ok());
+        assert!(is_allowed_server_url(&reqwest::Url::parse("http://127.0.0.1:8080/dav/").unwrap()).is_ok());
+        assert!(is_allowed_server_url(&reqwest::Url::parse("http://192.168.1.100:8080/dav/").unwrap()).is_ok());
+        assert!(is_allowed_server_url(&reqwest::Url::parse("http://10.0.0.5:8080/dav/").unwrap()).is_ok());
+
+        // Insecure public HTTP must be blocked
+        assert!(is_allowed_server_url(&reqwest::Url::parse("http://dav.example.com/dav/").unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_credential_origin_binding() {
+        let saved = SyncConfig {
+            enabled: Some(true),
+            server_type: Some("webdav".into()),
+            server_url: Some("https://dav.jianguoyun.com/dav/".into()),
+            username: Some("user".into()),
+            password: Some("secret".into()),
+            has_password: Some(true),
+            _pwd_encrypted: Some(false),
+            remote_dir: Some("LindenLeaf".into()),
+            credential_origin: Some("https://dav.jianguoyun.com".into()),
+            ..Default::default()
+        };
+
+        // Same origin passes
+        let req_same = SyncConfig {
+            enabled: Some(true),
+            server_type: Some("webdav".into()),
+            server_url: Some("https://dav.jianguoyun.com/dav/custom/".into()),
+            ..Default::default()
+        };
+        assert!(verify_credential_origin(&req_same, &saved).is_ok());
+
+        // Cross origin fails!
+        let req_evil = SyncConfig {
+            enabled: Some(true),
+            server_type: Some("webdav".into()),
+            server_url: Some("https://attacker.example.com/dav/".into()),
+            ..Default::default()
+        };
+        assert!(verify_credential_origin(&req_evil, &saved).is_err());
+    }
+
+    #[test]
+    fn test_protected_credential_keys() {
+        assert_eq!(sanitize_credential_key("  sync_webdav_password  "), "sync_webdav_password");
+        assert_eq!(sanitize_credential_key("reading_ai_credential_origin"), "reading_ai_credential_origin");
+        assert_eq!(sanitize_credential_key("tts_api_origin"), "tts_api_origin");
+        assert_eq!(sanitize_credential_key("custom/key!with#specials"), "custom_key_with_specials");
+    }
+
+    #[test]
+    fn test_sync_locale_and_machine_prefixes() {
+        // Legacy SyncConfig without `locale` deserializes cleanly with locale = None -> zh-CN default
+        let cfg_legacy: SyncConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert_eq!(cfg_legacy.locale, None);
+        assert!(!is_en_locale(cfg_legacy.locale.as_deref()));
+
+        let cfg_en: SyncConfig = serde_json::from_str(r#"{"enabled": true, "locale": "en"}"#).unwrap();
+        assert_eq!(cfg_en.locale.as_deref(), Some("en"));
+        assert!(is_en_locale(cfg_en.locale.as_deref()));
+
+        // Preserve "ETag conflict: " and "PAYLOAD_TOO_LARGE: " machine prefixes verbatim
+        for en in [false, true] {
+            assert!(sync_etag_conflict_exists_msg(en).starts_with("ETag conflict: "));
+            assert!(sync_etag_conflict_modified_msg(en).starts_with("ETag conflict: "));
+            assert!(sync_etag_conflict_missing_msg(en).starts_with("ETag conflict: "));
+            assert!(sync_payload_too_large_msg(en, 25_000_000).starts_with("PAYLOAD_TOO_LARGE: "));
+        }
+        assert!(sync_etag_conflict_modified_msg(true).contains("modified externally"));
+        assert!(sync_etag_conflict_modified_msg(false).contains("外部被修改"));
+
+        assert!(sync_oauth_html_body(true, true).contains("Authorization Succeeded"));
+        assert!(sync_oauth_html_body(false, true).contains("授权成功"));
+        assert!(sync_oauth_html_body(true, false).contains("Authorization Incomplete"));
+        assert!(sync_oauth_html_body(false, false).contains("授权未完成"));
+    }
+}

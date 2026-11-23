@@ -1,0 +1,101 @@
+--- a/source/fitz/draw-unpack.c
++++ b/source/fitz/draw-unpack.c
+@@ -437,12 +437,23 @@
+ fz_stream *
+ fz_unpack_stream(fz_context *ctx, fz_stream *src, int depth, int w, int h, int n, int indexed, int pad, int skip)
+ {
+-	int src_stride = (w*depth*n+7)>>3;
++	int src_stride;
++	int64_t src_stride64, dst_stride64;
+ 	int dst_stride;
+ 	unpack_state *state;
+ 	fz_unpack_line_fn unpack_line = NULL;
+ 	int scale = 1;
+ 
++	/* Backport of upstream image decode overflow checks to the 1.25 int ABI. */
++	if (w < 0 || h < 0 || n < 1 || n > FZ_MAX_COLORS || depth < 1 || depth > 32 || pad < 0 || pad > 1 || skip < 0)
++		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Invalid image unpack dimensions");
++	src_stride64 = ((int64_t)w * depth * n + 7) >> 3;
++	dst_stride64 = (int64_t)w * (n + pad);
++	if (src_stride64 > INT_MAX || dst_stride64 > INT_MAX ||
++		(uint64_t)src_stride64 + (uint64_t)dst_stride64 > SIZE_MAX - sizeof(unpack_state))
++		fz_throw(ctx, FZ_ERROR_LIMIT, "Image unpack stride is too large");
++	src_stride = (int)src_stride64;
++
+ 	if (depth == 1)
+ 		init_get1_tables();
+ 
+@@ -454,7 +465,7 @@
+ 		case 4: scale = 17; break;
+ 		}
+ 
+-	dst_stride = w * (n + !!pad);
++	dst_stride = (int)dst_stride64;
+ 
+ 	if (n == 1 && depth == 1 && scale == 1 && !pad && !skip)
+ 		unpack_line = fz_unpack_mono_line_unscaled;
+--- a/source/fitz/util.c
++++ b/source/fitz/util.c
+@@ -119,7 +119,14 @@
+ 	else
+ 		fz_clear_pixmap_with_value(ctx, pix, 0xFF);
+ 
+-	return fz_fill_pixmap_from_display_list(ctx, list, ctm, pix);
++	fz_try(ctx)
++		fz_fill_pixmap_from_display_list(ctx, list, ctm, pix);
++	fz_catch(ctx)
++	{
++		fz_drop_pixmap(ctx, pix);
++		fz_rethrow(ctx);
++	}
++	return pix;
+ }
+ 
+ fz_pixmap *
+@@ -140,10 +147,7 @@
+ 		fz_drop_device(ctx, dev);
+ 	}
+ 	fz_catch(ctx)
+-	{
+-		fz_drop_pixmap(ctx, pix);
+-		fz_rethrow(ctx);
+-	}
++		fz_rethrow(ctx);
+ 
+ 	return pix;
+ }
+--- a/source/pdf/pdf-image.c
++++ b/source/pdf/pdf-image.c
+@@ -206,7 +206,11 @@
+ 		else
+ 		{
+ 			/* Inline stream */
+-			stride = (w * n * bpc + 7) / 8;
++			int64_t row_bytes = ((int64_t)w * n * bpc + 7) / 8;
++			/* The 1.25 inline loader takes an int length. Check before narrowing. */
++			if (row_bytes > INT_MAX || row_bytes * h > INT_MAX)
++				fz_throw(ctx, FZ_ERROR_LIMIT, "Inline image is too large");
++			stride = (int)row_bytes;
+ 			image = fz_new_image_from_compressed_buffer(ctx, w, h, bpc, colorspace, 96, 96, interpolate, imagemask, decode, use_colorkey ? colorkey : NULL, NULL, mask);
+ 			pdf_load_compressed_inline_image(ctx, doc, dict, stride * h, cstm, indexed, (fz_compressed_image *)image);
+ 		}
+--- a/source/fitz/subset-cff.c
++++ b/source/fitz/subset-cff.c
+@@ -311,7 +311,7 @@
+ 	data_offset = 3 + (index->count+1) * os - 1;
+ 	index->data_offset = data_offset + offset;
+ 
+-	if (data_offset > len)
++	if (index->data_offset > len)
+ 		fz_throw(ctx, FZ_ERROR_FORMAT, "Truncated index");
+ 
+ 	data += 3;
+@@ -327,7 +327,7 @@
+ 			fz_throw(ctx, FZ_ERROR_FORMAT, "Index not monotonic");
+ 		prev = v;
+ 	}
+-	if (v > len)
++	if (v > len - index->data_offset)
+ 		fz_throw(ctx, FZ_ERROR_FORMAT, "Truncated index");
+ 
+ 	data += prev - 1;

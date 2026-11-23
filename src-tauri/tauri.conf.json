@@ -1,0 +1,134 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Linden Leaf",
+  "version": "1.0.0",
+  "identifier": "com.lindenleaf.reader",
+  "build": {
+    "beforeDevCommand": "node scripts/build-dist.js",
+    "beforeBuildCommand": "node scripts/build-dist.js",
+    "frontendDist": "../dist-tauri"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Linden Leaf",
+        "width": 1360,
+        "height": 880,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: http: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; frame-src 'self' blob: data:; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' data: blob: https://* http://*; font-src 'self' data: blob: https://* http://*; connect-src 'self' data: blob: http: https:;",
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "licenseFile": "../LICENSE.txt",
+    "resources": [
+      "../resources/dictionary/metadata.json"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["epub"],
+        "name": "EPUB E-Book",
+        "description": "EPUB E-Book",
+        "mimeType": "application/epub+zip",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["pdf"],
+        "name": "PDF Document",
+        "description": "PDF Document",
+        "mimeType": "application/pdf",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["docx"],
+        "name": "Word Document",
+        "description": "Word Document",
+        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["txt"],
+        "name": "Text Document",
+        "description": "Plain Text Document",
+        "mimeType": "text/plain",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["md"],
+        "name": "Markdown Document",
+        "description": "Markdown Document",
+        "mimeType": "text/markdown",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["mobi"],
+        "name": "MOBI E-Book",
+        "description": "MOBI E-Book",
+        "mimeType": "application/x-mobipocket-ebook",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["azw"],
+        "name": "Kindle AZW E-Book",
+        "description": "Kindle AZW E-Book",
+        "mimeType": "application/vnd.amazon.ebook",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["azw3"],
+        "name": "Kindle AZW3 E-Book",
+        "description": "Kindle AZW3 E-Book",
+        "mimeType": "application/vnd.amazon.mobi8-ebook",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["fb2"],
+        "name": "FictionBook2 E-Book",
+        "description": "FictionBook2 E-Book",
+        "mimeType": "application/x-fictionbook+xml",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["cbz"],
+        "name": "Comic Book Archive",
+        "description": "Comic Book Archive (CBZ)",
+        "mimeType": "application/vnd.comicbook+zip",
+        "role": "Viewer"
+      }
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": true,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ]
+  }
+}

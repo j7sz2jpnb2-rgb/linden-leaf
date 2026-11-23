@@ -1,0 +1,32 @@
+{
+  "name": "linden-leaf",
+  "productName": "Linden Leaf",
+  "version": "1.0.0",
+  "description": "Linden Leaf - Cross-platform eBook reader (Windows & Android)",
+  "author": "Linden Leaf Contributors",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "build:dist": "node scripts/build-dist.js",
+    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-current.ps1",
+    "check:syntax": "node scripts/run-syntax-checks.mjs",
+    "check:structure": "node --expose-internals scripts/check-structure.cjs",
+    "test:contracts": "node scripts/test-data-contracts.mjs",
+    "test:composition": "node scripts/test-app-composition.mjs",
+    "test:reader-search": "node scripts/test-reader-search.mjs",
+    "test:android-tts": "node scripts/test-android-tts.mjs",
+    "test:prebeta": "node scripts/test-prebeta-hardening.mjs"
+  },
+  "devDependencies": {
+    "@fontsource/lora": "^5.3.0",
+    "@fontsource/noto-serif-sc": "^5.2.8",
+    "@fontsource/plus-jakarta-sans": "^5.3.0",
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/cli": "^2.0.0"
+  },
+  "dependencies": {
+    "mammoth": "^1.12.1"
+  }
+}

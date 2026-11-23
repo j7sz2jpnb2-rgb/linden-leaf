@@ -1,0 +1,95 @@
+Linden Leaf 软件开源许可与合规声明 (License & Compliance Notice)
+
+版权所有 (c) 2026 Linden Leaf 团队及其贡献者。
+
+================================================================================
+一、 主程序开源许可证 (Application & Combined Distribution License)
+================================================================================
+1. 原创源码许可：
+   本仓库中由 Linden Leaf 团队原创的应用程序源代码遵循 GNU 通用公共许可证第 3 版或更新版本
+   （GNU General Public License v3.0 or later，简称 GPL-3.0-or-later）。
+   完整许可证正文见项目根目录的 LICENSE-GPL-3.0.txt，或访问：
+   https://www.gnu.org/licenses/gpl-3.0.html
+
+2. 集成 MuPDF 后的组合分发许可（GPLv3 §13 兼容性）：
+   当构建产物静态或动态链接 MuPDF（遵循 AGPL-3.0）并作为一个组合程序整体分发时，
+   依据 GPL-3.0 第 13 条与 AGPL-3.0 第 13 条的兼容规定，**组合后的可执行分发包整体受
+   GNU Affero General Public License v3.0 or later（AGPL-3.0-or-later）条款约束**
+   （除非分发者另行持有 Artifex Software, Inc. 的合法商业授权）。
+   完整 AGPL-3.0 许可证正文见项目根目录的 LICENSE-AGPL-3.0.txt，或访问：
+   https://www.gnu.org/licenses/agpl-3.0.html
+
+本软件按“原样”分发，不作任何明示或暗示的保证，包括但不限于适销性或特定用途适用性的暗示保证。
+
+================================================================================
+二、 第三方组件、字体与资源许可说明 (Third-Party Components & Assets)
+================================================================================
+本软件集成了以下开源组件与资源，各自保留其原作者版权声明与许可条款：
+
+1. MuPDF (Artifex Software, Inc.)
+   - 用途：PDF 快速解析、矢量文字提取、页面渲染与批注导出核心（可选启用）。
+   - 许可方式：GNU Affero General Public License v3.0 (AGPL-3.0) 或 Artifex 商业许可。
+   - 正文与官方说明：LICENSE-AGPL-3.0.txt / https://mupdf.com/licensing/
+
+2. Foliate.js (John Factotum，位于 foliate-js-main/)
+   - 用途：EPUB、MOBI、AZW3、FB2、CBZ、DOCX、TXT 等重排与固定版式文档解析分页核心。
+   - 许可方式：MIT License（详见 foliate-js-main/LICENSE）。
+
+3. PDF.js (Mozilla Foundation，位于 foliate-js-main/vendor/pdfjs/)
+   - 用途：Android 标准构建及备用 PDF 渲染核心。
+   - 许可方式：Apache License 2.0；其随附的 CMap、标准字体及 WASM 解码器（JBIG2 / OpenJPEG / QCMS）
+     保留各自目录内 LICENSE / LICENSE_* 文件中的版权与开源声明（BSD / Apache-2.0 / GPL-2.0 等适用条款，
+     详见 foliate-js-main/vendor/pdfjs/ 下对应 LICENSE 文件）。
+
+4. Tesseract.js / Tesseract Core (位于 vendor/tesseract/)
+   - 用途：离线 OCR 文字识别引擎与简体中文/英文训练数据。
+   - 许可方式：Apache License 2.0。
+
+5. Mammoth.js (Michael Williamson，位于 vendor/mammoth/)
+   - 用途：DOCX 文档到 HTML 语义转换引擎。
+   - 许可方式：BSD 2-Clause License。
+
+6. SQLite (Public Domain，经由 rusqlite bundled)
+   - 用途：本地离线词库及应用辅助数据存储。
+
+7. ECDICT (skywind3000)
+   - 用途：可选英汉词典数据源（运行时按需下载构建或手动导入，默认二进制包仅含 metadata.json，不预打包数据库）。
+   - 许可方式：MIT License。
+
+8. 内置开源字体资源 (位于 assets/fonts/)
+   - Lora (The Lora Project Authors)：SIL Open Font License 1.1。
+   - Noto Serif SC / 思源宋体 (Google Inc.)：SIL Open Font License 1.1。
+   - Plus Jakarta Sans (The Plus Jakarta Sans Project Authors)：SIL Open Font License 1.1。
+
+================================================================================
+三、 本地隐私与网络数据流声明 (Privacy & Network Data Flow Statement)
+================================================================================
+1. 默认离线与本地优先：
+   - Linden Leaf 遵循本地优先（Local-First）架构原则。您的电子书文件、阅读进度、书签划线、
+     想法笔记和阅读统计数据均保存在本机私有存储（IndexedDB / SQLite / 应用私有目录）中。
+   - 本软件不包含任何中心化用户行为跟踪、广告推送或未经披露的遥测日志上报代码。
+
+2. 网络请求边界与用户主动功能：
+   - 启动版本更新检查（自动与手动）：
+     主窗口启动约 8 秒后，应用会默认向配置的 GitHub 仓库（Releases API / 公开版本元数据）
+     发起一次只读 HTTPS 请求以检查是否存在新版本；用户亦可在设置中手动检查更新。
+     （卫星阅读子窗口不发起该后台更新检查。）
+   - AI 辅助阅读（需用户手动配置端点与 API Key）：
+     仅在用户显式触发划词提问、翻译、长文总结或润色时，将用户当前选中的文本与上下文
+     通过 HTTPS 发送至用户自行配置的模型接口（如 DeepSeek、OpenAI、Ollama 等）。
+   - 云端语音合成（TTS，需用户手动配置端点）：
+     仅在用户选用自定义云端 TTS 接口时，将当前朗读段落文本发送至用户指定的语音端点；
+     选用系统原生语音时完全使用本地操作系统 TTS 引擎。
+   - WebDAV / 云盘多端同步（需用户手动配置与启用）：
+     仅在用户手动触发或启用自动同步时，与用户自行配置的 WebDAV（如坚果云/Nextcloud）或
+     OneDrive / Google Drive 账号通信。本地同步凭据采用操作系统安全存储（Windows DPAPI /
+     Android Keystore）加密保护；网络传输通过 HTTPS/TLS 加密信道传输标准 JSON 数据，
+     而非客户端端到端密文格式（请确保使用可信的 HTTPS 服务并妥善保护云端账号权限）。
+   - 词库在线下载（需用户手动点击下载）：
+     仅在用户手动触发“下载词库”时，通过 HTTPS 从 GitHub / jsDelivr 公开源拉取 ECDICT CSV 并在本地建库。
+
+================================================================================
+四、 完整对应源码获取 (Corresponding Source Availability)
+================================================================================
+本软件遵照 GPL-3.0-or-later（及链接 MuPDF 分发时适用的 AGPL-3.0-or-later）向所有获得
+可执行安装包的接收方提供完整对应源代码及构建脚本。请通过项目官方开源代码仓库获取源码或提交反馈。

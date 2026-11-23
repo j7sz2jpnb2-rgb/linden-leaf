@@ -1,0 +1,203 @@
+/* Mobile PDF controls: page first, controls on demand. */
+html.is-mobile-viewport .mobile-pdf-reading .pdf-viewport-scroll-area {
+  top: var(--safe-top, 0px);
+  bottom: var(--safe-bottom, 0px);
+  left: var(--safe-left, 0px);
+  right: var(--safe-right, 0px);
+}
+html.is-mobile-viewport .mobile-pdf-reading .pdf-page-slot {
+  border-radius: 0;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, .08);
+}
+html.is-mobile-viewport .mobile-pdf-reading #mobile-reader-top-bar {
+  height: calc(48px + var(--safe-top, 0px));
+  padding-top: var(--safe-top, 0px);
+  background: var(--mobile-sheet-bg);
+  box-shadow: none;
+  backdrop-filter: none;
+  pointer-events: auto;
+}
+html.is-mobile-viewport .mobile-pdf-reading #mobile-reader-title {
+  font-weight: 500;
+  font-size: 14px;
+}
+html.is-mobile-viewport .mobile-pdf-reading #mobile-reader-bottom-bar {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-width: none;
+  border: 0;
+  border-top: 1px solid var(--mobile-card-border);
+  border-radius: 0;
+  padding: 8px calc(var(--safe-right, 0px) + 16px) calc(var(--safe-bottom, 0px) + 8px) calc(var(--safe-left, 0px) + 16px);
+  gap: 4px;
+  background: var(--mobile-sheet-bg);
+  box-shadow: none;
+  backdrop-filter: none;
+  transition: transform .2s ease, visibility .2s;
+}
+html.is-mobile-viewport .mobile-pdf-reading #mobile-reader-bottom-bar.visible { box-shadow: none; }
+html.is-mobile-viewport .mobile-pdf-reading .mobile-reader-tools-row { justify-content: space-evenly; }
+html.is-mobile-viewport .mobile-pdf-reading .mobile-reader-tool-btn {
+  min-width: 60px;
+  min-height: 48px;
+  padding: 8px 10px;
+  gap: 4px;
+  border-radius: 12px;
+}
+html.is-mobile-viewport .mobile-pdf-reading .mobile-reader-tool-btn svg { width: 21px; height: 21px; }
+html.is-mobile-viewport .mobile-pdf-reading .mobile-reader-tool-btn span { font-size: 12px; }
+html.is-mobile-viewport .mobile-pdf-reading #btn-tool-tts,
+html.is-mobile-viewport .mobile-pdf-reading #btn-mobile-pdf-more,
+html.is-mobile-viewport .mobile-pdf-reading .mobile-reader-meta-row,
+html.is-mobile-viewport .mobile-pdf-reading #mobile-display-sheet .mobile-theme-system,
+html.is-mobile-viewport .mobile-pdf-reading #mobile-display-sheet .mobile-theme-palette-row,
+html.is-mobile-viewport .mobile-pdf-reading #mobile-display-sheet .mobile-font-size-row,
+html.is-mobile-viewport .mobile-pdf-reading #mobile-display-sheet #mobile-reflow-controls { display: none !important; }
+html.is-mobile-viewport #mobile-shell-root [hidden] { display: none !important; }
+html.is-mobile-viewport .mobile-pdf-progress { display: flex; flex-direction: column; align-items: center; }
+html.is-mobile-viewport .mobile-pdf-page-number {
+  min-height: 44px;
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--mobile-text-main);
+  font: 13px/1.4 var(--mobile-font-ui);
+  font-variant-numeric: tabular-nums;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+html.is-mobile-viewport .mobile-pdf-page-number:active {
+  background: var(--mobile-primary-subtle);
+}
+html.is-mobile-viewport #mobile-pdf-page-slider {
+  width: 100%;
+  height: 32px;
+  margin: 0;
+  accent-color: var(--mobile-primary);
+  touch-action: pan-y;
+}
+html.is-mobile-viewport .mobile-pdf-page-badge {
+  pointer-events: auto;
+  position: fixed;
+  right: calc(var(--safe-right, 0px) + 4px);
+  bottom: var(--safe-bottom, 0px);
+  min-width: 60px;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--mobile-text-muted);
+  font: 11px/1 var(--mobile-font-ui);
+  font-variant-numeric: tabular-nums;
+  z-index: 1900;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+html.is-mobile-viewport .mobile-pdf-page-badge:active {
+  background: var(--mobile-primary-subtle);
+}
+html.is-mobile-viewport .mobile-pdf-reset-zoom {
+  pointer-events: auto;
+  position: fixed;
+  bottom: calc(var(--safe-bottom, 0px) + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 1px solid var(--mobile-card-border);
+  border-radius: 12px;
+  background: var(--mobile-sheet-bg);
+  color: var(--mobile-text-main);
+  font: 12px/1.4 var(--mobile-font-ui);
+  z-index: 1900;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+html.is-mobile-viewport .mobile-pdf-reset-zoom:active {
+  transform: translateX(-50%) scale(0.96);
+}
+html.is-mobile-viewport .mobile-pdf-display-controls { color: var(--mobile-text-main); }
+html.is-mobile-viewport .mobile-pdf-fit-options,
+html.is-mobile-viewport .mobile-pdf-appearance { display: flex; gap: 8px; }
+html.is-mobile-viewport .mobile-pdf-fit-options button,
+html.is-mobile-viewport .mobile-pdf-appearance button {
+  flex: 1;
+  min-height: 44px;
+  border: 1px solid var(--mobile-card-border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--mobile-text-main);
+  font: 14px/1.4 var(--mobile-font-ui);
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+  transition: transform 0.14s ease, background-color 0.14s ease;
+}
+html.is-mobile-viewport .mobile-pdf-fit-options button:active,
+html.is-mobile-viewport .mobile-pdf-appearance button:active {
+  transform: scale(0.97);
+}
+html.is-mobile-viewport .mobile-pdf-fit-options button[aria-pressed="true"],
+html.is-mobile-viewport .mobile-pdf-appearance button[aria-pressed="true"] {
+  background: var(--mobile-tab-active-pill);
+  color: var(--mobile-tab-active-color);
+  border-color: var(--mobile-primary);
+}
+html.is-mobile-viewport .mobile-pdf-zoom-row { display: flex; justify-content: space-between; align-items: center; margin: 18px 0; font-size: 14px; }
+html.is-mobile-viewport .mobile-pdf-zoom-stepper { display: flex; align-items: center; gap: 4px; }
+html.is-mobile-viewport .mobile-pdf-zoom-stepper button {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--mobile-text-main);
+  background: var(--mobile-bg-page);
+  font-size: 20px;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+  transition: transform 0.14s ease, background-color 0.14s ease;
+}
+html.is-mobile-viewport .mobile-pdf-zoom-stepper button:active {
+  transform: scale(0.94);
+  background: var(--mobile-primary-subtle);
+}
+html.is-mobile-viewport .mobile-pdf-zoom-stepper output { min-width: 56px; text-align: center; font-size: 13px; font-variant-numeric: tabular-nums; }
+html.is-mobile-viewport .mobile-pdf-display-hint { margin: 12px 0 0; font-size: 12px; line-height: 1.6; color: var(--mobile-text-muted); }
+html.is-mobile-viewport .mobile-pdf-jump-row { display: flex; gap: 12px; margin-top: 12px; }
+html.is-mobile-viewport .mobile-pdf-jump-row input {
+  min-width: 0;
+  flex: 1;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--mobile-card-border);
+  border-radius: 10px;
+  font: 16px/1.4 var(--mobile-font-ui);
+  background: var(--mobile-bg-page);
+  color: var(--mobile-text-main);
+  -webkit-tap-highlight-color: transparent;
+}
+html.is-mobile-viewport .mobile-pdf-jump-row button {
+  min-height: 44px;
+  padding: 10px 20px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--mobile-tab-active-pill);
+  color: var(--mobile-tab-active-color);
+  font: 500 14px/1.4 var(--mobile-font-ui);
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+html.is-mobile-viewport .mobile-pdf-jump-row button:active {
+  transform: scale(0.96);
+}
+html.is-mobile-viewport #mobile-pdf-page-range { color: var(--mobile-text-muted); font-size: 13px; }
+html.is-mobile-viewport .mobile-pdf-reading .mobile-bottom-sheet { padding-bottom: calc(var(--safe-bottom, 0px) + 16px); }
+html.is-mobile-viewport #mobile-pdf-page-sheet { bottom: var(--ime-bottom, 0px); }
+html.is-mobile-viewport.keyboard-open .mobile-pdf-reading .mobile-bottom-sheet,
+html.is-mobile-viewport.keyboard-open #mobile-pdf-page-sheet { padding-bottom: 16px; }
+@media (prefers-reduced-motion: reduce) {
+  html.is-mobile-viewport .mobile-pdf-reading #mobile-reader-top-bar,
+  html.is-mobile-viewport .mobile-pdf-reading #mobile-reader-bottom-bar { transition: none; }
+}

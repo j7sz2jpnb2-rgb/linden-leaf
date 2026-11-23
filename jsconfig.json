@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "checkJs": false,
+    "allowJs": true,
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+  },
+  "exclude": [
+    "node_modules",
+    "dist-tauri",
+    "src-tauri",
+    "vendor",
+    "foliate-js-main/vendor"
+  ]
+}

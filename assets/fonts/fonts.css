@@ -1,0 +1,112 @@
+/* ==========================================================================
+   Linden Leaf Local Bundled Fonts (Claude Code Humanist & Editorial Typography)
+   100% Offline, Zero Latency, Immune to Network & Google Font Restrictions
+   ========================================================================== */
+
+/* 1. Lora (Editorial Latin Serif) */
+@font-face {
+  font-family: 'Lora';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./lora-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Lora';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./lora-latin-400-italic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Lora';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./lora-latin-500-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Lora';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./lora-latin-600-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Lora';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./lora-latin-700-normal.woff2') format('woff2');
+}
+
+/* 2. Plus Jakarta Sans (Geometric Humanist Sans) */
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./plus-jakarta-sans-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./plus-jakarta-sans-latin-500-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./plus-jakarta-sans-latin-600-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./plus-jakarta-sans-latin-700-normal.woff2') format('woff2');
+}
+
+/* 3. Noto Serif SC (思源宋体 - Authentic Chinese Editorial Serif) */
+@font-face {
+  font-family: 'Noto Serif SC';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./noto-serif-sc-chinese-simplified-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Noto Serif SC';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./noto-serif-sc-chinese-simplified-600-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Noto Serif SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./noto-serif-sc-chinese-simplified-600-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Noto Serif SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./noto-serif-sc-chinese-simplified-700-normal.woff2') format('woff2');
+}
+

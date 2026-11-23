@@ -1,0 +1,16 @@
+src-tauri
+target
+node_modules
+.git
+.gemini
+scripts
+*.log
+deliveries
+build-temp-*
+.build-android
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+启动最新源码预览.cmd

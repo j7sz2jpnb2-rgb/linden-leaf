@@ -1,0 +1,1149 @@
+/* Desktop settings & reader left drawer — Warm Annotated Paper editorial architecture. */
+#btn-theme-system[hidden] { display: none; }
+@media (min-width: 768px) {
+  #drawer-backdrop.active {
+    background: rgba(26, 22, 18, 0.34);
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+  }
+  [data-theme="dark"] #drawer-backdrop.active,
+  [data-theme="black"] #drawer-backdrop.active {
+    background: rgba(10, 9, 8, 0.56);
+  }
+
+  /* Unified continuous warm-paper drawer surface */
+  #sidebar-drawer {
+    --drawer-surface: var(--bg-app, #faf9f5);
+    --drawer-well: rgba(20, 18, 15, 0.042);
+    --drawer-well-hover: rgba(20, 18, 15, 0.075);
+    --drawer-well-border: rgba(20, 18, 15, 0.095);
+    --drawer-hairline: rgba(145, 138, 128, 0.18);
+    --drawer-slider-track: rgba(20, 18, 15, 0.12);
+    width: min(448px, 92vw);
+    background: var(--drawer-surface);
+    font-family: var(--font-ui, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    font-size: 13px;
+    line-height: 1.5;
+    letter-spacing: 0;
+    font-synthesis: none;
+    border-right: 1px solid var(--border-color);
+    box-shadow: 8px 0 28px rgba(26, 22, 18, 0.10);
+  }
+  [data-theme="dark"] #sidebar-drawer,
+  [data-theme="black"] #sidebar-drawer {
+    --drawer-surface: var(--bg-app, #232220);
+    --drawer-well: rgba(255, 255, 255, 0.055);
+    --drawer-well-hover: rgba(255, 255, 255, 0.095);
+    --drawer-well-border: rgba(255, 255, 255, 0.10);
+    --drawer-hairline: rgba(255, 255, 255, 0.09);
+    --drawer-slider-track: rgba(255, 255, 255, 0.14);
+    box-shadow: 10px 0 36px rgba(0, 0, 0, 0.48);
+  }
+
+  /* Drawer Header — fuse shelf-mode title + domain tabs into ONE cohesive header (no double divider) */
+  #sidebar-drawer .drawer-header {
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--drawer-hairline);
+    background: var(--drawer-surface);
+  }
+  #sidebar-drawer.drawer-shelf-mode .drawer-header {
+    padding: 18px 24px 6px;
+    border-bottom: none;
+  }
+  #sidebar-drawer.drawer-shelf-mode .drawer-header::before {
+    font-family: var(--font-serif);
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-main);
+  }
+  #sidebar-drawer .drawer-body {
+    padding: 20px 24px 32px;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(165, 160, 150, 0.38) transparent;
+  }
+  #sidebar-drawer.drawer-shelf-mode .drawer-body {
+    padding-top: 10px;
+  }
+  #sidebar-drawer .drawer-body::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  #sidebar-drawer .drawer-body::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  #sidebar-drawer .drawer-body::-webkit-scrollbar-thumb {
+    background: rgba(165, 160, 150, 0.38);
+    border-radius: 4px;
+  }
+  #sidebar-drawer .drawer-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(165, 160, 150, 0.62);
+  }
+
+  /* Reader Mode Top Drawer Tabs */
+  #sidebar-drawer .drawer-tabs {
+    background: var(--drawer-well);
+    padding: 3px;
+    border-radius: 9px;
+    gap: 2px;
+  }
+  #sidebar-drawer .tab-btn {
+    padding: 5px 14px;
+    font-size: 12.5px;
+    font-weight: 500;
+    border-radius: 7px;
+    color: var(--text-muted);
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  #sidebar-drawer .tab-btn:hover {
+    color: var(--text-main);
+  }
+  #sidebar-drawer .tab-btn.active {
+    background: var(--bg-card);
+    color: var(--text-main);
+    font-weight: 600;
+    box-shadow: 0 1px 2px rgba(20, 18, 15, 0.06);
+  }
+  [data-theme="dark"] #sidebar-drawer .tab-btn.active,
+  [data-theme="black"] #sidebar-drawer .tab-btn.active {
+    background: rgba(255, 255, 255, 0.10);
+    box-shadow: none;
+  }
+
+  /* =====================================================================
+     TOC / Notes / Search Sub-Panels — Content First, Quiet Utility Chrome
+     ===================================================================== */
+  #sidebar-drawer #panel-toc:not([style*="display: none"]):not([style*="display:none"]) {
+    display: flex !important;
+    flex-direction: column;
+    min-height: 100%;
+  }
+  #panel-toc #toc-tree-container {
+    order: 1;
+    flex: 1 1 auto;
+  }
+  #panel-toc .drawer-toc-toolbar {
+    order: 2;
+    margin-top: auto;
+    margin-bottom: 0;
+    padding: 14px 0 0;
+    border-bottom: none;
+    border-top: 1px solid var(--drawer-hairline);
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 8px;
+  }
+  #panel-toc .drawer-toc-action-btn {
+    width: 100%;
+    min-height: 30px;
+    padding: 5px 8px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    text-align: left;
+    justify-content: flex-start;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  #panel-toc .drawer-toc-action-btn:hover {
+    color: var(--text-main);
+    background: var(--drawer-well);
+  }
+  #panel-toc .toc-list {
+    gap: 2px;
+  }
+  #panel-toc .toc-item {
+    position: relative;
+    padding: 8px 12px;
+    border-radius: 7px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-main);
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  #panel-toc .toc-item:hover {
+    background: var(--drawer-well);
+  }
+  #panel-toc .toc-item.active {
+    background: var(--accent-primary-subtle, rgba(218, 119, 86, 0.12));
+    color: var(--brand-terracotta-text, var(--accent-primary, #da7756));
+    font-weight: 600;
+  }
+  #panel-toc .toc-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 7px;
+    bottom: 7px;
+    width: 2.5px;
+    border-radius: 2px;
+    background: var(--accent-primary, #da7756);
+  }
+
+  /* Notes Drawer Panel */
+  .drawer-notes-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 10px;
+  }
+  .drawer-export-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    width: auto;
+    min-height: 28px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  .drawer-export-btn:hover {
+    color: var(--text-main);
+    background: var(--drawer-well);
+  }
+  #panel-notes .highlight-card {
+    padding: 12px 10px 12px 14px;
+    border-bottom: 1px solid var(--drawer-hairline);
+    border-left-width: 2.5px;
+    border-radius: 0 6px 6px 0;
+  }
+  #panel-notes .highlight-card:hover {
+    background: var(--drawer-well);
+  }
+  #panel-notes .highlight-text {
+    font-size: 13px;
+    line-height: 1.7;
+    margin-bottom: 6px;
+  }
+  #panel-notes .highlight-note {
+    border-left: none;
+    padding: 0;
+    margin-top: 6px;
+    margin-bottom: 6px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text-muted);
+  }
+  #panel-notes .highlight-meta-actions .btn-note-share {
+    color: var(--brand-terracotta-text, var(--accent-primary, #da7756));
+    font-weight: 500;
+  }
+  #panel-notes .highlight-meta-actions .btn-note-del {
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+  #panel-notes .highlight-meta-actions .btn-note-del:hover {
+    color: #c84b45;
+    background: rgba(200, 75, 69, 0.10);
+  }
+  [data-theme="dark"] #panel-notes .highlight-meta-actions .btn-note-del:hover,
+  [data-theme="black"] #panel-notes .highlight-meta-actions .btn-note-del:hover {
+    color: #f08a82;
+    background: rgba(240, 138, 130, 0.14);
+  }
+
+  /* Search Drawer Panel */
+  #panel-search .search-input-group {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+  .drawer-search-input-wrap {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+  }
+  #search-query-input {
+    width: 100%;
+    height: 34px;
+    box-sizing: border-box;
+    padding: 0 28px 0 11px;
+    font-size: 12.5px;
+    border: 1px solid var(--drawer-well-border);
+    border-radius: 8px;
+    background: var(--drawer-well);
+    color: var(--text-main);
+    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  #search-query-input:focus {
+    background: var(--bg-card);
+    border-color: var(--accent-primary, #da7756);
+    box-shadow: 0 0 0 3px var(--accent-primary-subtle, rgba(218, 119, 86, 0.12));
+    outline: none;
+  }
+  .drawer-search-clear-btn {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    font-size: 13px;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 2px 4px;
+  }
+  .drawer-search-exec-btn {
+    width: auto;
+    height: 34px;
+    padding: 0 13px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: var(--action-fill, var(--accent-primary, #da7756));
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .drawer-search-exec-btn:hover {
+    background: var(--accent-purple-hover, #c25e3c);
+    color: #fff;
+  }
+  .drawer-search-reset-btn {
+    width: auto;
+    height: 34px;
+    padding: 0 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    border-radius: 7px;
+    font-size: 12px;
+    white-space: nowrap;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  .drawer-search-reset-btn:hover {
+    background: var(--drawer-well);
+    color: var(--text-main);
+  }
+
+  /* =====================================================================
+     Top 3-Domain Underline Navigation (Seamless with Drawer Surface)
+     ===================================================================== */
+  .settings-domain-nav {
+    position: sticky;
+    top: -20px;
+    z-index: 20;
+    margin: -20px -24px 22px -24px;
+    padding: 4px 24px 0;
+    background: var(--drawer-surface);
+    border: none !important;
+    border-bottom: 1px solid var(--drawer-hairline) !important;
+    border-radius: 0 !important;
+    display: flex !important;
+    gap: 24px !important;
+    box-shadow: none !important;
+  }
+  #sidebar-drawer.drawer-shelf-mode .settings-domain-nav {
+    top: -10px;
+    margin-top: -10px;
+    padding-top: 2px;
+  }
+  .settings-domain-tab {
+    flex: 0 0 auto !important;
+    padding: 9px 1px 9px !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    color: var(--text-muted) !important;
+    border: none !important;
+    border-bottom: 2px solid transparent !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .settings-domain-tab:hover {
+    color: var(--text-main) !important;
+    background: transparent !important;
+  }
+  .settings-domain-tab.active {
+    color: var(--brand-terracotta-text, var(--accent-primary, #da7756)) !important;
+    font-weight: 600 !important;
+    border-bottom-color: var(--accent-primary, #da7756) !important;
+    background: transparent !important;
+  }
+
+  /* Domain Visibility Filtering with :not(.active) for CDP verification compatibility */
+  #sidebar-drawer #panel-settings:not(.active)[data-active-domain="reading"] [data-settings-domain]:not([data-settings-domain="reading"]):not(.settings-domain-tab),
+  #sidebar-drawer #panel-settings:not(.active)[data-active-domain="assistant"] [data-settings-domain]:not([data-settings-domain="assistant"]):not(.settings-domain-tab),
+  #sidebar-drawer #panel-settings:not(.active)[data-active-domain="system"] [data-settings-domain]:not([data-settings-domain="system"]):not(.settings-domain-tab) {
+    display: none !important;
+  }
+  #panel-settings .settings-domain-tab {
+    display: inline-flex !important;
+  }
+
+  /* =====================================================================
+     Settings Panel Structure & Editorial Rhythm (No Border-Over-Rule Soup)
+     ===================================================================== */
+  #panel-settings {
+    --settings-control-width: 188px;
+    display: flex;
+    flex-direction: column !important;
+  }
+  #panel-settings[style*="display: none"],
+  #panel-settings[style*="display:none"],
+  #sidebar-drawer #panel-settings:not(.drawer-panel-active) {
+    display: none !important;
+  }
+  #advanced-settings-trigger-section,
+  #advanced-settings-container {
+    display: contents !important;
+  }
+  #row-advanced-settings-trigger {
+    display: none !important;
+  }
+
+  /* Default: open whitespace separates core controls — NO gray razor cuts under boxes */
+  #panel-settings .setting-section,
+  #panel-settings .advanced-group {
+    margin: 0 0 24px !important;
+    padding: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+
+  /* Deliberate whisper hairlines ONLY at major chapter boundaries */
+  #panel-settings #reading-presets-section,
+  #panel-settings #publisher-styles-settings-section,
+  #panel-settings #adv-group-typography,
+  #panel-settings #adv-group-fonts,
+  #panel-settings #adv-group-palette,
+  #panel-settings #adv-group-txt-rules,
+  #panel-settings #ai-settings-section,
+  #panel-settings #adv-group-ai,
+  #panel-settings #adv-group-translation,
+  #panel-settings #dict-settings-section,
+  #panel-settings #adv-group-dictionary,
+  #panel-settings #user-profile-settings-section,
+  #panel-settings #goals-settings-section,
+  #panel-settings #search-settings-section,
+  #panel-settings #pdf-store-settings-section,
+  #panel-settings #sync-settings-section,
+  #panel-settings #data-backup-settings-section,
+  #panel-settings #adv-group-interaction,
+  #panel-settings #adv-group-strokes,
+  #panel-settings #adv-group-backup,
+  #panel-settings #about-settings-section {
+    padding-top: 20px !important;
+    border-top: 1px solid var(--drawer-hairline) !important;
+  }
+
+  /* Complete Flex Orders — Reader-first hierarchy across all 3 tabs */
+  /* Tab 1: Reading & Typography */
+  #book-override-section { order: 10; }
+  #pdf-paper-settings-section { order: 11; }
+  #pdf-crop-settings-section { order: 12; }
+  #theme-settings-section { order: 13; }
+  #font-settings-section { order: 14; }
+  #typography-settings-section { order: 15; }
+  #reading-presets-section { order: 16; }
+  #publisher-styles-settings-section { order: 17; }
+  #adv-group-typography { order: 18; }
+  #adv-group-fonts { order: 19; }
+  #adv-group-palette { order: 20; }
+  #adv-group-txt-rules { order: 21; }
+
+  /* Tab 2: Voice & Assistant */
+  #adv-group-tts { order: 22; }
+  #ai-settings-section { order: 23; }
+  #adv-group-ai { order: 24; }
+  #adv-group-translation { order: 25; }
+  #dict-settings-section { order: 26; }
+  #adv-group-dictionary { order: 27; }
+
+  /* Tab 3: Global & Data */
+  #language-settings-section { order: 30; }
+  #user-profile-settings-section { order: 31; }
+  #goals-settings-section { order: 32; }
+  #search-settings-section { order: 33; }
+  #pdf-store-settings-section { order: 34; }
+  #sync-settings-section { order: 35; }
+  #data-backup-settings-section { order: 36; }
+  #adv-group-interaction { order: 37; }
+  #adv-group-strokes { order: 38; }
+  #adv-group-backup { order: 39; }
+  #about-settings-section { order: 40; }
+  #mobile-backup-hint { order: 41; }
+  #mobile-advanced-reset { order: 42; }
+
+  /* Calm Editorial Section Kickers (muted warm ink, letting controls lead) */
+  #panel-settings .setting-title,
+  #panel-settings .advanced-group-title {
+    color: var(--text-muted) !important;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    margin-bottom: 12px;
+  }
+  #panel-settings .setting-title > span:first-child,
+  #panel-settings .advanced-settings-trigger-row > div > span:first-child {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+  }
+  #panel-settings .control-label {
+    color: var(--text-main);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.5;
+    word-break: normal;
+    overflow-wrap: break-word;
+  }
+  #panel-settings p {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.65 !important;
+  }
+  #panel-settings .control-row {
+    gap: 12px;
+    margin: 0;
+    min-height: 38px;
+    padding: 4px 0;
+    flex-wrap: nowrap;
+  }
+  #panel-settings .settings-row-pair,
+  #panel-settings .settings-row-slider {
+    display: grid;
+    align-items: center;
+    grid-template-columns: minmax(0, 1fr) var(--settings-control-width);
+  }
+  #panel-settings .settings-row-pair > :last-child { justify-self: end; }
+  #panel-settings .settings-row-pair > :first-child { min-width: 0; }
+  .ll-fixed-disabled .ll-fixed-disabled { opacity: 1 !important; }
+
+  #panel-settings .settings-row-pair > div:last-child:not(.locale-segmented-control) {
+    display: flex;
+    width: var(--settings-control-width);
+    max-width: var(--settings-control-width);
+    min-width: 0;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+  #panel-settings .settings-row-pair > .locale-segmented-control {
+    width: fit-content !important;
+    max-width: 100% !important;
+    justify-self: end;
+    margin-left: auto;
+    background: var(--drawer-well);
+    border: 1px solid var(--drawer-well-border);
+    padding: 2px;
+    border-radius: 8px;
+  }
+  #panel-settings .settings-row-pair > div:last-child:not(.locale-segmented-control) input:not([type="color"]) {
+    flex: 1;
+    width: 0;
+    min-width: 60px;
+  }
+  #panel-settings .settings-row-pair > div:last-child:not(.locale-segmented-control) input[type="color"] {
+    flex: 0 0 24px;
+    width: 24px;
+    min-width: 24px;
+  }
+  #panel-settings .settings-row-slider {
+    grid-template-columns: minmax(0, 1fr) 120px 58px;
+    gap: 12px;
+  }
+  #panel-settings .settings-row-slider > input[type="range"] {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+  #panel-settings .settings-row-slider > span:last-child {
+    width: auto !important;
+    min-width: 0 !important;
+    text-align: right;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  #panel-settings #value-font-weight { font-size: 11px; }
+  #panel-settings .settings-row-stacked {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 5px;
+    padding: 6px 0;
+  }
+  #panel-settings .settings-row-stacked > * { width: 100%; max-width: none; }
+  #panel-settings .settings-row-stacked > div { min-width: 0; }
+  #panel-settings .settings-row-stacked > .control-label {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  /* Tactile Warm-Well Inputs & Selects (background-color preserves select SVG chevron!) */
+  #panel-settings :is(input[type="text"], input[type="password"], input[type="number"], select, textarea) {
+    box-sizing: border-box;
+    min-width: 0;
+    width: var(--settings-control-width);
+    max-width: 100%;
+    min-height: 32px;
+    padding: 6px 10px;
+    border: 1px solid var(--drawer-well-border) !important;
+    border-radius: 8px;
+    background-color: var(--drawer-well) !important;
+    color: var(--text-main);
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 400;
+    line-height: 1.4;
+    box-shadow: none;
+    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  #panel-settings :is(input[type="text"], input[type="password"], input[type="number"], select, textarea):hover {
+    border-color: rgba(145, 138, 128, 0.34) !important;
+  }
+  #panel-settings :is(input[type="text"], input[type="password"], input[type="number"], select, textarea):focus,
+  #panel-settings :is(input[type="text"], input[type="password"], input[type="number"], select, textarea):focus-visible {
+    background-color: var(--bg-card) !important;
+    border-color: var(--accent-primary, #da7756) !important;
+    box-shadow: 0 0 0 3px var(--accent-primary-subtle, rgba(218, 119, 86, 0.12)) !important;
+    outline: none;
+  }
+  #panel-settings select.setting-select,
+  #panel-settings select.leaf-modal-input,
+  #panel-settings select {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 30px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b675f' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px 12px;
+    cursor: pointer;
+  }
+  [data-theme="dark"] #panel-settings select.setting-select,
+  [data-theme="dark"] #panel-settings select.leaf-modal-input,
+  [data-theme="dark"] #panel-settings select,
+  [data-theme="black"] #panel-settings select.setting-select,
+  [data-theme="black"] #panel-settings select.leaf-modal-input,
+  [data-theme="black"] #panel-settings select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a8a39a' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  }
+  #panel-settings .settings-row-stacked > :is(input, select, textarea) { width: 100%; }
+
+  /* Crisp Terracotta-Filled Range Sliders */
+  #panel-settings input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    height: 22px;
+    margin: 0;
+    cursor: pointer;
+  }
+  #panel-settings input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 999px;
+    border: none;
+    background: linear-gradient(
+      to right,
+      var(--accent-primary, #da7756) 0%,
+      var(--accent-primary, #da7756) var(--range-pct, 0%),
+      var(--drawer-slider-track) var(--range-pct, 0%),
+      var(--drawer-slider-track) 100%
+    );
+  }
+  #panel-settings input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent-primary, #da7756);
+    border: 2px solid var(--drawer-surface);
+    box-shadow: 0 1px 3px rgba(20, 18, 15, 0.24);
+    margin-top: -5px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  #panel-settings input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+    box-shadow: 0 1px 6px rgba(218, 119, 86, 0.35);
+  }
+  #panel-settings input[type="range"]::-moz-range-track {
+    height: 4px;
+    border-radius: 999px;
+    border: none;
+    background: var(--drawer-slider-track);
+  }
+  #panel-settings input[type="range"]::-moz-range-progress {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--accent-primary, #da7756);
+  }
+  #panel-settings input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent-primary, #da7756);
+    border: 2px solid var(--drawer-surface);
+    box-shadow: 0 1px 3px rgba(20, 18, 15, 0.24);
+  }
+
+  /* Compact Switches */
+  #panel-settings .toggle-switch { width: 36px; height: 21px; flex: 0 0 36px; }
+  #panel-settings .toggle-slider { border-radius: 20px; }
+  #panel-settings .toggle-slider::before { width: 17px; height: 17px; left: 2px; bottom: 2px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14); }
+  #panel-settings .toggle-switch input:checked + .toggle-slider::before { transform: translateX(15px); }
+
+  /* =====================================================================
+     Reading Theme Swatches — Uniform Optical Hair-Ring & Refined Paper/Ink
+     ===================================================================== */
+  #panel-settings #theme-settings-section {
+    position: relative;
+  }
+  #panel-settings .theme-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+  #panel-settings .theme-btn:not(#btn-theme-system) {
+    min-height: 58px;
+    padding: 8px 6px 7px;
+    gap: 3px;
+    font-size: 11.5px;
+    font-weight: 500;
+    border-radius: 10px;
+    border: none !important;
+    position: relative;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(20, 18, 15, 0.09);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  #panel-settings .theme-btn:not(#btn-theme-system):hover {
+    transform: translateY(-1px);
+  }
+  #panel-settings .theme-btn[data-val="light"] {
+    background: #ffffff;
+    color: #1f1e1c;
+    box-shadow: inset 0 0 0 1px rgba(20, 18, 15, 0.10);
+  }
+  #panel-settings .theme-btn[data-val="sepia"] {
+    background: #f4ecd8;
+    color: #3e2f1e;
+    box-shadow: inset 0 0 0 1px rgba(95, 75, 50, 0.14);
+  }
+  #panel-settings .theme-btn[data-val="dark"] {
+    background: #252320;
+    color: #ede9e0;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.11);
+  }
+  #panel-settings .theme-btn[data-val="black"] {
+    background: #101010;
+    color: #d4d0c8;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  }
+  #panel-settings .theme-btn[data-val="green"] {
+    background: #e9f1e8;
+    color: #23472b;
+    box-shadow: inset 0 0 0 1px rgba(35, 71, 43, 0.13);
+  }
+  #panel-settings .theme-btn[data-val="eink"] {
+    background: #f4f4f1;
+    color: #000000;
+    box-shadow: inset 0 0 0 1px rgba(20, 18, 15, 0.16);
+  }
+  #panel-settings .theme-btn:not(#btn-theme-system) .theme-preview {
+    width: auto;
+    height: auto;
+    display: block;
+    background: transparent !important;
+    color: inherit !important;
+    border: none !important;
+    border-radius: 0;
+    font-size: 16px !important;
+    line-height: 1.15;
+    font-family: var(--font-serif);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    overflow: visible;
+  }
+  #panel-settings .theme-btn[data-val="eink"] .theme-preview {
+    font-weight: 700;
+  }
+  #panel-settings .theme-btn:not(#btn-theme-system) .theme-preview::before {
+    content: 'Aa';
+    display: block;
+  }
+  #panel-settings .theme-btn:not(#btn-theme-system).active {
+    box-shadow:
+      inset 0 0 0 1px rgba(218, 119, 86, 0.32),
+      0 0 0 2px var(--drawer-surface),
+      0 0 0 3.5px var(--accent-primary, #da7756) !important;
+  }
+  #panel-settings .theme-btn:not(#btn-theme-system).active::after {
+    content: none !important;
+  }
+
+  /* Quiet Borderless Ghost Toggle for "Follow System" */
+  #panel-settings #btn-theme-system {
+    position: absolute;
+    top: -4px;
+    right: 0;
+    min-height: 26px !important;
+    height: 26px !important;
+    width: auto !important;
+    padding: 0 8px !important;
+    border-radius: 6px !important;
+    border: 1px solid transparent !important;
+    background: transparent;
+    color: var(--text-muted);
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 5px !important;
+    font-size: 11.5px !important;
+    font-weight: 500;
+    box-shadow: none;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  #panel-settings #btn-theme-system:hover {
+    background: var(--drawer-well);
+    color: var(--text-main);
+  }
+  #panel-settings #btn-theme-system.active {
+    background: var(--accent-primary-subtle, rgba(218, 119, 86, 0.12));
+    color: var(--brand-terracotta-text, var(--accent-primary, #da7756));
+    border-color: transparent !important;
+    box-shadow: none !important;
+  }
+  #panel-settings #btn-theme-system .theme-preview {
+    width: 11px !important;
+    height: 11px !important;
+    flex: 0 0 11px !important;
+    border-radius: 50%;
+    font-size: 0 !important;
+  }
+  #panel-settings #btn-theme-system.active::after {
+    content: none;
+  }
+
+  /* =====================================================================
+     Font Family Specimen Tiles — Borderless Warm Wells (No White Box Grid)
+     ===================================================================== */
+  #panel-settings .font-select-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  #panel-settings .font-choice-btn {
+    min-height: 38px;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 10px;
+    border-radius: 9px;
+    border: 1px solid transparent;
+    background: var(--drawer-well);
+    color: var(--text-main);
+    box-shadow: none;
+    position: relative;
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  }
+  #panel-settings .font-choice-btn:hover {
+    background: var(--drawer-well-hover);
+    border-color: transparent;
+    color: var(--text-main);
+  }
+  #panel-settings .font-choice-btn.active {
+    background: var(--bg-card);
+    border-color: rgba(218, 119, 86, 0.55);
+    color: var(--brand-terracotta-text, var(--accent-primary, #da7756));
+    font-weight: 600;
+    box-shadow: 0 1px 3px rgba(20, 18, 15, 0.06);
+  }
+  [data-theme="dark"] #panel-settings .font-choice-btn.active,
+  [data-theme="black"] #panel-settings .font-choice-btn.active {
+    background: rgba(204, 120, 92, 0.16);
+    border-color: rgba(204, 120, 92, 0.55);
+    color: var(--brand-terracotta-text, #ee9e82);
+    box-shadow: none;
+  }
+  #panel-settings .font-choice-btn.active::after {
+    content: none !important;
+  }
+
+  /* =====================================================================
+     Quiet Ghost Inline Actions, Compact Presets & Storage Cards
+     ===================================================================== */
+  #panel-settings .settings-meta-chip {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: var(--drawer-well);
+    border: none;
+    color: var(--text-muted);
+  }
+  #panel-settings .settings-meta-chip.is-ok {
+    color: #3a6849;
+    background: rgba(58, 104, 73, 0.10);
+  }
+  [data-theme="dark"] #panel-settings .settings-meta-chip.is-ok,
+  [data-theme="black"] #panel-settings .settings-meta-chip.is-ok {
+    color: #82be98;
+    background: rgba(130, 190, 152, 0.14);
+  }
+  #panel-settings .settings-meta-chip.is-mono {
+    font-family: var(--font-mono, monospace);
+    font-variant-numeric: tabular-nums;
+  }
+  #panel-settings .settings-presets-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: inherit;
+    text-align: left;
+  }
+  #panel-settings .settings-title-meta-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #panel-settings .reading-presets-body {
+    display: flex;
+    margin-top: 8px;
+    flex-direction: column;
+    gap: 6px;
+  }
+  #panel-settings .reading-presets-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  #panel-settings .settings-count-muted {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  #panel-settings .settings-inline-accent-btn,
+  #panel-settings .settings-inline-reset-btn {
+    width: auto;
+    height: 26px;
+    padding: 0 7px !important;
+    border: none !important;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11.5px !important;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    transition: color 0.15s ease, background-color 0.15s ease;
+  }
+  #panel-settings .settings-inline-accent-btn:hover,
+  #panel-settings .settings-inline-reset-btn:hover {
+    color: var(--brand-terracotta-text, var(--accent-primary, #da7756));
+    background: var(--accent-primary-subtle, rgba(218, 119, 86, 0.10));
+  }
+  #panel-settings .settings-inline-reset-btn .icon {
+    width: 12px;
+    height: 12px;
+  }
+  #panel-settings .settings-title-with-action {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  #panel-settings .settings-value-accent {
+    color: var(--brand-terracotta-text, var(--accent-primary, #da7756));
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Quiet single-line caption instead of noisy dashed empty box */
+  #panel-settings .presets-empty-hint {
+    text-align: left !important;
+    font-size: 11.5px !important;
+    line-height: 1.55;
+    padding: 2px 0 0 !important;
+    border-radius: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-subtle, var(--text-muted));
+  }
+  #panel-settings #ai-custom-inputs-wrap {
+    border-top: 1px solid var(--drawer-hairline) !important;
+    padding-top: 10px !important;
+    margin-top: 10px !important;
+  }
+  #panel-settings .storage-paths-list .storage-path-item {
+    background: var(--drawer-well) !important;
+    border: none !important;
+    border-radius: 8px !important;
+    padding: 9px 11px !important;
+  }
+  #panel-settings #btn-tts-preview {
+    background: var(--drawer-well);
+    border: 1px solid var(--drawer-well-border);
+    color: var(--text-main);
+    padding: 5px 11px !important;
+    border-radius: 7px;
+  }
+  #panel-settings #btn-tts-preview:hover {
+    background: var(--drawer-well-hover);
+  }
+
+  /* Book Override Control — Clean Top Scope Bar in Reader Mode Only */
+  #panel-settings[data-active-domain="reading"] #book-override-section {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    margin: 0 0 20px !important;
+    padding: 0 0 14px !important;
+    border-bottom: 1px solid var(--drawer-hairline) !important;
+    background: transparent !important;
+  }
+  #panel-settings #book-override-section .control-label {
+    font-weight: 500;
+  }
+  #book-override-hint,
+  #btn-reset-book-override {
+    display: none !important;
+  }
+  #sidebar-drawer.drawer-shelf-mode #panel-settings #book-override-section {
+    display: none !important;
+  }
+
+  /* Reading Presets Flat Container */
+  #panel-settings #reading-presets-container {
+    display: flex !important;
+  }
+  #panel-settings #hint-presets-toggle {
+    display: none !important;
+  }
+  #panel-settings #btn-toggle-reading-presets {
+    display: flex !important;
+    pointer-events: none;
+    cursor: default;
+    margin-bottom: 6px;
+  }
+  #panel-settings #btn-toggle-reading-presets > div > span:first-child {
+    color: var(--text-muted) !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.02em;
+  }
+
+  /* Custom Palette Compact Single Column List */
+  #panel-settings #adv-group-palette .palette-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 12px;
+  }
+  #panel-settings #adv-group-palette .settings-row-pair {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    min-height: 32px;
+    padding: 3px 0;
+  }
+  #panel-settings #adv-group-palette .control-label { white-space: nowrap; }
+  #panel-settings #adv-group-palette .settings-row-pair > div:last-child {
+    width: auto;
+    max-width: none;
+    gap: 6px;
+    margin-left: auto;
+  }
+  #panel-settings #adv-group-palette .settings-row-pair input[id^="palette-"][type="text"] {
+    width: 78px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    flex: none;
+  }
+  #panel-settings #adv-group-palette .settings-row-pair input[type="color"] {
+    width: 24px;
+    min-width: 24px;
+    height: 22px;
+    flex: 0 0 24px;
+  }
+
+  #panel-settings #adv-group-strokes > div:not([class]) {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin: 10px 0 4px 0;
+  }
+  #panel-settings .settings-row-pair input[type="color"] { width: 24px; }
+  #panel-settings .settings-row-pair input[id^="palette-"][type="text"] { width: 78px; font-family: var(--font-mono); font-size: 11px; }
+  #panel-settings :is(.btn-primary-action, .btn-secondary-action, .txt-rules-actions button) {
+    min-height: 32px;
+    padding: 6px 11px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  #panel-settings #setting-user-name { text-align: left !important; }
+  #panel-settings #setting-tts-api-key { font-family: inherit; }
+  #panel-settings #hint-presets-toggle,
+  #panel-settings #hint-advanced-trigger,
+  #panel-settings #hint-fonts-toggle { font-size: 11px; color: var(--text-muted); }
+  #panel-settings #badge-active-preset { font-size: 11px; font-weight: 500; }
+
+  /* PC desktop: remove page-turn animation row */
+  #sidebar-drawer #setting-turn-animation-row,
+  #panel-settings #setting-turn-animation-row,
+  #setting-turn-animation-row {
+    display: none !important;
+  }
+
+  /* Disabled select options in settings: grayed out & unselectable */
+  #setting-column-count option:disabled,
+  #setting-column-count option[disabled],
+  .setting-select option:disabled,
+  .setting-select option[disabled] {
+    color: var(--text-muted, #8e8e93) !important;
+    opacity: 0.55;
+    cursor: not-allowed;
+    background-color: var(--bg-card, transparent);
+  }
+}
+
+/* Fallback ensuring drawer always hides turn animation on PC across all viewport widths */
+#sidebar-drawer #setting-turn-animation-row,
+#panel-settings #setting-turn-animation-row,
+#setting-turn-animation-row {
+  display: none !important;
+}
+
+#setting-column-count option:disabled,
+#setting-column-count option[disabled],
+.setting-select option:disabled,
+.setting-select option[disabled] {
+  color: var(--text-muted, #8e8e93) !important;
+  opacity: 0.55;
+  cursor: not-allowed;
+  background-color: var(--bg-card, transparent);
+}
+
+.ll-fixed-disabled .ll-fixed-disabled {
+  opacity: 1 !important;
+}
+
+#panel-settings .settings-row-pair > div:last-child:not(.locale-segmented-control) {
+  margin-left: auto;
+}

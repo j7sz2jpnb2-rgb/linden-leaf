@@ -1,0 +1,14 @@
+{
+  "name": "Skywind3000 ECDICT",
+  "version": "1.0.28",
+  "license": "MIT",
+  "licenseUrl": "https://raw.githubusercontent.com/skywind3000/ECDICT/master/LICENSE",
+  "sourceUrl": "https://raw.githubusercontent.com/skywind3000/ECDICT/master/ecdict.csv",
+  "upstreamCommit": "8defb761f7c7ad1818ca94290a1844d7b33d6b23",
+  "csvSha256": "1a6947e04785db63613a92e14903cdae7954f7e84860b10e68e5c7cbb3f9c3cf",
+  "csvSizeBytes": 65933428,
+  "dbSha256": "855ed845290da6fd575a113519a6a65dc1325b3af3d5f2a318ec3b813bed17b2",
+  "dbSizeBytes": 100843520,
+  "totalEntries": 770611,
+  "builtAt": "2026-09-26T04:21:35.982Z"
+}
