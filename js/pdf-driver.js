@@ -11,6 +11,38 @@ const abortError = () => new DOMException('Render cancelled', 'AbortError')
 const IS_LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 
 /**
+ * Joins MuPDF character geometry entries into plain text while inserting spaces
+ * across line boundaries when adjacent lines lack separating whitespace.
+ * @param {Array<{ text?: string, line?: number }>} chars
+ * @returns {string}
+ */
+export function joinMuPdfGeometryChars(chars) {
+    if (!Array.isArray(chars) || !chars.length) return ''
+    let result = ''
+    let currentLine = null
+    let lineText = ''
+    const flush = () => {
+        if (!lineText) return
+        if (result && !/\s$/.test(result) && !/^\s/.test(lineText)) {
+            result += ' '
+        }
+        result += lineText
+        lineText = ''
+    }
+    for (let i = 0; i < chars.length; i++) {
+        const ch = chars[i]
+        if (!ch) continue
+        if (currentLine !== null && ch.line != null && ch.line !== currentLine) {
+            flush()
+        }
+        if (ch.line != null) currentLine = ch.line
+        lineText += (ch.text || '')
+    }
+    flush()
+    return result
+}
+
+/**
  * Decodes an `LLP3` QOI-RGBA payload into a destination RGBA pixel array.
  * Matches `append_qoi_rgba` in `src-tauri/src/commands/mupdf.rs` byte-for-byte.
  * @param {Uint8Array} src
@@ -707,8 +739,11 @@ export class MuPdfTauriDriver {
         }
         if (this.geometryCache?.has(pageIndex)) {
             const chars = await this.geometryCache.get(pageIndex)
-            const text = (chars || []).map(c => c.text || '').join('')
+            const text = joinMuPdfGeometryChars(chars)
             this._plainTextCache.set(pageIndex, text)
+            if (this._plainTextCache.size > 200) {
+                this._plainTextCache.delete(this._plainTextCache.keys().next().value)
+            }
             return text
         }
         let text = ''
@@ -724,7 +759,7 @@ export class MuPdfTauriDriver {
             }
         } catch (_) {
             const chars = await this.getTextGeometry(pageIndex)
-            text = (chars || []).map(c => c.text || '').join('')
+            text = joinMuPdfGeometryChars(chars)
         }
         this._plainTextCache.set(pageIndex, text)
         if (this._plainTextCache.size > 200) {

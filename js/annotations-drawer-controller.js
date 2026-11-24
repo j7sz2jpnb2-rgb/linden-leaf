@@ -1131,8 +1131,12 @@ export class AnnotationsDrawerController {
     async updateSidebarNotesCount(count = null) {
         try {
             if (count == null) {
-                const hls = await db.getAllHighlights()
-                count = hls ? hls.length : 0
+                if (typeof db.countHighlights === 'function') {
+                    count = await db.countHighlights()
+                } else {
+                    const hls = await db.getAllHighlights()
+                    count = hls ? hls.length : 0
+                }
             }
             const badge = document.getElementById('sidebar-notes-count')
             if (badge) {

@@ -1556,6 +1556,17 @@ export const getAllHighlights = async () => {
     })
 }
 
+export const countHighlights = async () => {
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('highlights', 'readonly')
+        const store = tx.objectStore('highlights')
+        const req = store.count()
+        req.onsuccess = () => resolve(Number(req.result) || 0)
+        req.onerror = () => reject(req.error || new Error('Failed to count highlights'))
+    })
+}
+
 export const deleteHighlight = async (id, recordTombstone = true, tombstoneTime = Date.now()) => {
     if (!id) return false
     const db = await openDB()

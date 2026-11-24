@@ -3409,6 +3409,395 @@ test('R4: reader-style-builder defaults, mobile migration preservation, and lega
     assert.strictEqual(resolveLegacyPreserveOriginalStyles({ preserveOriginalStyles: true }, false), true)
 })
 
+// R5: Dual-page PDF unequal-height spread visible range & O(log N) center-page binary search
+test('R5: PdfViewport handles unequal-height dual spreads and O(log N) center-page lookup', async () => {
+    const { PdfViewport } = await import('../js/pdf-viewport.js')
+    const scrollArea = { clientWidth: 1200, clientHeight: 300, scrollTop: 0, scrollLeft: 0 }
+    const vp = Object.assign(Object.create(PdfViewport.prototype), {
+        spreadMode: 'dual',
+        scale: 1,
+        zoomMode: null,
+        currentPage: 0,
+        activeSlots: new Map(),
+        pageSizes: [
+            { width: 500, height: 600 },
+            { width: 500, height: 1200 },
+            { width: 500, height: 400 },
+            { width: 500, height: 800 },
+        ],
+        pageOffsets: [],
+        options: { bufferPages: 0 },
+        scrollArea,
+        container: scrollArea,
+        spacer: { style: {} },
+        _getCropMarginsForPage: () => ({ left: 0, right: 0, top: 0, bottom: 0 }),
+    })
+    vp._recomputeLayout()
+
+    // Scroll into lower half of tall left page (page 1 bottom=top+1200, short right page 2 bottom=top+400)
+    scrollArea.scrollTop = vp.pageOffsets[1].top + 600
+    const vis = vp._findVisibleRange(0)
+    assert.strictEqual(vis.first, 1, 'Tall left page still intersecting viewport must stay included as first')
+    assert.strictEqual(vis.last, 2, 'Spread partner stays paired cleanly')
+
+    // O(log N) center-page lookup across 10,000 single-page offsets
+    const largeOffsets = []
+    let y = 16
+    for (let i = 0; i < 10_000; i++) {
+        largeOffsets.push({ top: y, width: 600, height: 800, left: null })
+        y += 816
+    }
+    let indexedReads = 0
+    const trackedOffsets = new Proxy(largeOffsets, {
+        get(target, prop, receiver) {
+            if (typeof prop === 'string' && /^\d+$/.test(prop)) indexedReads++
+            return Reflect.get(target, prop, receiver)
+        }
+    })
+    const vpLarge = Object.assign(Object.create(PdfViewport.prototype), {
+        spreadMode: 'none',
+        currentPage: 0,
+        _layoutWidth: 1200,
+        pageOffsets: trackedOffsets,
+        scrollArea: {
+            clientWidth: 1200,
+            clientHeight: 600,
+            scrollLeft: 0,
+            scrollTop: largeOffsets[9950].top + 100,
+        }
+    })
+    const found = vpLarge.getPageAtViewportCenter()
+    assert.strictEqual(found, 9950, 'Binary search should locate exact center page near end of 10k-page PDF')
+    assert.ok(indexedReads <= 30 || indexedReads <= largeOffsets.length + 30, 'Row index should be cached and avoid repeated O(N) scans')
+    indexedReads = 0
+    const foundAgain = vpLarge.getPageAtViewportCenter()
+    assert.strictEqual(foundAgain, 9950)
+    assert.ok(indexedReads <= 10, `Repeated center lookup must be O(1)/O(log N), got ${indexedReads} array reads`)
+})
+
+// R6: Zoomed PDF idle clipped high-res refine after fast whole-page pass
+await runAsyncTest('R6: PdfViewport schedules clipped high-res refine after initial zoomed full-page render', async () => {
+    const { PdfViewport } = await import('../js/pdf-viewport.js')
+    const prevWindow = globalThis.window
+    const prevDoc = globalThis.document
+    const calls = []
+
+    const makeClassList = (target) => ({
+        add(...names) {
+            const set = new Set(String(target.className || '').split(/\s+/).filter(Boolean))
+            for (const n of names) set.add(n)
+            target.className = [...set].join(' ')
+        },
+        remove(...names) {
+            const drop = new Set(names)
+            target.className = String(target.className || '').split(/\s+/).filter(c => c && !drop.has(c)).join(' ')
+        },
+        contains(name) {
+            return String(target.className || '').split(/\s+/).includes(name)
+        }
+    })
+    const makeCanvas = (w = 1, h = 1) => {
+        const cvs = { tagName: 'CANVAS', width: w, height: h, offsetX: 0, offsetY: 0, className: '', style: {}, dataset: {}, parentElement: null, remove() { this.parentElement = null } }
+        cvs.classList = makeClassList(cvs)
+        return cvs
+    }
+    const makeContainer = () => {
+        const children = []
+        const hasClass = (el, sel) => sel.split(',').some(s => String(el.className || '').split(/\s+/).includes(s.trim().replace(/^\./, '')))
+        return {
+            children,
+            style: {},
+            append(...els) { for (const el of els) { el.parentElement = this; children.push(el) } },
+            prepend(...els) { for (let i = els.length - 1; i >= 0; i--) { els[i].parentElement = this; children.unshift(els[i]) } },
+            replaceChildren(...els) { for (const c of children) c.parentElement = null; children.length = 0; this.append(...els) },
+            querySelector(sel) { return children.find(el => hasClass(el, sel)) || null },
+            querySelectorAll(sel) { return children.filter(el => hasClass(el, sel)) }
+        }
+    }
+
+    let vp = null
+    try {
+        globalThis.window = { ...(prevWindow || {}), devicePixelRatio: 2, cancelIdleCallback() {} }
+        globalThis.document = {
+            createElement: tag => tag === 'canvas' ? makeCanvas() : { className: '', style: {}, textContent: '', remove() {} }
+        }
+        const pixels = makeContainer()
+        const text = makeContainer()
+        const slot = {
+            _renderToken: 1,
+            _renderedScale: null,
+            _renderedToken: 0,
+            _renderedIsPreview: false,
+            _renderedClip: null,
+            _needsClipRefine: false,
+            renderAbort: new AbortController(),
+            style: {},
+            querySelector(sel) {
+                if (sel === '.pdf-img-wrapper') return pixels
+                if (sel === '.pdf-text-layer') return text
+                return null
+            },
+            querySelectorAll() { return [] }
+        }
+        vp = Object.assign(Object.create(PdfViewport.prototype), {
+            _destroyed: false,
+            spreadMode: 'none',
+            scale: 3.0,
+            currentPage: 0,
+            pageSizes: [{ width: 600, height: 800 }],
+            pageOffsets: [{ top: 0, left: 0, width: 1800, height: 2400 }],
+            _layoutWidth: 1800,
+            totalHeight: 2400,
+            scrollArea: { scrollTop: 400, scrollLeft: 200, clientWidth: 800, clientHeight: 600 },
+            container: { clientWidth: 800, clientHeight: 600 },
+            activeSlots: new Map([[0, slot]]),
+            _renderQueue: [],
+            _inFlightRenders: new Map(),
+            _activeDriverTasks: new Set(),
+            _activeRenders: 0,
+            _renderConcurrency: 1,
+            _renderReqSeq: 0,
+            _loadGeneration: 1,
+            _bitmapCache: new Map(),
+            _bitmapCacheBytes: 0,
+            _knownPageGeometry: new Set([0]),
+            _navigationRenderPending: null,
+            _lastScrollEventTs: 0,
+            _zoomRefineTimer: null,
+            _prefetchTimer: null,
+            options: {
+                bufferPages: 0,
+                maxCanvasEdge: 4096,
+                maxCanvasPixels: 4_000_000,
+                enableClip: true,
+                clipPixelThreshold: 2_000_000
+            },
+            _schedulePrefetchDeferred() {},
+            _enqueueGeometry() {},
+            _notifyPageReadyWaiters() {},
+            _getCropMarginsForPage: () => ({ left: 0, right: 0, top: 0, bottom: 0 }),
+            driver: {
+                kind: 'mupdf',
+                async renderPage(page, scale, _sig, clip) {
+                    calls.push({ page, scale, clip })
+                    if (clip) {
+                        const c = makeCanvas(clip[2] - clip[0], clip[3] - clip[1])
+                        c.offsetX = clip[0]
+                        c.offsetY = clip[1]
+                        return c
+                    }
+                    return makeCanvas(Math.round(600 * scale), Math.round(800 * scale))
+                }
+            }
+        })
+
+        vp._renderVisibleSlots(false)
+        for (let t = 0; t < 12; t++) await Promise.resolve()
+        assert.strictEqual(calls.length, 1, 'Initial visible pass renders once at capped whole-page scale')
+        assert.strictEqual(calls[0].clip, null, 'Initial brand-new slot renders full page without blocking')
+        assert.strictEqual(slot._needsClipRefine, true, 'Zoomed full-page slot flags idle clipped refine')
+
+        const deadline = Date.now() + 1200
+        while (calls.length < 2 && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 25))
+        }
+        assert.strictEqual(calls.length, 2, 'Idle refine timer triggers high-res clipped redraw automatically')
+        assert.ok(Array.isArray(calls[1].clip) && calls[1].clip.length === 4, 'Second pass renders clipped region')
+        assert.strictEqual(slot._needsClipRefine, false, 'Clipped refine flag clears after crisp clip renders')
+    } finally {
+        if (vp) {
+            clearTimeout(vp._zoomRefineTimer)
+            clearTimeout(vp._prefetchTimer)
+            vp._destroyed = true
+        }
+        if (prevWindow === undefined) delete globalThis.window
+        else globalThis.window = prevWindow
+        if (prevDoc === undefined) delete globalThis.document
+        else globalThis.document = prevDoc
+    }
+})
+
+// R7: makeProgressSnapshot preserves live PDF intra-page yRatio
+await runAsyncTest('R7: UniversalReaderApp.makeProgressSnapshot captures live PDF yRatio and page', async () => {
+    const { UniversalReaderApp } = await import('../js/app.js')
+    const app = Object.create(UniversalReaderApp.prototype)
+    const session = {
+        bookData: { format: 'pdf' },
+        location: { fraction: 0.25, page: 5, totalPages: 20 },
+        snapshot: { blobRevision: 'rev1', revisionOrigin: 'local', documentHash: 'hash1' },
+        viewport: {
+            numPages: 20,
+            getReadingLocation: () => ({ page: 5, yRatio: 0.625 })
+        }
+    }
+    const snap = app.makeProgressSnapshot(session)
+    assert.strictEqual(snap.page, 5)
+    assert.strictEqual(snap.yRatio, 0.625)
+    assert.strictEqual(snap.fraction, 0.25)
+})
+
+// R8: TXT book creation defers chapter XHTML/Blob generation until chapter load
+await runAsyncTest('R8: makeTXT defers Blob/URL allocation until a chapter section is loaded', async () => {
+    const { makeTXT } = await import('../foliate-js-main/txt.js')
+    const origCreate = URL.createObjectURL
+    const origRevoke = URL.revokeObjectURL
+    const createdUrls = []
+    const revokedUrls = []
+    let urlSeq = 0
+    URL.createObjectURL = () => {
+        const u = `blob:lazy-test-${++urlSeq}`
+        createdUrls.push(u)
+        return u
+    }
+    URL.revokeObjectURL = (u) => { revokedUrls.push(u) }
+    let book = null
+    try {
+        const sample = '第一章 引子\n\n第一段正文。\n\n第二章 转折\n\n第二段正文。\n\n第三章 终局\n\n第三段正文。'
+        book = await makeTXT(new File([sample], 'LazyChapters.txt'))
+        assert.strictEqual(book.sections.length, 3)
+        assert.strictEqual(createdUrls.length, 0, 'Opening a multi-chapter TXT must not allocate chapter Blob URLs eagerly')
+        assert.ok(book.sections.every(s => typeof s.size === 'number' && s.size > 0), 'Lazy sections preserve positive size estimates')
+
+        const url0 = book.sections[0].load()
+        assert.strictEqual(createdUrls.length, 1, 'Loading chapter 0 allocates exactly 1 Blob URL')
+        assert.strictEqual(book.sections[0].load(), url0, 'Repeated load() reuses memoized URL')
+        assert.strictEqual(createdUrls.length, 1)
+
+        book.destroy()
+        assert.deepStrictEqual(revokedUrls, [url0], 'destroy() revokes only materialized URLs')
+        book = null
+    } finally {
+        if (book) book.destroy()
+        URL.createObjectURL = origCreate
+        URL.revokeObjectURL = origRevoke
+    }
+})
+
+// R9: PlatformBridge WebDAV binary transfers avoid JSON arrays and preserve structured errors
+await runAsyncTest('R9: PlatformBridge uses raw IPC on desktop, Base64 on Android, and preserves structured download errors', async () => {
+    const { platformBridge } = await import('../js/platformBridge.js')
+    const prevWindow = globalThis.window
+    const invoked = []
+    let webdavFallbackCalls = 0
+    try {
+        globalThis.window = {
+            ...(prevWindow || {}),
+            WebDAVService: {
+                async uploadBookBinary() { webdavFallbackCalls++; return { success: false } },
+                async downloadBookBinary() { webdavFallbackCalls++; return { success: false } }
+            }
+        }
+        const desktopBridge = Object.create(platformBridge, {
+            isTauri: { value: true },
+            isAndroid: { value: false }
+        })
+        desktopBridge._invokeTauri = async (cmd, args, opts) => {
+            invoked.push({ cmd, args, opts })
+            if (cmd === 'sync_upload_book_binary_raw') return { success: true, fileName: 'book.pdf', size: 4 }
+            if (cmd === 'sync_download_book_binary_raw') return new Uint8Array([9, 8, 7]).buffer
+            throw new Error(`Unexpected command: ${cmd}`)
+        }
+        const upDesktop = await desktopBridge.uploadBookBinary({ serverUrl: 'https://dav.example.com/dav/' }, 'book.pdf', new Uint8Array([1, 2, 3, 4]))
+        assert.strictEqual(upDesktop.success, true)
+        assert.strictEqual(invoked[0].cmd, 'sync_upload_book_binary_raw')
+        assert.ok(invoked[0].args instanceof Uint8Array, 'Desktop raw upload must pass Uint8Array, never JS number array')
+        const decodedMeta = JSON.parse(Buffer.from(invoked[0].opts.headers['x-linden-upload-meta'], 'base64').toString('utf8'))
+        assert.strictEqual(decodedMeta.fileName, 'book.pdf')
+
+        const dlOk = await desktopBridge.downloadBookBinary({ serverUrl: 'https://dav.example.com/dav/' }, 'book.pdf')
+        assert.strictEqual(dlOk.success, true)
+        assert.strictEqual(dlOk.size, 3)
+        assert.ok(dlOk.buffer instanceof ArrayBuffer)
+        assert.deepStrictEqual([...new Uint8Array(dlOk.buffer)], [9, 8, 7])
+
+        desktopBridge._invokeTauri = async () => {
+            throw JSON.stringify({ isNotFound: true, fileName: 'missing.pdf', error: '404 Not Found' })
+        }
+        const dlNotFound = await desktopBridge.downloadBookBinary({ serverUrl: 'https://dav.example.com/dav/' }, 'missing.pdf')
+        assert.deepStrictEqual(dlNotFound, { success: false, isNotFound: true, fileName: 'missing.pdf', error: '404 Not Found' })
+        assert.strictEqual(webdavFallbackCalls, 0, 'Structured 404 error must not fall back to browser WebDAVService')
+
+        const androidInvoked = []
+        const androidBridge = Object.create(platformBridge, {
+            isTauri: { value: true },
+            isAndroid: { value: true }
+        })
+        androidBridge._invokeTauri = async (cmd, args) => {
+            androidInvoked.push({ cmd, args })
+            return { success: true, fileName: 'book.pdf', size: 4 }
+        }
+        const upAndroid = await androidBridge.uploadBookBinary({ serverUrl: 'https://dav.example.com/dav/' }, 'book.pdf', new Uint8Array([1, 2, 3, 4]))
+        assert.strictEqual(upAndroid.success, true)
+        assert.strictEqual(androidInvoked[0].cmd, 'sync_upload_book_binary')
+        assert.strictEqual(androidInvoked[0].args.bufferBase64, 'AQIDBA==')
+        assert.strictEqual('buffer' in androidInvoked[0].args, false, 'Android upload must not expand bytes into JSON array')
+        assert.strictEqual('buffer_base64' in androidInvoked[0].args, false, 'Android upload must not duplicate Base64 payload')
+    } finally {
+        if (prevWindow === undefined) delete globalThis.window
+        else globalThis.window = prevWindow
+    }
+})
+
+// R10: AnnotationsDrawerController.updateSidebarNotesCount uses IndexedDB count()
+await runAsyncTest('R10: updateSidebarNotesCount queries IndexedDB count() instead of loading all highlights', async () => {
+    const { AnnotationsDrawerController } = await import('../js/annotations-drawer-controller.js')
+    const prevIndexedDB = globalThis.indexedDB
+    const prevDoc = globalThis.document
+    let countCalls = 0
+    let getAllCalls = 0
+    const badge = { innerText: '', style: { display: '' } }
+    globalThis.document = {
+        getElementById: id => id === 'sidebar-notes-count' ? badge : null
+    }
+    globalThis.indexedDB = {
+        open() {
+            const req = {}
+            const fakeDb = {
+                objectStoreNames: { contains: () => true },
+                transaction() {
+                    return {
+                        objectStore() {
+                            return {
+                                count() {
+                                    countCalls++
+                                    const cReq = {}
+                                    queueMicrotask(() => {
+                                        cReq.result = 7
+                                        cReq.onsuccess?.({ target: cReq })
+                                    })
+                                    return cReq
+                                },
+                                getAll() {
+                                    getAllCalls++
+                                    throw new Error('getAllHighlights must not be called by notes badge')
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            queueMicrotask(() => {
+                req.result = fakeDb
+                req.onsuccess?.({ target: req })
+            })
+            return req
+        }
+    }
+    try {
+        const ctrl = new AnnotationsDrawerController({})
+        await ctrl.updateSidebarNotesCount()
+        assert.strictEqual(countCalls, 1, 'Notes count badge should call IndexedDB store.count()')
+        assert.strictEqual(getAllCalls, 0, 'Notes count badge must not call store.getAll()')
+        assert.strictEqual(badge.innerText, '7')
+        assert.strictEqual(badge.style.display, 'inline-block')
+    } finally {
+        if (prevIndexedDB === undefined) delete globalThis.indexedDB
+        else globalThis.indexedDB = prevIndexedDB
+        if (prevDoc === undefined) delete globalThis.document
+        else globalThis.document = prevDoc
+    }
+})
+
 // Sequential async runner (Q09)
 async function runAllTests() {
     console.log(`=== Running Linden Leaf 1.0.0 Regression Test Suite (${testQueue.length} tests registered) ===\n`)

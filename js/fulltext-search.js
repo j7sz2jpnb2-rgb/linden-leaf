@@ -745,39 +745,64 @@ export class FullTextSearchEngine {
                 })
             }
         }
+        const cachedSupported = []
+        const uncachedSupported = []
+        for (const book of supported) {
+            const existing = this.index.get(book.id)
+            const isCacheHit = Boolean(
+                existing &&
+                existing.meta?.extractorVersion === EXTRACTOR_VERSION &&
+                existing.meta?.blobRevision &&
+                (!book.blobRevision || existing.meta.blobRevision === book.blobRevision)
+            )
+            if (isCacheHit) cachedSupported.push(book)
+            else uncachedSupported.push(book)
+        }
         const results = []
         const bookGroups = []
         const failedBooks = []
-        let visited = 0
         let searched = 0
         let failed = 0
         const workers = Math.max(1, Math.min(6, Number(concurrency) || 1))
-        const visit = async () => {
-            while (!signal?.aborted && visited < supported.length) {
-                const book = supported[visited++]
-                if (!book) break
-                try {
-                    if (await this.indexBook(book.id, signal)) {
-                        if (signal?.aborted) return
-                        const matches = this.search(query, { bookIds: [book.id], previewLimit: 3 })
-                        const totalHits = matches.totalHits != null ? matches.totalHits : matches.length
-                        if (totalHits > 0) {
-                            for (let i = 0; i < matches.length; i++) {
-                                results.push(matches[i])
+        const visitQueue = async (queue) => {
+            if (!queue.length) return
+            let queueIdx = 0
+            const visit = async () => {
+                while (!signal?.aborted && queueIdx < queue.length) {
+                    const book = queue[queueIdx++]
+                    if (!book) break
+                    try {
+                        if (await this.indexBook(book.id, signal)) {
+                            if (signal?.aborted) return
+                            const matches = this.search(query, { bookIds: [book.id], previewLimit: 3 })
+                            const totalHits = matches.totalHits != null ? matches.totalHits : matches.length
+                            if (totalHits > 0) {
+                                for (let i = 0; i < matches.length; i++) {
+                                    results.push(matches[i])
+                                }
+                                const bookResult = {
+                                    bookId: book.id,
+                                    bookTitle: book.title || matches[0]?.bookTitle || t('book.untitled'),
+                                    cover: book.cover || null,
+                                    format: book.format || '',
+                                    totalHits: totalHits,
+                                    previewMatches: matches.slice(0, 3)
+                                }
+                                bookGroups.push(bookResult)
+                                onBookResult?.(bookResult)
                             }
-                            const bookResult = {
+                            searched++
+                        } else {
+                            failed++
+                            failedBooks.push({
                                 bookId: book.id,
-                                bookTitle: book.title || matches[0]?.bookTitle || t('book.untitled'),
-                                cover: book.cover || null,
-                                format: book.format || '',
-                                totalHits: totalHits,
-                                previewMatches: matches.slice(0, 3)
-                            }
-                            bookGroups.push(bookResult)
-                            onBookResult?.(bookResult)
+                                bookTitle: book.title || t('book.untitled'),
+                                format: (book.format || '').toUpperCase() || '?',
+                                reason: 'unreadable'
+                            })
                         }
-                        searched++
-                    } else {
+                    } catch (error) {
+                        if (signal?.aborted) return
                         failed++
                         failedBooks.push({
                             bookId: book.id,
@@ -785,22 +810,17 @@ export class FullTextSearchEngine {
                             format: (book.format || '').toUpperCase() || '?',
                             reason: 'unreadable'
                         })
+                        console.warn('[FullTextSearch] Unable to search book:', book.id, error)
                     }
-                } catch (error) {
-                    if (signal?.aborted) return
-                    failed++
-                    failedBooks.push({
-                        bookId: book.id,
-                        bookTitle: book.title || t('book.untitled'),
-                        format: (book.format || '').toUpperCase() || '?',
-                        reason: 'unreadable'
-                    })
-                    console.warn('[FullTextSearch] Unable to search book:', book.id, error)
+                    onProgress({ visited: searched + failed, total: supported.length, matches: results.length, searched, failed })
                 }
-                onProgress({ visited: searched + failed, total: supported.length, matches: results.length, searched, failed })
             }
+            const workerCount = Math.min(workers, queue.length)
+            await Promise.all(Array.from({ length: workerCount }, () => visit()))
         }
-        await Promise.all(Array.from({ length: workers }, () => visit()))
+        // Visit cached books first so uncached IndexedDB loads cannot evict still-pending cache entries.
+        await visitQueue(cachedSupported)
+        await visitQueue(uncachedSupported)
         return {
             results,
             bookGroups,

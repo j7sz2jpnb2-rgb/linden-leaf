@@ -676,20 +676,42 @@ export const makeTXT = async (file, { filename = file.name, legacyLayout = false
 </html>`
 
     const urls = []
+    const estimateChapterSize = (chapter) => {
+        let bytes = 640 + (chapter.title ? chapter.title.length * 3 : 0)
+        const chLines = chapter.lines || []
+        for (let i = 0; i < chLines.length; i++) {
+            const entry = chLines[i]
+            const text = typeof entry === 'string' ? entry : (entry?.text || '')
+            bytes += text.length * 3 + 24
+        }
+        return Math.max(256, bytes)
+    }
     const sectionData = chapters.map((chapter, index) => {
-        const htmlBody = renderContentToHTML(chapter.lines, { isPoetryMode: isBookPoetry, tocLinkMap, language, legacyLayout })
-        const htmlStr = template(chapter.title, chapter.isHeaderExplicit, htmlBody)
-        const blob = new Blob([htmlStr], { type: MIME.XHTML })
-        const url = URL.createObjectURL(blob)
-        urls.push(url)
-
-        return {
+        let cachedHtml = null
+        let cachedUrl = null
+        const getHtml = () => {
+            if (cachedHtml === null) {
+                const htmlBody = renderContentToHTML(chapter.lines, { isPoetryMode: isBookPoetry, tocLinkMap, language, legacyLayout })
+                cachedHtml = template(chapter.title, chapter.isHeaderExplicit, htmlBody)
+            }
+            return cachedHtml
+        }
+        const section = {
             id: index,
             title: chapter.title,
-            size: blob.size,
-            load: () => url,
-            createDocument: () => new DOMParser().parseFromString(htmlStr, MIME.XHTML)
+            size: estimateChapterSize(chapter),
+            load: () => {
+                if (cachedUrl === null) {
+                    const blob = new Blob([getHtml()], { type: MIME.XHTML })
+                    section.size = blob.size
+                    cachedUrl = URL.createObjectURL(blob)
+                    urls.push(cachedUrl)
+                }
+                return cachedUrl
+            },
+            createDocument: () => new DOMParser().parseFromString(getHtml(), MIME.XHTML)
         }
+        return section
     })
 
     const coverSvg = generateCoverSVG(title, author)
@@ -708,7 +730,7 @@ export const makeTXT = async (file, { filename = file.name, legacyLayout = false
             id: s.id,
             load: s.load,
             createDocument: s.createDocument,
-            size: s.size
+            get size() { return s.size }
         })),
         toc: sectionData.map((s, idx) => ({
             label: s.title,

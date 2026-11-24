@@ -28,10 +28,11 @@ glyph edges, and also record RGB error. They do not claim exact pixel identity.
 
 ## Bounds and fallback
 
-- Keep at most three CPU canvases at up to 1 Mi pixels each by default.
-  If WebView reports at least 8 GiB of device memory, prepare one more
-  page in the reading direction, with up to 3 Mi pixels per canvas and
-  up to 3x display density.
+- On low-memory devices (`navigator.deviceMemory <= 2` GiB), keep at most three
+  CPU canvases at up to 2 Mi pixels each and up to 2x display density.
+  By default (`> 2` GiB or when `deviceMemory` is unavailable), prepare up to
+  four canvases in the reading direction at up to 6,000,000 pixels per canvas
+  and up to 3x display density (further bounded by viewport CSS size and DPR).
   The GL renderer uses the prepared texture resolution, two page textures
   and shadow buffers. These limits describe allocations for page turning.
 - Chapter pagination retains the serialized XHTML and already painted page

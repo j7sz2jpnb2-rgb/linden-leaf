@@ -87,6 +87,7 @@ export class PdfViewport {
             onSlotGeometrySync: null,
             onInteractionModeChange: null,
             onZoomChange: null,
+            onScrollPositionChange: null,
             onTap: null,
         }, options)
 
@@ -98,6 +99,9 @@ export class PdfViewport {
         this.numPages = 0
         this.pageSizes = []
         this.pageOffsets = []
+        this._layoutRows = []
+        this._layoutRowsSource = null
+        this._layoutRowsLength = 0
         this.totalHeight = 0
         this.activeSlots = new Map()
         this.currentPage = 0
@@ -121,6 +125,8 @@ export class PdfViewport {
         this._renderConcurrency = 2
         this._budgetRenderConcurrency = null
         this._prefetchTimer = null
+        this._zoomRefineTimer = null
+        this._scrollPositionTimer = null
         this._navigationBurstCount = 0
         this._lastNavigationDirection = 1
         this._bitmapCache = new Map()
@@ -265,8 +271,18 @@ export class PdfViewport {
                     // Holding a key must not postpone its raster until scrolling stops.
                     this._renderVisibleSlots()
                     this._schedulePdfTextLayers()
+                    if (this._hasPendingVisibleZoomRefine()) {
+                        this._scheduleZoomRefine()
+                    }
                 })
             }
+
+            clearTimeout(this._scrollPositionTimer)
+            this._scrollPositionTimer = setTimeout(() => {
+                this._scrollPositionTimer = null
+                if (this._destroyed || !this.numPages) return
+                this.options.onScrollPositionChange?.(this.getReadingLocation())
+            }, 350)
 
         }, { passive: true })
 
@@ -379,6 +395,10 @@ export class PdfViewport {
         this._outlineRequested = false
         clearTimeout(this._prefetchTimer)
         this._prefetchTimer = null
+        clearTimeout(this._zoomRefineTimer)
+        this._zoomRefineTimer = null
+        clearTimeout(this._scrollPositionTimer)
+        this._scrollPositionTimer = null
         clearTimeout(this._navigationRenderTimer)
         this._navigationRenderTimer = null
         this._navigationRenderPending = null
@@ -440,6 +460,10 @@ export class PdfViewport {
         this._outlineRequested = false
         clearTimeout(this._prefetchTimer)
         this._prefetchTimer = null
+        clearTimeout(this._zoomRefineTimer)
+        this._zoomRefineTimer = null
+        clearTimeout(this._scrollPositionTimer)
+        this._scrollPositionTimer = null
         clearTimeout(this._navigationRenderTimer)
         this._navigationRenderTimer = null
         this._navigationRenderPending = null
@@ -599,11 +623,15 @@ export class PdfViewport {
     _recomputeLayout() {
         if (!Array.isArray(this.pageSizes) || !this.pageSizes.length) {
             this.pageOffsets = []
+            this._layoutRows = []
+            this._layoutRowsSource = this.pageOffsets
+            this._layoutRowsLength = 0
             this.totalHeight = 0
             this._layoutWidth = 0
             return
         }
         this.pageOffsets = []
+        const rows = []
         const gap = 16
         let y = 16
         let maxWidth = 0
@@ -615,6 +643,7 @@ export class PdfViewport {
                 const w0 = m0.slotWidth
                 const h0 = m0.slotHeight
                 this.pageOffsets.push({ top: y, width: w0, height: h0, left: null })
+                rows.push({ top: y, bottom: y + h0, startPage: 0, endPage: 0 })
                 maxWidth = Math.max(maxWidth, w0)
                 y += h0 + gap
             }
@@ -633,11 +662,13 @@ export class PdfViewport {
 
                     this.pageOffsets.push({ top: y, width: wL, height: hL, left: null, _pairRight: i + 1, _wR: wR })
                     this.pageOffsets.push({ top: y, width: wR, height: hR, left: null })
+                    rows.push({ top: y, bottom: y + rowH, startPage: i, endPage: i + 1 })
                     maxWidth = Math.max(maxWidth, wL + gap + wR)
                     y += rowH + gap
                 } else {
                     // Trailing single page
                     this.pageOffsets.push({ top: y, width: wL, height: hL, left: null })
+                    rows.push({ top: y, bottom: y + hL, startPage: i, endPage: i })
                     maxWidth = Math.max(maxWidth, wL)
                     y += hL + gap
                 }
@@ -648,6 +679,7 @@ export class PdfViewport {
                 const width = m.slotWidth
                 const height = m.slotHeight
                 this.pageOffsets.push({ top: y, width, height, left: null })
+                rows.push({ top: y, bottom: y + height, startPage: i, endPage: i })
                 y += height + gap
                 maxWidth = Math.max(maxWidth, width)
             }
@@ -688,6 +720,10 @@ export class PdfViewport {
             }
         }
 
+        this._layoutRows = rows
+        this._layoutRowsSource = this.pageOffsets
+        this._layoutRowsLength = this.pageOffsets.length
+
         this.spacer.style.height = `${this.totalHeight}px`
         this.spacer.style.width = `${this._layoutWidth}px`
     }
@@ -711,33 +747,64 @@ export class PdfViewport {
         }
     }
 
-    _firstPageAt(y) {
-        let lo = 0, hi = this.pageOffsets.length
-        while (lo < hi) {
-            const mid = (lo + hi) >>> 1, p = this.pageOffsets[mid]
-            if (p.top + p.height < y) lo = mid + 1
-            else hi = mid
+    _ensureLayoutRows() {
+        if (!Array.isArray(this.pageOffsets) || !this.pageOffsets.length) {
+            this._layoutRows = []
+            this._layoutRowsSource = this.pageOffsets
+            this._layoutRowsLength = 0
+            return this._layoutRows
         }
-        if (lo > 0 && this.pageOffsets[lo] && this.pageOffsets[lo - 1] && this.pageOffsets[lo].top === this.pageOffsets[lo - 1].top) {
-            lo--
+        if (this._layoutRows && this._layoutRowsSource === this.pageOffsets && this._layoutRowsLength === this.pageOffsets.length) {
+            return this._layoutRows
+        }
+        const rows = []
+        for (let i = 0; i < this.pageOffsets.length; i++) {
+            const p = this.pageOffsets[i]
+            const pBottom = p.top + p.height
+            const prevRow = rows[rows.length - 1]
+            if (prevRow && prevRow.top === p.top) {
+                prevRow.endPage = i
+                if (pBottom > prevRow.bottom) prevRow.bottom = pBottom
+            } else {
+                rows.push({ top: p.top, bottom: pBottom, startPage: i, endPage: i })
+            }
+        }
+        this._layoutRows = rows
+        this._layoutRowsSource = this.pageOffsets
+        this._layoutRowsLength = this.pageOffsets.length
+        return rows
+    }
+
+    _firstRowAt(y) {
+        const rows = this._ensureLayoutRows()
+        let lo = 0, hi = rows.length
+        while (lo < hi) {
+            const mid = (lo + hi) >>> 1
+            if (rows[mid].bottom < y) lo = mid + 1
+            else hi = mid
         }
         return lo
     }
 
+    _firstPageAt(y) {
+        const rows = this._ensureLayoutRows()
+        if (!rows.length) return 0
+        const rowIdx = this._firstRowAt(y)
+        if (rowIdx >= rows.length) return this.pageOffsets.length
+        return rows[rowIdx].startPage
+    }
+
     _findVisibleRange(bufferPages = this.options.bufferPages) {
-        if (!this.pageOffsets.length) return { first: 0, last: 0, start: 0, end: 0 }
+        const rows = this._ensureLayoutRows()
+        if (!this.pageOffsets.length || !rows.length) return { first: 0, last: 0, start: 0, end: 0 }
         const top = this.scrollArea.scrollTop, bottom = top + this.scrollArea.clientHeight
-        let first = this._firstPageAt(top)
-        if (first > 0 && this.pageOffsets[first] && this.pageOffsets[first - 1] && this.pageOffsets[first].top === this.pageOffsets[first - 1].top) {
-            first--
+        const firstRow = Math.min(rows.length - 1, this._firstRowAt(top))
+        let lastRow = firstRow
+        while (lastRow + 1 < rows.length && rows[lastRow + 1].top <= bottom) {
+            lastRow++
         }
-        let last = first
-        for (let i = first; i < this.pageOffsets.length && this.pageOffsets[i].top <= bottom; i++) {
-            last = i
-        }
-        if (last + 1 < this.pageOffsets.length && this.pageOffsets[last + 1].top === this.pageOffsets[last].top) {
-            last++
-        }
+        const first = rows[firstRow].startPage
+        const last = rows[lastRow].endPage
         const buf = bufferPages * (this.spreadMode === 'dual' ? 2 : 1)
         const start = Math.max(0, first - buf)
         const end = Math.min(this.pageOffsets.length - 1, last + buf)
@@ -845,6 +912,8 @@ export class PdfViewport {
         if (force) {
             clearTimeout(this._prefetchTimer)
             this._prefetchTimer = null
+            clearTimeout(this._zoomRefineTimer)
+            this._zoomRefineTimer = null
             for (let i = start; i <= end; i++) {
                 const slot = this.activeSlots.get(i)
                 if (!slot) continue
@@ -852,6 +921,7 @@ export class PdfViewport {
                 slot.renderAbort?.abort()
                 slot.renderAbort = new AbortController()
                 slot._renderedIsPreview = false
+                slot._needsClipRefine = false
                 const text = slot.querySelector('.pdf-text-layer')
                 if (text) {
                     text.style.opacity = '0'
@@ -926,10 +996,56 @@ export class PdfViewport {
 
         this._pumpRenderQueue()
 
+        if (!previewOnly && this._hasPendingVisibleZoomRefine()) {
+            this._scheduleZoomRefine()
+        }
+
         if (!previewOnly && this.options.bufferPages > 0) {
             // Defer offscreen prefetch briefly so visible page(s) finish first cleanly
             // without queue churn during active scrolling or single-page handoff.
             this._schedulePrefetchDeferred(toSchedule.length ? 95 : 20)
+        }
+    }
+
+    _hasPendingVisibleZoomRefine() {
+        if (this._destroyed || !this.pageOffsets.length || !this.activeSlots.size) return false
+        const { first, last } = this._findVisibleRange(0)
+        for (let i = first; i <= last; i++) {
+            const slot = this.activeSlots.get(i)
+            if (slot?._needsClipRefine && slot._renderedScale === this.scale) return true
+        }
+        return false
+    }
+
+    _scheduleZoomRefine(delayMs = 180) {
+        if (this._destroyed) return
+        clearTimeout(this._zoomRefineTimer)
+        this._zoomRefineTimer = setTimeout(() => {
+            this._zoomRefineTimer = null
+            this._runZoomRefine()
+        }, delayMs)
+    }
+
+    _runZoomRefine() {
+        if (this._destroyed || !this.driver || !this.pageOffsets.length) return
+        if (this._lastScrollEventTs && (performance.now() - this._lastScrollEventTs) < 140) {
+            this._scheduleZoomRefine(120)
+            return
+        }
+        const { first, last } = this._findVisibleRange(0)
+        let promoted = false
+        for (let i = first; i <= last; i++) {
+            const slot = this.activeSlots.get(i)
+            if (!slot || !slot._needsClipRefine || slot._renderedScale !== this.scale) continue
+            if (this._isPageQueuedOrRendering(i, slot._renderToken)) continue
+            slot._needsClipRefine = false
+            slot._renderToken = (slot._renderToken || 0) + 1
+            slot.renderAbort?.abort()
+            slot.renderAbort = new AbortController()
+            promoted = true
+        }
+        if (promoted) {
+            this._renderVisibleSlots()
         }
     }
 
@@ -1097,10 +1213,7 @@ export class PdfViewport {
         if (!this._renderQueue.length && totalActive === 0) return
 
         // 2. Re-compute visible boundaries to update tiers and distances dynamically
-        const top = this.scrollArea.scrollTop, bottom = top + this.scrollArea.clientHeight
-        const first = this._firstPageAt(top)
-        let last = first
-        for (let i = first; i < this.pageOffsets.length && this.pageOffsets[i].top <= bottom; i++) last = i
+        const { first, last } = this._findVisibleRange(0)
 
         for (const item of this._renderQueue) {
             if (item.page >= first && item.page <= last) {
@@ -1384,8 +1497,9 @@ export class PdfViewport {
 
             // A new slot needs one complete raster, rather than a serial preview
             // plus a second high-resolution request. Retained full-page canvases
-            // cover scrolling immediately; later zooms may refine with a clip.
-            if (clip && !pixels.querySelector('.pdf-page-canvas, .pdf-page-preview')) {
+            // cover scrolling immediately; later idle ticks refine zoomed slots with a clip.
+            const deferredClipRefine = Boolean(clip && !pixels.querySelector('.pdf-page-canvas, .pdf-page-preview'))
+            if (deferredClipRefine) {
                 clip = null
                 requestedClip = null
                 scale = fullPageScale
@@ -1435,6 +1549,7 @@ export class PdfViewport {
                 slot._renderedScale = null
                 slot._renderedToken = 0
                 slot._renderedIsPreview = true
+                slot._needsClipRefine = false
                 return
             }
 
@@ -1452,6 +1567,14 @@ export class PdfViewport {
                 slot._fullRaster = { canvas, scale, generation: this._loadGeneration }
                 slot._renderedClip = null
                 slot._renderedIsPreview = false
+                slot._needsClipRefine = Boolean(
+                    deferredClipRefine ||
+                    (priority !== 0 &&
+                        this.options.enableClip !== false &&
+                        this.driver.kind === 'mupdf' &&
+                        totalPixels >= threshold &&
+                        unthrottledScale > fullPageScale * 1.02)
+                )
             } else {
                 // Clipped render with 2D preview handover
                 pixels.querySelector('.pdf-page-loading')?.remove()
@@ -1505,6 +1628,7 @@ export class PdfViewport {
                 else if (pixels.children?.unshift) { pixels.children.unshift(canvas); canvas.parentElement = pixels }
                 else pixels.append(canvas)
 
+                slot._needsClipRefine = false
                 slot._renderedClip = {
                     left: requestedClip ? requestedClip.left : cssLeft,
                     right: requestedClip ? requestedClip.right : (cssLeft + cssWidth),
@@ -1518,6 +1642,12 @@ export class PdfViewport {
             slot._renderedToken = token
             slot._renderError = false
             slot._renderedIsPreview = false
+            if (slot._needsClipRefine && isCurrent()) {
+                const vis = this._findVisibleRange(0)
+                if (page >= vis.first && page <= vis.last) {
+                    this._scheduleZoomRefine()
+                }
+            }
             this.visualVersion = (this.visualVersion || 0) + 1
             this._notifyPageReadyWaiters(page)
             if (page === this._initialTargetPage && canvas?.width > 0 && canvas?.height > 0 && isCurrent()) {
@@ -2687,28 +2817,39 @@ export class PdfViewport {
 
     getPageAtViewportCenter() {
         if (!this.pageOffsets.length) return 0
+        const rows = this._ensureLayoutRows()
+        if (!rows.length) return 0
         const top = this.scrollArea.scrollTop, centerY = top + this.scrollArea.clientHeight / 2
         const left = this.scrollArea.scrollLeft, centerX = left + this.scrollArea.clientWidth / 2
+        const fallbackWidth = this._layoutWidth || this.scrollArea.clientWidth || 0
 
-        let best = this.currentPage
+        const rowIdx = Math.min(rows.length - 1, this._firstRowAt(centerY))
+        const minRow = Math.max(0, rowIdx - 1)
+        const maxRow = Math.min(rows.length - 1, rowIdx + 1)
+
+        let best = clamp(this.currentPage || 0, 0, this.pageOffsets.length - 1)
         let minDistanceSq = Infinity
 
-        for (let i = 0; i < this.pageOffsets.length; i++) {
-            const p = this.pageOffsets[i]
-            const pLeft = p.left != null ? p.left : (this._layoutWidth - p.width) / 2
-            const pRight = pLeft + p.width
-            const pBottom = p.top + p.height
+        for (let r = minRow; r <= maxRow; r++) {
+            const row = rows[r]
+            for (let i = row.startPage; i <= row.endPage; i++) {
+                const p = this.pageOffsets[i]
+                if (!p) continue
+                const pLeft = p.left != null ? p.left : (fallbackWidth - p.width) / 2
+                const pRight = pLeft + p.width
+                const pBottom = p.top + p.height
 
-            if (centerX >= pLeft && centerX <= pRight && centerY >= p.top && centerY <= pBottom) {
-                return i
-            }
+                if (centerX >= pLeft && centerX <= pRight && centerY >= p.top && centerY <= pBottom) {
+                    return i
+                }
 
-            const pCenterX = pLeft + p.width / 2
-            const pCenterY = p.top + p.height / 2
-            const distSq = (centerX - pCenterX) ** 2 + (centerY - pCenterY) ** 2
-            if (distSq < minDistanceSq) {
-                minDistanceSq = distSq
-                best = i
+                const pCenterX = pLeft + p.width / 2
+                const pCenterY = p.top + p.height / 2
+                const distSq = (centerX - pCenterX) ** 2 + (centerY - pCenterY) ** 2
+                if (distSq < minDistanceSq) {
+                    minDistanceSq = distSq
+                    best = i
+                }
             }
         }
         return best
@@ -2796,14 +2937,19 @@ export class PdfViewport {
         this._syncActiveSlotGeometry()
         this.visualVersion = (this.visualVersion || 0) + 1
         this.options.onZoomChange?.(this.scale)
-        if (scaleChanged) for (const slot of this.activeSlots.values()) {
-            slot._renderedClip = null
-            // Old tile positions are CSS pixels at the previous zoom. The full
-            // page preview scales with its wrapper while a fresh raster is made.
-            slot.querySelectorAll('.pdf-clip-canvas').forEach(canvas => {
-                canvas.remove()
-                canvas.width = canvas.height = 0
-            })
+        if (scaleChanged) {
+            clearTimeout(this._zoomRefineTimer)
+            this._zoomRefineTimer = null
+            for (const slot of this.activeSlots.values()) {
+                slot._renderedClip = null
+                slot._needsClipRefine = false
+                // Old tile positions are CSS pixels at the previous zoom. The full
+                // page preview scales with its wrapper while a fresh raster is made.
+                slot.querySelectorAll('.pdf-clip-canvas').forEach(canvas => {
+                    canvas.remove()
+                    canvas.width = canvas.height = 0
+                })
+            }
         }
         if (render) this._renderVisibleSlots(scaleChanged)
         this._redrawNativePreview()
@@ -3859,6 +4005,10 @@ export class PdfViewport {
         this._pdfTextPressTimer = null
         clearTimeout(this._prefetchTimer)
         this._prefetchTimer = null
+        clearTimeout(this._zoomRefineTimer)
+        this._zoomRefineTimer = null
+        clearTimeout(this._scrollPositionTimer)
+        this._scrollPositionTimer = null
         clearTimeout(this._navigationRenderTimer)
         this._navigationRenderTimer = null
         this._navigationRenderPending = null

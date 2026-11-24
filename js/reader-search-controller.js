@@ -418,18 +418,35 @@ export class ReaderSearchController {
         if (viewport && driver) {
             const total = viewport.numPages || viewport.pageSizes?.length || 0
             const needle = query.toLowerCase()
+            const normalizedNeedle = needle.replace(/\s+/g, ' ').trim()
+            const searchNeedle = normalizedNeedle || needle
             for (let pageIndex = 0; pageIndex < total; pageIndex++) {
                 if (signal.aborted) return
                 try {
                     const plain = await driver.getPagePlainText?.(pageIndex)
                     if (signal.aborted) return
-                    if (typeof plain === 'string' && !plain.toLowerCase().includes(needle)) continue
+                    if (typeof plain === 'string') {
+                        const plainLower = plain.toLowerCase()
+                        const hasMatch = plainLower.includes(needle) ||
+                            (normalizedNeedle.length > 0 && plainLower.replace(/\s+/g, ' ').includes(normalizedNeedle))
+                        if (!hasMatch) continue
+                    }
                     const { spans = [] } = await driver.getTextLayer(pageIndex)
                     if (signal.aborted) return
                     const size = viewport.pageSizes?.[pageIndex] || { width: 595, height: 842 }
-                    const text = spans.map(span => span.text).join(' '), lower = text.toLowerCase()
-                    let offset = 0
-                    const offsets = spans.map(span => { const start = offset; offset += span.text.length + 1; return { span, start } })
+                    let text = ''
+                    const offsets = []
+                    for (let i = 0; i < spans.length; i++) {
+                        const span = spans[i]
+                        const spanText = span.text || ''
+                        if (i > 0 && text.length > 0 && spanText.length > 0 && !/\s$/.test(text) && !/^\s/.test(spanText)) {
+                            text += ' '
+                        }
+                        const start = text.length
+                        text += spanText
+                        offsets.push({ span, start })
+                    }
+                    const lower = text.toLowerCase()
                     let position = 0, sliceStart = performance.now()
                     while (position < text.length) {
                         if (signal.aborted) return
@@ -438,9 +455,9 @@ export class ReaderSearchController {
                             sliceStart = performance.now()
                             if (signal.aborted) return
                         }
-                        const found = lower.indexOf(needle, position)
+                        const found = lower.indexOf(searchNeedle, position)
                         if (found < 0) break
-                        const end = found + query.length
+                        const end = found + searchNeedle.length
                         const rects = this._pdfSearchRects(offsets, found, end, size)
                         yield {
                             label: t('common.pageNumber', { page: pageIndex + 1 }), pageIndex, rects, yRatio: rects[0]?.[1] || 0,
@@ -487,9 +504,10 @@ export class ReaderSearchController {
         const state = this._bookSearchState
         if (!state || state.busy || !this._isBookSearchCurrent(state)) return false
         state.busy = true
-        const container = this.dom.searchResultsContainer
-        container.querySelectorAll('button').forEach(button => button.disabled = true)
-        if (!state.pages.size) container.innerText = t('search.inBookSearching')
+        const container = this.dom?.searchResultsContainer
+        container?.querySelectorAll?.('button')?.forEach?.(button => button.disabled = true)
+        if (!state.pages.size && container) container.innerText = t('search.inBookSearching')
+        let firstPulsed = false
         try {
             let page = state.pages.get(index)
             if (!page && index < state.nextPage) {
@@ -502,18 +520,38 @@ export class ReaderSearchController {
                 state.failedPages = 0
             }
             while (!page && state.nextPage <= index) {
+                const isTargetPage = state.nextPage === index
                 const items = []
+                let lastProgressiveRender = 0
                 while (items.length < state.pageSize) {
                     const step = state.pending || await state.iterator.next()
                     state.pending = null
                     if (!this._isBookSearchCurrent(state)) return false
                     if (step.done) break
                     items.push(step.value)
+                    if (isTargetPage) {
+                        const now = performance.now()
+                        if (items.length === 1 || (now - lastProgressiveRender >= 120)) {
+                            lastProgressiveRender = now
+                            state.pageIndex = index
+                            state.page = { items: items.slice(), hasMore: true, searching: true }
+                            this.currentSearchMatches = state.page.items
+                            this.currentSearchMatchIndex = 0
+                            this._renderBookSearchPage(state)
+                            this.updateSearchBarUI?.()
+                            if (!firstPulsed) {
+                                firstPulsed = true
+                                const first = state.page.items[0]
+                                if (first?.cfi) state.view?.setActiveSearchMatch?.(first.cfi)
+                                else if (first?.rects?.length) state.viewport?.pulseRects?.(first.pageIndex, first.rects)
+                            }
+                        }
+                    }
                 }
                 const lookahead = items.length === state.pageSize ? await state.iterator.next() : { done: true }
                 if (!this._isBookSearchCurrent(state)) return false
                 state.pending = lookahead.done ? null : lookahead
-                page = { items, hasMore: !lookahead.done }
+                page = { items, hasMore: !lookahead.done, searching: false }
                 if (!page.hasMore) state.total = state.nextPage * state.pageSize + items.length
                 state.pages.set(state.nextPage, page)
                 state.nextPage++
@@ -527,13 +565,15 @@ export class ReaderSearchController {
             this.currentSearchMatches = page.items
             this.currentSearchMatchIndex = 0
             this._renderBookSearchPage(state)
-            const first = page.items[0]
-            if (first?.cfi) state.view?.setActiveSearchMatch?.(first.cfi)
-            else if (first?.rects?.length) state.viewport?.pulseRects(first.pageIndex, first.rects)
-            this.updateSearchBarUI()
+            if (!firstPulsed) {
+                const first = page.items[0]
+                if (first?.cfi) state.view?.setActiveSearchMatch?.(first.cfi)
+                else if (first?.rects?.length) state.viewport?.pulseRects?.(first.pageIndex, first.rects)
+            }
+            this.updateSearchBarUI?.()
             return true
         } catch (error) {
-            if (this._isBookSearchCurrent(state)) container.innerText = t('search.inBookFailed', { error: error.message || error })
+            if (this._isBookSearchCurrent(state) && container) container.innerText = t('search.inBookFailed', { error: error.message || error })
             return false
         } finally {
             if (this._isBookSearchCurrent(state)) state.busy = false
@@ -541,7 +581,9 @@ export class ReaderSearchController {
     }
 
     _renderBookSearchPage(state) {
-        const container = this.dom.searchResultsContainer, { page, pageIndex, pageSize } = state
+        const container = this.dom?.searchResultsContainer
+        if (!container) return
+        const { page, pageIndex, pageSize } = state
         container.replaceChildren()
         const summary = document.createElement('div')
         summary.className = 'search-page-summary'
@@ -577,7 +619,7 @@ export class ReaderSearchController {
         if (pageIndex || page.hasMore) {
             const pager = document.createElement('div')
             pager.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:12px'
-            for (const [label, direction, disabled] of [[t('search.prevPage'), -1, !pageIndex], [t('search.nextPage'), 1, !page.hasMore]]) {
+            for (const [label, direction, disabled] of [[t('search.prevPage'), -1, Boolean(page.searching) || !pageIndex], [t('search.nextPage'), 1, Boolean(page.searching) || !page.hasMore]]) {
                 const button = document.createElement('button')
                 button.type = 'button'; button.className = 'btn-secondary'; button.textContent = label; button.disabled = disabled
                 button.dataset.searchPage = direction < 0 ? 'previous' : 'next'

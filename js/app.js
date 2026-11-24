@@ -2785,9 +2785,29 @@ class UniversalReaderApp {
     makeProgressSnapshot(session) {
         if (!session || !session.location || !session.snapshot) return null
         const loc = session.location
-        const fraction = Number.isFinite(loc.fraction) ? Math.min(1, Math.max(0, loc.fraction)) : 0
-        const page = typeof loc.page === 'number' && loc.page >= 1 ? Math.round(loc.page) : null
+        let fraction = Number.isFinite(loc.fraction) ? Math.min(1, Math.max(0, loc.fraction)) : 0
+        let page = typeof loc.page === 'number' && loc.page >= 1 ? Math.round(loc.page) : null
         const totalPages = typeof loc.totalPages === 'number' && loc.totalPages >= 1 ? Math.round(loc.totalPages) : null
+        let yRatio = typeof loc.yRatio === 'number' && Number.isFinite(loc.yRatio)
+            ? Math.min(1, Math.max(0, loc.yRatio))
+            : null
+        if (session.viewport?.numPages && typeof session.viewport.getReadingLocation === 'function') {
+            try {
+                const liveLoc = session.viewport.getReadingLocation()
+                if (Number.isFinite(liveLoc?.yRatio)) {
+                    yRatio = Math.min(1, Math.max(0, liveLoc.yRatio))
+                }
+                if (Number.isFinite(liveLoc?.page) && liveLoc.page >= 1) {
+                    const livePage = Math.round(liveLoc.page)
+                    if (livePage !== page) {
+                        page = livePage
+                        if (totalPages && totalPages >= 1) {
+                            fraction = Math.min(1, Math.max(0, livePage / totalPages))
+                        }
+                    }
+                }
+            } catch (_) {}
+        }
         const cfi = typeof loc.cfi === 'string' ? loc.cfi : null
         const tocItem = loc.tocItem ? { label: loc.tocItem.label || '', href: loc.tocItem.href || '' } : null
         const format = session.bookData?.format || ''
@@ -2800,7 +2820,7 @@ class UniversalReaderApp {
             cfi,
             tocItem,
             format,
-            yRatio: typeof loc.yRatio === 'number' ? loc.yRatio : null,
+            yRatio,
             blobRevision: snapshot.blobRevision || null,
             revisionOrigin: snapshot.revisionOrigin || null,
             documentHash: snapshot.documentHash || null,
@@ -3182,7 +3202,9 @@ class UniversalReaderApp {
                         tracker.recordPageTurn()
 
                         const frac = total > 0 ? (pageIdx + 1) / total : 0
-                        const loc = { fraction: frac, page: pageIdx + 1, totalPages: total }
+                        const liveYRatio = sessionViewport.getReadingLocation?.()?.yRatio
+                        const normalizedYRatio = Number.isFinite(liveYRatio) ? Math.min(1, Math.max(0, liveYRatio)) : 0
+                        const loc = { fraction: frac, page: pageIdx + 1, totalPages: total, yRatio: normalizedYRatio }
                         readerSession.location = loc
                         if (this._activeSession === readerSession) {
                             this.currentLocation = loc
@@ -3220,6 +3242,30 @@ class UniversalReaderApp {
                                 const progressSnapshot = this.makeProgressSnapshot(readerSession)
                                 if (progressSnapshot) {
                                     db.updateBookProgress(bookId, progressSnapshot).catch(err => console.warn('Failed to update PDF progress:', err))
+                                }
+                            }
+                        }, 500)
+                    },
+                    onScrollPositionChange: (liveLoc) => {
+                        if (!readerSession.isCurrent()) return
+                        const nextYRatio = Number.isFinite(liveLoc?.yRatio) ? Math.min(1, Math.max(0, liveLoc.yRatio)) : 0
+                        const total = sessionViewport.numPages || readerSession.location?.totalPages || 0
+                        const nextPage = Number.isFinite(liveLoc?.page) && liveLoc.page >= 1
+                            ? Math.round(liveLoc.page)
+                            : (readerSession.location?.page || (sessionViewport.currentPage + 1))
+                        const nextFrac = total > 0 ? Math.min(1, Math.max(0, nextPage / total)) : (readerSession.location?.fraction ?? 0)
+                        const prevLoc = readerSession.location || {}
+                        const updatedLoc = { ...prevLoc, fraction: nextFrac, page: nextPage, totalPages: total, yRatio: nextYRatio }
+                        readerSession.location = updatedLoc
+                        if (this._activeSession === readerSession) {
+                            this.currentLocation = updatedLoc
+                        }
+                        clearTimeout(this._progressDebounceTimer)
+                        this._progressDebounceTimer = setTimeout(() => {
+                            if (readerSession.isCurrent() && this.currentBookId === bookId) {
+                                const progressSnapshot = this.makeProgressSnapshot(readerSession)
+                                if (progressSnapshot) {
+                                    db.updateBookProgress(bookId, progressSnapshot).catch(err => console.warn('Failed to update PDF scroll progress:', err))
                                 }
                             }
                         }, 500)
@@ -3387,7 +3433,18 @@ this.pdfTools.applyPdfPageAppearance()
                     : { page: 1, fraction: 0 }
                 const displayPage = sessionViewport.currentPage + 1
                 const initialFrac = initialLocation?.page != null ? displayPage / docInfo.numPages : decodedInitial.fraction
-                const initLoc = { fraction: initialFrac, page: displayPage, totalPages: docInfo.numPages }
+                const restoredYRatio = initialLocation
+                    ? (initialLocation.yRatio ?? 0)
+                    : (isProgressIdentityMatching ? (progressMeta?.yRatio ?? 0) : 0)
+                const liveInitialYRatio = sessionViewport.getReadingLocation?.()?.yRatio
+                const initLoc = {
+                    fraction: initialFrac,
+                    page: displayPage,
+                    totalPages: docInfo.numPages,
+                    yRatio: Number.isFinite(liveInitialYRatio)
+                        ? Math.min(1, Math.max(0, liveInitialYRatio))
+                        : (Number.isFinite(restoredYRatio) ? Math.min(1, Math.max(0, restoredYRatio)) : 0)
+                }
                 readerSession.location = initLoc
                 this.currentLocation = initLoc
 

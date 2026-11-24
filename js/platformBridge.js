@@ -320,18 +320,24 @@ class PlatformBridge {
     /**
      * Low-level Tauri invoke dispatcher supporting Tauri 2.0 and Tauri 1.x
      */
-    async _invokeTauri(cmd, args = {}) {
+    async _invokeTauri(cmd, args = {}, options = undefined) {
         if (typeof window === 'undefined') {
             throw new Error(`Cannot invoke Tauri command '${cmd}' outside browser window`);
         }
         if (window.__TAURI__?.core?.invoke) {
-            return await window.__TAURI__.core.invoke(cmd, args);
+            return options !== undefined
+                ? await window.__TAURI__.core.invoke(cmd, args, options)
+                : await window.__TAURI__.core.invoke(cmd, args);
         }
         if (window.__TAURI__?.invoke) {
-            return await window.__TAURI__.invoke(cmd, args);
+            return options !== undefined
+                ? await window.__TAURI__.invoke(cmd, args, options)
+                : await window.__TAURI__.invoke(cmd, args);
         }
         if (window.__TAURI_INTERNALS__?.invoke) {
-            return await window.__TAURI_INTERNALS__.invoke(cmd, args);
+            return options !== undefined
+                ? await window.__TAURI_INTERNALS__.invoke(cmd, args, options)
+                : await window.__TAURI_INTERNALS__.invoke(cmd, args);
         }
         throw new Error(`Tauri invoke is not available in current window for command '${cmd}'`);
     }
@@ -1784,6 +1790,53 @@ class PlatformBridge {
         return { success: false, error: t('bridge.error.syncUnavailable') };
     }
 
+    _bytesToBase64(u8) {
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < u8.length; i += chunkSize) {
+            const slice = u8.subarray(i, Math.min(i + chunkSize, u8.length));
+            binary += String.fromCharCode(...slice);
+        }
+        return btoa(binary);
+    }
+
+    _utf8ToBase64(str) {
+        return this._bytesToBase64(new TextEncoder().encode(String(str ?? '')));
+    }
+
+    _parseRawSyncError(err) {
+        const rawText = typeof err === 'string'
+            ? err
+            : (typeof err?.message === 'string' ? err.message : null);
+        if (!rawText || !rawText.trim().startsWith('{')) return null;
+        try {
+            const parsed = JSON.parse(rawText);
+            if (parsed && typeof parsed.error === 'string') {
+                return parsed;
+            }
+        } catch (_) {}
+        return null;
+    }
+
+    async _normalizeBinaryArrayBuffer(value) {
+        if (!value) return null;
+        if (value instanceof ArrayBuffer) return value;
+        if (ArrayBuffer.isView(value)) {
+            return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+        }
+        if (value?.body instanceof ArrayBuffer) return value.body;
+        if (ArrayBuffer.isView(value?.body)) {
+            return value.body.buffer.slice(value.body.byteOffset, value.body.byteOffset + value.body.byteLength);
+        }
+        if (typeof value?.arrayBuffer === 'function') {
+            return await value.arrayBuffer();
+        }
+        if (Array.isArray(value)) {
+            return new Uint8Array(value).buffer;
+        }
+        return null;
+    }
+
     /**
      * Upload single book binary to WebDAV LindenLeaf/books/
      * @param {object} config
@@ -1798,13 +1851,34 @@ class PlatformBridge {
         }
 
         if (this.isTauri) {
+            const u8 = buffer instanceof Uint8Array
+                ? buffer
+                : (buffer instanceof ArrayBuffer
+                    ? new Uint8Array(buffer)
+                    : (buffer?.buffer instanceof ArrayBuffer
+                        ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+                        : new Uint8Array(buffer || [])));
+
+            if (!this.isAndroid) {
+                try {
+                    const rawPayload = (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength) ? u8 : u8.slice();
+                    const metaHeader = this._utf8ToBase64(JSON.stringify({ config: localizedConfig, fileName }));
+                    const res = await this._invokeTauri('sync_upload_book_binary_raw', rawPayload, {
+                        headers: { 'x-linden-upload-meta': metaHeader }
+                    });
+                    if (res && res.success !== undefined) return res;
+                } catch (err) {
+                    console.warn('[PlatformBridge] Tauri sync_upload_book_binary_raw failed, falling back:', err);
+                }
+            }
+
             try {
-                const u8 = buffer instanceof Uint8Array ? buffer : (buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : (buffer?.buffer instanceof ArrayBuffer ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength) : new Uint8Array(buffer || [])));
+                const bufferBase64 = this._bytesToBase64(u8);
                 const res = await this._invokeTauri('sync_upload_book_binary', {
                     config: localizedConfig,
                     fileName,
                     file_name: fileName,
-                    buffer: Array.from(u8)
+                    bufferBase64
                 });
                 if (res && res.success !== undefined) return res;
             } catch (err) {
@@ -1833,24 +1907,49 @@ class PlatformBridge {
 
         if (this.isTauri) {
             try {
-                const res = await this._invokeTauri('sync_download_book_binary', { config: localizedConfig, fileName, file_name: fileName });
-                if (res && res.success && res.buffer) {
-                    let arrayBuffer = null;
-                    if (res.buffer instanceof ArrayBuffer) {
-                        arrayBuffer = res.buffer;
-                    } else if (ArrayBuffer.isView(res.buffer)) {
-                        arrayBuffer = res.buffer.buffer.slice(res.buffer.byteOffset, res.buffer.byteOffset + res.buffer.byteLength);
-                    } else if (Array.isArray(res.buffer)) {
-                        arrayBuffer = new Uint8Array(res.buffer).buffer;
-                    }
+                const raw = await this._invokeTauri('sync_download_book_binary_raw', {
+                    config: localizedConfig,
+                    fileName,
+                    file_name: fileName
+                });
+                if (raw && typeof raw === 'object' && !(raw instanceof ArrayBuffer) && !ArrayBuffer.isView(raw) && raw.success !== undefined) {
+                    const arrayBuffer = await this._normalizeBinaryArrayBuffer(raw.buffer);
+                    return raw.success && arrayBuffer ? { ...raw, buffer: arrayBuffer } : raw;
+                }
+                const arrayBuffer = await this._normalizeBinaryArrayBuffer(raw);
+                if (arrayBuffer) {
                     return {
-                        ...res,
+                        success: true,
+                        fileName,
+                        size: arrayBuffer.byteLength,
                         buffer: arrayBuffer
                     };
                 }
-                if (res && res.success !== undefined) return res;
             } catch (err) {
-                console.warn('[PlatformBridge] Tauri sync_download_book_binary failed, trying WebDAVService fallback:', err);
+                const structured = this._parseRawSyncError(err);
+                if (structured) {
+                    return {
+                        success: false,
+                        isNotFound: Boolean(structured.isNotFound),
+                        fileName: structured.fileName || fileName,
+                        error: structured.error
+                    };
+                }
+                console.warn('[PlatformBridge] Tauri sync_download_book_binary_raw failed, trying legacy IPC fallback:', err);
+                try {
+                    const res = await this._invokeTauri('sync_download_book_binary', {
+                        config: localizedConfig,
+                        fileName,
+                        file_name: fileName
+                    });
+                    if (res && res.success && res.buffer) {
+                        const arrayBuffer = await this._normalizeBinaryArrayBuffer(res.buffer);
+                        return { ...res, buffer: arrayBuffer };
+                    }
+                    if (res && res.success !== undefined) return res;
+                } catch (legacyErr) {
+                    console.warn('[PlatformBridge] Tauri sync_download_book_binary failed, trying WebDAVService fallback:', legacyErr);
+                }
             }
         }
 

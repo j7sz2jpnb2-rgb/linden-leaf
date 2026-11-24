@@ -923,77 +923,134 @@ pub async fn sync_save_remote(
     }
 }
 
-#[tauri::command]
-pub async fn sync_upload_book_binary(
-    #[allow(unused)] app_handle: tauri::AppHandle,
+const MAX_BOOK_BINARY_BYTES: usize = 300 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadBookBinaryMeta {
+    config: SyncConfig,
+    #[serde(alias = "file_name")]
+    file_name: String,
+}
+
+fn decode_upload_meta_header(raw_header: &str) -> Result<UploadBookBinaryMeta, String> {
+    use base64::Engine as _;
+    let trimmed = raw_header.trim();
+    if trimmed.is_empty() {
+        return Err("Missing x-linden-upload-meta header".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|e| format!("Invalid x-linden-upload-meta Base64 encoding: {e}"))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Invalid x-linden-upload-meta JSON payload: {e}"))
+}
+
+fn decode_base64_payload(b64: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let trimmed = b64.trim();
+    let max_encoded_len = (MAX_BOOK_BINARY_BYTES / 3 + 2) * 4 + 4;
+    if trimmed.len() > max_encoded_len {
+        return Err(format!(
+            "Book binary payload exceeds maximum permitted limit of {} bytes",
+            MAX_BOOK_BINARY_BYTES
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|e| format!("Invalid book binary Base64 payload: {e}"))?;
+    if bytes.len() > MAX_BOOK_BINARY_BYTES {
+        return Err(format!(
+            "Book binary payload exceeds maximum permitted limit of {} bytes",
+            MAX_BOOK_BINARY_BYTES
+        ));
+    }
+    Ok(bytes)
+}
+
+async fn upload_book_binary_inner(
+    app_handle: &tauri::AppHandle,
     config: SyncConfig,
     file_name: String,
     buffer: Vec<u8>,
-) -> Result<BookBinaryResponse, String> {
+) -> BookBinaryResponse {
     let safe_file_name = match validate_book_filename(&file_name) {
         Ok(n) => n,
-        Err(e) => return Ok(BookBinaryResponse {
+        Err(e) => return BookBinaryResponse {
             success: false,
             file_name: Some(file_name),
             size: None,
             buffer: None,
             error: Some(e),
-        }),
+        },
     };
+
+    if buffer.len() > MAX_BOOK_BINARY_BYTES {
+        return BookBinaryResponse {
+            success: false,
+            file_name: Some(safe_file_name),
+            size: None,
+            buffer: None,
+            error: Some(format!(
+                "Book binary payload exceeds maximum permitted limit of {} bytes",
+                MAX_BOOK_BINARY_BYTES
+            )),
+        };
+    }
 
     let client = match create_http_client(60) {
         Ok(c) => c,
-        Err(e) => return Ok(BookBinaryResponse {
+        Err(e) => return BookBinaryResponse {
             success: false,
             file_name: Some(safe_file_name),
             size: None,
             buffer: None,
             error: Some(e),
-        }),
+        },
     };
 
     let url = match get_sync_url(&config, &format!("books/{}", safe_file_name)) {
         Ok(u) => u,
-        Err(e) => return Ok(BookBinaryResponse {
+        Err(e) => return BookBinaryResponse {
             success: false,
             file_name: Some(safe_file_name),
             size: None,
             buffer: None,
             error: Some(e),
-        }),
+        },
     };
 
     let base_dir_url = match get_sync_url(&config, "") {
         Ok(u) => u,
-        Err(e) => return Ok(BookBinaryResponse {
+        Err(e) => return BookBinaryResponse {
             success: false,
             file_name: Some(safe_file_name),
             size: None,
             buffer: None,
             error: Some(e),
-        }),
+        },
     };
 
     let books_dir_url = match get_sync_url(&config, "books") {
         Ok(u) => u,
-        Err(e) => return Ok(BookBinaryResponse {
+        Err(e) => return BookBinaryResponse {
             success: false,
             file_name: Some(safe_file_name),
             size: None,
             buffer: None,
             error: Some(e),
-        }),
+        },
     };
 
-    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
+    let (user, pass) = match get_credentials(Some(app_handle), &config) {
         Ok(c) => c,
-        Err(e) => return Ok(BookBinaryResponse {
+        Err(e) => return BookBinaryResponse {
             success: false,
             file_name: Some(safe_file_name),
             size: None,
             buffer: None,
             error: Some(e),
-        }),
+        },
     };
 
     ensure_remote_dir(&client, &base_dir_url, &user, &pass).await;
@@ -1001,28 +1058,147 @@ pub async fn sync_upload_book_binary(
     let size = buffer.len();
 
     match client.put(url.as_str()).basic_auth(user, Some(pass)).body(buffer).send().await {
-        Ok(res) if res.status().is_success() => Ok(BookBinaryResponse {
+        Ok(res) if res.status().is_success() => BookBinaryResponse {
             success: true,
             file_name: Some(safe_file_name),
             size: Some(size),
             buffer: None,
             error: None,
-        }),
-        Ok(res) => Ok(BookBinaryResponse {
+        },
+        Ok(res) => BookBinaryResponse {
             success: false,
             file_name: Some(safe_file_name),
             size: None,
             buffer: None,
             error: Some(format!("HTTP {}", res.status().as_u16())),
-        }),
-        Err(e) => Ok(BookBinaryResponse {
+        },
+        Err(e) => BookBinaryResponse {
             success: false,
             file_name: Some(safe_file_name),
             size: None,
             buffer: None,
             error: Some(e.to_string()),
+        },
+    }
+}
+
+enum DownloadBookBinaryError {
+    NotFound { file_name: String, message: String },
+    Other { file_name: Option<String>, message: String },
+}
+
+async fn download_book_binary_inner(
+    app_handle: &tauri::AppHandle,
+    config: SyncConfig,
+    file_name: String,
+) -> Result<(String, Vec<u8>), DownloadBookBinaryError> {
+    let safe_file_name = validate_book_filename(&file_name).map_err(|e| DownloadBookBinaryError::Other {
+        file_name: Some(file_name),
+        message: e,
+    })?;
+
+    let client = create_http_client(60).map_err(|e| DownloadBookBinaryError::Other {
+        file_name: Some(safe_file_name.clone()),
+        message: e,
+    })?;
+
+    let url = get_sync_url(&config, &format!("books/{}", safe_file_name)).map_err(|e| DownloadBookBinaryError::Other {
+        file_name: Some(safe_file_name.clone()),
+        message: e,
+    })?;
+
+    let (user, pass) = get_credentials(Some(app_handle), &config).map_err(|e| DownloadBookBinaryError::Other {
+        file_name: Some(safe_file_name.clone()),
+        message: e,
+    })?;
+
+    match client.get(url.as_str()).basic_auth(user, Some(pass)).send().await {
+        Ok(res) if res.status().is_success() => {
+            // Hard limit: 300 MB for book binary
+            let bytes = read_response_body_limited(res, MAX_BOOK_BINARY_BYTES)
+                .await
+                .map_err(|e| DownloadBookBinaryError::Other {
+                    file_name: Some(safe_file_name.clone()),
+                    message: format!("Book binary download failed size limit: {}", e),
+                })?;
+            Ok((safe_file_name, bytes))
+        }
+        Ok(res) if res.status().as_u16() == 404 => Err(DownloadBookBinaryError::NotFound {
+            file_name: safe_file_name,
+            message: "404 Not Found".to_string(),
+        }),
+        Ok(res) => Err(DownloadBookBinaryError::Other {
+            file_name: Some(safe_file_name),
+            message: format!("HTTP {}", res.status().as_u16()),
+        }),
+        Err(e) => Err(DownloadBookBinaryError::Other {
+            file_name: Some(safe_file_name),
+            message: e.to_string(),
         }),
     }
+}
+
+#[tauri::command]
+pub async fn sync_upload_book_binary(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+    file_name: String,
+    buffer: Option<Vec<u8>>,
+    buffer_base64: Option<String>,
+) -> Result<BookBinaryResponse, String> {
+    let bytes = match buffer_base64 {
+        Some(b64) => match decode_base64_payload(&b64) {
+            Ok(data) => data,
+            Err(e) => return Ok(BookBinaryResponse {
+                success: false,
+                file_name: Some(file_name),
+                size: None,
+                buffer: None,
+                error: Some(e),
+            }),
+        },
+        None => match buffer {
+            Some(data) => data,
+            None => return Ok(BookBinaryResponse {
+                success: false,
+                file_name: Some(file_name),
+                size: None,
+                buffer: None,
+                error: Some("Missing upload buffer".to_string()),
+            }),
+        },
+    };
+    Ok(upload_book_binary_inner(&app_handle, config, file_name, bytes).await)
+}
+
+#[tauri::command]
+pub async fn sync_upload_book_binary_raw(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<BookBinaryResponse, String> {
+    let raw_header = request
+        .headers()
+        .get("x-linden-upload-meta")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| "Missing x-linden-upload-meta header".to_string())?;
+    let meta = decode_upload_meta_header(raw_header)?;
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) if bytes.len() <= MAX_BOOK_BINARY_BYTES => bytes.clone(),
+        tauri::ipc::InvokeBody::Raw(_) => {
+            return Ok(BookBinaryResponse {
+                success: false,
+                file_name: Some(meta.file_name),
+                size: None,
+                buffer: None,
+                error: Some(format!(
+                    "Book binary payload exceeds maximum permitted limit of {} bytes",
+                    MAX_BOOK_BINARY_BYTES
+                )),
+            });
+        }
+        _ => return Err("Expected raw binary payload for sync_upload_book_binary_raw".to_string()),
+    };
+    Ok(upload_book_binary_inner(&app_handle, meta.config, meta.file_name, bytes).await)
 }
 
 #[tauri::command]
@@ -1031,94 +1207,54 @@ pub async fn sync_download_book_binary(
     config: SyncConfig,
     file_name: String,
 ) -> Result<BookBinaryResponse, String> {
-    let safe_file_name = match validate_book_filename(&file_name) {
-        Ok(n) => n,
-        Err(e) => return Ok(BookBinaryResponse {
+    match download_book_binary_inner(&app_handle, config, file_name).await {
+        Ok((safe_file_name, bytes)) => {
+            let len = bytes.len();
+            Ok(BookBinaryResponse {
+                success: true,
+                file_name: Some(safe_file_name),
+                size: Some(len),
+                buffer: Some(bytes),
+                error: None,
+            })
+        }
+        Err(DownloadBookBinaryError::NotFound { file_name, message }) => Ok(BookBinaryResponse {
             success: false,
             file_name: Some(file_name),
             size: None,
             buffer: None,
-            error: Some(e),
+            error: Some(message),
         }),
-    };
+        Err(DownloadBookBinaryError::Other { file_name, message }) => Ok(BookBinaryResponse {
+            success: false,
+            file_name,
+            size: None,
+            buffer: None,
+            error: Some(message),
+        }),
+    }
+}
 
-    let client = match create_http_client(60) {
-        Ok(c) => c,
-        Err(e) => return Ok(BookBinaryResponse {
-            success: false,
-            file_name: Some(safe_file_name),
-            size: None,
-            buffer: None,
-            error: Some(e),
-        }),
-    };
-
-    let url = match get_sync_url(&config, &format!("books/{}", safe_file_name)) {
-        Ok(u) => u,
-        Err(e) => return Ok(BookBinaryResponse {
-            success: false,
-            file_name: Some(safe_file_name),
-            size: None,
-            buffer: None,
-            error: Some(e),
-        }),
-    };
-
-    let (user, pass) = match get_credentials(Some(&app_handle), &config) {
-        Ok(c) => c,
-        Err(e) => return Ok(BookBinaryResponse {
-            success: false,
-            file_name: Some(safe_file_name),
-            size: None,
-            buffer: None,
-            error: Some(e),
-        }),
-    };
-
-    match client.get(url.as_str()).basic_auth(user, Some(pass)).send().await {
-        Ok(res) if res.status().is_success() => {
-            // Hard limit: 300 MB for book binary
-            match read_response_body_limited(res, 300 * 1024 * 1024).await {
-                Ok(bytes) => {
-                    let len = bytes.len();
-                    Ok(BookBinaryResponse {
-                        success: true,
-                        file_name: Some(safe_file_name),
-                        size: Some(len),
-                        buffer: Some(bytes),
-                        error: None,
-                    })
-                }
-                Err(e) => Ok(BookBinaryResponse {
-                    success: false,
-                    file_name: Some(safe_file_name),
-                    size: None,
-                    buffer: None,
-                    error: Some(format!("Book binary download failed size limit: {}", e)),
-                }),
-            }
-        }
-        Ok(res) if res.status().as_u16() == 404 => Ok(BookBinaryResponse {
-            success: false,
-            file_name: Some(safe_file_name),
-            size: None,
-            buffer: None,
-            error: Some("404 Not Found".to_string()),
-        }),
-        Ok(res) => Ok(BookBinaryResponse {
-            success: false,
-            file_name: Some(safe_file_name),
-            size: None,
-            buffer: None,
-            error: Some(format!("HTTP {}", res.status().as_u16())),
-        }),
-        Err(e) => Ok(BookBinaryResponse {
-            success: false,
-            file_name: Some(safe_file_name),
-            size: None,
-            buffer: None,
-            error: Some(e.to_string()),
-        }),
+#[tauri::command]
+pub async fn sync_download_book_binary_raw(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    config: SyncConfig,
+    file_name: String,
+) -> Result<tauri::ipc::Response, String> {
+    match download_book_binary_inner(&app_handle, config, file_name).await {
+        Ok((_safe_file_name, bytes)) => Ok(tauri::ipc::Response::new(bytes)),
+        Err(DownloadBookBinaryError::NotFound { file_name, message }) => Err(serde_json::json!({
+            "isNotFound": true,
+            "fileName": file_name,
+            "error": message,
+        })
+        .to_string()),
+        Err(DownloadBookBinaryError::Other { file_name, message }) => Err(serde_json::json!({
+            "isNotFound": false,
+            "fileName": file_name,
+            "error": message,
+        })
+        .to_string()),
     }
 }
 
@@ -1916,5 +2052,33 @@ mod tests {
         assert!(sync_oauth_html_body(false, true).contains("授权成功"));
         assert!(sync_oauth_html_body(true, false).contains("Authorization Incomplete"));
         assert!(sync_oauth_html_body(false, false).contains("授权未完成"));
+    }
+
+    #[test]
+    fn test_raw_upload_meta_and_base64_payload_helpers() {
+        use base64::Engine as _;
+
+        let meta_json = serde_json::json!({
+            "config": {
+                "enabled": true,
+                "serverUrl": "https://dav.jianguoyun.com/dav/",
+                "remoteDir": "LindenLeaf"
+            },
+            "fileName": "三体-第一部.epub"
+        });
+        let encoded_meta = base64::engine::general_purpose::STANDARD.encode(meta_json.to_string().as_bytes());
+        let decoded_meta = decode_upload_meta_header(&encoded_meta).expect("valid meta header");
+        assert_eq!(decoded_meta.file_name, "三体-第一部.epub");
+        assert_eq!(decoded_meta.config.remote_dir.as_deref(), Some("LindenLeaf"));
+
+        assert!(decode_upload_meta_header("").is_err());
+        assert!(decode_upload_meta_header("!!!not-base64!!!").is_err());
+        let bad_json = base64::engine::general_purpose::STANDARD.encode(br#"{"not":"valid"}"#);
+        assert!(decode_upload_meta_header(&bad_json).is_err());
+
+        let sample = vec![0x00, 0xFF, 0x10, 0x7A, 0x80, 0x42];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&sample);
+        assert_eq!(decode_base64_payload(&b64).expect("valid base64 payload"), sample);
+        assert!(decode_base64_payload("***invalid***").is_err());
     }
 }
