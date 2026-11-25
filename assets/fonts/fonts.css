@@ -91,7 +91,7 @@
   font-style: normal;
   font-weight: 500;
   font-display: swap;
-  src: url('./noto-serif-sc-chinese-simplified-600-normal.woff2') format('woff2');
+  src: url('./noto-serif-sc-chinese-simplified-400-normal.woff2') format('woff2');
 }
 
 @font-face {

@@ -412,18 +412,6 @@ export class ImportFolderController {
             const coverUrl = coverUrlPool.get(book.id, coverBlob, book.coverRevision ?? 0)
             
             // Dynamically update DOM if present on shelf
-            const skeuoEl = document.querySelector(`.skeuo-book[data-id="${book.id}"] .skeuo-book-cover`)
-            if (skeuoEl) {
-                const existingImg = skeuoEl.querySelector('.skeuo-cover-img')
-                if (existingImg) {
-                    existingImg.src = coverUrl
-                } else {
-                    const cleanCover = skeuoEl.querySelector('.skeuo-clean-cover')
-                    if (cleanCover) {
-                        cleanCover.outerHTML = `<img class="skeuo-cover-img" src="${escapeHTML(coverUrl)}" alt="${escapeHTML(book.title)}" decoding="async"/>`
-                    }
-                }
-            }
             const gridEl = document.querySelector(`.leaf-book-card[data-id="${book.id}"] .leaf-cover-box`)
             if (gridEl) {
                 const existingImg = gridEl.querySelector('.leaf-cover-img')

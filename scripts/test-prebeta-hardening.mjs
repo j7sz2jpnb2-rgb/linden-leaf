@@ -113,4 +113,4 @@ try {
         } finally { delete globalThis.__TAURI__ }
     })
 } finally { globalThis.fetch = oldFetch }
-console.log(`Pre-beta hardening tests: ${count} passed; no external requests.`)
+console.log(`Pre-beta hardening tests: ${count} passed.`)

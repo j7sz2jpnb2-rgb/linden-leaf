@@ -110,8 +110,8 @@ html.is-mobile-viewport :is(
   -webkit-tap-highlight-color: transparent;
 }
 
-html.is-mobile-viewport :is(a, button, summary, input, select, textarea, [role="button"], [tabindex]):focus-visible {
-  outline: 2px solid var(--mobile-primary);
+html.is-mobile-viewport :is(a, button, summary, select, [role="button"], [role="radio"], [tabindex="0"], input[type="checkbox"], input[type="radio"], input[type="range"]):focus-visible {
+  outline: 2px solid var(--line-strong);
   outline-offset: 2px;
 }/* ==========================================================================
    2. DESKTOP SAFEGUARD (HIDES ALL MOBILE EXCLUSIVE SHELL PIECES)
@@ -2143,41 +2143,45 @@ html.is-mobile-viewport .mobile-search-input-box {
   flex: 1;
   display: flex;
   align-items: center;
-  background: var(--mobile-card-bg);
-  border: 1px solid var(--mobile-card-border);
+  background: var(--paper-sunken);
+  border: 1px solid var(--line-soft);
   border-radius: var(--mobile-pill-radius);
   padding: 0 0.85rem;
   height: 44px;
-  box-shadow: var(--mobile-card-shadow);
+  box-shadow: none;
   gap: 0.5rem;
+  transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
 }
 
 html.is-mobile-viewport .mobile-search-input-box svg {
   width: 18px;
   height: 18px;
-  color: var(--mobile-text-subtle);
+  color: var(--ink-muted);
   flex-shrink: 0;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
 }
 
-html.is-mobile-viewport .mobile-search-input-box:has(input:focus-visible) {
-  outline: 2px solid var(--mobile-primary);
-  outline-offset: 2px;
+html.is-mobile-viewport .mobile-search-input-box:focus-within {
+  background: var(--paper-raised);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-lift);
+  outline: 1px solid transparent;
 }
 
-html.is-mobile-viewport .mobile-search-input-box input {
+html.is-mobile-viewport .mobile-search-input-box input,
+html.is-mobile-viewport .mobile-search-input-box input:focus,
+html.is-mobile-viewport .mobile-search-input-box input:focus-visible {
   flex: 1;
   min-width: 0;
-  background: none;
-  border: none;
+  background: transparent;
+  border: 0;
+  outline: none;
+  box-shadow: none;
   font-size: 0.95rem;
   color: var(--mobile-text-main);
-}
-
-html.is-mobile-viewport .mobile-search-input-box input:focus {
-  outline: none;
+  caret-color: var(--accent-primary);
 }
 
 html.is-mobile-viewport .mobile-search-back-btn {
@@ -3158,7 +3162,7 @@ html.is-mobile-viewport .mobile-notes-list { width: 100%; box-sizing: border-box
 html.is-mobile-viewport .mobile-note-card { border-radius: 0 !important; box-shadow: none; }
 html.is-mobile-viewport .note-source-title { color: var(--mobile-text-muted); }
 
-html.is-mobile-viewport .mobile-reader-active :is(#mobile-header-bar, #btn-mobile-palette, #btn-mobile-global-fab) { display: none !important; }
+html.is-mobile-viewport .mobile-reader-active :is(#bookshelf-view, .mobile-view-container, #mobile-header-bar, #btn-mobile-palette, #btn-mobile-global-fab) { display: none !important; }
 
 html.is-mobile-viewport #sidebar-drawer .control-row {
   min-height: 44px; gap: 8px 12px; align-items: center; flex-wrap: wrap; padding-block: 6px;
@@ -3679,10 +3683,16 @@ html.is-mobile-viewport body.mobile-ai-history-active .ai-history-search-row {
   background: var(--history-wash); color: var(--history-muted); gap: 10px; box-sizing: border-box;
 }
 html.is-mobile-viewport body.mobile-ai-history-active .ai-history-search-row:focus-within {
-  border-color: var(--history-accent); background: var(--history-card);
+  border-color: var(--line-strong);
+  background: var(--paper-raised);
+  box-shadow: var(--shadow-lift);
+  outline: 1px solid transparent;
 }
-html.is-mobile-viewport body.mobile-ai-history-active #ai-history-page-search {
+html.is-mobile-viewport body.mobile-ai-history-active #ai-history-page-search,
+html.is-mobile-viewport body.mobile-ai-history-active #ai-history-page-search:focus,
+html.is-mobile-viewport body.mobile-ai-history-active #ai-history-page-search:focus-visible {
   min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--history-ink); font: 15px/1.5 var(--history-ui);
+  outline: none; box-shadow: none; caret-color: var(--accent-primary);
 }
 html.is-mobile-viewport body.mobile-ai-history-active #ai-history-page-search::placeholder { color: var(--history-subtle); opacity: 1; }
 html.is-mobile-viewport body.mobile-ai-history-active #ai-history-page-conv-list {
@@ -3834,7 +3844,7 @@ html.is-mobile-viewport body.mobile-ai-history-active .mobile-history-answer-sta
   margin-top: 10px; padding: 8px 12px; border-radius: 10px; background: var(--history-wash);
   font: 12.5px/1.5 var(--history-ui); color: var(--history-accent-ink);
 }
-html.is-mobile-viewport body.mobile-ai-history-active :is(button,.mobile-history-record):focus-visible { outline: 2px solid var(--history-accent); outline-offset: 2px; }
+html.is-mobile-viewport body.mobile-ai-history-active :is(button,.mobile-history-record):focus-visible { outline: 2px solid var(--line-strong); outline-offset: 2px; }
 
 /* Unified Warm 24px Bottom Sheet Dialog */
 html.is-mobile-viewport body.mobile-ai-history-active #mobile-history-actions-dialog {

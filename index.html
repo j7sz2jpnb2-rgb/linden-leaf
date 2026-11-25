@@ -418,13 +418,15 @@
 
           <div class="header-actions" id="shelf-header-actions">
             <!-- Header Search Bar -->
-            <div class="header-search-bar" id="header-search-bar">
-              <svg class="icon icon-sm" viewBox="0 0 24 24">
+            <div class="header-search-bar leaf-field leaf-field--sm" id="header-search-bar">
+              <svg class="icon icon-sm leaf-field-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <circle cx="11" cy="11" r="8"/>
                 <line x1="21" y1="21" x2="16.65" y2="16.65"/>
               </svg>
-              <input type="text" id="shelf-search" placeholder="搜索图书、作者..." data-i18n-placeholder="shelf.searchPlaceholder"/>
-              <button id="btn-open-cross-search" type="button" style="background: var(--bg-tertiary); border: 1px solid var(--border-color); font-size: 0.72rem; color: var(--accent-purple); cursor: pointer; padding: 2px 6px; border-radius: 4px; margin-right: 4px; font-weight: 600; white-space: nowrap;" title="跨书全文检索" data-i18n-title="shelf.crossSearchTitle" data-i18n="shelf.crossSearchShort">全文</button>
+              <input type="text" id="shelf-search" class="leaf-field-input" placeholder="搜索图书、作者..." data-i18n-placeholder="shelf.searchPlaceholder"/>
+              <button type="button" id="btn-clear-shelf-search" class="leaf-field-clear" hidden title="清空搜索" data-i18n-title="notes.clearSearchTitle" aria-label="清空搜索" data-i18n-aria-label="notes.clearSearchTitle">×</button>
+              <kbd class="leaf-field-kbd" id="shelf-search-kbd" aria-hidden="true">Ctrl K</kbd>
+              <button id="btn-open-cross-search" type="button" class="leaf-field-action header-cross-search-trigger" title="跨书全文检索" data-i18n-title="shelf.crossSearchTitle" data-i18n="shelf.crossSearchShort">全文</button>
             </div>
 
             <!-- Import Book Button -->
@@ -484,9 +486,6 @@
                 <div class="sort-menu-item active" data-order="desc"><span data-i18n="shelf.order.desc">降序</span><span class="order-check">✓</span></div>
               </div>
               <div class="view-mode-switcher">
-                <button class="btn-view-mode" id="btn-view-shelf" title="木质书架视图" data-i18n-title="shelf.viewShelfTitle">
-                  <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M3 19h18v2H3z"/><path d="M5 5h3v14H5z"/><path d="M9 7h3v12H9z"/><path d="M14 9h3v10h-3z"/><path d="M18 6h3v13h-3z"/></svg>
-                </button>
                 <button class="btn-view-mode active" id="btn-view-grid" title="现代极简网格" data-i18n-title="shelf.viewGridTitle">
                   <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
                 </button>
@@ -496,10 +495,8 @@
               </div>
             </div>
           </div>
-          <!-- 1. Skeuomorphic Wooden Bookshelf View -->
-          <div id="books-shelf" class="books-shelf-layout" style="display: none;"></div>
 
-          <!-- 2. Modern Grid View with Two-Screen Architecture (Screen 1: Hero Lounge ↔ Screen 2: Full Library Grid) -->
+          <!-- Modern Grid View with Two-Screen Architecture (Screen 1: Hero Lounge ↔ Screen 2: Full Library Grid) -->
           <div id="modern-grid-wrapper" class="modern-grid-wrapper" style="display: flex;">
             <!-- Screen 1: Hero Lounge (First Screen: Dedicated welcoming lounge) -->
             <section id="modern-hero-threshold" class="modern-hero-threshold">
@@ -2647,13 +2644,26 @@
         <button id="btn-close-create-list" class="footnote-popup-close" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
       </div>
       <div class="global-modal-body" style="padding: 0.5rem 0 0.75rem 0; display: flex; flex-direction: column; gap: 0.85rem;">
+        <div class="create-list-preview" id="create-list-preview" aria-live="polite">
+          <span class="create-list-preview-label" data-i18n="modal.listPreviewLabel">侧栏预览</span>
+          <div class="create-list-preview-pill">
+            <span class="create-list-preview-icon" id="create-list-preview-icon" aria-hidden="true"></span>
+            <span class="create-list-preview-name is-placeholder" id="create-list-preview-name" data-i18n="modal.listUntitledPreview">未命名书单</span>
+          </div>
+        </div>
         <div>
-          <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 0.4rem;" data-i18n="modal.listNameLabel">书单名称</label>
-          <input type="text" id="input-custom-list-name" class="global-modal-input" placeholder="例如：社科阅读" data-i18n-placeholder="modal.listNamePlaceholder" maxlength="30" />
+          <label for="input-custom-list-name" style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 0.4rem;" data-i18n="modal.listNameLabel">书单名称</label>
+          <div class="leaf-field leaf-field--md" id="create-list-name-field">
+            <input type="text" id="input-custom-list-name" class="global-modal-input leaf-field-input" maxlength="30" aria-describedby="create-list-name-error" />
+          </div>
+          <div id="create-list-name-error" class="leaf-field-error" role="alert" hidden>
+            <svg class="icon icon-xs" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <span data-i18n="modal.listNameRequiredError">给书单起个名字</span>
+          </div>
         </div>
         <div style="width: 100%;">
-          <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 0.4rem;" data-i18n="modal.listIconLabel">选择书单图标</label>
-          <div id="custom-list-icon-picker" class="icon-picker-grid">
+          <label id="custom-list-icon-label" style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 0.4rem;" data-i18n="modal.listIconLabel">选择书单图标</label>
+          <div id="custom-list-icon-picker" class="icon-picker-grid" role="radiogroup" aria-labelledby="custom-list-icon-label">
             <!-- Rendered by JS -->
           </div>
         </div>

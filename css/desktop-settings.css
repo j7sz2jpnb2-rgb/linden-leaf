@@ -270,17 +270,19 @@
     box-sizing: border-box;
     padding: 0 28px 0 11px;
     font-size: 12.5px;
-    border: 1px solid var(--drawer-well-border);
+    border: 1px solid var(--line-soft);
     border-radius: 8px;
-    background: var(--drawer-well);
+    background: var(--paper-sunken);
     color: var(--text-main);
-    transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
   }
-  #search-query-input:focus {
-    background: var(--bg-card);
-    border-color: var(--accent-primary, #da7756);
-    box-shadow: 0 0 0 3px var(--accent-primary-subtle, rgba(218, 119, 86, 0.12));
-    outline: none;
+  #search-query-input:focus,
+  #search-query-input:focus-visible {
+    background: var(--paper-raised);
+    border-color: var(--line-strong);
+    box-shadow: var(--shadow-lift);
+    caret-color: var(--accent-primary);
+    outline: 1px solid transparent;
   }
   .drawer-search-clear-btn {
     position: absolute;
@@ -609,14 +611,15 @@
     transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   }
   #panel-settings :is(input[type="text"], input[type="password"], input[type="number"], select, textarea):hover {
-    border-color: rgba(145, 138, 128, 0.34) !important;
+    border-color: color-mix(in srgb, var(--line-strong) 45%, var(--line-soft)) !important;
   }
   #panel-settings :is(input[type="text"], input[type="password"], input[type="number"], select, textarea):focus,
   #panel-settings :is(input[type="text"], input[type="password"], input[type="number"], select, textarea):focus-visible {
-    background-color: var(--bg-card) !important;
-    border-color: var(--accent-primary, #da7756) !important;
-    box-shadow: 0 0 0 3px var(--accent-primary-subtle, rgba(218, 119, 86, 0.12)) !important;
-    outline: none;
+    background-color: var(--paper-raised) !important;
+    border-color: var(--line-strong) !important;
+    box-shadow: var(--shadow-lift) !important;
+    caret-color: var(--accent-primary);
+    outline: 1px solid transparent;
   }
   #panel-settings select.setting-select,
   #panel-settings select.leaf-modal-input,

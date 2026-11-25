@@ -5,7 +5,7 @@ import { tracker } from './tracker.js'
 import { resolveReadingState } from './tags-manager.js'
 import { resolveBookTitle } from './book-title.js'
 import { coverUrlPool } from './cover-url-pool.js'
-import { uiSymbol, escapeHTML, renderEditorialCoverHTML } from './ui-format.js'
+import { uiSymbol, escapeHTML, renderEditorialCoverHTML, mapHighlightDisplayColor } from './ui-format.js'
 import { getReadingChartScale } from './stats-chart-scale.js'
 import { formatMinutesClean, formatAxisLabel, renderCleanBarChart, renderCalendarHeatmap } from './app-modules.js'
 
@@ -156,7 +156,7 @@ export class StatsViewController {
             if (val !== null && val.trim() !== '') {
                 const parsed = parseInt(val, 10)
                 if (!isNaN(parsed) && parsed > 0) {
-                    this.app.settings.readingGoalYear = parsed
+                    this.app.setSetting('readingGoalYear', parsed, 'global')
                     if (this.app.appearance.dom.settingGoalYear) this.app.appearance.dom.settingGoalYear.value = parsed
                     await this.app.saveSettings()
                     this.renderStatsDashboard()
@@ -175,7 +175,7 @@ export class StatsViewController {
             if (val !== null && val.trim() !== '') {
                 const parsed = parseInt(val, 10)
                 if (!isNaN(parsed) && parsed > 0) {
-                    this.app.settings.readingGoalMonth = parsed
+                    this.app.setSetting('readingGoalMonth', parsed, 'global')
                     if (this.app.appearance.dom.settingGoalMonth) this.app.appearance.dom.settingGoalMonth.value = parsed
                     await this.app.saveSettings()
                     this.renderStatsDashboard()
@@ -194,7 +194,7 @@ export class StatsViewController {
             if (val !== null && val.trim() !== '') {
                 const parsed = parseInt(val, 10)
                 if (!isNaN(parsed) && parsed > 0) {
-                    this.app.settings.readingGoalToday = parsed
+                    this.app.setSetting('readingGoalToday', parsed, 'global')
                     if (this.app.appearance.dom.settingGoalToday) this.app.appearance.dom.settingGoalToday.value = parsed
                     await this.app.saveSettings()
                     this.renderStatsDashboard()
@@ -204,7 +204,7 @@ export class StatsViewController {
         });
         this.events.on(this.app.appearance.dom.settingEnableReadingGoals, 'change', async (e) => {
             const enabled = !!e.target.checked
-            this.app.settings.enableReadingGoals = enabled
+            this.app.setSetting('enableReadingGoals', enabled, 'global')
             await this.app.saveSettings()
             if (this.dom.goalsCustomInputsWrap) {
                 this.dom.goalsCustomInputsWrap.style.display = enabled ? 'block' : 'none'
@@ -220,7 +220,7 @@ export class StatsViewController {
         this.events.on(this.app.appearance.dom.settingGoalYear, 'change', async (e) => {
             const parsed = parseInt(e.target.value, 10)
             if (!isNaN(parsed) && parsed > 0) {
-                this.app.settings.readingGoalYear = parsed
+                this.app.setSetting('readingGoalYear', parsed, 'global')
                 await this.app.saveSettings()
                 if (this.app.bookshelf.shelfCategory === 'stats') this.renderStatsDashboard()
             }
@@ -228,7 +228,7 @@ export class StatsViewController {
         this.events.on(this.app.appearance.dom.settingGoalMonth, 'change', async (e) => {
             const parsed = parseInt(e.target.value, 10)
             if (!isNaN(parsed) && parsed > 0) {
-                this.app.settings.readingGoalMonth = parsed
+                this.app.setSetting('readingGoalMonth', parsed, 'global')
                 await this.app.saveSettings()
                 if (this.app.bookshelf.shelfCategory === 'stats') this.renderStatsDashboard()
             }
@@ -236,7 +236,7 @@ export class StatsViewController {
         this.events.on(this.app.appearance.dom.settingGoalToday, 'change', async (e) => {
             const parsed = parseInt(e.target.value, 10)
             if (!isNaN(parsed) && parsed > 0) {
-                this.app.settings.readingGoalToday = parsed
+                this.app.setSetting('readingGoalToday', parsed, 'global')
                 await this.app.saveSettings()
                 if (this.app.bookshelf.shelfCategory === 'stats') this.renderStatsDashboard()
             }
@@ -734,11 +734,18 @@ export class StatsViewController {
 
             const timeFormatted = new Date(sess.startTime).toLocaleTimeString(getLocale(), { hour: '2-digit', minute: '2-digit' })
             const durStr = tracker.formatDuration(sess.durationSeconds || 0)
-            const sBookTitle = sess.bookTitle || t('statsView.unknownBook')
+            const sBookTitle = resolveBookTitle(sess.bookTitle, sess.bookFilename) || t('statsView.unknownBook')
+            const coverUrl = sess.coverBlob
+                ? coverUrlPool.getForBook({ id: sess.bookId || sBookTitle, coverBlob: sess.coverBlob, coverRevision: sess.coverRevision })
+                : ''
 
             item.innerHTML = `
                 <div class="session-item-left">
-                    <div class="session-micro-cover">${renderEditorialCoverHTML({ id: sess.bookId || sBookTitle, title: sBookTitle }, { micro: true, displayTitle: sBookTitle })}</div>
+                    <div class="session-micro-cover">${
+                        coverUrl
+                            ? `<img src="${escapeHTML(coverUrl)}" alt="${escapeHTML(sBookTitle)}" />`
+                            : renderEditorialCoverHTML({ id: sess.bookId || sBookTitle, title: sBookTitle, format: sess.format }, { micro: true, displayTitle: sBookTitle })
+                    }</div>
                     <div class="session-info">
                         <div class="session-book-title" title="${escapeHTML(sBookTitle)}">${escapeHTML(sBookTitle)}</div>
                         <div class="session-time-range">${escapeHTML(sess.date)} ${timeFormatted}</div>
@@ -776,6 +783,8 @@ export class StatsViewController {
         this._activeDetailModalType = type
 
         listEl.innerHTML = ''
+        modal.classList.toggle('is-notes-detail', type === 'notes')
+        listEl.classList.toggle('is-notes-list', type === 'notes')
         const stats = this.latestStats || {}
         let periodLabel = t('statsView.period.current')
         if (stats.viewMode === 'week') periodLabel = stats.weekDateRangeStr ? t('statsView.period.thisWeekRange', { range: stats.weekDateRangeStr }) : t('statsView.period.thisWeek')
@@ -879,22 +888,89 @@ export class StatsViewController {
             if (iconEl) iconEl.innerHTML = uiSymbol('note')
             if (titleEl) titleEl.innerText = t('statsView.modal.notesTitle', { period: periodLabel, count: stats.periodHighlights?.length || 0 })
 
-            const notes = stats.periodHighlights || []
+            const notes = [...(stats.periodHighlights || [])].sort(
+                (a, b) => (b.createdAt || b.updatedAt || 0) - (a.createdAt || a.updatedAt || 0)
+            )
             if (notes.length === 0) {
                 listEl.innerHTML = `<div style="text-align:center; padding: 2rem; color: var(--text-muted); font-size: 0.88rem;">${escapeHTML(t('statsView.modal.notesEmpty'))}</div>`
             } else {
                 notes.forEach(n => {
-                    const row = document.createElement('div')
+                    const row = document.createElement('article')
                     row.className = 'stats-detail-note-row'
 
+                    const bookTitle = resolveBookTitle(n.bookTitle, n.bookFilename) || t('book.untitled')
+                    const chapterTitle = (n.chapterTitle && n.chapterTitle !== 'undefined') ? n.chapterTitle : ''
+                    const dateStr = (n.createdAt || n.updatedAt) ? new Date(n.createdAt || n.updatedAt).toLocaleDateString(getLocale()) : ''
+                    const sourceParts = [t('statsView.modal.noteSourceTitle', { title: bookTitle })]
+                    if (chapterTitle) sourceParts.push(chapterTitle)
+                    const sourceText = sourceParts.join(' · ')
+                    const mappedColor = mapHighlightDisplayColor(n.color || '#D6A736')
+                    const rawColor = String(mappedColor || '#c89b3c').trim()
+                    const quoteColor = /^[#a-zA-Z0-9(),.%\s-]+$/.test(rawColor) ? rawColor : '#c89b3c'
+
                     row.innerHTML = `
-                        <div class="stats-detail-note-quote">“${escapeHTML(n.text || '')}”</div>
-                        ${n.note ? `<div class="stats-detail-note-thought">${escapeHTML(t('statsView.modal.thoughtPrefix', { note: n.note }))}</div>` : ''}
+                        ${n.title ? `<h4 class="stats-detail-note-title">${escapeHTML(n.title)}</h4>` : ''}
+                        ${n.text ? `
+                            <div class="stats-detail-note-quote-block" style="border-left-color: ${escapeHTML(quoteColor)};">
+                                <div class="stats-detail-note-quote">${escapeHTML(n.text)}</div>
+                            </div>
+                        ` : ''}
+                        ${n.note ? `
+                            <div class="stats-detail-note-thought">
+                                <span class="stats-detail-thought-badge">${escapeHTML(t('annotations.thoughtBadge'))}</span>
+                                <span class="stats-detail-thought-body">${escapeHTML(n.note)}</span>
+                            </div>
+                        ` : ''}
                         <div class="stats-detail-note-meta">
-                            <span>${escapeHTML(t('statsView.modal.noteSourceTitle', { title: n.bookTitle || t('book.untitled') }))}${n.chapterTitle ? ` · ${escapeHTML(n.chapterTitle)}` : ''}</span>
-                            <span>${(n.createdAt || n.updatedAt) ? new Date(n.createdAt || n.updatedAt).toLocaleDateString(getLocale()) : ''}</span>
+                            <span class="stats-detail-note-source" title="${escapeHTML(sourceText)}">${escapeHTML(sourceText)}</span>
+                            ${dateStr ? `<span class="stats-detail-note-date">${escapeHTML(dateStr)}</span>` : ''}
                         </div>
                     `
+
+                    if (n.bookId) {
+                        row.setAttribute('role', 'button')
+                        row.setAttribute('tabindex', '0')
+                        const jumpToNote = async () => {
+                            this.closeStatsDetailModal()
+                            const target = n.pdfTarget || {}
+                            const firstSegment = Array.isArray(target.segments) ? target.segments[0] : null
+                            const page = firstSegment?.page ?? target.page ?? 0
+                            const rects = firstSegment?.rects?.length ? firstSegment.rects : target.rects
+                            const yRatio = rects?.[0]?.[1] ?? 0
+                            const isPdf = Boolean(n.pdfTarget || n.formatType === 'pdf')
+                            const loc = n.cfi
+                                ? { cfi: n.cfi }
+                                : (isPdf ? { page: page + 1, yRatio, highlightId: n.id, rects } : null)
+
+                            if (window.mobileShell?.isMobileViewport?.() && typeof window.mobileShell.locateNote === 'function') {
+                                await window.mobileShell.locateNote(n)
+                                return
+                            }
+                            if (this.app.currentBookId && String(this.app.currentBookId) === String(n.bookId)) {
+                                this.app.navHistory?.pushLocation?.()
+                                if (this.app.dom.readerView) {
+                                    this.app.dom.readerView.style.display = 'block'
+                                    this.app.dom.readerView.classList.add('active')
+                                }
+                                if (this.app.dom.bookshelfView) this.app.dom.bookshelfView.style.display = 'none'
+                                if (this.app.pdfViewport && isPdf) {
+                                    this.app.pdfViewport.goToPage(page, yRatio)
+                                    this.app.pdfViewport.pulseHighlight?.(page, n.id, rects)
+                                } else if (n.cfi && this.app.foliateView) {
+                                    this.app.foliateView.goTo(n.cfi)
+                                }
+                            } else {
+                                await this.app.openBook(n.bookId, loc)
+                            }
+                        }
+                        row.addEventListener('click', () => { jumpToNote().catch(err => console.warn('Jump to note failed:', err)) })
+                        row.addEventListener('keydown', (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                jumpToNote().catch(err => console.warn('Jump to note failed:', err))
+                            }
+                        })
+                    }
                     listEl.appendChild(row)
                 })
             }

@@ -658,8 +658,7 @@ export class ReaderAppearanceController {
         }
 
         // View mode switcher buttons
-        this.app.bookshelf.dom.btnViewShelf?.classList.toggle('active', this.app.bookshelf.shelfViewMode === 'shelf')
-        this.app.bookshelf.dom.btnViewGrid?.classList.toggle('active', this.app.bookshelf.shelfViewMode === 'grid')
+        this.app.bookshelf.dom.btnViewGrid?.classList.toggle('active', this.app.bookshelf.shelfViewMode !== 'list')
         this.app.bookshelf.dom.btnViewList?.classList.toggle('active', this.app.bookshelf.shelfViewMode === 'list')
         this.syncSettingsSliderFills()
     }
@@ -818,7 +817,7 @@ export class ReaderAppearanceController {
                     try {
                         this.app.dialogs.showToast(t('appearance.toast.fontImporting', { name: file.name }), 'info')
                         const imported = await customFontManager.importFont(file)
-                        this.app.settings.font = imported.id
+                        this.app.setSetting('font', imported.id)
                         await this.app.saveSettings()
                         await this.renderCustomFontsUI()
                         this.updateSettingsUI()

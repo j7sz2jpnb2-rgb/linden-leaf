@@ -189,7 +189,7 @@ class UniversalReaderApp {
             theme: initialTheme,
             realisticPen: true,
             fullscreenAutohide: false,
-            shelfViewMode: 'shelf',
+            shelfViewMode: 'grid',
             enableReadingGoals: false,
             readingGoalYear: 12,
             readingGoalMonth: 20,
@@ -393,7 +393,15 @@ class UniversalReaderApp {
             this.setupAndroidNavigationAndImports()
             // An external-file event may have opened a reader while startup awaited DB work.
             if (document.documentElement.dataset.startupView === 'pending') {
-                this.publishStartupView(this.currentBookId || isExternalFileColdStart || this.isSatelliteReaderWindow ? 'reader' : 'shelf')
+                const readerActiveAtStartup = Boolean(
+                    this.currentBookId ||
+                    isExternalFileColdStart ||
+                    this.isSatelliteReaderWindow ||
+                    this._activeSession ||
+                    window.mobileShell?.isInReader ||
+                    window.mobileShell?._homeOpeningBookId
+                )
+                this.publishStartupView(readerActiveAtStartup ? 'reader' : 'shelf')
             }
         }).catch(err => {
             console.error('[App] Critical startup error:', err)
@@ -406,7 +414,10 @@ class UniversalReaderApp {
      }
 
     publishStartupView(destination) {
-        if (destination === 'reader') {
+        const resolvedDestination = (destination === 'reader' || window.mobileShell?._homeOpeningBookId)
+            ? 'reader'
+            : destination
+        if (resolvedDestination === 'reader') {
             if (this.dom.bookshelfView) this.dom.bookshelfView.style.display = 'none'
             if (this.dom.readerView) {
                 this.dom.readerView.style.display = 'flex'
@@ -1175,8 +1186,12 @@ class UniversalReaderApp {
                 ...migratedSettings
             }
         }
+        const hadLegacyShelfMode = this.globalSettings.shelfViewMode && !['grid', 'list'].includes(this.globalSettings.shelfViewMode)
+        if (hadLegacyShelfMode || !this.globalSettings.shelfViewMode) {
+            this.globalSettings.shelfViewMode = 'grid'
+        }
         this.settings = resolveReaderSettings(this.globalSettings, this.appearance._bookSettingsOverride, READER_OVERRIDE_ALLOWED_KEYS)
-        if (migrated) db.setSetting('readerSettings', this.globalSettings).catch(() => {})
+        if (migrated || hadLegacyShelfMode) db.setSetting('readerSettings', this.globalSettings).catch(() => {})
         if (!platformBridge.isAndroid && this.settings.theme === 'system') {
             this.setSetting('theme', initialTheme)
         }
@@ -1496,9 +1511,7 @@ class UniversalReaderApp {
             this.updateCachedDimensions()
             clearTimeout(resizeTimer)
             resizeTimer = setTimeout(() => {
-                if (this.bookshelf.shelfViewMode === 'shelf' && this.dom.bookshelfView?.style.display !== 'none') {
-                    if (this.bookshelf.currentBooksList) this.bookshelf.renderBooksShelf(this.bookshelf.currentBooksList)
-                } else if (this.bookshelf.shelfViewMode === 'grid' && this.bookshelf._isGridVirtualized && this.bookshelf._virtualBooks) {
+                if (this.bookshelf.shelfViewMode === 'grid' && this.bookshelf._isGridVirtualized && this.bookshelf._virtualBooks) {
                     this.bookshelf._renderVirtualizedBooksGrid(this.bookshelf._virtualBooks)
                 } else if (this.currentBookId && (this.foliateView?.isFixedLayout || this.currentBookData?.format === 'pdf')) {
                     this.drawing.renderPdfDrawingOverlayForCurrentPage()
@@ -1510,7 +1523,7 @@ class UniversalReaderApp {
             if (e.target?.matches?.('input, textarea') || e.target?.isContentEditable) {
                 return
             }
-            const card = e.target?.closest?.('.skeuo-book, .leaf-book-card, .leaf-table-row')
+            const card = e.target?.closest?.('.leaf-book-card, .leaf-table-row')
             if (card && card.dataset?.id) {
                 e.preventDefault()
                 this.openBookDetailsModal(card.dataset.id)
@@ -3008,6 +3021,14 @@ class UniversalReaderApp {
 
             // Handle cloud-only books before requiring local Blob
             if (bookData?.isCloudOnly) {
+                if (this._activeSession === readerSession) this._activeSession = null
+                if (window.mobileShell?.isInReader) {
+                    if (this.dom.readerView) {
+                        this.dom.readerView.classList.remove('active', 'closing')
+                        this.dom.readerView.style.display = 'none'
+                    }
+                    this._returnToLibraryView({ deferRefresh: true })
+                }
                 return this.sync.handleCloudBookClick(bookData)
             }
 

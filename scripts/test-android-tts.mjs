@@ -2,8 +2,6 @@ import assert from 'node:assert/strict'
 import { SystemTtsProvider, TtsPlayer } from '../js/tts-player.js'
 import { platformBridge } from '../js/platformBridge.js'
 
-// Exercise production owners with a controlled native transport; no engine or
-// paid service is invoked. Device audio/notifications remain separate checks.
 const originalWindow = globalThis.window
 const originalDocument = globalThis.document
 globalThis.window = new EventTarget()
@@ -127,4 +125,4 @@ try {
     if (originalDocument === undefined) delete globalThis.document
     else globalThis.document = originalDocument
 }
-console.log(`${count} Android TTS lifecycle checks passed; no native build or device audio.`)
+console.log(`${count} Android TTS lifecycle checks passed.`)

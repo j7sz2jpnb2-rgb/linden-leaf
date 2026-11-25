@@ -503,6 +503,8 @@ export const isMOBI = async file => {
     return magic === 'BOOKMOBI'// || magic === 'TEXtREAd'
 }
 
+const TEXT_READ_CHUNK_BYTES = 512 * 1024
+
 class PDB {
     #file
     #offsets
@@ -521,6 +523,29 @@ class PDB {
         const offsets = this.#offsets[index]
         if (!offsets) throw new RangeError('Record index out of bounds')
         return this.#file.slice(...offsets).arrayBuffer()
+    }
+    // MOBI6 reads every text record in order. Read adjacent records as one Blob slice.
+    async *loadRecordBatches(first, count) {
+        const end = first + count
+        if (end > this.#offsets.length) throw new RangeError('Record index out of bounds')
+        for (let index = first; index < end;) {
+            const [start, firstEnd = this.#file.size] = this.#offsets[index]
+            let next = index + 1
+            let batchEnd = firstEnd
+            while (next < end && batchEnd >= start) {
+                const [, recordEnd = this.#file.size] = this.#offsets[next]
+                if (recordEnd < batchEnd || recordEnd - start > TEXT_READ_CHUNK_BYTES) break
+                batchEnd = recordEnd
+                next++
+            }
+            const chunk = new Uint8Array(await this.#file.slice(start, batchEnd).arrayBuffer())
+            const records = []
+            for (; index < next; index++) {
+                const [recordStart, recordEnd = this.#file.size] = this.#offsets[index]
+                records.push(chunk.subarray(recordStart - start, recordEnd - start))
+            }
+            yield records
+        }
     }
     async loadMagic(index) {
         const start = this.#offsets[index][0]
@@ -624,6 +649,12 @@ export class MOBI extends PDB {
             .then(this.#removeTrailingEntries)
             .then(this.#decompress)
     }
+    async *loadTextBatches() {
+        const count = this.headers.palmdoc.numTextRecords
+        for await (const records of super.loadRecordBatches(this.#start + 1, count)) {
+            yield records.map(record => this.#decompress(this.#removeTrailingEntries(record)))
+        }
+    }
     async loadResource(index) {
         const buf = await super.loadRecord(this.#resourceStart + index)
         const magic = getString(buf.slice(0, 4))
@@ -701,15 +732,14 @@ class MOBI6 {
     }
     async init() {
         const recordBuffers = []
-        for (let i = 0; i < this.mobi.headers.palmdoc.numTextRecords; i++) {
-            const buf = await this.mobi.loadText(i)
-            recordBuffers.push(buf)
+        for await (const batch of this.mobi.loadTextBatches()) {
+            for (const record of batch) recordBuffers.push(record)
         }
         const totalLength = recordBuffers.reduce((sum, buf) => sum + buf.byteLength, 0)
         // load all text records in an array
         const array = new Uint8Array(totalLength)
         recordBuffers.reduce((offset, buf) => {
-            array.set(new Uint8Array(buf), offset)
+            array.set(buf, offset)
             return offset + buf.byteLength
         }, 0)
         // convert to string so we can use regex
@@ -869,6 +899,9 @@ class MOBI6 {
     async loadSection(section) {
         if (this.#cache.has(section)) return this.#cache.get(section)
         const doc = await this.createDocument(section)
+
+        // Use the same standards-mode layout as the curl texture.
+        if (!doc.doctype) doc.prepend(doc.implementation.createDocumentType('html', '', ''))
 
         // inject default stylesheet
         const style = doc.createElement('style')

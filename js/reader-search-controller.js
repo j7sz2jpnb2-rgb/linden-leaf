@@ -5,6 +5,9 @@ import { fullTextSearchEngine } from './fulltext-search.js'
 import { escapeHTML } from './ui-format.js'
 import { t } from './i18n.js'
 
+const CROSS_SEARCH_RECENT_KEY = 'll_cross_search_recent'
+const MAX_RECENT_CROSS_SEARCHES = 5
+
 /** Owns search UI state, DOM queries and bindings. App supplies shared reading/session coordination. */
 export class ReaderSearchController {
     constructor(app) {
@@ -62,12 +65,103 @@ export class ReaderSearchController {
         }
     }
 
+    getRecentCrossSearches() {
+        try {
+            const raw = globalThis?.localStorage?.getItem(CROSS_SEARCH_RECENT_KEY)
+            if (!raw) return []
+            const parsed = JSON.parse(raw)
+            if (!Array.isArray(parsed)) return []
+            const out = []
+            const seen = new Set()
+            for (const item of parsed) {
+                if (typeof item !== 'string') continue
+                const trimmed = item.trim()
+                if (!trimmed || seen.has(trimmed)) continue
+                seen.add(trimmed)
+                out.push(trimmed)
+                if (out.length >= MAX_RECENT_CROSS_SEARCHES) break
+            }
+            return out
+        } catch (_) {
+            return []
+        }
+    }
+
+    _writeRecentCrossSearches(list) {
+        try {
+            globalThis?.localStorage?.setItem(CROSS_SEARCH_RECENT_KEY, JSON.stringify(list))
+        } catch (_) {}
+    }
+
+    saveRecentCrossSearch(term) {
+        const trimmed = typeof term === 'string' ? term.trim() : ''
+        if (!trimmed) return this.getRecentCrossSearches()
+        const existing = this.getRecentCrossSearches().filter(item => item !== trimmed)
+        const next = [trimmed, ...existing].slice(0, MAX_RECENT_CROSS_SEARCHES)
+        this._writeRecentCrossSearches(next)
+        return next
+    }
+
+    removeRecentCrossSearch(term) {
+        const trimmed = typeof term === 'string' ? term.trim() : ''
+        const next = this.getRecentCrossSearches().filter(item => item !== trimmed)
+        this._writeRecentCrossSearches(next)
+        return next
+    }
+
+    renderRecentCrossSearches() {
+        const container = this.dom?.crossSearchResults
+        if (!container) return
+        const recent = this.getRecentCrossSearches()
+        if (!recent.length) {
+            container.innerHTML = ''
+            return
+        }
+        container.innerHTML = `
+            <div class="cross-search-recent-section">
+                <div class="cross-search-recent-header">
+                    <span>${escapeHTML(t('search.crossRecentTitle'))}</span>
+                </div>
+                <div class="cross-search-recent-list">
+                    ${recent.map((term, idx) => `
+                        <div class="cross-search-recent-item">
+                            <button type="button" class="cross-search-recent-term" data-recent-idx="${idx}">${escapeHTML(term)}</button>
+                            <button type="button" class="cross-search-recent-del" data-recent-idx="${idx}" title="${escapeHTML(t('search.crossRecentRemoveTitle'))}" aria-label="${escapeHTML(t('search.crossRecentRemoveAria', { term }))}">×</button>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        `
+        container.querySelectorAll?.('.cross-search-recent-term')?.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const idx = Number(btn.dataset?.recentIdx)
+                const term = recent[idx]
+                if (!term) return
+                if (this.dom.inputCrossSearch) {
+                    this.dom.inputCrossSearch.value = term
+                }
+                this._syncCrossSearchClearBtn()
+                this.executeCrossSearch(term)
+            })
+        })
+        container.querySelectorAll?.('.cross-search-recent-del')?.forEach(btn => {
+            btn.addEventListener('click', e => {
+                e?.stopPropagation?.()
+                const idx = Number(btn.dataset?.recentIdx)
+                const term = recent[idx]
+                if (!term) return
+                this.removeRecentCrossSearch(term)
+                this.renderRecentCrossSearches()
+            })
+        })
+    }
+
     bindEvents() {
         if (this._bound) return
         this._bound = true;
         this.events.on(this.dom.btnExecSearch, 'click', () => this.executeSearch());
         this.events.on(this.dom.searchQueryInput, 'keydown', e => {
-            if (e.key === 'Enter') this.executeSearch()
+            if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) this.executeSearch()
         });
         this.events.on(this.dom.searchQueryInput, 'input', e => {
             if (this.dom.btnClearSearchInput) {
@@ -86,28 +180,57 @@ export class ReaderSearchController {
         this.events.on(this.dom.btnSearchBarNext, 'click', () => this.navigateSearchMatch(1));
         this.events.on(this.dom.btnSearchBarClose, 'click', () => this.clearSearchState(false));
         this.events.on(this.app.annotations.dom.btnExportNotes, 'click', () => this.app.annotations.exportNotesToMarkdown());
-        this.events.on(this.dom.btnOpenCrossSearch, 'click', () => this.openCrossSearchModal());
+        this.events.on(this.dom.btnOpenCrossSearch, 'click', () => {
+            const shelfInput = this.app?.bookshelf?.dom?.shelfSearch || document.getElementById('shelf-search')
+            const initialQuery = (shelfInput?.value || '').trim()
+            this.openCrossSearchModal(initialQuery)
+        });
         this.events.on(this.dom.btnCloseCrossSearch, 'click', () => this.closeCrossSearchModal());
         this.events.on(this.dom.btnBackCrossSearchMob, 'click', () => this.closeCrossSearchModal());
         this.events.on(this.dom.modalCrossSearch, 'click', e => {
             if (e.target === this.dom.modalCrossSearch) this.closeCrossSearchModal()
         });
+        this._crossSearchComposing = false
+        this._crossSearchSuppressSubmitUntil = 0
+        this.events.on(this.dom.inputCrossSearch, 'compositionstart', () => {
+            this._crossSearchComposing = true
+        });
+        this.events.on(this.dom.inputCrossSearch, 'compositionend', () => {
+            this._crossSearchComposing = false
+        });
+        this.events.on(this.dom.btnExecCrossSearch, 'pointerdown', () => {
+            this._crossSearchSuppressSubmitUntil = 0
+        });
+        this.events.on(this.dom.inputCrossSearch, 'keydown', e => {
+            if (e.key === 'Enter') {
+                if (e.isComposing || e.keyCode === 229 || this._crossSearchComposing) {
+                    this._crossSearchSuppressSubmitUntil = Date.now() + 120
+                    return
+                }
+                if (!this.dom.crossSearchForm) {
+                    this.executeCrossSearch(this.dom.inputCrossSearch?.value)
+                }
+            }
+        });
         if (this.dom.crossSearchForm) {
             this.events.on(this.dom.crossSearchForm, 'submit', e => {
                 e.preventDefault()
+                if (this._crossSearchComposing || Date.now() < (this._crossSearchSuppressSubmitUntil || 0)) {
+                    return
+                }
                 this.executeCrossSearch(this.dom.inputCrossSearch?.value)
             })
         } else {
             this.events.on(this.dom.btnExecCrossSearch, 'click', () => {
                 this.executeCrossSearch(this.dom.inputCrossSearch?.value)
             });
-            this.events.on(this.dom.inputCrossSearch, 'keydown', e => {
-                if (e.key === 'Enter') {
-                    this.executeCrossSearch(this.dom.inputCrossSearch?.value)
-                }
-            });
         }
-        this.events.on(this.dom.inputCrossSearch, 'input', () => this._syncCrossSearchClearBtn());
+        this.events.on(this.dom.inputCrossSearch, 'input', () => {
+            this._syncCrossSearchClearBtn()
+            if (!this.dom.inputCrossSearch?.value?.trim() && !this.dom.crossSearchResults?.querySelector?.('.cross-search-book-section')) {
+                this.renderRecentCrossSearches()
+            }
+        });
         this.events.on(this.dom.btnClearCrossSearchInput, 'click', () => {
             this._searchQueryGeneration = (this._searchQueryGeneration || 0) + 1
             if (this._crossSearchAbortController) {
@@ -117,8 +240,8 @@ export class ReaderSearchController {
             if (this.dom.inputCrossSearch) this.dom.inputCrossSearch.value = ''
             this._syncCrossSearchClearBtn()
             this._resetSkippedBooks()
-            if (this.dom.crossSearchResults) this.dom.crossSearchResults.innerHTML = ''
             if (this.dom.crossSearchStatus) this.dom.crossSearchStatus.innerText = t('modal.crossSearchHint')
+            this.renderRecentCrossSearches()
             this.dom.inputCrossSearch?.focus()
         });
         this.events.on(this.dom.btnCrossSearchSkipped, 'click', () => {
@@ -159,11 +282,35 @@ export class ReaderSearchController {
 
     dispose() { this.closeCrossSearchModal(); this.clearSearchState(true); this.events.dispose(); this._bound = false }
 
-    openCrossSearchModal() {
+    refreshLocale() {
+        const resultsEl = this.dom?.crossSearchResults
+        if (resultsEl?.querySelector?.('.cross-search-recent-section') && !resultsEl?.querySelector?.('.cross-search-book-section')) {
+            this.renderRecentCrossSearches()
+        }
+        if (this._bookSearchState?.page) {
+            this._renderBookSearchPage(this._bookSearchState)
+            this.updateSearchBarUI?.()
+        }
+    }
+
+    openCrossSearchModal(initialQuery = '') {
         if (!this.dom.modalCrossSearch) return
+        const normalizedQuery = typeof initialQuery === 'string' ? initialQuery.trim() : ''
         this.dom.modalCrossSearch.style.display = 'flex'
         this.dom.modalCrossSearch.classList.add('show')
+        if (normalizedQuery) {
+            if (this.dom.inputCrossSearch) this.dom.inputCrossSearch.value = normalizedQuery
+            this._syncCrossSearchClearBtn()
+            this.dom.inputCrossSearch?.focus()
+            void this.executeCrossSearch(normalizedQuery)
+            return
+        }
         this._syncCrossSearchClearBtn()
+        if (!this.dom.inputCrossSearch?.value?.trim() || !this.dom.crossSearchResults?.querySelector?.('.cross-search-book-section')) {
+            this._resetSkippedBooks()
+            if (this.dom.crossSearchStatus) this.dom.crossSearchStatus.innerText = t('modal.crossSearchHint')
+            this.renderRecentCrossSearches()
+        }
         this.dom.inputCrossSearch?.focus()
     }
 
@@ -181,7 +328,9 @@ export class ReaderSearchController {
     }
 
     async executeCrossSearch(query) {
-        if (!query || !query.trim()) return
+        const trimmedQuery = typeof query === 'string' ? query.trim() : ''
+        if (!trimmedQuery) return
+        this.saveRecentCrossSearch(trimmedQuery)
         const container = this.dom.crossSearchResults
         const status = this.dom.crossSearchStatus
         if (!container) return

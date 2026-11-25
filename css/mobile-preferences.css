@@ -123,7 +123,15 @@ html.is-mobile-viewport #mobile-settings-page :is(select, input[type="text"], in
   border-radius: 9px; background: var(--mobile-bg-page); color: var(--mobile-text-main);
 }
 html.is-mobile-viewport #mobile-settings-page select { text-overflow: ellipsis; }
-html.is-mobile-viewport #mobile-settings-page :is(input, select, textarea, button):focus-visible { outline: 2px solid var(--mobile-primary); outline-offset: 2px; }
+html.is-mobile-viewport #mobile-settings-page :is(select, button):focus-visible { outline: 2px solid var(--line-strong); outline-offset: 2px; }
+html.is-mobile-viewport #mobile-settings-page :is(input[type="text"], input[type="password"], input[type="number"], input[type="url"], textarea):focus,
+html.is-mobile-viewport #mobile-settings-page :is(input[type="text"], input[type="password"], input[type="number"], input[type="url"], textarea):focus-visible {
+  background: var(--paper-raised);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-lift);
+  caret-color: var(--accent-primary);
+  outline: 1px solid transparent;
+}
 html.is-mobile-viewport #mobile-settings-page .settings-row-stacked,
 html.is-mobile-viewport #mobile-settings-page .control-row:has(> input[type="text"], > input[type="password"], > input[type="url"], > textarea) { align-items: stretch; flex-direction: column; gap: 8px; }
 html.is-mobile-viewport #mobile-settings-page .control-row:has(> input[type="text"], > input[type="password"], > input[type="url"], > textarea) > * { width: 100% !important; flex: initial; }
@@ -296,7 +304,14 @@ html.is-mobile-viewport #modal-webdav-sync .sync-input {
   font: 15px/1.5 var(--mobile-font-ui) !important; box-shadow: none;
   background: var(--mobile-card-bg); color: var(--mobile-text-main);
 }
-html.is-mobile-viewport #modal-webdav-sync .sync-input:focus-visible { outline: 2px solid var(--mobile-primary); outline-offset: 2px; }
+html.is-mobile-viewport #modal-webdav-sync .sync-input:focus,
+html.is-mobile-viewport #modal-webdav-sync .sync-input:focus-visible {
+  background: var(--paper-raised);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-lift);
+  caret-color: var(--accent-primary);
+  outline: 1px solid transparent;
+}
 html.is-mobile-viewport #modal-webdav-sync #btn-toggle-sync-pwd { min-width: 44px; min-height: 44px; border-radius: 9px; right: 0 !important; }
 html.is-mobile-viewport #modal-webdav-sync .sync-help { margin-top: 18px; font-size: 13px; line-height: 1.7; color: var(--mobile-text-muted); }
 html.is-mobile-viewport #modal-webdav-sync .sync-help summary { min-height: 44px; display: flex; align-items: center; gap: 6px; list-style: none; border-radius: 8px; cursor: pointer; }
@@ -531,9 +546,26 @@ html.is-mobile-viewport #modal-cross-book-search .global-modal-card {
   gap: 8px !important;
 }
 html.is-mobile-viewport #modal-cross-book-search .cross-search-modal-header,
-html.is-mobile-viewport #modal-cross-book-search .cross-search-kbd-footer,
-html.is-mobile-viewport #modal-cross-book-search #btn-exec-cross-search {
+html.is-mobile-viewport #modal-cross-book-search .cross-search-kbd-footer {
   display: none !important;
+}
+html.is-mobile-viewport #modal-cross-book-search #btn-exec-cross-search {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px !important;
+  height: 36px !important;
+  padding: 0 10px !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  color: var(--accent-text) !important;
+  font-size: 13.5px !important;
+  font-weight: 600 !important;
+  box-shadow: none !important;
+}
+html.is-mobile-viewport #modal-cross-book-search #btn-exec-cross-search:active {
+  background: var(--accent-soft) !important;
 }
 html.is-mobile-viewport #modal-cross-book-search .cross-search-mob-search-row {
   display: flex;
@@ -567,18 +599,27 @@ html.is-mobile-viewport #modal-cross-book-search .cross-search-command-bar {
   min-height: 44px;
   padding: 0 6px 0 12px;
   border-radius: 12px;
-  border: 1px solid var(--mobile-card-border);
-  background: var(--mobile-card-bg);
+  border: 1px solid var(--line-soft);
+  background: var(--paper-sunken);
   box-shadow: none !important;
 }
 html.is-mobile-viewport #modal-cross-book-search .cross-search-command-bar:focus-within {
-  border-color: var(--mobile-primary);
+  border-color: var(--line-strong);
+  background: var(--paper-raised);
   box-shadow: none !important;
+  outline: 1px solid transparent;
 }
-html.is-mobile-viewport #modal-cross-book-search .cross-search-cmd-input {
+html.is-mobile-viewport #modal-cross-book-search .cross-search-cmd-input,
+html.is-mobile-viewport #modal-cross-book-search .cross-search-cmd-input:focus,
+html.is-mobile-viewport #modal-cross-book-search .cross-search-cmd-input:focus-visible {
   height: 42px;
   font-size: 15px;
   color: var(--mobile-text-main);
+  caret-color: var(--accent-primary);
+  border: 0;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
 }
 html.is-mobile-viewport #modal-cross-book-search .cross-search-cmd-clear {
   width: 36px;
@@ -705,10 +746,25 @@ html.is-mobile-viewport #custom-list-icon-picker.icon-picker-grid {
 html.is-mobile-viewport #custom-list-icon-picker.icon-picker-grid button.icon-pick-btn {
   height: 44px;
 }
-html.is-mobile-viewport :is(#global-modal-backdrop, #modal-create-list, #modal-manage-book-lists, #modal-batch-add-to-list, #modal-batch-tags, #modal-ai-replace-preset, #modal-advanced-settings-confirm, #modal-update-dialog, #modal-chapter-trans-confirm, #modal-global-tags, #modal-cross-book-search, #modal-ai-presets, #modal-ai-audit, #modal-pdf-ocr, #modal-stats-detail, #modal-ai-assistant) :is(.btn-primary-action, .btn-secondary-action, .global-modal-input, .leaf-modal-input, select) {
+html.is-mobile-viewport :is(#global-modal-backdrop, #modal-create-list, #modal-manage-book-lists, #modal-batch-add-to-list, #modal-batch-tags, #modal-ai-replace-preset, #modal-advanced-settings-confirm, #modal-update-dialog, #modal-chapter-trans-confirm, #modal-global-tags, #modal-cross-book-search, #modal-ai-presets, #modal-ai-audit, #modal-pdf-ocr, #modal-stats-detail, #modal-ai-assistant) :is(.btn-primary-action, .btn-secondary-action, .global-modal-input:not(.leaf-field-input), .leaf-modal-input, select) {
   min-height: 44px;
   font-size: 14.5px;
   border-radius: 10px;
+}
+html.is-mobile-viewport #modal-create-list .leaf-field--md {
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+}
+html.is-mobile-viewport #modal-create-list .leaf-field .leaf-field-input {
+  min-height: 42px;
+  font-size: 15px;
+  padding: 0;
+  border-radius: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
 }
 html.is-mobile-viewport #modal-ai-presets #input-new-preset-name,
 html.is-mobile-viewport #modal-ai-presets #input-new-preset-prompt {
@@ -971,4 +1027,60 @@ html.is-mobile-viewport #modal-ai-audit .ai-audit-table td:nth-child(6) {
   color: var(--mobile-text-muted);
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* 5. Mobile Stats Detail Modal — Notes Editorial Parity with Ideas (想法) Tab */
+html.is-mobile-viewport #modal-stats-detail #stats-detail-modal-list {
+  max-height: none !important;
+  padding: 6px 0 12px !important;
+  overscroll-behavior: contain;
+}
+html.is-mobile-viewport #modal-stats-detail #stats-detail-modal-list.is-notes-list {
+  padding: 0 0 12px !important;
+  gap: 0 !important;
+}
+html.is-mobile-viewport #modal-stats-detail .stats-detail-note-row {
+  padding: 18px 0 16px;
+  border-bottom: 1px solid var(--mobile-card-border);
+  border-radius: 0;
+  gap: 10px;
+}
+html.is-mobile-viewport #modal-stats-detail .stats-detail-note-row:active {
+  background: color-mix(in srgb, var(--mobile-text-main) 3%, transparent);
+}
+html.is-mobile-viewport #modal-stats-detail .stats-detail-note-title {
+  font-family: var(--mobile-font-editorial) !important;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--mobile-text-main);
+  line-height: 1.4;
+}
+html.is-mobile-viewport #modal-stats-detail .stats-detail-note-quote-block {
+  border-left-width: 2.5px;
+  padding-left: 13px;
+}
+html.is-mobile-viewport #modal-stats-detail .stats-detail-note-quote {
+  font-family: var(--mobile-font-editorial) !important;
+  font-size: 16px;
+  line-height: 1.82;
+  color: var(--mobile-text-main);
+}
+html.is-mobile-viewport #modal-stats-detail .stats-detail-note-thought {
+  font-family: var(--mobile-font-ui) !important;
+  font-size: 14px;
+  line-height: 1.72;
+  color: var(--mobile-text-muted);
+  padding: 0;
+  margin-top: 2px;
+}
+html.is-mobile-viewport #modal-stats-detail .stats-detail-thought-badge {
+  color: var(--mobile-tab-active-color);
+  font-size: 12px;
+  font-weight: 600;
+}
+html.is-mobile-viewport #modal-stats-detail .stats-detail-note-meta {
+  font-family: var(--mobile-font-ui) !important;
+  font-size: 12px;
+  color: var(--mobile-text-muted);
+  padding: 4px 0 0;
 }

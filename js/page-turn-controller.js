@@ -7,7 +7,7 @@
 //     4. 'scroll'     - Continuous vertical/horizontal stream reading flow
 // - State Machine: 'idle' -> 'preparing' -> 'dragging' -> 'settling' -> 'idle'
 // - Single Gesture Ownership: 8px + dx/dy>=1.2 lock, 24px OS edge-back exclusion,
-//   rAF-batched touchmove, 60-100ms release velocity, single coalesced pending turn,
+//   rAF-batched touchmove, 60-100ms release velocity, ordered swipe commits,
 //   and generation/lifecycle abort hooks.
 
 import * as CurlGeom from './curl-geometry.js'
@@ -247,7 +247,7 @@ export class FoliatePageTurnAdapter extends PageTurnAdapter {
         return null
     }
 
-    setCurlEnabled(enabled, viewport, canPrepare) {
+    setCurlEnabled(enabled, viewport, canPrepare, onPrepared) {
         this._curlEnabled = enabled
         if (!enabled) {
             this._snapshots?.dispose()
@@ -258,7 +258,7 @@ export class FoliatePageTurnAdapter extends PageTurnAdapter {
         this._snapshotModule ??= import('./foliate-page-snapshot.js')
         this._snapshotModule.then(({ FoliatePageSnapshots }) => {
             if (this._curlEnabled && !this._snapshots && this.isSessionValid())
-                this._snapshots = new FoliatePageSnapshots(this.view.renderer, viewport, canPrepare)
+                this._snapshots = new FoliatePageSnapshots(this.view.renderer, viewport, canPrepare, onPrepared)
         }).catch(() => {}) // The live destination path can still use the displayed Android page.
     }
 
@@ -276,11 +276,11 @@ export class FoliatePageTurnAdapter extends PageTurnAdapter {
 
     prepareCurlSource() { return this._snapshots?.getCurrentForTurn() }
 
-    pauseTurnVisuals() { this._snapshots?.pause() }
+    prepareCurlDirection(direction) { this._snapshots?.prepareTurn(direction) }
 
     retainTurnVisuals() {
         if (!this._snapshots) return false
-        this._snapshots.refresh(0)
+        this._snapshots.resume()
         return true
     }
 
@@ -888,7 +888,11 @@ export class PageTurnController {
             if (!renderer) return
             const { W, H } = this._computeCurlSize()
             const dpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1, 3)
-            renderer.resize(W, H, dpr)
+            const current = this.adapter instanceof FoliatePageTurnAdapter
+                ? this.adapter.getCurlSnapshot('current') : null
+            const neighbor = current && (this.adapter.getCurlSnapshot('next') || this.adapter.getCurlSnapshot('prev'))
+            const textureDpr = Math.min(dpr, current?.textureDpr ?? dpr, neighbor?.textureDpr ?? dpr)
+            if (renderer.resize(W, H, textureDpr) && neighbor) renderer.syncPageTextures(current, neighbor)
             if (!this._activeCurl) {
                 if (this._curlHostEl) this._curlHostEl.style.display = 'none'
                 if (this._overlayEl) this._overlayEl.style.display = 'none'
@@ -905,7 +909,11 @@ export class PageTurnController {
         this.adapter?.setCurlEnabled?.(
             !this._destroyed && !this._curlWebGLFailed && this.getEffectiveMode() === 'cover',
             this.container,
-            () => this.state === 'idle' && !this.touchStart,
+            () => (this.state === 'idle' && !this.touchStart) ||
+                (this.state === 'dragging' && Boolean(this.touchStart) && !this._activeCurl),
+            () => {
+                if (this.state === 'idle' && !this.touchStart) this._scheduleCurlPrewarm()
+            },
         )
     }
 
@@ -1786,7 +1794,8 @@ export class PageTurnController {
                 // Let the live page replace the last compositor frame before copying.
                 await new Promise(resolve => safeRaf(() => safeRaf(resolve)))
                 if (!current()) return
-                const capture = await platformBridge.captureAndroidReaderPage(this.container.getBoundingClientRect())
+                const prepared = adapter.getCurlSnapshot?.('current')
+                const capture = prepared ? null : await platformBridge.captureAndroidReaderPage(this.container.getBoundingClientRect())
                     .catch(() => null)
                 if (!current()) { capture?.bitmap.close(); return }
                 if (capture) {
@@ -1795,7 +1804,7 @@ export class PageTurnController {
                     capture.closeBitmapOnUpload = false
                 }
                 try {
-                    source = capture || await adapter.prepareCurlSource?.()
+                    source = prepared || capture || await adapter.prepareCurlSource?.()
                     if (!current()) return
                     if (!source || !upload(source)) {
                         this._onCurlUnavailable()
@@ -1838,7 +1847,7 @@ export class PageTurnController {
         if (renderer && !renderer._disposed && !renderer._contextLost) {
             if (!commit && CurlGeom.geometry(curl.pose, curl.W, curl.H).flat) return
             const duration = this._queuedSwipes.length ? Math.min(durationOverride ?? 145, 145) : durationOverride
-            const options = duration == null ? undefined : { duration }
+            const options = duration == null ? { maxDuration: commit ? this.animationDuration : undefined } : { duration }
             const plan = CurlGeom.createSettlePlan(curl.pose, velocity, commit, curl.W, curl.H, options)
             animated = await this._animateProgress(plan.duration, curGen, (p) => {
                 if (renderer._disposed || renderer._contextLost) return false
@@ -2012,7 +2021,6 @@ export class PageTurnController {
             this.cancelCurrent({ keepPreparedPages: true })
         }
 
-        this.adapter?.pauseTurnVisuals?.()
         const now = nowMs()
         this.touchStart = {
             x: touch.clientX,
@@ -2077,20 +2085,26 @@ export class PageTurnController {
 
         if (this.state === 'idle' && !this.adapter.isBusy?.()) this.state = 'preparing'
         this.isGestureActive = true
-        if (this.state === 'preparing') {
+        const mode = this.getEffectiveMode()
+        const direction = deltaX < 0 ? 'next' : 'prev'
+        const starting = this.state === 'preparing'
+        if (starting) {
             this._cancelSlowTurnWait()
             this.state = 'dragging'
-            const mode = this.getEffectiveMode()
-            const direction = deltaX < 0 ? 'next' : 'prev'
-            if (mode === 'cover') this._beginCurlSession(direction)
-            else if (mode === 'slide') this._beginSlideSession(direction)
+            if (mode === 'slide') this._beginSlideSession(direction)
+        }
+        if (this.state === 'dragging' && mode === 'cover' && !this._activeCurl) {
+            this.adapter?.prepareCurlDirection?.(direction)
+            if (starting || (this.adapter?.getCurlSnapshot?.('current') && this.adapter?.getCurlSnapshot?.(direction))) {
+                this._beginCurlSession(direction)
+            }
         }
 
         if (e.cancelable) e.preventDefault()
         this.currentDrag = { deltaX, deltaY }
 
         if (this.state === 'dragging') {
-            if (!this._activeCurl && !this._activeSlideSession && this.getEffectiveMode() !== 'slide') return
+            if (!this._activeCurl && !this._activeSlideSession && mode !== 'slide') return
 
             if (!this._dragRafId) {
                 const curGen = this.generation
@@ -2172,11 +2186,7 @@ export class PageTurnController {
         this._clearTouch()
 
         if (this.state === 'settling' || (this.adapter.isBusy?.() && !this._activeSlideSession)) {
-            if (accepted) {
-                // Coalesce at most one pending swipe while settling/busy.
-                this._queuedSwipes.length = 0
-                this._queuedSwipes.push(direction)
-            }
+            if (accepted) this._queuedSwipes.push(direction)
             if (this.state !== 'settling') {
                 this.state = 'idle'
                 await this._flushPendingIntent(this.generation)

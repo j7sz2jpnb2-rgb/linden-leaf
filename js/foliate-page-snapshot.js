@@ -27,21 +27,29 @@ function waitFor(promise, signal) {
     })
 }
 
-function loadImage(src, signal) {
-    return new Promise((resolve, reject) => {
-        const img = new Image()
-        const finish = (error) => {
-            signal.removeEventListener('abort', abort)
-            img.onload = img.onerror = null
-            if (error) { img.src = ''; reject(error) } else resolve(img)
+async function loadImage(src, signal) {
+    const img = new Image()
+    try {
+        check(signal)
+        if (typeof img.decode === 'function') {
+            // On Android WebView, onload alone can leave the first SVG text raster blank.
+            img.src = src
+            await waitFor(img.decode(), signal)
+        } else {
+            await waitFor(new Promise((resolve, reject) => {
+                img.onload = resolve
+                img.onerror = () => reject(new Error('Page snapshot image unavailable'))
+                img.src = src
+            }), signal)
         }
-        const abort = () => finish(new DOMException('Snapshot cancelled', 'AbortError'))
-        img.onload = () => finish()
-        img.onerror = () => finish(new Error('Page snapshot image unavailable'))
-        signal.addEventListener('abort', abort, { once: true })
-        if (signal.aborted) abort()
-        else img.src = src
-    })
+        check(signal)
+        return img
+    } catch (error) {
+        img.src = ''
+        throw error
+    } finally {
+        img.onload = img.onerror = null
+    }
 }
 
 // SVG images cannot load external subresources. Inline only the same resources
@@ -94,7 +102,13 @@ async function serializeDocument(doc, signal) {
                 vmax: Math.max(win.innerWidth, win.innerHeight) / 100 }[unit]
             return `${Number(n) * factor}px`
         })
-        if (/^@font-face\b/.test(source)) text = text.replace(/font-display\s*:[^;}]+/g, 'font-display: block')
+        if (/^@font-face\b/.test(source)) {
+            // An SVG image has its own font loading timeline. Its first raster still needs visible glyphs.
+            const fontDisplay = /font-display\s*:[^;}]+/g
+            text = fontDisplay.test(text)
+                ? text.replace(fontDisplay, 'font-display: swap')
+                : text.replace(/}\s*$/, '; font-display: swap; }')
+        }
         for (let i = 0; i < urls.length; i++) {
             const value = await dataUrl(urls[i], base)
             text = text.replace(`url(__linden_resource_${i}__)`, `url("${value}")`)
@@ -236,15 +250,18 @@ async function paintPage(context, encodedXhtml, signal) {
     const prefix = encodeURIComponent(source.slice(0, offset))
     const suffix = encodeURIComponent(source.slice(offset + marker.length))
     const img = await loadImage('data:image/svg+xml;charset=utf-8,' + prefix + encodedXhtml + suffix, signal)
-    check(signal)
-    const canvas = document.createElement('canvas')
-    canvas.width = pixelWidth
-    canvas.height = pixelHeight
-    const ctx = canvas.getContext('2d')
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-    img.src = ''
-    return { canvas, width, height, bgColor: background, textureDpr: ratio,
-        pageIndex: context.page, visualVersion: ++snapshotVersion, closeBitmapOnUpload: false }
+    try {
+        check(signal)
+        const canvas = document.createElement('canvas')
+        canvas.width = pixelWidth
+        canvas.height = pixelHeight
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        return { canvas, width, height, bgColor: background, textureDpr: ratio,
+            pageIndex: context.page, visualVersion: ++snapshotVersion, closeBitmapOnUpload: false }
+    } finally {
+        img.src = ''
+    }
 }
 
 /** One active section and a bounded window of nearby page textures.
@@ -252,10 +269,14 @@ async function paintPage(context, encodedXhtml, signal) {
  * Content or layout changes invalidate all snapshots from that section.
  */
 export class FoliatePageSnapshots {
-    constructor(renderer, viewport, canPrepare = () => true) {
+    constructor(renderer, viewport, canPrepare = () => true, onPrepared = () => {}) {
         this.renderer = renderer
         this.viewport = viewport
         this.canPrepare = canPrepare
+        this.onPrepared = onPrepared
+        this.turnOffset = 0
+        this.preparation = null
+        this.refreshAfterPreparation = false
         this.cache = new Map()
         this.events = new AbortController()
         this.onChange = () => this.invalidate()
@@ -299,14 +320,24 @@ export class FoliatePageSnapshots {
         if (!this.events.signal.aborted && !document.hidden) this.timer = setTimeout(() => this.prepare(), delay)
     }
 
-    pause() {
-        this.controller?.abort()
-        this.refresh()
+    prepareTurn(direction) {
+        const offset = direction === 'next' ? 1 : -1
+        if (this.turnOffset === offset) return
+        this.turnOffset = offset
+        if (!this.get('current') || !this.get(direction)) this.refresh(0)
+    }
+
+    resume() {
+        this.turnOffset = 0
+        this.refresh(0)
     }
 
     invalidate() {
         this.controller?.abort()
         this.controller = null
+        this.preparation = null
+        this.refreshAfterPreparation = false
+        this.turnOffset = 0
         this.source = null
         this.observer.disconnect()
         this.documentEvents?.abort()
@@ -331,6 +362,26 @@ export class FoliatePageSnapshots {
     }
 
     async prepare(onlyCurrent = false) {
+        if (this.preparation) {
+            this.refreshAfterPreparation ||= !onlyCurrent
+            return this.preparation
+        }
+        const work = this.buildSnapshots(onlyCurrent)
+        this.preparation = work
+        try {
+            await work
+        } finally {
+            if (this.preparation === work) {
+                this.preparation = null
+                if (this.refreshAfterPreparation) {
+                    this.refreshAfterPreparation = false
+                    this.refresh(0)
+                }
+            }
+        }
+    }
+
+    async buildSnapshots(onlyCurrent) {
         if (this.events.signal.aborted || document.hidden || this.renderer.isNavBusy?.()) return
         if (!onlyCurrent && !this.canPrepare()) {
             this.refresh()
@@ -346,7 +397,6 @@ export class FoliatePageSnapshots {
             return
         }
 
-        this.controller?.abort()
         const controller = this.controller = new AbortController()
         const { signal } = controller
         const timeout = setTimeout(() => controller.abort(), 2500)
@@ -362,31 +412,41 @@ export class FoliatePageSnapshots {
             const movement = context.page - (prepared.page ?? context.page)
             if (movement) prepared.visualDirection = Math.sign(movement) * (context.direction === 'rtl' ? -1 : 1)
             prepared.page = context.page
-            const forward = prepared.visualDirection ?? (context.direction === 'rtl' ? -1 : 1)
+            const forward = this.turnOffset || prepared.visualDirection || (context.direction === 'rtl' ? -1 : 1)
             const offsets = onlyCurrent ? [0]
-                : hasHighTextureBudget() ? [0, forward, 2 * forward, -forward] : [0, forward, -forward]
-            const wanted = offsets
-                .map(offset => this.renderer.getPageSnapshotContext(offset, this.viewport))
-                .filter(page => page?.doc === context.doc)
-            const pages = new Set(wanted.map(page => page.page))
+                : hasHighTextureBudget() ? [0, forward, -forward, 2 * forward] : [0, forward, -forward]
+            const wanted = offsets.map(offset => ({
+                offset, page: this.renderer.getPageSnapshotContext(offset, this.viewport)
+            })).filter(({ page }) => page?.doc === context.doc)
+            const pages = new Set(wanted.map(({ page }) => page.page))
             for (const [key, value] of this.cache) {
                 if (onlyCurrent || pages.has(key)) continue
                 value.canvas.width = value.canvas.height = 0
                 this.cache.delete(key)
             }
 
-            for (const page of wanted) {
+            let notified = false
+            const notifyPair = () => {
+                if (!notified && this.get('current') && (this.get('next') || this.get('prev'))) {
+                    notified = true
+                    this.onPrepared()
+                }
+            }
+            notifyPair()
+            for (const { offset, page } of wanted) {
                 if (this.cache.has(page.page)) continue
                 if (!onlyCurrent && !this.canPrepare()) {
                     this.refresh()
                     break
                 }
+                if (this.turnOffset && offset && offset !== this.turnOffset) continue
                 const snapshot = await paintPage(page, prepared.encodedXhtml, signal)
                 if (signal.aborted) {
                     snapshot.canvas.width = snapshot.canvas.height = 0
                     break
                 }
                 this.cache.set(page.page, snapshot)
+                notifyPair()
             }
             if (!signal.aborted) this.lastError = null
         } catch (error) {

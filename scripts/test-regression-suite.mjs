@@ -3130,7 +3130,7 @@ await runAsyncTest('R8: a new touch preserves the previously accepted curl', asy
     }
 })
 
-await runAsyncTest('R9: texture misses and section loads coalesce at most one pending swipe with latest direction', async () => {
+await runAsyncTest('R9: texture misses and section loads keep accepted swipes in order', async () => {
     const { PageTurnAdapter, PageTurnController } = await import('../js/page-turn-controller.js')
     const adapter = new PageTurnAdapter()
     const calls = []
@@ -3171,18 +3171,45 @@ await runAsyncTest('R9: texture misses and section loads coalesce at most one pe
         await swipe(80, 300)
         await swipe(300, 295)
         assert.deepEqual(calls, ['next'])
-        assert.deepEqual(controller._queuedSwipes, ['prev'])
+        assert.deepEqual(controller._queuedSwipes, ['next', 'prev'])
         finishChapter()
         await first
-        assert.deepEqual(calls, ['next', 'prev'])
+        assert.deepEqual(calls, ['next', 'next', 'prev'])
         // The platform can coalesce the whole flick into the release event.
         controller.handleTouchStart({ touches: [point(300)] })
         await controller.handleTouchEnd({ touches: [], changedTouches: [point(100)] })
-        assert.deepEqual(calls, ['next', 'prev', 'next'])
-        assert.deepEqual(frames, Array.from({ length: 3 }, () => ['hold', 'curl']).flat())
+        assert.deepEqual(calls, ['next', 'next', 'prev', 'next'])
+        assert.deepEqual(frames, Array.from({ length: 4 }, () => ['hold', 'curl']).flat())
         assert.equal(controller.state, 'idle')
     } finally {
         finishChapter()
+        controller.destroy()
+    }
+})
+
+await runAsyncTest('R9a: an in-progress drag starts the curl when its textures arrive', async () => {
+    const { PageTurnAdapter, PageTurnController } = await import('../js/page-turn-controller.js')
+    const adapter = new PageTurnAdapter()
+    const controller = new PageTurnController({ adapter, mode: 'cover' })
+    let ready = false
+    const directions = []
+    adapter.getCurlSnapshot = key => ready && (key === 'current' || key === 'next') ? {} : null
+    controller._beginCurlSession = direction => {
+        directions.push(direction)
+        if (!ready) return false
+        controller._activeCurl = { dir: direction }
+        return true
+    }
+    const point = clientX => ({ clientX, clientY: 400 })
+    try {
+        controller.handleTouchStart({ touches: [point(300)] })
+        controller.handleTouchMove({ touches: [point(230)] })
+        assert.equal(controller._activeCurl, null)
+        ready = true
+        controller.handleTouchMove({ touches: [point(180)] })
+        assert.equal(controller._activeCurl?.dir, 'next')
+        assert.deepEqual(directions, ['next', 'next'])
+    } finally {
         controller.destroy()
     }
 })
@@ -3793,6 +3820,806 @@ await runAsyncTest('R10: updateSidebarNotesCount queries IndexedDB count() inste
     } finally {
         if (prevIndexedDB === undefined) delete globalThis.indexedDB
         else globalThis.indexedDB = prevIndexedDB
+        if (prevDoc === undefined) delete globalThis.document
+        else globalThis.document = prevDoc
+    }
+})
+
+await runAsyncTest('UI-01 (#1): Wooden bookshelf is removed and legacy shelf view mode falls back to grid', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const { BookshelfController } = await import('../js/bookshelf-controller.js')
+    const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+    const indexHtml = fs.readFileSync(path.join(root, 'index.html'), 'utf8')
+    const mainCss = fs.readFileSync(path.join(root, 'css/main.css'), 'utf8')
+    assert.doesNotMatch(indexHtml, /btn-view-shelf|id="books-shelf"/)
+    assert.doesNotMatch(mainCss, /wood-shelf-theme|skeuo-book/)
+
+    let refreshedWith = null
+    let saved = 0
+    const ctrl = Object.create(BookshelfController.prototype)
+    ctrl.shelfViewMode = 'list'
+    ctrl.dom = { modernGridWrapper: null, booksTableContainer: null }
+    ctrl.app = {
+        appearance: { updateSettingsUI() {} },
+        saveSettings: async () => { saved++ }
+    }
+    ctrl.refreshBookshelf = async (opts) => { refreshedWith = opts }
+    await ctrl.setShelfViewMode('shelf')
+    assert.strictEqual(ctrl.shelfViewMode, 'grid')
+    assert.strictEqual(saved, 1)
+    assert.strictEqual(refreshedWith?.landOnShelf, true)
+})
+
+await runAsyncTest('UI-02 (#6): Reading goal toggle and targets persist via setSetting without reverting on saveSettings', async () => {
+    const { StatsViewController } = await import('../js/stats-view-controller.js')
+    const { resolveReaderSettings } = await import('../js/translation-job-core.js')
+    const listeners = new Map()
+    const makeInput = (value = '') => ({
+        checked: false,
+        value,
+        addEventListener(type, fn) { listeners.set(this, fn) },
+        removeEventListener() {}
+    })
+    const toggleEl = makeInput()
+    const yearEl = makeInput('12')
+    const monthEl = makeInput('20')
+    const todayEl = makeInput('45')
+
+    const app = {
+        globalSettings: { enableReadingGoals: false, readingGoalYear: 12, readingGoalMonth: 20, readingGoalToday: 45 },
+        settings: { enableReadingGoals: false, readingGoalYear: 12, readingGoalMonth: 20, readingGoalToday: 45 },
+        bookshelf: { shelfCategory: 'all' },
+        dialogs: { showToast() {} },
+        appearance: { dom: { settingEnableReadingGoals: toggleEl, settingGoalYear: yearEl, settingGoalMonth: monthEl, settingGoalToday: todayEl } },
+        setSetting(key, val) {
+            this.globalSettings[key] = val
+            this.settings = resolveReaderSettings(this.globalSettings, null, [])
+            return this.settings
+        },
+        async saveSettings() {
+            this.settings = resolveReaderSettings(this.globalSettings, null, [])
+        }
+    }
+    const prevDoc = globalThis.document
+    globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] }
+    try {
+        const ctrl = new StatsViewController(app)
+        ctrl.dom = {}
+        ctrl.bindEvents()
+        await listeners.get(toggleEl)({ target: { checked: true } })
+        assert.strictEqual(app.globalSettings.enableReadingGoals, true)
+        assert.strictEqual(app.settings.enableReadingGoals, true)
+
+        await listeners.get(yearEl)({ target: { value: '24' } })
+        await listeners.get(monthEl)({ target: { value: '35' } })
+        await listeners.get(todayEl)({ target: { value: '60' } })
+        assert.strictEqual(app.settings.readingGoalYear, 24)
+        assert.strictEqual(app.settings.readingGoalMonth, 35)
+        assert.strictEqual(app.settings.readingGoalToday, 60)
+    } finally {
+        if (prevDoc === undefined) delete globalThis.document
+        else globalThis.document = prevDoc
+    }
+})
+
+await runAsyncTest('UI-03 (#3): Returning to all books from filters/sidebar or list->grid lands on Screen 2 shelf', async () => {
+    const { BookshelfController } = await import('../js/bookshelf-controller.js')
+    const prevDoc = globalThis.document
+    globalThis.document = { querySelectorAll: () => [] }
+    try {
+        const calls = []
+        const ctrl = Object.create(BookshelfController.prototype)
+        ctrl.shelfCategory = 'favorite'
+        ctrl.shelfViewMode = 'grid'
+        ctrl.dom = { navCategoryItems: [] }
+        ctrl.refreshBookshelf = async (opts) => { calls.push(opts) }
+
+        await ctrl.switchShelfCategory('all')
+        assert.strictEqual(calls.at(-1)?.landOnShelf, true)
+        assert.strictEqual(calls.at(-1)?.resetScroll, false)
+
+        ctrl.shelfCategory = 'stats'
+        await ctrl.switchShelfCategory('all')
+        assert.strictEqual(calls.at(-1)?.landOnShelf, true)
+
+        ctrl.shelfCategory = 'notes'
+        await ctrl.switchShelfCategory('all', { allowHero: true })
+        assert.strictEqual(calls.at(-1)?.landOnShelf, false)
+    } finally {
+        if (prevDoc === undefined) delete globalThis.document
+        else globalThis.document = prevDoc
+    }
+})
+
+await runAsyncTest('UI-04 (#2/#4/#5/#11): Stats recent covers, KPI grid CSS, zh-CN serif font priority, and notes detail modal', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const { StatsViewController } = await import('../js/stats-view-controller.js')
+    const { coverUrlPool } = await import('../js/cover-url-pool.js')
+    const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+    const mainCss = fs.readFileSync(path.join(root, 'css/main.css'), 'utf8')
+    const desktopCss = fs.readFileSync(path.join(root, 'css/desktop-ui.css'), 'utf8')
+    const fontsCss = fs.readFileSync(path.join(root, 'assets/fonts/fonts.css'), 'utf8')
+
+    // #2: zh-CN puts Noto Serif SC before Lora; Noto Serif SC 500 uses 400 weight; no -0.01em on hero-book-title
+    assert.match(mainCss, /html:lang\(zh\)[\s\S]*?--font-serif:\s*"Noto Serif SC"/)
+    assert.match(fontsCss, /font-weight:\s*500;[\s\S]*?noto-serif-sc-chinese-simplified-400-normal\.woff2/)
+    const heroTitleBlock = desktopCss.match(/\.hero-book-title\s*\{[^}]+\}/)?.[0] || ''
+    assert.ok(heroTitleBlock && !heroTitleBlock.includes('-0.01em'), 'hero-book-title must not use -0.01em negative tracking')
+
+    // #5: quad KPIs full width & chart card single row aligned with header card
+    const quadBlock = desktopCss.match(/\.stats-quad-kpis-grid\s*\{[^}]+\}/)?.[0] || ''
+    assert.match(quadBlock, /width:\s*100%/)
+    assert.doesNotMatch(quadBlock, /grid-row:\s*2/)
+    const chartBlock = desktopCss.match(/\.stats-chart-card\s*\{[^}]+\}/)?.[0] || ''
+    assert.match(chartBlock, /grid-row:\s*1;/)
+    assert.doesNotMatch(chartBlock, /span 2/)
+
+    // #4: session-micro-cover img rule & renderRecentSessions uses real cover + resolveBookTitle
+    assert.match(mainCss, /\.session-micro-cover img\s*\{[^}]*object-fit:\s*cover/)
+    const prevDoc = globalThis.document
+    const prevGetForBook = coverUrlPool.getForBook
+    const createdNodes = []
+    const makeEl = (tag) => {
+        const el = {
+            tagName: tag.toUpperCase(),
+            className: '',
+            innerHTML: '',
+            innerText: '',
+            style: {},
+            attrs: {},
+            classList: {
+                _set: new Set(),
+                add(c) { this._set.add(c) },
+                remove(c) { this._set.delete(c) },
+                toggle(c, v) { if (v) this._set.add(c); else this._set.delete(c) },
+                contains(c) { return this._set.has(c) }
+            },
+            setAttribute(k, v) { this.attrs[k] = v },
+            addEventListener() {},
+            appendChild(child) { createdNodes.push(child) }
+        }
+        return el
+    }
+    const modalEl = makeEl('div')
+    const iconEl = makeEl('span')
+    const titleEl = makeEl('span')
+    const listEl = makeEl('div')
+    globalThis.document = {
+        createElement: makeEl,
+        getElementById(id) {
+            if (id === 'modal-stats-detail') return modalEl
+            if (id === 'stats-detail-modal-icon') return iconEl
+            if (id === 'stats-detail-modal-title') return titleEl
+            if (id === 'stats-detail-modal-list') return listEl
+            return null
+        }
+    }
+    coverUrlPool.getForBook = () => 'blob:test-cover-1'
+    try {
+        const ctrl = new StatsViewController({ openBook() {} })
+        const recentContainer = makeEl('div')
+        ctrl.dom = { statsRecentSessions: recentContainer }
+        ctrl.renderRecentSessions([{
+            bookId: 'b1',
+            bookTitle: 'book_12345.epub',
+            bookFilename: 'Dune.epub',
+            coverBlob: new Blob(['x']),
+            startTime: Date.now(),
+            durationSeconds: 300,
+            date: '2026-11-24'
+        }])
+        assert.strictEqual(createdNodes.length, 1)
+        assert.match(createdNodes[0].innerHTML, /src="blob:test-cover-1"/)
+
+        // #11: notes detail modal renders editorial cards sorted newest-first with highlight bar & thought badge
+        createdNodes.length = 0
+        ctrl.latestStats = {
+            viewMode: 'total',
+            periodHighlights: [
+                { id: 'h1', bookId: 'b1', bookTitle: 'Old Book', text: 'First quote', note: 'Early thought', color: '#facc15', createdAt: 1000 },
+                { id: 'h2', bookId: 'b2', bookTitle: 'New Book', chapterTitle: 'Ch 2', text: 'Second quote', note: 'Latest thought', color: '#38bdf8', createdAt: 2000 }
+            ]
+        }
+        ctrl.openStatsDetailModal('notes')
+        assert.strictEqual(modalEl.classList.contains('is-notes-detail'), true)
+        assert.strictEqual(listEl.classList.contains('is-notes-list'), true)
+        assert.strictEqual(createdNodes.length, 2)
+        assert.match(createdNodes[0].innerHTML, /Second quote/)
+        assert.match(createdNodes[0].innerHTML, /stats-detail-note-quote-block/)
+        assert.match(createdNodes[0].innerHTML, /stats-detail-thought-badge/)
+        assert.match(createdNodes[1].innerHTML, /First quote/)
+    } finally {
+        coverUrlPool.getForBook = prevGetForBook
+        if (prevDoc === undefined) delete globalThis.document
+        else globalThis.document = prevDoc
+    }
+})
+
+await runAsyncTest('UI-05 (#10): Mobile Home continue-reading immediately hides shelf and blocks concurrent switchTab', async () => {
+    const { MobileShellController } = await import('../js/mobile-shell.js')
+    const prevDoc = globalThis.document
+    const prevWindow = globalThis.window
+    const makeClassList = () => {
+        const s = new Set()
+        return {
+            add(...cs) { cs.forEach(c => s.add(c)) },
+            remove(...cs) { cs.forEach(c => s.delete(c)) },
+            toggle(c, force) { if (force === undefined) { s.has(c) ? s.delete(c) : s.add(c) } else if (force) s.add(c); else s.delete(c) },
+            contains(c) { return s.has(c) }
+        }
+    }
+    const shelfArea = { style: { display: 'flex' }, classList: makeClassList() }
+    const readerView = { style: { display: 'none' }, classList: makeClassList() }
+    const homeView = { classList: makeClassList() }
+    homeView.classList.add('active')
+    const body = { classList: makeClassList() }
+    globalThis.document = {
+        body,
+        getElementById(id) {
+            if (id === 'bookshelf-view') return shelfArea
+            if (id === 'reader-view') return readerView
+            if (id === 'mobile-home-view') return homeView
+            return null
+        },
+        querySelectorAll(sel) {
+            if (sel === '.mobile-view-container') return [homeView]
+            return []
+        }
+    }
+    let openCalled = false
+    let shelfDisplayDuringOpen = null
+    let switchTabBlocked = false
+    globalThis.window = {
+        app: {
+            _activeSession: null,
+            currentBookId: null,
+            async openBook(id) {
+                openCalled = true
+                this._activeSession = { bookId: id }
+                this.currentBookId = id
+                shelfDisplayDuringOpen = shelfArea.style.display
+                shell.switchTab('shelf')
+                switchTabBlocked = shelfArea.style.display === 'none'
+            }
+        }
+    }
+    const shell = Object.create(MobileShellController.prototype)
+    shell.currentTab = 'home'
+    shell.isInReader = false
+    shell.settingsPage = { close() {} }
+    shell.isMobileViewport = () => true
+    shell.closeNowPlayingSheet = () => {}
+    shell.closeAllSheets = () => {}
+    shell.setReaderToolsVisible = () => {}
+    shell.syncPdfControls = () => {}
+    shell.updateMiniPlayerState = () => {}
+    shell._setReaderLoadingIndicator = () => {}
+    try {
+        await shell._openBookFromHome('b-test', null, { id: 'b-test', title: 'Test Book' })
+        assert.strictEqual(openCalled, true)
+        assert.strictEqual(shelfDisplayDuringOpen, 'none', 'bookshelf must be hidden synchronously before openBook awaits')
+        assert.strictEqual(switchTabBlocked, true, 'switchTab("shelf") must be blocked while opening from Home')
+        assert.strictEqual(readerView.style.display, 'block')
+        assert.strictEqual(body.classList.contains('mobile-reader-active'), true)
+    } finally {
+        if (prevDoc === undefined) delete globalThis.document
+        else globalThis.document = prevDoc
+        if (prevWindow === undefined) delete globalThis.window
+        else globalThis.window = prevWindow
+    }
+})
+
+await runAsyncTest('FOCUS-01: Focus tokens cover all 6 themes and focus-visible pencil ring uses neutral ink without embedded inputs', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+    const mainCss = fs.readFileSync(path.join(root, 'css/main.css'), 'utf8')
+    const desktopCss = fs.readFileSync(path.join(root, 'css/desktop-ui.css'), 'utf8')
+    const mobileCss = fs.readFileSync(path.join(root, 'css/mobile-shell.css'), 'utf8')
+
+    const themes = ['light', 'sepia', 'dark', 'black', 'green', 'eink']
+    const requiredTokens = ['--paper-sunken', '--paper-raised', '--line-soft', '--line-strong', '--ink-muted', '--accent-soft', '--accent-text', '--danger', '--danger-soft']
+    for (const theme of themes) {
+        const match = mainCss.match(new RegExp(`\\[data-theme="${theme}"\\]\\s*\\{([\\s\\S]*?)\\}`))
+        assert.ok(match, `Missing theme block for [data-theme="${theme}"]`)
+        for (const token of requiredTokens) {
+            assert.ok(match[1].includes(token), `Theme [data-theme="${theme}"] missing token ${token}`)
+        }
+    }
+
+    const desktopFocusBlock = desktopCss.match(/button:focus-visible[\s\S]*?\{[^}]+\}/)?.[0] || ''
+    assert.ok(desktopFocusBlock.includes('var(--line-strong)'), 'desktop-ui.css focus-visible must use --line-strong')
+    assert.doesNotMatch(desktopFocusBlock, /--accent-purple|--accent-primary|#da7756/i, 'desktop-ui.css focus-visible must not use orange accent')
+    const desktopFocusSelectors = desktopFocusBlock.split('{')[0].split(',').map(s => s.trim())
+    assert.ok(!desktopFocusSelectors.some(s => /^(?:input|textarea):focus-visible$/i.test(s)), 'desktop-ui.css pencil ring must not target generic text inputs')
+
+    const mobilePencilMatch = mobileCss.match(/html\.is-mobile-viewport\s+:is\([^)]+\):focus-visible\s*\{[^}]+\}/)?.[0] || ''
+    assert.ok(mobilePencilMatch.includes('var(--line-strong)'), 'mobile-shell.css pencil ring must use --line-strong')
+    assert.doesNotMatch(mobilePencilMatch, /--mobile-primary|--accent-primary|--accent-purple|#da7756/i, 'mobile-shell.css pencil ring must not use orange accent')
+    const mobilePencilSelector = mobilePencilMatch.split('{')[0]
+    assert.doesNotMatch(mobilePencilSelector, /\binput(?!\[type=)|\btextarea\b/, 'mobile-shell.css pencil ring must not cover generic text inputs')
+})
+
+await runAsyncTest('FOCUS-02: Header shelf search handles IME guard, clear-to-shelf, Shift+Enter, Esc, global shortcuts, and empty-state fulltext handoff', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+    const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8')
+    const headerBarMatch = html.match(/<div[^>]*id="header-search-bar"[\s\S]*?<\/div>/)?.[0] || ''
+    assert.match(headerBarMatch, /class="[^"]*\bleaf-field\b[^"]*\bleaf-field--sm\b/)
+    assert.match(headerBarMatch, /id="btn-clear-shelf-search"/)
+    assert.match(headerBarMatch, /id="shelf-search-kbd"/)
+    const crossBtnTag = headerBarMatch.match(/<button[^>]*id="btn-open-cross-search"[^>]*>/)?.[0] || ''
+    assert.ok(crossBtnTag && !/\bstyle=/.test(crossBtnTag), '#btn-open-cross-search must not carry inline style')
+
+    const { BookshelfController } = await import('../js/bookshelf-controller.js')
+    const prevDoc = globalThis.document
+    const prevWin = globalThis.window
+    const prevRaf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = fn => fn()
+    const makeEl = (tag = 'div') => {
+        const listeners = new Map()
+        const classes = new Set()
+        const attrs = new Map()
+        const el = {
+            tagName: tag.toUpperCase(),
+            value: '',
+            hidden: false,
+            textContent: '',
+            innerHTML: '',
+            style: {},
+            dataset: {},
+            focused: false,
+            selected: false,
+            classList: {
+                add(...cs) { cs.forEach(c => classes.add(c)) },
+                remove(...cs) { cs.forEach(c => classes.delete(c)) },
+                toggle(c, f) { if (f === undefined) { classes.has(c) ? classes.delete(c) : classes.add(c) } else if (f) classes.add(c); else classes.delete(c) },
+                contains(c) { return classes.has(c) }
+            },
+            setAttribute(k, v) { attrs.set(k, String(v)) },
+            getAttribute(k) { return attrs.get(k) ?? null },
+            removeAttribute(k) { attrs.delete(k) },
+            addEventListener(type, fn) {
+                if (!listeners.has(type)) listeners.set(type, [])
+                listeners.get(type).push(fn)
+            },
+            removeEventListener(type, fn) {
+                if (!listeners.has(type)) return
+                listeners.set(type, listeners.get(type).filter(f => f !== fn))
+            },
+            dispatch(type, evt = {}) {
+                for (const fn of (listeners.get(type) || [])) fn(evt)
+            },
+            focus() { this.focused = true; globalThis.document.activeElement = this },
+            blur() { this.focused = false; if (globalThis.document.activeElement === this) globalThis.document.activeElement = globalThis.document.body },
+            select() { this.selected = true },
+            matches: () => false,
+            closest: () => null
+        }
+        return el
+    }
+
+    const headerSearchBar = makeEl('div')
+    const shelfSearch = makeEl('input')
+    shelfSearch.matches = sel => sel.includes('input')
+    const btnClearShelfSearch = makeEl('button')
+    btnClearShelfSearch.hidden = true
+    const btnOpenCrossSearch = makeEl('button')
+    const bookshelfView = makeEl('div')
+    bookshelfView.style.display = 'flex'
+    const shelfHeaderActions = makeEl('div')
+    shelfHeaderActions.style.display = 'flex'
+    const readerView = makeEl('div')
+    readerView.style.display = 'none'
+    const booksGrid = makeEl('div')
+    const emptyFulltextBtn = makeEl('button')
+    const docListeners = new Map()
+    const bodyEl = makeEl('body')
+
+    globalThis.document = {
+        body: bodyEl,
+        activeElement: bodyEl,
+        getElementById(id) {
+            if (id === 'header-search-bar') return headerSearchBar
+            if (id === 'shelf-search') return shelfSearch
+            if (id === 'btn-clear-shelf-search') return btnClearShelfSearch
+            if (id === 'btn-open-cross-search') return btnOpenCrossSearch
+            if (id === 'bookshelf-view') return bookshelfView
+            if (id === 'shelf-header-actions') return shelfHeaderActions
+            if (id === 'reader-view') return readerView
+            if (id === 'books-grid') return booksGrid
+            if (id === 'btn-empty-search-fulltext') return emptyFulltextBtn
+            return null
+        },
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener(type, fn) {
+            if (!docListeners.has(type)) docListeners.set(type, [])
+            docListeners.get(type).push(fn)
+        },
+        removeEventListener(type, fn) {
+            if (!docListeners.has(type)) return
+            docListeners.set(type, docListeners.get(type).filter(f => f !== fn))
+        }
+    }
+    globalThis.window = { innerHeight: 900 }
+
+    const openedCrossQueries = []
+    const refreshCalls = []
+    try {
+        const ctrl = new BookshelfController({
+            annotations: { activeDrawer: null },
+            search: { openCrossSearchModal(q) { openedCrossQueries.push(q) } }
+        })
+        ctrl.initDOM()
+        ctrl.initShelfDelegatedListeners = () => {}
+        ctrl.initShelfSidebar = () => {}
+        ctrl.bindOverviewEvents = () => {}
+        ctrl.refreshBookshelf = async (opts = {}) => { refreshCalls.push(opts) }
+        ctrl.bindEvents()
+
+        // IME composition must not trigger search until compositionend
+        shelfSearch.dispatch('compositionstart')
+        shelfSearch.value = 'sh'
+        shelfSearch.dispatch('input', { target: shelfSearch, isComposing: true })
+        await new Promise(r => setTimeout(r, 180))
+        assert.strictEqual(refreshCalls.length, 0, 'IME composition input must not trigger bookshelf filtering')
+
+        shelfSearch.value = '史记'
+        shelfSearch.dispatch('compositionend', { target: shelfSearch })
+        assert.strictEqual(refreshCalls.length, 1, 'compositionend must trigger bookshelf filtering')
+        assert.strictEqual(headerSearchBar.classList.contains('has-value'), true)
+        assert.strictEqual(btnClearShelfSearch.hidden, false)
+        assert.strictEqual(btnOpenCrossSearch.dataset.i18n, 'shelf.crossSearchAction')
+
+        // Shift+Enter opens cross-book search with current query
+        let shiftEnterPrevented = false
+        shelfSearch.dispatch('keydown', { key: 'Enter', shiftKey: true, isComposing: false, preventDefault() { shiftEnterPrevented = true } })
+        assert.strictEqual(shiftEnterPrevented, true)
+        assert.deepStrictEqual(openedCrossQueries, ['史记'])
+
+        // Escape clears when non-empty, lands on shelf, and keeps focus; second Escape blurs
+        shelfSearch.dispatch('keydown', { key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} })
+        assert.strictEqual(shelfSearch.value, '')
+        assert.strictEqual(refreshCalls.at(-1)?.landOnShelf, true)
+        assert.strictEqual(shelfSearch.focused, true)
+        assert.strictEqual(headerSearchBar.classList.contains('has-value'), false)
+        assert.strictEqual(btnClearShelfSearch.hidden, true)
+
+        shelfSearch.dispatch('keydown', { key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} })
+        assert.strictEqual(shelfSearch.focused, false)
+
+        // Global '/' and 'Ctrl+K' focus #shelf-search only in bookshelf main view
+        const fireDocKey = evt => { for (const fn of (docListeners.get('keydown') || [])) fn(evt) }
+        fireDocKey({ key: '/', target: bodyEl, preventDefault() {} })
+        assert.strictEqual(shelfSearch.focused, true)
+
+        shelfSearch.blur()
+        shelfSearch.selected = false
+        fireDocKey({ key: 'k', ctrlKey: true, target: bodyEl, preventDefault() {} })
+        assert.strictEqual(shelfSearch.focused, true)
+        assert.strictEqual(shelfSearch.selected, true)
+
+        // Must not intercept inside reader view
+        shelfSearch.blur()
+        readerView.style.display = 'flex'
+        fireDocKey({ key: 'k', ctrlKey: true, target: bodyEl, preventDefault() {} })
+        assert.strictEqual(shelfSearch.focused, false)
+        readerView.style.display = 'none'
+
+        // Empty grid during search links directly to cross-book search
+        ctrl.searchQuery = '史记'
+        ctrl.renderBooksGrid([])
+        assert.match(booksGrid.innerHTML, /id="btn-empty-search-fulltext"/)
+        emptyFulltextBtn.dispatch('click')
+        assert.deepStrictEqual(openedCrossQueries, ['史记', '史记'])
+
+        ctrl.dispose()
+    } finally {
+        if (prevRaf === undefined) delete globalThis.requestAnimationFrame
+        else globalThis.requestAnimationFrame = prevRaf
+        if (prevDoc === undefined) delete globalThis.document
+        else globalThis.document = prevDoc
+        if (prevWin === undefined) delete globalThis.window
+        else globalThis.window = prevWin
+    }
+})
+
+await runAsyncTest('FOCUS-03: Cross-book search supports initialQuery, IME Enter guard, and recent searches (max 5, deduped, deletable)', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+    const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8')
+    assert.match(html, /id="btn-exec-cross-search"/, '#btn-exec-cross-search must stay in DOM for mobile & mouse users')
+
+    const { ReaderSearchController } = await import('../js/reader-search-controller.js')
+    const prevStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    const prevDoc = globalThis.document
+    const store = new Map()
+    Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        value: {
+            getItem: k => (store.has(k) ? store.get(k) : null),
+            setItem: (k, v) => store.set(k, String(v)),
+            removeItem: k => store.delete(k)
+        }
+    })
+
+    const makeMock = () => {
+        const listeners = new Map()
+        const classes = new Set()
+        return {
+            value: '',
+            hidden: false,
+            innerHTML: '',
+            innerText: '',
+            style: {},
+            focused: false,
+            classList: {
+                add(...cs) { cs.forEach(c => classes.add(c)) },
+                remove(...cs) { cs.forEach(c => classes.delete(c)) },
+                contains(c) { return classes.has(c) }
+            },
+            addEventListener(type, fn) {
+                if (!listeners.has(type)) listeners.set(type, [])
+                listeners.get(type).push(fn)
+            },
+            removeEventListener(type, fn) {
+                if (!listeners.has(type)) return
+                listeners.set(type, listeners.get(type).filter(f => f !== fn))
+            },
+            dispatch(type, evt = {}) {
+                for (const fn of (listeners.get(type) || [])) fn(evt)
+            },
+            focus() { this.focused = true },
+            querySelector: () => null,
+            querySelectorAll: () => []
+        }
+    }
+
+    const modalCrossSearch = makeMock()
+    const crossSearchForm = makeMock()
+    const inputCrossSearch = makeMock()
+    const btnClearCrossSearchInput = makeMock()
+    const btnExecCrossSearch = makeMock()
+    const crossSearchResults = makeMock()
+    const crossSearchStatus = makeMock()
+    globalThis.document = {
+        getElementById(id) {
+            if (id === 'modal-cross-book-search') return modalCrossSearch
+            if (id === 'cross-search-form') return crossSearchForm
+            if (id === 'input-cross-search') return inputCrossSearch
+            if (id === 'btn-clear-cross-search-input') return btnClearCrossSearchInput
+            if (id === 'btn-exec-cross-search') return btnExecCrossSearch
+            if (id === 'cross-search-results') return crossSearchResults
+            if (id === 'cross-search-status') return crossSearchStatus
+            return null
+        }
+    }
+
+    try {
+        const ctrl = new ReaderSearchController({ annotations: { dom: {} } })
+        ctrl.initDOM()
+        const execQueries = []
+        const origExec = ctrl.executeCrossSearch.bind(ctrl)
+        ctrl.executeCrossSearch = async (q) => {
+            if (q && q.trim()) {
+                ctrl.saveRecentCrossSearch(q.trim())
+                execQueries.push(q.trim())
+            }
+        }
+        ctrl.bindEvents()
+
+        // Deduplicated max-5 recent search persistence
+        for (const term of ['t1', 't2', 't3', 't4', 't5', 't6', 't2']) {
+            ctrl.saveRecentCrossSearch(term)
+        }
+        assert.deepStrictEqual(ctrl.getRecentCrossSearches(), ['t2', 't6', 't5', 't4', 't3'])
+
+        // Empty open shows escaped recent search markup
+        ctrl.saveRecentCrossSearch('<script>alert(1)</script>')
+        ctrl.openCrossSearchModal('')
+        assert.match(crossSearchResults.innerHTML, /cross-search-recent-section/)
+        assert.ok(!crossSearchResults.innerHTML.includes('<script>alert(1)</script>'))
+        assert.ok(crossSearchResults.innerHTML.includes('&lt;script&gt;alert(1)&lt;/script&gt;'))
+        ctrl.removeRecentCrossSearch('<script>alert(1)</script>')
+        assert.strictEqual(ctrl.getRecentCrossSearches().includes('<script>alert(1)</script>'), false)
+
+        // IME Enter during composition must NOT submit cross-search form
+        inputCrossSearch.value = '红楼'
+        inputCrossSearch.dispatch('compositionstart')
+        inputCrossSearch.dispatch('keydown', { key: 'Enter', isComposing: true, keyCode: 229 })
+        crossSearchForm.dispatch('submit', { preventDefault() {} })
+        assert.strictEqual(execQueries.length, 0, 'IME Enter must not submit cross-book search')
+
+        inputCrossSearch.dispatch('compositionend')
+        ctrl._crossSearchSuppressSubmitUntil = 0
+        inputCrossSearch.value = '红楼梦'
+        inputCrossSearch.dispatch('keydown', { key: 'Enter', isComposing: false, keyCode: 13 })
+        crossSearchForm.dispatch('submit', { preventDefault() {} })
+        assert.deepStrictEqual(execQueries, ['红楼梦'])
+
+        // openCrossSearchModal(initialQuery) prefills and searches immediately
+        ctrl.openCrossSearchModal('三体')
+        assert.strictEqual(inputCrossSearch.value, '三体')
+        assert.deepStrictEqual(execQueries, ['红楼梦', '三体'])
+
+        // Clear button restores recent searches
+        btnClearCrossSearchInput.dispatch('click')
+        assert.strictEqual(inputCrossSearch.value, '')
+        assert.match(crossSearchResults.innerHTML, /cross-search-recent-section/)
+        assert.strictEqual(typeof origExec, 'function')
+
+        ctrl.dispose()
+    } finally {
+        if (prevStorage) Object.defineProperty(globalThis, 'localStorage', prevStorage)
+        else delete globalThis.localStorage
+        if (prevDoc === undefined) delete globalThis.document
+        else globalThis.document = prevDoc
+    }
+})
+
+await runAsyncTest('FOCUS-04: Create-list modal provides live preview, inline error state, IME Enter guard, Esc close, and radiogroup icon picker', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+    const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8')
+    const modalHtml = html.match(/<div id="modal-create-list"[\s\S]*?<!-- Modal: Manage Book Lists/)?.[0] || ''
+    assert.match(modalHtml, /id="create-list-preview"/)
+    assert.match(modalHtml, /class="leaf-field leaf-field--md" id="create-list-name-field"/)
+    assert.match(modalHtml, /aria-describedby="create-list-name-error"/)
+    assert.match(modalHtml, /id="create-list-name-error"[^>]*role="alert"/)
+    assert.match(modalHtml, /id="custom-list-icon-picker"[^>]*role="radiogroup"/)
+
+    const { BookshelfController } = await import('../js/bookshelf-controller.js')
+    const prevDoc = globalThis.document
+    const prevRaf = globalThis.requestAnimationFrame
+    const makeNode = (tag = 'div') => {
+        const listeners = new Map()
+        const classes = new Set()
+        const attrs = new Map()
+        const node = {
+            tagName: tag.toUpperCase(),
+            value: '',
+            hidden: false,
+            textContent: '',
+            _innerHTML: '',
+            children: [],
+            style: {},
+            dataset: {},
+            focused: false,
+            classList: {
+                add(...cs) { cs.forEach(c => classes.add(c)) },
+                remove(...cs) { cs.forEach(c => classes.delete(c)) },
+                toggle(c, f) { if (f === undefined) { classes.has(c) ? classes.delete(c) : classes.add(c) } else if (f) classes.add(c); else classes.delete(c) },
+                contains(c) { return classes.has(c) }
+            },
+            set innerHTML(v) { this._innerHTML = String(v ?? ''); if (v === '') this.children = [] },
+            get innerHTML() { return this._innerHTML },
+            setAttribute(k, v) { attrs.set(k, String(v)) },
+            getAttribute(k) { return attrs.get(k) ?? null },
+            removeAttribute(k) { attrs.delete(k) },
+            addEventListener(type, fn) {
+                if (!listeners.has(type)) listeners.set(type, [])
+                listeners.get(type).push(fn)
+            },
+            removeEventListener(type, fn) {
+                if (!listeners.has(type)) return
+                listeners.set(type, listeners.get(type).filter(f => f !== fn))
+            },
+            dispatch(type, evt = {}) {
+                for (const fn of (listeners.get(type) || [])) fn(evt)
+            },
+            appendChild(child) { this.children.push(child); return child },
+            querySelectorAll(sel) {
+                return sel === '.icon-pick-btn' ? this.children : []
+            },
+            focus() { this.focused = true }
+        }
+        return node
+    }
+
+    const modalCreateList = makeNode('div')
+    const createListPreview = makeNode('div')
+    const createListPreviewIcon = makeNode('span')
+    const createListPreviewName = makeNode('span')
+    createListPreviewName.classList.add('is-placeholder')
+    const createListNameField = makeNode('div')
+    const inputCustomListName = makeNode('input')
+    const createListNameError = makeNode('div')
+    createListNameError.hidden = true
+    const customListIconPicker = makeNode('div')
+
+    globalThis.requestAnimationFrame = fn => fn()
+    globalThis.document = {
+        createElement: makeNode,
+        getElementById(id) {
+            if (id === 'modal-create-list') return modalCreateList
+            if (id === 'create-list-preview') return createListPreview
+            if (id === 'create-list-preview-icon') return createListPreviewIcon
+            if (id === 'create-list-preview-name') return createListPreviewName
+            if (id === 'create-list-name-field') return createListNameField
+            if (id === 'input-custom-list-name') return inputCustomListName
+            if (id === 'create-list-name-error') return createListNameError
+            if (id === 'custom-list-icon-picker') return customListIconPicker
+            return null
+        },
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        removeEventListener() {}
+    }
+
+    try {
+        const ctrl = new BookshelfController({ annotations: {}, dialogs: { showToast() {} } })
+        ctrl.initDOM()
+        ctrl.initShelfDelegatedListeners = () => {}
+        ctrl.initShelfSidebar = () => {}
+        ctrl.bindOverviewEvents = () => {}
+        ctrl.bindEvents()
+
+        ctrl.openCreateListModal()
+        assert.strictEqual(modalCreateList.classList.contains('show'), true)
+        assert.strictEqual(createListPreviewName.classList.contains('is-placeholder'), true)
+        assert.ok(createListPreviewIcon.innerHTML.includes('<svg'))
+
+        // Empty submit triggers inline error state & refocuses input
+        await ctrl.handleCreateListConfirm()
+        assert.strictEqual(createListNameField.classList.contains('is-error'), true)
+        assert.strictEqual(inputCustomListName.getAttribute('aria-invalid'), 'true')
+        assert.strictEqual(createListNameError.hidden, false)
+        assert.strictEqual(inputCustomListName.focused, true)
+
+        // Typing updates preview & clears error state
+        inputCustomListName.value = '哲学随笔'
+        inputCustomListName.dispatch('input', { target: inputCustomListName })
+        assert.strictEqual(createListNameField.classList.contains('is-error'), false)
+        assert.strictEqual(inputCustomListName.getAttribute('aria-invalid'), null)
+        assert.strictEqual(createListNameError.hidden, true)
+        assert.strictEqual(createListPreviewName.textContent, '哲学随笔')
+        assert.strictEqual(createListPreviewName.classList.contains('is-placeholder'), false)
+
+        // IME Enter does not submit
+        let confirmCalls = 0
+        const origConfirm = ctrl.handleCreateListConfirm.bind(ctrl)
+        ctrl.handleCreateListConfirm = () => { confirmCalls++ }
+        inputCustomListName.dispatch('keydown', { key: 'Enter', isComposing: true, keyCode: 229, preventDefault() {} })
+        assert.strictEqual(confirmCalls, 0)
+        ctrl.handleCreateListConfirm = origConfirm
+
+        // Radiogroup & roving tabindex arrow navigation
+        assert.strictEqual(customListIconPicker.getAttribute('role'), 'radiogroup')
+        const radios = customListIconPicker.children
+        assert.strictEqual(radios.length, ctrl.iconDefs.length)
+        assert.strictEqual(radios[0].getAttribute('role'), 'radio')
+        assert.strictEqual(radios[0].getAttribute('aria-checked'), 'true')
+        assert.strictEqual(radios[0].getAttribute('tabindex'), '0')
+        assert.strictEqual(radios[1].getAttribute('aria-checked'), 'false')
+        assert.strictEqual(radios[1].getAttribute('tabindex'), '-1')
+
+        radios[0].dispatch('keydown', { key: 'ArrowRight', preventDefault() {} })
+        assert.strictEqual(ctrl.selectedListIcon, ctrl.iconDefs[1].id)
+        assert.strictEqual(radios[1].getAttribute('aria-checked'), 'true')
+        assert.strictEqual(radios[1].getAttribute('tabindex'), '0')
+        assert.strictEqual(radios[0].getAttribute('tabindex'), '-1')
+        assert.strictEqual(radios[1].focused, true)
+
+        radios[1].dispatch('keydown', { key: 'End', preventDefault() {} })
+        const lastIdx = radios.length - 1
+        assert.strictEqual(ctrl.selectedListIcon, ctrl.iconDefs[lastIdx].id)
+        assert.strictEqual(radios[lastIdx].getAttribute('aria-checked'), 'true')
+
+        // Escape closes modal
+        modalCreateList.dispatch('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} })
+        assert.strictEqual(modalCreateList.classList.contains('show'), false)
+
+        ctrl.dispose()
+    } finally {
+        if (prevRaf === undefined) delete globalThis.requestAnimationFrame
+        else globalThis.requestAnimationFrame = prevRaf
         if (prevDoc === undefined) delete globalThis.document
         else globalThis.document = prevDoc
     }

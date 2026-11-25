@@ -318,7 +318,7 @@ export function createSettlePlan(pose, velocity, commit, W, H, options = {}) {
     const dist = Math.hypot(from.x - to.x, from.y - to.y)
     const duration = Number.isFinite(options.duration)
         ? Math.max(0, options.duration)
-        : clamp((dist / safeW) * 145 + 110, 140, 280)
+        : Math.min(options.maxDuration ?? 280, clamp((dist / safeW) * 145 + 110, 140, 280))
 
     const vx = clamp(Number(velocity?.vx ?? velocity?.x ?? 0) || 0, -1.5, 1.5)
     const vy = clamp(Number(velocity?.vy ?? velocity?.y ?? 0) || 0, -1.5, 1.5)

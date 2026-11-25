@@ -76,16 +76,17 @@ export class BookshelfController {
 
     initDOM() {
         this.dom = {
+            headerSearchBar: document.getElementById('header-search-bar'),
             shelfSearch: document.getElementById('shelf-search'),
+            btnClearShelfSearch: document.getElementById('btn-clear-shelf-search'),
+            btnOpenCrossSearch: document.getElementById('btn-open-cross-search'),
             btnHeaderFavorite: document.getElementById('btn-header-favorite'),
             btnSortToggle: document.getElementById('btn-sort-toggle'),
             sortDropdownMenu: document.getElementById('sort-dropdown-menu'),
             sortMenuItems: document.querySelectorAll('#sort-dropdown-menu .sort-menu-item'),
-            btnViewShelf: document.getElementById('btn-view-shelf'),
             btnViewGrid: document.getElementById('btn-view-grid'),
             btnViewList: document.getElementById('btn-view-list'),
             btnHeaderSettings: document.getElementById('btn-header-settings'),
-            booksShelf: document.getElementById('books-shelf'),
             booksGrid: document.getElementById('books-grid'),
             modernGridWrapper: document.getElementById('modern-grid-wrapper'),
             modernHeroThreshold: document.getElementById('modern-hero-threshold'),
@@ -117,7 +118,12 @@ export class BookshelfController {
             btnCreateList: document.getElementById('btn-create-list'),
             btnListAddBooks: document.getElementById('btn-list-add-books'),
             modalCreateList: document.getElementById('modal-create-list'),
+            createListPreview: document.getElementById('create-list-preview'),
+            createListPreviewIcon: document.getElementById('create-list-preview-icon'),
+            createListPreviewName: document.getElementById('create-list-preview-name'),
+            createListNameField: document.getElementById('create-list-name-field'),
             inputCustomListName: document.getElementById('input-custom-list-name'),
+            createListNameError: document.getElementById('create-list-name-error'),
             customListIconPicker: document.getElementById('custom-list-icon-picker'),
             btnConfirmCreateList: document.getElementById('btn-confirm-create-list'),
             btnCancelCreateList: document.getElementById('btn-cancel-create-list'),
@@ -187,22 +193,64 @@ export class BookshelfController {
         this.initShelfDelegatedListeners();
         this.events.on(this.dom.btnHeaderFavorite, 'click', () => {
             if (this.shelfCategory === 'favorite') {
-                this.switchShelfCategory('all')
+                this.switchShelfCategory('all', { landOnShelf: true })
             } else {
                 this.switchShelfCategory('favorite')
             }
         });
-        let searchTimer = null;
+        this._shelfSearchTimer = null
+        this._shelfSearchComposing = false
+        this._hadActiveSearchQuery = false
+        this._pendingLandOnShelfAfterSearchClear = false
+        this._syncHeaderSearchState()
+        this.events.on(this.dom.shelfSearch, 'compositionstart', () => {
+            this._shelfSearchComposing = true
+        })
+        this.events.on(this.dom.shelfSearch, 'compositionend', e => {
+            this._shelfSearchComposing = false
+            const val = e?.target?.value ?? this.dom.shelfSearch?.value ?? ''
+            this._syncHeaderSearchState(val)
+            this._scheduleShelfSearchFilter(val, { immediate: true })
+        })
         this.events.on(this.dom.shelfSearch, 'input', e => {
-            this.searchQuery = e.target.value
-            clearTimeout(searchTimer)
-            searchTimer = setTimeout(() => this.refreshBookshelf(), 150)
+            const val = e?.target?.value ?? ''
+            this._syncHeaderSearchState(val)
+            if (e?.isComposing || this._shelfSearchComposing) return
+            this._scheduleShelfSearchFilter(val)
         });
+        this.events.on(this.dom.shelfSearch, 'keydown', e => {
+            if (e.isComposing || e.keyCode === 229 || this._shelfSearchComposing) return
+            if (e.key === 'Enter' && e.shiftKey) {
+                const q = (this.dom.shelfSearch?.value ?? '').trim()
+                if (q) {
+                    e.preventDefault()
+                    this.app?.search?.openCrossSearchModal?.(q)
+                }
+                return
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault()
+                e.stopPropagation()
+                if (this.dom.shelfSearch?.value) {
+                    this.clearShelfSearch({ focusInput: true })
+                } else {
+                    this.dom.shelfSearch?.blur?.()
+                }
+            }
+        })
+        this.events.on(this.dom.btnClearShelfSearch, 'click', () => {
+            this.clearShelfSearch({ focusInput: true })
+        })
         this.events.on(this.dom.shelfSearch, 'focus', () => {
+            if (this._suppressNextSearchFocusGlide) {
+                this._suppressNextSearchFocusGlide = false
+                return
+            }
             if (this.shelfViewMode === 'grid' && this.dom.booksWorkspace && this.dom.booksWorkspace.scrollTop < 40) {
                 this.glideToShelf()
             }
         });
+        this.events.on(document, 'keydown', e => this._handleGlobalSearchShortcut(e));
         this.initShelfSidebar();
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
@@ -219,7 +267,8 @@ export class BookshelfController {
         });
         this.dom.navCategoryItems?.forEach(item => {
             this.events.on(item, 'click', () => {
-                this.switchShelfCategory(item.dataset.category)
+                const targetCat = item.dataset.category
+                this.switchShelfCategory(targetCat, targetCat === 'all' ? { landOnShelf: true } : {})
             })
         });
         if (this.dom.booksWorkspace) {
@@ -246,8 +295,22 @@ export class BookshelfController {
         this.events.on(this.dom.btnCloseCreateList, 'click', () => this.closeCreateListModal());
         this.events.on(this.dom.btnCancelCreateList, 'click', () => this.closeCreateListModal());
         this.events.on(this.dom.btnConfirmCreateList, 'click', () => this.handleCreateListConfirm());
+        this.events.on(this.dom.inputCustomListName, 'input', () => {
+            this._setCreateListNameError(false)
+            this._updateCreateListPreview()
+        });
         this.events.on(this.dom.inputCustomListName, 'keydown', e => {
-            if (e.key === 'Enter') this.handleCreateListConfirm()
+            if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+                e.preventDefault()
+                this.handleCreateListConfirm()
+            }
+        });
+        this.events.on(this.dom.modalCreateList, 'keydown', e => {
+            if (e.key === 'Escape') {
+                e.preventDefault()
+                e.stopPropagation()
+                this.closeCreateListModal()
+            }
         });
         this.events.on(this.dom.modalCreateList, 'click', e => {
             if (e.target === this.dom.modalCreateList) this.closeCreateListModal()
@@ -269,7 +332,6 @@ export class BookshelfController {
         this.events.on(this.dom.modalBatchAddToList, 'click', e => {
             if (e.target === this.dom.modalBatchAddToList) this.closeBatchAddToListModal()
         });
-        this.events.on(this.dom.btnViewShelf, 'click', () => this.setShelfViewMode('shelf'));
         this.events.on(this.dom.btnViewGrid, 'click', () => this.setShelfViewMode('grid'));
         this.events.on(this.dom.btnViewList, 'click', () => this.setShelfViewMode('list'));
         this.events.on(this.dom.btnHeaderSettings, 'click', () => this.app.annotations.openDrawer('settings'));
@@ -344,6 +406,7 @@ export class BookshelfController {
         this.events.dispose()
         this._shelfSidebarController?.abort()
         this._shelfCoverObserver?.disconnect()
+        clearTimeout(this._shelfSearchTimer)
         clearTimeout(this._scrollEndTimer)
         clearTimeout(this._coverOptTimer)
         clearTimeout(this._virtualLayoutTimer)
@@ -356,21 +419,127 @@ export class BookshelfController {
         this._bound = false
     }
 
-    async setShelfViewMode(mode) {
-        if (['shelf', 'grid', 'list'].includes(mode)) {
-            this.shelfViewMode = mode
-            try { localStorage.setItem('linden_leaf_view_mode', mode) } catch (e) {}
-            this.app.appearance.updateSettingsUI()
-            await this.app.saveSettings()
-            await this.refreshBookshelf()
-
-            const activeEl = mode === 'shelf' ? this.dom.booksShelf : (mode === 'grid' ? this.dom.modernGridWrapper : this.dom.booksTableContainer)
-            if (activeEl) {
-                activeEl.classList.remove('view-spring-transition')
-                void activeEl.offsetWidth
-                activeEl.classList.add('view-spring-transition')
-                setTimeout(() => activeEl.classList.remove('view-spring-transition'), 360)
+    _syncHeaderSearchState(valueOverride = null) {
+        const raw = valueOverride !== null
+            ? String(valueOverride)
+            : (this.dom?.shelfSearch?.value ?? this.searchQuery ?? '')
+        const hasRaw = Boolean(raw)
+        const hasNonEmpty = Boolean(raw && raw.trim())
+        this.dom?.headerSearchBar?.classList?.toggle('has-value', hasNonEmpty)
+        if (this.dom?.btnClearShelfSearch) {
+            this.dom.btnClearShelfSearch.hidden = !hasRaw
+        }
+        if (this.dom?.btnOpenCrossSearch) {
+            const labelKey = hasNonEmpty ? 'shelf.crossSearchAction' : 'shelf.crossSearchShort'
+            if (this.dom.btnOpenCrossSearch.dataset) {
+                this.dom.btnOpenCrossSearch.dataset.i18n = labelKey
             }
+            this.dom.btnOpenCrossSearch.textContent = t(labelKey)
+        }
+    }
+
+    _scheduleShelfSearchFilter(rawValue, { immediate = false } = {}) {
+        this.searchQuery = rawValue
+        const nextHasQuery = Boolean(this.searchQuery && this.searchQuery.trim())
+        if (this._hadActiveSearchQuery && !nextHasQuery) {
+            this._pendingLandOnShelfAfterSearchClear = true
+        } else if (nextHasQuery) {
+            this._hadActiveSearchQuery = true
+            this._pendingLandOnShelfAfterSearchClear = false
+        }
+        clearTimeout(this._shelfSearchTimer)
+        const runFilter = () => {
+            const landOnShelf = Boolean(this._pendingLandOnShelfAfterSearchClear)
+            this._pendingLandOnShelfAfterSearchClear = false
+            this._hadActiveSearchQuery = Boolean(this.searchQuery && this.searchQuery.trim())
+            this.refreshBookshelf({ landOnShelf })
+        }
+        if (immediate) {
+            runFilter()
+        } else {
+            this._shelfSearchTimer = setTimeout(runFilter, 150)
+        }
+    }
+
+    clearShelfSearch({ focusInput = true } = {}) {
+        clearTimeout(this._shelfSearchTimer)
+        this._shelfSearchComposing = false
+        this._pendingLandOnShelfAfterSearchClear = false
+        this._hadActiveSearchQuery = false
+        this.searchQuery = ''
+        if (this.dom?.shelfSearch) {
+            this.dom.shelfSearch.value = ''
+        }
+        this._syncHeaderSearchState('')
+        if (focusInput) {
+            this._suppressNextSearchFocusGlide = true
+            this.dom?.shelfSearch?.focus?.()
+        }
+        return this.refreshBookshelf({ landOnShelf: true })
+    }
+
+    _isShelfSearchShortcutContext(e) {
+        const isEditable = el => Boolean(
+            el && (
+                el.isContentEditable ||
+                el.matches?.('input, textarea, select, [contenteditable]:not([contenteditable="false"])') ||
+                el.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"])')
+            )
+        )
+        if (isEditable(e?.target) || isEditable(document.activeElement)) return false
+        if (globalThis.window?.mobileShell?.isInReader) return false
+        if (this.app?.annotations?.activeDrawer) return false
+        const shelfView = this.dom?.bookshelfView || document.getElementById('bookshelf-view')
+        if (!shelfView || shelfView.style?.display === 'none') return false
+        const headerActions = this.dom?.shelfHeaderActions || document.getElementById('shelf-header-actions')
+        if (headerActions && headerActions.style?.display === 'none') return false
+        const readerView = document.getElementById('reader-view')
+        if (readerView && readerView.style?.display && readerView.style.display !== 'none') return false
+        if (typeof document.querySelectorAll === 'function') {
+            const modals = Array.from(document.querySelectorAll('.global-modal-backdrop, #quote-card-backdrop'))
+            const hasOpenModal = modals.some(el => {
+                if (el.classList?.contains('show')) return true
+                if (el.style?.display && el.style.display !== 'none') return true
+                if (typeof getComputedStyle === 'function') {
+                    try { return getComputedStyle(el).display !== 'none' } catch (_) {}
+                }
+                return false
+            })
+            if (hasOpenModal) return false
+        }
+        return true
+    }
+
+    _handleGlobalSearchShortcut(e) {
+        if (!e || e.isComposing || e.keyCode === 229) return
+        const isSlash = e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey
+        const isCtrlK = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && String(e.key || '').toLowerCase() === 'k'
+        if (!isSlash && !isCtrlK) return
+        if (!this._isShelfSearchShortcutContext(e)) return
+        if (!this.dom?.shelfSearch) return
+        e.preventDefault()
+        this.dom.shelfSearch.focus()
+        if (isCtrlK && typeof this.dom.shelfSearch.select === 'function') {
+            this.dom.shelfSearch.select()
+        }
+    }
+
+    async setShelfViewMode(mode) {
+        const normalizedMode = mode === 'list' ? 'list' : (mode === 'grid' || mode === 'shelf' ? 'grid' : null)
+        if (!normalizedMode) return
+        const prevMode = this.shelfViewMode
+        this.shelfViewMode = normalizedMode
+        try { localStorage.setItem('linden_leaf_view_mode', normalizedMode) } catch (e) {}
+        this.app.appearance.updateSettingsUI()
+        await this.app.saveSettings()
+        await this.refreshBookshelf({ landOnShelf: normalizedMode === 'grid' && prevMode !== 'grid' })
+
+        const activeEl = normalizedMode === 'grid' ? this.dom.modernGridWrapper : this.dom.booksTableContainer
+        if (activeEl) {
+            activeEl.classList.remove('view-spring-transition')
+            void activeEl.offsetWidth
+            activeEl.classList.add('view-spring-transition')
+            setTimeout(() => activeEl.classList.remove('view-spring-transition'), 360)
         }
     }
 
@@ -644,7 +813,13 @@ export class BookshelfController {
             item.classList.toggle('active', item.dataset.id === cat)
         })
 
-        await this.refreshBookshelf({ resetScroll: categoryChanged && !options.preserveScroll })
+        const returningToAllBooks = cat === 'all' && Boolean(prevCategory && prevCategory !== 'all')
+        const shouldLandOnShelf = Boolean(options.landOnShelf || (returningToAllBooks && !options.allowHero))
+
+        await this.refreshBookshelf({
+            resetScroll: categoryChanged && !options.preserveScroll && !shouldLandOnShelf,
+            landOnShelf: shouldLandOnShelf
+        })
     }
 
     normalizeRatingFilter(filterVal) {
@@ -1154,7 +1329,7 @@ export class BookshelfController {
                 : t('modal.batchSelectAll')
         }
 
-        const shelfCards = document.querySelectorAll('.skeuo-book, .leaf-book-card, .leaf-table-row')
+        const shelfCards = document.querySelectorAll('.leaf-book-card, .leaf-table-row')
         shelfCards.forEach(card => {
             const id = card.dataset.id
             if (!id) return
@@ -1322,11 +1497,9 @@ export class BookshelfController {
 
     async refreshBookshelf(options = {}) {
         const resetScroll = Boolean(options?.resetScroll)
+        const landOnShelf = Boolean(options?.landOnShelf)
         const refreshEpoch = ++this._bookshelfRefreshEpoch
         if (this.shelfCategory === 'stats') {
-            this.dom.mainArea?.classList.remove('wood-shelf-active')
-            this.dom.booksWorkspace?.classList.remove('wood-shelf-theme')
-            if (this.dom.booksShelf) this.dom.booksShelf.style.display = 'none'
             if (this.dom.modernGridWrapper) this.dom.modernGridWrapper.style.display = 'none'
             if (this.dom.booksGrid) this.dom.booksGrid.style.display = 'none'
             if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'none'
@@ -1353,9 +1526,6 @@ export class BookshelfController {
         }
 
         if (this.shelfCategory === 'ai-history') {
-            this.dom.mainArea?.classList.remove('wood-shelf-active')
-            this.dom.booksWorkspace?.classList.remove('wood-shelf-theme')
-            if (this.dom.booksShelf) this.dom.booksShelf.style.display = 'none'
             if (this.dom.modernGridWrapper) this.dom.modernGridWrapper.style.display = 'none'
             if (this.dom.booksGrid) this.dom.booksGrid.style.display = 'none'
             if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'none'
@@ -1384,9 +1554,6 @@ export class BookshelfController {
         }
 
         if (this.shelfCategory === 'notes') {
-            this.dom.mainArea?.classList.remove('wood-shelf-active')
-            this.dom.booksWorkspace?.classList.remove('wood-shelf-theme')
-            if (this.dom.booksShelf) this.dom.booksShelf.style.display = 'none'
             if (this.dom.modernGridWrapper) this.dom.modernGridWrapper.style.display = 'none'
             if (this.dom.booksGrid) this.dom.booksGrid.style.display = 'none'
             if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'none'
@@ -1566,7 +1733,7 @@ export class BookshelfController {
             return this.sortOrder === 'asc' ? res : -res
         })
 
-        const shelfViewMode = mobileShell ? 'grid' : this.shelfViewMode
+        const shelfViewMode = mobileShell ? 'grid' : (this.shelfViewMode === 'list' ? 'list' : 'grid')
         mobileShell?.syncShelfLayout()
         if (isMobileShelf) mobileShell.syncShelfControls(statusCounts, books.length)
         this.currentBooksList = books
@@ -1587,20 +1754,7 @@ export class BookshelfController {
         if (this.dom.btnBackToHero && shelfViewMode !== 'grid') {
             this.dom.btnBackToHero.style.display = 'none'
         }
-        if (shelfViewMode === 'shelf') {
-            this.dom.mainArea?.classList.add('wood-shelf-active')
-            this.dom.booksWorkspace?.classList.add('wood-shelf-theme')
-            if (this.dom.booksShelf) this.dom.booksShelf.style.display = 'flex'
-            if (this.dom.modernGridWrapper) this.dom.modernGridWrapper.style.display = 'none'
-            else if (this.dom.booksGrid) this.dom.booksGrid.style.display = 'none'
-            if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'none'
-            if (this.dom.footerStatus) this.dom.footerStatus.style.display = 'flex'
-            if (resetScroll && this.dom.booksWorkspace) this.dom.booksWorkspace.scrollTop = 0
-            this.renderBooksShelf(books)
-        } else if (shelfViewMode === 'grid') {
-            this.dom.mainArea?.classList.remove('wood-shelf-active')
-            this.dom.booksWorkspace?.classList.remove('wood-shelf-theme')
-            if (this.dom.booksShelf) this.dom.booksShelf.style.display = 'none'
+        if (shelfViewMode === 'grid') {
             if (this.dom.modernGridWrapper) {
                 this.dom.modernGridWrapper.style.display = 'flex'
                 if (this.dom.booksGrid) this.dom.booksGrid.style.display = 'grid'
@@ -1609,15 +1763,16 @@ export class BookshelfController {
             }
             if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'none'
             if (this.dom.footerStatus) this.dom.footerStatus.style.display = 'none'
-            if (resetScroll && this.dom.booksWorkspace) this.dom.booksWorkspace.scrollTop = 0
             this.renderModernThreshold(books)
+            if (landOnShelf && !mobileShell && isHeroEligibleMode && this.dom.booksWorkspace) {
+                this.dom.booksWorkspace.scrollTop = this._getShelfScreenTop()
+            } else if (resetScroll && this.dom.booksWorkspace) {
+                this.dom.booksWorkspace.scrollTop = 0
+            }
             this._heroScrollState = null
             this.renderBooksGrid(books)
             this.onBooksWorkspaceScroll()
         } else {
-            this.dom.mainArea?.classList.remove('wood-shelf-active')
-            this.dom.booksWorkspace?.classList.remove('wood-shelf-theme')
-            if (this.dom.booksShelf) this.dom.booksShelf.style.display = 'none'
             if (this.dom.modernGridWrapper) this.dom.modernGridWrapper.style.display = 'none'
             else if (this.dom.booksGrid) this.dom.booksGrid.style.display = 'none'
             if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'block'
@@ -1692,7 +1847,7 @@ export class BookshelfController {
 
             // If in batch mode, any card click or checkbox click toggles selection
             if (this.isBatchMode) {
-                const card = target.closest('.skeuo-book, .leaf-book-card, .leaf-table-row')
+                const card = target.closest('.leaf-book-card, .leaf-table-row')
                 if (card) {
                     const bookId = card.dataset?.id
                     if (bookId) {
@@ -1705,10 +1860,10 @@ export class BookshelfController {
             }
 
             // 1. Favorite button
-            const favBtn = target.closest('.skeuo-fav-btn, .grid-fav-btn, .table-fav-btn')
+            const favBtn = target.closest('.grid-fav-btn, .table-fav-btn')
             if (favBtn) {
                 e.stopPropagation()
-                const card = favBtn.closest('.skeuo-book, .leaf-book-card, .leaf-table-row')
+                const card = favBtn.closest('.leaf-book-card, .leaf-table-row')
                 const bookId = card?.dataset?.id
                 if (!bookId) return
 
@@ -1726,7 +1881,7 @@ export class BookshelfController {
                 favBtn.classList.toggle('active', isFav)
                 favBtn.title = isFav ? t('bookshelf.favRemoveTitle') : t('bookshelf.favAddTitle')
 
-                const coverBox = card.querySelector('.skeuo-book-cover, .leaf-cover-box')
+                const coverBox = card.querySelector('.leaf-cover-box')
                 if (coverBox) coverBox.classList.toggle('is-favorite', isFav)
                 if (favBtn.classList.contains('table-fav-btn')) {
                     favBtn.className = `table-fav-btn ${isFav ? 'active' : ''}`
@@ -1742,10 +1897,10 @@ export class BookshelfController {
             }
 
             // 2. Cloud button
-            const cloudBtn = target.closest('.skeuo-cloud-btn, .grid-cloud-btn, .table-cloud-btn')
+            const cloudBtn = target.closest('.grid-cloud-btn, .table-cloud-btn')
             if (cloudBtn) {
                 e.stopPropagation()
-                const card = cloudBtn.closest('.skeuo-book, .leaf-book-card, .leaf-table-row')
+                const card = cloudBtn.closest('.leaf-book-card, .leaf-table-row')
                 const bookId = card?.dataset?.id
                 if (!bookId) return
 
@@ -1769,10 +1924,10 @@ export class BookshelfController {
             }
 
             // 3. List button
-            const listBtn = target.closest('.skeuo-list-btn, .grid-list-btn, .table-list-btn')
+            const listBtn = target.closest('.grid-list-btn, .table-list-btn')
             if (listBtn) {
                 e.stopPropagation()
-                const card = listBtn.closest('.skeuo-book, .leaf-book-card, .leaf-table-row')
+                const card = listBtn.closest('.leaf-book-card, .leaf-table-row')
                 const bookId = card?.dataset?.id
                 if (bookId) {
                     this.openManageBookListsModal(bookId)
@@ -1781,10 +1936,10 @@ export class BookshelfController {
             }
 
             // 4. Delete button
-            const delBtn = target.closest('.skeuo-delete-btn, .grid-delete-btn, .table-delete-btn')
+            const delBtn = target.closest('.grid-delete-btn, .table-delete-btn')
             if (delBtn) {
                 e.stopPropagation()
-                const card = delBtn.closest('.skeuo-book, .leaf-book-card, .leaf-table-row')
+                const card = delBtn.closest('.leaf-book-card, .leaf-table-row')
                 const bookId = card?.dataset?.id
                 if (!bookId) return
 
@@ -1797,10 +1952,10 @@ export class BookshelfController {
             }
 
             // 4.5. Book details button
-            const detailsBtn = target.closest('.skeuo-details-btn, .grid-details-btn, .table-details-btn')
+            const detailsBtn = target.closest('.grid-details-btn, .table-details-btn')
             if (detailsBtn) {
                 e.stopPropagation()
-                const card = detailsBtn.closest('.skeuo-book, .leaf-book-card, .leaf-table-row')
+                const card = detailsBtn.closest('.leaf-book-card, .leaf-table-row')
                 const bookId = card?.dataset?.id
                 if (bookId) {
                     this.app.openBookDetailsModal(bookId)
@@ -1815,7 +1970,7 @@ export class BookshelfController {
             }
 
             // 5. Open book (Ctrl/Cmd/Shift + Click opens in a new independent window)
-            const card = target.closest('.skeuo-book, .leaf-book-card, .leaf-table-row')
+            const card = target.closest('.leaf-book-card, .leaf-table-row')
             if (card) {
                 const bookId = card.dataset.id
                 if (!bookId) return
@@ -1832,20 +1987,19 @@ export class BookshelfController {
         }
 
         const handleShelfContextMenu = e => {
-            const card = e.target?.closest?.('.skeuo-book, .leaf-book-card, .leaf-table-row')
+            const card = e.target?.closest?.('.leaf-book-card, .leaf-table-row')
             if (card && card.dataset?.id) {
                 e.preventDefault()
                 this.app.openBookDetailsModal(card.dataset.id)
             }
         }
 
-        this.events.on(this.dom.booksShelf, 'click', handleShelfClick)
         this.events.on(this.dom.booksGrid, 'click', handleShelfClick)
         this.events.on(this.dom.booksTableBody, 'click', handleShelfClick)
 
         const handleShelfAuxClick = e => {
             if (e.button === 1) {
-                const card = e.target?.closest?.('.skeuo-book, .leaf-book-card, .leaf-table-row')
+                const card = e.target?.closest?.('.leaf-book-card, .leaf-table-row')
                 if (card && card.dataset?.id) {
                     e.preventDefault()
                     this.app.openBookInNewWindow(card.dataset.id)
@@ -1853,11 +2007,9 @@ export class BookshelfController {
             }
         }
 
-        this.events.on(this.dom.booksShelf, 'auxclick', handleShelfAuxClick)
         this.events.on(this.dom.booksGrid, 'auxclick', handleShelfAuxClick)
         this.events.on(this.dom.booksTableBody, 'auxclick', handleShelfAuxClick)
 
-        this.events.on(this.dom.booksShelf, 'contextmenu', handleShelfContextMenu)
         this.events.on(this.dom.booksGrid, 'contextmenu', handleShelfContextMenu)
         this.events.on(this.dom.booksTableBody, 'contextmenu', handleShelfContextMenu)
 
@@ -1912,222 +2064,6 @@ export class BookshelfController {
             }
         }
         this.events.on(this.dom.booksGrid, 'keydown', handleShelfKeydown)
-    }
-
-    renderBooksShelf(books) {
-        if (!this.dom.booksShelf) return
-        const container = this.dom.booksShelf
-
-        if (books.length === 0) {
-            container.innerHTML = ''
-            const isFavView = this.shelfCategory === 'favorite'
-            const isCustomList = this.shelfCategory && this.shelfCategory.startsWith('list_')
-            const isFinishedView = this.shelfCategory === 'finished'
-            const isOverview = this.shelfCategory === 'overview'
-            let svgIcon = ''
-            if (isFavView) {
-                svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`
-            } else if (isCustomList) {
-                svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`
-            } else if (isFinishedView) {
-                svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`
-            } else if (isOverview) {
-                svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`
-            } else {
-                svgIcon = `<svg style="width: 44px; height: 44px; stroke-width: 1.5; color: #e5e7eb; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.8));" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`
-            }
-            let emptyTitle = isFavView ? t('bookshelf.emptyShelf.favTitle')
-                : (isCustomList ? t('bookshelf.emptyShelf.listTitle')
-                : (isFinishedView ? t('bookshelf.emptyShelf.finishedTitle')
-                : (isOverview ? t('bookshelf.emptyShelf.overviewTitle') : t('bookshelf.emptyShelf.allTitle'))))
-            let emptySub = isFavView ? t('bookshelf.emptyShelf.favSub')
-                : (isCustomList ? t('bookshelf.emptyShelf.listSub')
-                : (isFinishedView ? t('bookshelf.emptyShelf.finishedSub')
-                : (isOverview ? t('bookshelf.emptyShelf.overviewSub') : t('bookshelf.emptyShelf.allSub'))))
-
-            container.innerHTML = `
-                <div class="wood-shelf-empty-state">
-                    <div class="empty-book-icon" style="display: flex; justify-content: center; margin-bottom: 0.6rem;">${svgIcon}</div>
-                    <h3 style="font-family: var(--font-serif); font-size: 1.15rem; font-weight: 600;">${escapeHTML(emptyTitle)}</h3>
-                    <p>${escapeHTML(emptySub)}</p>
-                </div>
-            `
-            return
-        }
-
-        // Exactly 4 books per row, dynamic unlimited rows
-        const booksPerRow = 4
-        const rows = []
-        for (let i = 0; i < books.length; i += booksPerRow) {
-            rows.push(books.slice(i, i + booksPerRow))
-        }
-
-        // Harvest existing .skeuo-book elements so decoded <img class="skeuo-cover-img"> bitmaps are preserved
-        const existingSkeuoCards = new Map()
-        for (const el of container.querySelectorAll('.skeuo-book[data-id]')) {
-            if (el.dataset?.id) {
-                existingSkeuoCards.set(el.dataset.id, el)
-            }
-        }
-
-        const shelfFragment = document.createDocumentFragment()
-        const unregisterShelf = coverUrlPool.registerPendingRoot(shelfFragment)
-        try {
-            for (let r = 0; r < rows.length; r++) {
-                const shelfRow = document.createElement('div')
-                shelfRow.className = 'wood-shelf-row'
-
-                const booksWrap = document.createElement('div')
-                booksWrap.className = 'wood-shelf-books'
-
-                const rowBooks = rows[r] || []
-                const rowOffset = r * booksPerRow
-                rowBooks.forEach((book, idxInRow) => {
-                    const cardIdx = rowOffset + idxInRow
-                    const nextSig = this._getBookRenderSignature(book)
-                    let bookEl = existingSkeuoCards.get(book.id)
-                    if (bookEl) {
-                        bookEl.classList.add('card-settled')
-                        bookEl.style.setProperty('--card-index', cardIdx)
-                        if (bookEl._renderSig !== nextSig) {
-                            const existingImg = bookEl.querySelector('img.skeuo-cover-img')
-                            const freshEl = this.createSkeuomorphicBookElement(book, cardIdx)
-                            freshEl.classList.add('card-settled')
-                            const freshImg = freshEl.querySelector('img.skeuo-cover-img')
-                            if (existingImg && freshImg && existingImg.src === freshImg.src) {
-                                freshImg.replaceWith(existingImg)
-                            }
-                            bookEl = freshEl
-                        }
-                    } else {
-                        bookEl = this.createSkeuomorphicBookElement(book, cardIdx)
-                    }
-                    booksWrap.appendChild(bookEl)
-                })
-
-                // 3D Wood Shelf Plank
-                const plank = document.createElement('div')
-                plank.className = 'wood-shelf-plank'
-                plank.innerHTML = `
-                    <div class="wood-shelf-surface"></div>
-                    <div class="wood-shelf-front">
-                        <div class="wood-shelf-bevel-highlight"></div>
-                    </div>
-                    <div class="wood-shelf-shadow"></div>
-                `
-
-                shelfRow.appendChild(booksWrap)
-                shelfRow.appendChild(plank)
-                shelfFragment.appendChild(shelfRow)
-            }
-            container.replaceChildren(shelfFragment)
-        } finally {
-            unregisterShelf()
-        }
-    }
-
-    createSkeuomorphicBookElement(book, cardIndex = 0) {
-        const card = document.createElement('div')
-        card.className = 'skeuo-book'
-        card.dataset.id = book.id
-        card.style.setProperty('--card-index', cardIndex)
-
-        const fraction = resolveBookProgressFraction(book)
-        const rawPct = fraction * 100
-        const progressPct = rawPct % 1 === 0 ? rawPct.toFixed(0) : (rawPct < 1 ? rawPct.toFixed(1) : rawPct.toFixed(0))
-        
-        let coverUrl = ''
-        const isRealImageCover = book.coverBlob && book.coverBlob.type !== 'image/svg+xml'
-        if (isRealImageCover) {
-            coverUrl = coverUrlPool.getForBook(book)
-        }
-
-        const COVER_PALETTES = [
-            { bg: '#F4F1EA', border: '#D4CDC0', text: '#141413', author: '#6C6A63', tag: 'TXT' },
-            { bg: '#EFE6D5', border: '#C9B182', text: '#2D2512', author: '#706046', tag: 'DOC' },
-            { bg: '#E7EFEA', border: '#8CA79B', text: '#1F362E', author: '#506B60', tag: 'BOOK' },
-            { bg: '#E8EEF2', border: '#90A8BA', text: '#1E3240', author: '#536A7B', tag: 'EPUB' },
-            { bg: '#F4EAE5', border: '#CF9582', text: '#3F231B', author: '#7C5347', tag: 'NOVEL' },
-            { bg: '#EDEADF', border: '#B8B29F', text: '#262522', author: '#6B685E', tag: 'LIT' },
-            { bg: '#EBEAE6', border: '#9E9B92', text: '#262624', author: '#6C6A63', tag: 'CLASSIC' }
-        ]
-        // High-dispersion hash using title, author, id, format
-        const seedStr = `${book.title || ''}|${book.author || ''}|${book.id || ''}|${book.format || ''}`
-        let hash = 5381
-        for (let i = 0; i < seedStr.length; i++) {
-            hash = ((hash << 5) + hash) ^ seedStr.charCodeAt(i)
-        }
-        const palette = COVER_PALETTES[Math.abs(hash >>> 0) % COVER_PALETTES.length]
-
-        let coverInner = ''
-        if (coverUrl) {
-            coverInner = `<img class="skeuo-cover-img" src="${escapeHTML(coverUrl)}" alt="${escapeHTML(book.title)}" decoding="async" loading="lazy"/>`
-        } else {
-            coverInner = `
-                <div class="skeuo-clean-cover" style="background: ${palette.bg}; border-left-color: ${palette.border};">
-                    <div class="skeuo-clean-badge">${palette.tag}</div>
-                    <div class="skeuo-clean-title" style="color: ${palette.text};">${escapeHTML(book.title)}</div>
-                    <div class="skeuo-clean-author" style="color: ${palette.author};">${escapeHTML(book.author || t('book.unknownAuthor'))}</div>
-                </div>
-            `
-        }
-
-        // Clean Understated Progress Tag
-        const readingState = resolveReadingState(book)
-        let progressTag = ''
-        if (readingState === 'finished') {
-            progressTag = `<div class="skeuo-clean-tag is-finished">${escapeHTML(t('bookshelf.badgeFinished'))}</div>`
-        } else if (readingState === 'want_to_read') {
-            progressTag = `<div class="skeuo-clean-tag is-want">${escapeHTML(t('status.wantToRead'))}</div>`
-        } else if (readingState === 'on_hold') {
-            progressTag = `<div class="skeuo-clean-tag is-hold">${escapeHTML(t('status.onHold'))}</div>`
-        } else if (fraction > 0) {
-            progressTag = `<div class="skeuo-clean-tag">${progressPct}%</div>`
-        } else {
-            progressTag = `<div class="skeuo-clean-tag is-new">${escapeHTML(t('bookshelf.badgeNewBook'))}</div>`
-        }
-
-        const isCloud = !!book.isCloudOnly
-        const hasBackup = !!(book.cloudBackup?.hasBackup)
-        const cloudBtnClass = hasBackup ? 'synced' : ''
-        const cloudBtnTitle = hasBackup
-            ? t('bookshelf.cloudBackedUpTitle')
-            : (isCloud ? t('bookshelf.cloudNutstorePullTitle') : t('bookshelf.cloudBackupActionTitle'))
-
-        let skeuoCloudBadge = ''
-        if (isCloud) {
-            const fmtStr = escapeHTML((book.format || 'doc').toUpperCase())
-            const sizeStr = book.size ? (book.size >= 1048576 ? (book.size / 1048576).toFixed(1) + 'MB' : (book.size / 1024).toFixed(0) + 'KB') : ''
-            skeuoCloudBadge = `<div class="skeuo-cloud-badge ${book.format === 'pdf' ? 'is-pdf' : ''}"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" style="display:inline-block;vertical-align:middle;margin-right:3px;"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>${escapeHTML(t('bookshelf.cloudPendingPull'))} · ${fmtStr} ${sizeStr ? sizeStr : ''}</div>`
-        }
-
-        const favActive = book.isFavorite ? 'active' : ''
-        const favClass = book.isFavorite ? 'is-favorite' : ''
-        const favTitle = book.isFavorite ? t('bookshelf.favRemoveTitle') : t('bookshelf.favAddTitle')
-
-        const isSelected = this.isBatchMode && this.selectedBookIds.has(book.id)
-        if (isSelected) {
-            card.classList.add('selected')
-        }
-        const batchCheckboxHtml = this.isBatchMode
-            ? `<div class="card-batch-checkbox ${isSelected ? 'selected' : ''}" title="${escapeHTML(isSelected ? t('bookshelf.deselect') : t('bookshelf.select'))}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></div>`
-            : ''
-
-        card.innerHTML = `
-            <div class="skeuo-book-cover ${favClass} ${isCloud ? 'is-cloud-only' : ''}">
-                ${batchCheckboxHtml}
-                <button class="skeuo-fav-btn ${favActive}" title="${escapeHTML(favTitle)}"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 2.8 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L2.9 9.4l6.3-.9Z"/></svg></button>
-                <button class="skeuo-details-btn" title="${escapeHTML(t('bookshelf.viewDetailsSettingsTitle'))}" aria-label="${escapeHTML(t('bookshelf.viewDetailsAria'))}"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="5" cy="12" r="2"/></svg></button>
-                ${progressTag}
-                ${skeuoCloudBadge}
-                ${coverInner}
-                <div class="skeuo-spine-gloss"></div>
-                <div class="skeuo-paper-edge"></div>
-            </div>
-            <div class="skeuo-book-shelf-shadow"></div>
-        `
-        card._renderSig = this._getBookRenderSignature(book)
-        return card
     }
 
     createBookCard(book, cardIndex = 0) {
@@ -2642,9 +2578,17 @@ export class BookshelfController {
         requestAnimationFrame(step)
     }
 
+    _getShelfScreenTop() {
+        const heroEl = this.dom.modernHeroThreshold
+        if (!heroEl || heroEl.style.display === 'none') return 0
+        const measured = heroEl.offsetHeight || this.cachedShelfHeight || Math.max(0, window.innerHeight - 52)
+        this.cachedShelfHeight = measured
+        return measured
+    }
+
     glideToShelf() {
         if (!this.dom.booksWorkspace) return
-        const shelfTop = this.cachedShelfHeight || (window.innerHeight - 52)
+        const shelfTop = this._getShelfScreenTop() || (window.innerHeight - 52)
         if (this.dom.currentCategoryTitle) {
             this.dom.currentCategoryTitle.innerText = this._resolveCategoryTitle('all')
             this.dom.currentCategoryTitle.style.display = 'block'
@@ -2694,30 +2638,40 @@ export class BookshelfController {
                 svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-primary, #da7756);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`
             }
 
-            const mobileFilter = window.mobileShell?.isMobileViewport() && this.shelfCategory === 'all'
-                ? window.mobileShell.shelfFilter : 'all'
+            const isMobileShelf = Boolean(globalThis.window?.mobileShell?.isMobileViewport() && this.shelfCategory === 'all')
+            const mobileFilter = isMobileShelf ? globalThis.window.mobileShell.shelfFilter : 'all'
             const emptyFilterKeys = {
                 reading: 'mobile.shelf.emptyReading',
                 on_hold: 'mobile.shelf.emptyOnHold',
                 finished: 'mobile.shelf.emptyFinished'
             }
 
+            const activeShelfSearch = (!isMobileShelf && this.searchQuery && this.searchQuery.trim())
+                ? this.searchQuery.trim()
+                : ''
             const hasActiveOverviewFilters = isOverview && (this.overviewSelectedTags.size > 0 || this.overviewRatingFilter !== 'all' || (this.overviewSearchQuery && this.overviewSearchQuery.trim()) || this.overviewStatus !== 'all')
 
-            let emptyTitle = isFavView ? t('bookshelf.emptyShelf.favTitle')
+            let emptyTitle = activeShelfSearch
+                ? t('bookshelf.emptySearchTitle', { query: activeShelfSearch })
+                : (isFavView ? t('bookshelf.emptyShelf.favTitle')
                 : (isCustomList ? t('bookshelf.emptyShelf.listTitle')
                 : (isFinishedView ? t('bookshelf.emptyShelf.finishedTitle')
                 : (hasActiveOverviewFilters ? t('bookshelf.emptyGrid.filteredTitle')
-                : (isOverview ? t('bookshelf.emptyGrid.overviewTitle') : t('bookshelf.emptyShelf.allTitle')))))
-            let emptySub = isFavView ? t('bookshelf.emptyGrid.favSub')
+                : (isOverview ? t('bookshelf.emptyGrid.overviewTitle') : t('bookshelf.emptyShelf.allTitle'))))))
+            let emptySub = activeShelfSearch
+                ? t('bookshelf.emptySearchSub')
+                : (isFavView ? t('bookshelf.emptyGrid.favSub')
                 : (isCustomList ? t('bookshelf.emptyGrid.listSub')
                 : (isFinishedView ? t('bookshelf.emptyShelf.finishedSub')
                 : (hasActiveOverviewFilters ? t('bookshelf.emptyGrid.filteredSub')
-                : (isOverview ? t('bookshelf.emptyGrid.overviewSub') : t('bookshelf.emptyGrid.allSub')))))
+                : (isOverview ? t('bookshelf.emptyGrid.overviewSub') : t('bookshelf.emptyGrid.allSub'))))))
 
-            let clearBtnHtml = hasActiveOverviewFilters 
-                ? `<button type="button" id="btn-grid-empty-clear" class="btn-clear-overview-filters" style="margin-top: 14px; padding: 5px 16px; font-size: 0.82rem; cursor: pointer; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-main);">${escapeHTML(t('bookshelf.clearFilterConditionBtn'))}</button>`
-                : ''
+            let clearBtnHtml = ''
+            if (activeShelfSearch) {
+                clearBtnHtml = `<button type="button" id="btn-empty-search-fulltext" class="btn-secondary-action">${escapeHTML(t('bookshelf.emptySearchFullTextBtn', { query: activeShelfSearch }))}</button>`
+            } else if (hasActiveOverviewFilters) {
+                clearBtnHtml = `<button type="button" id="btn-grid-empty-clear" class="btn-clear-overview-filters" style="margin-top: 14px; padding: 5px 16px; font-size: 0.82rem; cursor: pointer; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-main);">${escapeHTML(t('bookshelf.clearFilterConditionBtn'))}</button>`
+            }
 
             this.dom.booksGrid.innerHTML = `
                 <div class="leaf-empty-state" style="grid-column: 1 / -1; width: 100%; max-width: 520px; margin: 0 auto; padding: 4rem 1.5rem; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center;">
@@ -2727,6 +2681,11 @@ export class BookshelfController {
                     ${clearBtnHtml}
                 </div>
             `
+            if (activeShelfSearch) {
+                document.getElementById('btn-empty-search-fulltext')?.addEventListener('click', () => {
+                    this.app?.search?.openCrossSearchModal?.(activeShelfSearch)
+                })
+            }
             document.getElementById('btn-grid-empty-clear')?.addEventListener('click', () => {
                 this.clearOverviewFilters()
             })
@@ -3024,15 +2983,18 @@ export class BookshelfController {
         this.dom.booksTableBody.innerHTML = ''
 
         if (books.length === 0) {
+            const activeShelfSearch = (this.searchQuery && this.searchQuery.trim()) ? this.searchQuery.trim() : ''
             const isFavView = this.shelfCategory === 'favorite'
             const isCustomList = this.shelfCategory && this.shelfCategory.startsWith('list_')
             const isFinishedView = this.shelfCategory === 'finished'
             const isOverview = this.shelfCategory === 'overview'
-            let emptyMsg = isFavView ? t('bookshelf.emptyTable.fav')
+            let emptyMsg = activeShelfSearch
+                ? t('bookshelf.emptySearchTitle', { query: activeShelfSearch })
+                : (isFavView ? t('bookshelf.emptyTable.fav')
                 : (isCustomList ? t('bookshelf.emptyTable.list')
                 : (isFinishedView ? t('bookshelf.emptyTable.finished')
                 : (isOverview ? t('bookshelf.emptyTable.overview')
-                : t('bookshelf.emptyTable.all'))))
+                : t('bookshelf.emptyTable.all')))))
             this.dom.booksTableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-tertiary);">${escapeHTML(emptyMsg)}</td></tr>`
             return
         }
@@ -3258,16 +3220,73 @@ export class BookshelfController {
         return '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>'
     }
 
+    _setCreateListNameError(hasError) {
+        const active = Boolean(hasError)
+        this.dom?.createListNameField?.classList?.toggle('is-error', active)
+        if (this.dom?.inputCustomListName) {
+            if (active) {
+                this.dom.inputCustomListName.setAttribute('aria-invalid', 'true')
+            } else {
+                this.dom.inputCustomListName.removeAttribute?.('aria-invalid')
+            }
+        }
+        if (this.dom?.createListNameError) {
+            this.dom.createListNameError.hidden = !active
+        }
+    }
+
+    _updateCreateListPreview() {
+        const rawName = (this.dom?.inputCustomListName?.value || '').trim()
+        if (this.dom?.createListPreviewName) {
+            if (rawName) {
+                this.dom.createListPreviewName.textContent = rawName
+                this.dom.createListPreviewName.classList?.remove('is-placeholder')
+            } else {
+                this.dom.createListPreviewName.textContent = t('modal.listUntitledPreview')
+                this.dom.createListPreviewName.classList?.add('is-placeholder')
+            }
+        }
+        if (this.dom?.createListPreviewIcon) {
+            this.dom.createListPreviewIcon.innerHTML = this.getListIconSvg(this.selectedListIcon || 'book')
+        }
+    }
+
+    _selectCreateListIcon(iconId, { focusButton = false } = {}) {
+        this.selectedListIcon = iconId
+        const buttons = Array.from(this.dom?.customListIconPicker?.querySelectorAll('.icon-pick-btn') || [])
+        buttons.forEach(b => {
+            const isSelected = b.dataset.iconId === iconId
+            b.classList.toggle('active', isSelected)
+            b.setAttribute('aria-checked', isSelected ? 'true' : 'false')
+            b.setAttribute('tabindex', isSelected ? '0' : '-1')
+            if (isSelected && focusButton) {
+                b.focus()
+            }
+        })
+        this._updateCreateListPreview()
+    }
+
+    _getIconPickerColumnCount(buttons) {
+        if (buttons.length > 1 && typeof buttons[0]?.getBoundingClientRect === 'function') {
+            const firstRect = buttons[0].getBoundingClientRect()
+            if (firstRect && firstRect.width > 0) {
+                const sameRow = buttons.filter(b => Math.abs(b.getBoundingClientRect().top - firstRect.top) < 4).length
+                if (sameRow > 0) return sameRow
+            }
+        }
+        return Math.min(8, Math.max(1, buttons.length))
+    }
+
     openCreateListModal() {
         if (!this.dom.modalCreateList) return
         if (this.dom.inputCustomListName) {
             this.dom.inputCustomListName.value = ''
-            this.dom.inputCustomListName.placeholder = (this.customLists && this.customLists.length > 0)
-                ? t('bookshelf.inputListNamePlaceholder')
-                : t('modal.listNamePlaceholder')
+            this.dom.inputCustomListName.placeholder = ''
         }
+        this._setCreateListNameError(false)
         this.selectedListIcon = 'book'
         this.renderIconPicker()
+        this._updateCreateListPreview()
         this.dom.modalCreateList.style.display = 'flex'
         this.dom.modalCreateList.classList.add('show')
         requestAnimationFrame(() => {
@@ -3276,6 +3295,7 @@ export class BookshelfController {
     }
 
     closeCreateListModal() {
+        this._setCreateListNameError(false)
         if (this.dom.modalCreateList) {
             this.dom.modalCreateList.classList.remove('show')
             setTimeout(() => {
@@ -3286,17 +3306,51 @@ export class BookshelfController {
 
     renderIconPicker() {
         if (!this.dom.customListIconPicker) return
+        this.dom.customListIconPicker.setAttribute?.('role', 'radiogroup')
         this.dom.customListIconPicker.innerHTML = ''
-        this.iconDefs.forEach(def => {
+        this.iconDefs.forEach((def, idx) => {
+            const isSelected = this.selectedListIcon === def.id
+            const iconLabel = t('bookshelf.icon.' + def.id)
             const btn = document.createElement('button')
             btn.type = 'button'
-            btn.className = `icon-pick-btn ${this.selectedListIcon === def.id ? 'active' : ''}`
-            btn.title = t('bookshelf.icon.' + def.id)
+            btn.className = `icon-pick-btn ${isSelected ? 'active' : ''}`
+            btn.dataset.iconId = def.id
+            btn.setAttribute('role', 'radio')
+            btn.setAttribute('aria-checked', isSelected ? 'true' : 'false')
+            btn.setAttribute('tabindex', isSelected ? '0' : '-1')
+            btn.title = iconLabel
+            btn.setAttribute('aria-label', iconLabel)
             btn.innerHTML = def.svg
             btn.addEventListener('click', () => {
-                this.selectedListIcon = def.id
-                this.dom.customListIconPicker.querySelectorAll('.icon-pick-btn').forEach(b => b.classList.remove('active'))
-                btn.classList.add('active')
+                this._selectCreateListIcon(def.id)
+            })
+            btn.addEventListener('keydown', e => {
+                const buttons = Array.from(this.dom.customListIconPicker?.querySelectorAll('.icon-pick-btn') || [])
+                const total = buttons.length || this.iconDefs.length
+                if (!total) return
+                const cols = this._getIconPickerColumnCount(buttons)
+                let nextIdx = null
+                if (e.key === 'ArrowRight') nextIdx = (idx + 1) % total
+                else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + total) % total
+                else if (e.key === 'ArrowDown') nextIdx = (idx + cols < total) ? idx + cols : (idx % cols)
+                else if (e.key === 'ArrowUp') {
+                    if (idx - cols >= 0) nextIdx = idx - cols
+                    else {
+                        const col = idx % cols
+                        const lastRowStart = Math.floor((total - 1) / cols) * cols
+                        nextIdx = lastRowStart + col < total ? lastRowStart + col : lastRowStart + col - cols
+                    }
+                } else if (e.key === 'Home') nextIdx = 0
+                else if (e.key === 'End') nextIdx = total - 1
+                else if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault()
+                    this._selectCreateListIcon(def.id, { focusButton: true })
+                    return
+                }
+                if (nextIdx !== null && nextIdx >= 0 && nextIdx < this.iconDefs.length) {
+                    e.preventDefault()
+                    this._selectCreateListIcon(this.iconDefs[nextIdx].id, { focusButton: true })
+                }
             })
             this.dom.customListIconPicker.appendChild(btn)
         })
@@ -3305,10 +3359,11 @@ export class BookshelfController {
     async handleCreateListConfirm() {
         const name = this.dom.inputCustomListName?.value.trim()
         if (!name) {
-            this.app.dialogs.showToast(t('bookshelf.inputListNameRequiredToast'), 'warning')
+            this._setCreateListNameError(true)
             this.dom.inputCustomListName?.focus()
             return
         }
+        this._setCreateListNameError(false)
         const newList = {
             id: `list_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             name,
@@ -3514,14 +3569,14 @@ export class BookshelfController {
             }
         }
 
+        this._syncHeaderSearchState()
         await this.renderCustomListsSidebar()
         if (this.dom.modalCreateList && (this.dom.modalCreateList.classList.contains('show') || this.dom.modalCreateList.style.display === 'flex')) {
             if (this.dom.inputCustomListName) {
-                this.dom.inputCustomListName.placeholder = (this.customLists && this.customLists.length > 0)
-                    ? t('bookshelf.inputListNamePlaceholder')
-                    : t('modal.listNamePlaceholder')
+                this.dom.inputCustomListName.placeholder = ''
             }
             this.renderIconPicker()
+            this._updateCreateListPreview()
         }
         if (this.dom.modalManageBookLists && (this.dom.modalManageBookLists.classList.contains('show') || this.dom.modalManageBookLists.style.display === 'flex') && this.managingBookId) {
             const book = await db.getBook(this.managingBookId)
@@ -3559,8 +3614,7 @@ export class BookshelfController {
         } else {
             const selector = `[data-id="${CSS.escape(bookId)}"]`
             const gridVisible = this.dom.modernGridWrapper?.style.display !== 'none' && this.dom.booksGrid?.style.display !== 'none'
-            const container = gridVisible ? this.dom.booksGrid
-                : this.dom.booksShelf?.style.display === 'flex' ? this.dom.booksShelf : this.dom.booksTableBody
+            const container = gridVisible ? this.dom.booksGrid : this.dom.booksTableBody
             const card = container?.querySelector(selector)
             card?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
             card?.focus?.()

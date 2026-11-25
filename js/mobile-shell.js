@@ -314,7 +314,12 @@ export class MobileShellController {
 
         const shelfArea = document.getElementById('bookshelf-view')
         const readerView = document.getElementById('reader-view')
-        const isReaderActive = Boolean(this.isInReader || (readerView && readerView.classList.contains('active') && (window.getComputedStyle ? window.getComputedStyle(readerView).display !== 'none' : readerView.style.display === 'block')))
+        const isReaderActive = Boolean(
+            this.isInReader ||
+            this._homeOpeningBookId ||
+            window.app?._activeSession ||
+            (readerView && readerView.classList.contains('active') && (window.getComputedStyle ? window.getComputedStyle(readerView).display !== 'none' : readerView.style.display === 'block'))
+        )
 
         if (!isMobile) {
             this.settingsPage.close()
@@ -366,7 +371,7 @@ export class MobileShellController {
                 'padding: 24px',
                 'text-align: center',
                 'pointer-events: none',
-                'background: var(--bg-primary, var(--mobile-bg, transparent))',
+                'background: var(--book-bg, var(--bg-primary, var(--mobile-bg-page, #faf9f5)))',
                 'color: var(--text-muted, var(--mobile-text-muted, #6b7280))'
             ].join('; ')
             overlay.innerHTML = `
@@ -433,10 +438,18 @@ export class MobileShellController {
             navBar.classList.toggle('hidden-in-reader', inReader)
         }
         if (inReader) {
+            const shelfArea = document.getElementById('bookshelf-view')
+            if (shelfArea) shelfArea.style.display = 'none'
             const shelfHeader = document.getElementById('mobile-header-bar')
             if (shelfHeader) shelfHeader.style.display = 'none'
             const shelfPalette = document.getElementById('btn-mobile-palette')
             if (shelfPalette) shelfPalette.style.display = 'none'
+            if (document.body.classList.contains('mobile-subview-active') || this.activeSubviewKey) {
+                this.activeSubviewKey = null
+                document.body.classList.remove('mobile-subview-active', 'mobile-ai-history-active')
+                const subHeader = document.getElementById('mobile-subview-header')
+                if (subHeader) subHeader.style.display = 'none'
+            }
             // Deactivate all mobile tabs and bottom bar active states when reader is open
             document.querySelectorAll('.mobile-nav-tab').forEach(el => el.classList.remove('active'))
             document.querySelectorAll('.mobile-view-container').forEach(el => el.classList.remove('active'))
@@ -445,6 +458,7 @@ export class MobileShellController {
             this.syncPdfControls()
             this.updateMiniPlayerState(ttsPlayer.state)
         } else {
+            this._homeOpeningBookId = null
             this.finishReaderSessionLoading()
             document.body.classList.remove('mobile-pdf-reading', 'mobile-pdf-tools-visible')
             this._pdfScrubbing = false
@@ -455,7 +469,7 @@ export class MobileShellController {
             const titleEl = document.getElementById('mobile-reader-title')
             if (titleEl) titleEl.innerText = t('mobile.reader.defaultTitle')
             this.setReaderToolsVisible(false)
-            this.switchTab(this.currentTab || 'home', { skipRender: Boolean(options?.deferRender) })
+            this.switchTab(this.currentTab || 'home', { skipRender: Boolean(options?.deferRender), force: true })
         }
     }
 
@@ -1131,6 +1145,7 @@ export class MobileShellController {
     }
 
     switchTab(targetTab, options = {}) {
+        if ((this.isInReader || this._homeOpeningBookId) && !options?.force) return
         document.body.classList.remove('mobile-ai-history-active')
         document.getElementById('mobile-history-actions-dialog')?.close()
         this.currentTab = targetTab
@@ -1701,8 +1716,15 @@ export class MobileShellController {
                 this.switchTab('shelf')
             })
 
-            container.querySelector('#home-hero-card')?.addEventListener('click', (e) => {
-                this._openBookFromHome(currentBook.id, e.currentTarget)
+            const heroCardEl = container.querySelector('#home-hero-card')
+            container.querySelector('#btn-home-continue-reading')?.addEventListener('click', (e) => {
+                e.stopPropagation()
+                this._openBookFromHome(currentBook.id, heroCardEl, currentBook)
+            })
+
+            heroCardEl?.addEventListener('click', (e) => {
+                if (e.target?.closest?.('#btn-home-hero-reading-link')) return
+                this._openBookFromHome(currentBook.id, e.currentTarget, currentBook)
             })
 
             container.querySelector('#btn-goal-edit')?.addEventListener('click', (e) => {
@@ -1720,11 +1742,12 @@ export class MobileShellController {
                 this.renderHomeTab()
             })
 
+            const recBookMap = new Map(recList.map(b => [String(b.id), b]))
             container.querySelectorAll('.home-rec-item').forEach(item => {
                 item.addEventListener('click', (e) => {
                     e.stopPropagation()
                     const bId = item.dataset.recId
-                    if (bId) this._openBookFromHome(bId, item)
+                    if (bId) this._openBookFromHome(bId, item, recBookMap.get(String(bId)) || null)
                 })
             })
 
@@ -1733,7 +1756,7 @@ export class MobileShellController {
         }
     }
 
-    async _openBookFromHome(bookId, triggerEl = null) {
+    async _openBookFromHome(bookId, triggerEl = null, bookHint = null) {
         if (!bookId || this._homeOpeningBookId) return
         this._homeOpeningBookId = bookId
         const continueBtn = triggerEl?.querySelector?.('#btn-home-continue-reading') || null
@@ -1742,11 +1765,32 @@ export class MobileShellController {
             triggerEl.style.opacity = '0.72'
         }
         if (continueBtn) continueBtn.disabled = true
+        let enteredImmediateLoading = false
+        if (this.isMobileViewport() && !bookHint?.isCloudOnly) {
+            const shelfArea = document.getElementById('bookshelf-view')
+            const readerView = document.getElementById('reader-view')
+            if (shelfArea) shelfArea.style.display = 'none'
+            if (readerView) {
+                readerView.classList.remove('closing')
+                readerView.style.display = 'block'
+                readerView.classList.add('active')
+            }
+            this.beginReaderSessionLoading(bookHint?.title || '')
+            enteredImmediateLoading = true
+        }
         try {
             await Promise.resolve(window.app?.openBook?.(bookId))
         } finally {
             if (this._homeOpeningBookId === bookId) {
                 this._homeOpeningBookId = null
+            }
+            if (enteredImmediateLoading && !window.app?._activeSession && !window.app?.currentBookId && this.isInReader) {
+                const readerView = document.getElementById('reader-view')
+                if (readerView) {
+                    readerView.classList.remove('active', 'closing')
+                    readerView.style.display = 'none'
+                }
+                this.setReaderInView(false, { deferRender: true })
             }
             if (triggerEl) {
                 triggerEl.removeAttribute('aria-busy')

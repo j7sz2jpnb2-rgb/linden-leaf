@@ -1962,6 +1962,7 @@ async function loadReadingStatsSnapshot() {
         getAllReadingSessions(), getAllBooks(), getAllHighlights()
     ])
     const sessions = allSessions.filter(session => getSessionDur(session) > 0)
+    const bookMap = new Map(books.map(book => [book.id, book]))
     const bookTitles = new Map(books.map(book => [book.id, book.title]))
 
     const now = new Date()
@@ -2031,7 +2032,7 @@ async function loadReadingStatsSnapshot() {
     }
 
     return {
-        sessions, books, highlights, bookTitles, totalSeconds, dailyMap, monthlyMap, yearlyMap,
+        sessions, books, highlights, bookMap, bookTitles, totalSeconds, dailyMap, monthlyMap, yearlyMap,
         activeDates, earliestTime, unallocatedHistoricalSeconds, allSessionBookMap, allBookSessions
     }
 }
@@ -2039,7 +2040,7 @@ async function loadReadingStatsSnapshot() {
 // Calculate Reading Full Statistics (Supports Week, Month, Year, Total views)
 export const getReadingStats = async (viewMode = 'month', targetYear = new Date().getFullYear(), targetMonth = new Date().getMonth() + 1, weekOffset = 0) => {
     const {
-        sessions, books, highlights, bookTitles, totalSeconds, dailyMap, monthlyMap, yearlyMap,
+        sessions, books, highlights, bookMap, bookTitles, totalSeconds, dailyMap, monthlyMap, yearlyMap,
         activeDates, earliestTime, unallocatedHistoricalSeconds, allSessionBookMap, allBookSessions
     } = await getReadingStatsSnapshot()
     const now = new Date()
@@ -2454,12 +2455,30 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         periodBooksCount: periodBooks.length,
         periodFinishedBooks,
         periodFinishedCount: periodFinishedBooks.length,
-        periodHighlights: periodHighlights.map(note => ({ ...note, bookTitle: note.bookTitle || bookTitles.get(note.bookId) || t('db.stats.removedBook') })),
+        periodHighlights: periodHighlights.map(note => {
+            const book = bookMap.get(note.bookId)
+            return {
+                ...note,
+                bookTitle: note.bookTitle || book?.title || bookTitles.get(note.bookId) || t('db.stats.removedBook'),
+                bookFilename: note.bookFilename || book?.filename || ''
+            }
+        }),
         periodHighlightsCount: periodHighlights.length,
         chartData,
         peakInfo: peakInfo.seconds > 0 ? peakInfo : null,
         topBooks: topBooks.slice(0, 10),
-        recentSessions: sessions.slice(0, 15).map(session => ({ ...session, bookTitle: session.bookTitle || bookTitles.get(session.bookId) || t('db.stats.removedBook'), date: session.date || toLocalDateKey(session.startTime) }))
+        recentSessions: sessions.slice(0, 15).map(session => {
+            const book = bookMap.get(session.bookId)
+            return {
+                ...session,
+                bookTitle: session.bookTitle || book?.title || bookTitles.get(session.bookId) || t('db.stats.removedBook'),
+                bookFilename: session.bookFilename || book?.filename || '',
+                coverBlob: book?.coverBlob || null,
+                coverRevision: book?.coverRevision ?? book?.coverBlob?._revision ?? 0,
+                format: session.format || book?.format || '',
+                date: session.date || toLocalDateKey(session.startTime)
+            }
+        })
     }
 }
 
