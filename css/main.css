@@ -1283,18 +1283,23 @@ button,
 }
 
 /* Header Search Bar */
-.header-search-bar {
+.header-search-bar,
+.header-search-bar.leaf-field--sm {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  box-sizing: border-box;
   background: var(--paper-sunken);
   border: 1px solid var(--line-soft);
-  border-radius: 20px;
-  padding: 0 6px 0 11px;
-  width: 210px;
-  height: 34px;
-  min-height: 34px;
+  border-radius: 8px;
+  padding: 0 6px 0 10px;
+  height: 32px;
+  min-height: 32px;
   transition: width var(--dur-med) ease-out, border-color var(--dur-fast) ease, background-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+}
+
+.header-search-bar {
+  width: 210px;
 }
 
 .header-search-bar:hover {
@@ -1314,19 +1319,27 @@ button,
   }
 }
 
-.header-search-bar:focus-within .leaf-field-kbd,
-.header-search-bar.has-value .leaf-field-kbd {
-  display: none;
-}
-
-.header-search-bar svg {
+.header-search-bar svg,
+#header-search-bar svg.leaf-field-icon {
+  display: block;
+  width: 15px;
+  height: 15px;
+  margin: 0;
   color: var(--ink-muted);
   flex-shrink: 0;
 }
 
 .header-search-bar input,
 .header-search-bar input:focus,
-.header-search-bar input:focus-visible {
+.header-search-bar input:focus-visible,
+#header-search-bar input,
+#header-search-bar input:focus,
+#header-search-bar input:focus-visible {
+  display: block;
+  height: 100%;
+  line-height: 1;
+  padding: 0;
+  margin: 0;
   border: 0;
   outline: none;
   box-shadow: none;
@@ -1336,29 +1349,88 @@ button,
   font-weight: 400;
   color: var(--text-main);
   caret-color: var(--accent-primary);
+  flex: 1;
   width: 100%;
   min-width: 0;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-.header-search-bar input::placeholder {
-  color: var(--ink-muted);
+.header-search-bar input::placeholder,
+#header-search-bar input::placeholder {
+  color: transparent;
   font-family: var(--font-ui);
   font-size: 13px;
   font-weight: 400;
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease;
+}
+
+.header-search-bar:focus-within input::placeholder,
+#header-search-bar:focus-within input::placeholder {
+  color: var(--ink-muted);
   opacity: 0.85;
 }
 
+html[data-reduced-motion="true"] .header-search-bar input::placeholder,
+html[data-anim-intensity="none"] .header-search-bar input::placeholder {
+  transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header-search-bar input::placeholder {
+    transition: none !important;
+  }
+}
+
+#btn-clear-shelf-search.leaf-field-clear,
+#header-search-bar .leaf-field-clear {
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.header-search-bar .leaf-field-kbd {
+  height: 20px;
+  line-height: 1;
+  padding: 0 6px;
+  margin: 0;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.header-search-bar:focus-within .leaf-field-kbd,
+.header-search-bar.has-value .leaf-field-kbd,
+#header-search-bar:focus-within .leaf-field-kbd,
+#header-search-bar.has-value .leaf-field-kbd {
+  display: none;
+}
+
 #btn-open-cross-search,
+#btn-open-cross-search.header-cross-search-trigger,
 .header-cross-search-trigger {
+  height: 22px;
+  line-height: 1;
+  padding: 0 6px;
+  margin: 0;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: 0;
   color: var(--ink-muted);
   font-family: var(--font-ui);
   font-size: 12px;
   font-weight: 500;
-  padding: 2px 6px;
   border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
@@ -10947,7 +11019,11 @@ input[type="range"].control-input::-moz-range-thumb,
 .leaf-field-kbd {
   display: inline-flex;
   align-items: center;
-  padding: 1px 5px;
+  justify-content: center;
+  height: 20px;
+  padding: 0 6px;
+  margin: 0;
+  box-sizing: border-box;
   border: 0;
   border-radius: 4px;
   background: color-mix(in srgb, var(--text-main) 6%, transparent);
@@ -10955,7 +11031,7 @@ input[type="range"].control-input::-moz-range-thumb,
   font-family: var(--font-ui);
   font-size: 11px;
   font-weight: 500;
-  line-height: 1.4;
+  line-height: 1;
   white-space: nowrap;
   flex-shrink: 0;
   pointer-events: none;
