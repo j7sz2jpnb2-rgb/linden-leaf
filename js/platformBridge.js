@@ -574,7 +574,7 @@ class PlatformBridge {
 
     async stageSavedPdfBlob(blob) {
         if (!this.isTauri || !(blob instanceof Blob) || blob.isLazySnapshot || !blob.size) return null
-        if (!this.isAndroid && blob.size > 128 * 1024 * 1024) return null
+        if (blob.size > 128 * 1024 * 1024) return null
         const raw = this.isAndroid
             ? await this._stageAndroidPdfBlob(blob)
             : await this._invokeTauri('mupdf_stage_pdf_bytes', new Uint8Array(await blob.arrayBuffer()))
@@ -711,12 +711,17 @@ class PlatformBridge {
 
     async windowSetAlwaysOnTop(alwaysOnTop) {
         if (this.isTauri) {
-            try {
-                if (window.__TAURI__?.window?.getCurrentWindow) {
-                    await window.__TAURI__.window.getCurrentWindow().setAlwaysOnTop(Boolean(alwaysOnTop));
-                } else {
-                    await this._invokeTauri('window_set_always_on_top', { alwaysOnTop: Boolean(alwaysOnTop) });
+            const flag = Boolean(alwaysOnTop);
+            if (window.__TAURI__?.window?.getCurrentWindow) {
+                try {
+                    await window.__TAURI__.window.getCurrentWindow().setAlwaysOnTop(flag);
+                    return true;
+                } catch (e) {
+                    console.warn('[PlatformBridge] Tauri window.setAlwaysOnTop error, falling back:', e);
                 }
+            }
+            try {
+                await this._invokeTauri('window_set_always_on_top', { alwaysOnTop: flag });
                 return true;
             } catch (e) {
                 console.warn('[PlatformBridge] Tauri window_set_always_on_top error:', e);
@@ -727,12 +732,15 @@ class PlatformBridge {
 
     async windowIsAlwaysOnTop() {
         if (this.isTauri) {
-            try {
-                if (window.__TAURI__?.window?.getCurrentWindow) {
-                    return await window.__TAURI__.window.getCurrentWindow().isAlwaysOnTop();
-                } else {
-                    return await this._invokeTauri('window_is_always_on_top');
+            if (window.__TAURI__?.window?.getCurrentWindow) {
+                try {
+                    return Boolean(await window.__TAURI__.window.getCurrentWindow().isAlwaysOnTop());
+                } catch (e) {
+                    console.warn('[PlatformBridge] Tauri window.isAlwaysOnTop error, falling back:', e);
                 }
+            }
+            try {
+                return Boolean(await this._invokeTauri('window_is_always_on_top'));
             } catch (e) {
                 console.warn('[PlatformBridge] Tauri window_is_always_on_top error:', e);
             }
@@ -1344,29 +1352,51 @@ class PlatformBridge {
         return true;
     }
 
+    _isSafeExternalUrl(url) {
+        if (typeof url !== 'string') return null;
+        const trimmed = url.trim();
+        if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return null;
+        try {
+            const parsed = new URL(trimmed);
+            if (!['https:', 'http:', 'mailto:'].includes(parsed.protocol)) return null;
+            return parsed.protocol === 'mailto:'
+                ? (trimmed.length > 'mailto:'.length ? trimmed : null)
+                : (parsed.hostname ? trimmed : null);
+        } catch (_) {
+            return null;
+        }
+    }
+
     /**
      * Open URL in user's default web browser
      * @param {string} url
      */
     async openExternal(url) {
-        if (!url) return false;
+        const safeUrl = this._isSafeExternalUrl(url);
+        if (!safeUrl) return false;
         if (this._getNativeElectron()?.openExternal) {
-            return await this._getNativeElectron().openExternal(url);
+            const opened = await this._getNativeElectron().openExternal(safeUrl);
+            if (opened !== false) return Boolean(opened ?? true);
         }
         if (this.isTauri) {
-            try {
-                if (window.__TAURI__?.shell?.open) {
-                    await window.__TAURI__.shell.open(url);
+            if (window.__TAURI__?.shell?.open) {
+                try {
+                    await window.__TAURI__.shell.open(safeUrl);
                     return true;
+                } catch (e) {
+                    console.warn('[PlatformBridge] Tauri shell.open error, falling back:', e);
                 }
-                return await this._invokeTauri('shell_open_external', { url });
+            }
+            try {
+                const opened = await this._invokeTauri('shell_open_external', { url: safeUrl });
+                if (opened === true) return true;
             } catch (e) {
                 console.warn('[PlatformBridge] Tauri openExternal error:', e);
             }
         }
-        if (typeof window !== 'undefined') {
-            window.open(url, '_blank', 'noopener,noreferrer');
-            return true;
+        if (typeof window !== 'undefined' && typeof window.open === 'function') {
+            const win = window.open(safeUrl, '_blank', 'noopener,noreferrer');
+            return Boolean(win);
         }
         return false;
     }
@@ -1791,13 +1821,19 @@ class PlatformBridge {
     }
 
     _bytesToBase64(u8) {
-        let binary = '';
-        const chunkSize = 0x8000;
+        if (!u8 || u8.length === 0) return '';
+        // 24 KiB is an exact multiple of 3 bytes so each chunk encodes cleanly without padding mid-stream,
+        // avoiding allocating one giant binary string + Base64 copy simultaneously on large Android payloads.
+        const chunkSize = 0x6000;
+        if (u8.length <= chunkSize) {
+            return btoa(String.fromCharCode(...u8));
+        }
+        const parts = [];
         for (let i = 0; i < u8.length; i += chunkSize) {
             const slice = u8.subarray(i, Math.min(i + chunkSize, u8.length));
-            binary += String.fromCharCode(...slice);
+            parts.push(btoa(String.fromCharCode(...slice)));
         }
-        return btoa(binary);
+        return parts.join('');
     }
 
     _utf8ToBase64(str) {
@@ -2134,6 +2170,7 @@ class PlatformBridge {
                 text,
                 rate: Number(rate) || 1.0,
                 bookId: options.bookId || null,
+                bookAuthor: options.bookAuthor || null,
                 jobId: options.jobId || null,
                 utteranceId: options.utteranceId || null,
                 generation: options.generation != null ? Number(options.generation) : null,
@@ -2164,6 +2201,7 @@ class PlatformBridge {
                 startIndex: Number(startIndex) || 0,
                 rate: Number(rate) || 1.0,
                 bookId: options.bookId || null,
+                bookAuthor: options.bookAuthor || null,
                 jobId: options.jobId || null,
                 generation: options.generation != null ? Number(options.generation) : null,
                 voiceId: options.voiceId || null,
@@ -2286,7 +2324,8 @@ class PlatformBridge {
             try {
                 return await this._invokeTauri('android_save_image_to_gallery', {
                     base64: base64Data,
-                    filename: filename || `linden_${Date.now()}.png`
+                    filename: filename || `linden_${Date.now()}.png`,
+                    locale: getLocale()
                 });
             } catch (e) {
                 return { success: false, error: e.message || String(e) };
@@ -2354,7 +2393,8 @@ class PlatformBridge {
                 const res = await this._invokeTauri('android_export_text_file', {
                     filename: cleanFilename,
                     content: textContent,
-                    mimeType
+                    mimeType,
+                    locale: getLocale()
                 });
                 if (res?.saved) {
                     const savedUri = res.uri || cleanFilename;

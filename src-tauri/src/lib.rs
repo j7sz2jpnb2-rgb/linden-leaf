@@ -117,6 +117,10 @@ pub fn run() {
     builder
         .setup(|app| {
             eprintln!("[TAURI SETUP] Setting up application...");
+            crate::commands::fs::set_cached_app_dirs(
+                app.path().app_data_dir().ok(),
+                app.path().resource_dir().ok(),
+            );
             if let Ok(exe_path) = std::env::current_exe() {
                 eprintln!("[TAURI SETUP] EXE Path: {}", exe_path.display());
             }
@@ -187,7 +191,8 @@ pub fn run() {
 
                     if let Some(id) = req_id {
                         use tauri::Emitter;
-                        let _ = window.emit(
+                        let _ = window.emit_to(
+                            &win_label,
                             "app:request-flush",
                             serde_json::json!({
                                 "requestId": id,
@@ -203,12 +208,15 @@ pub fn run() {
                             let state = window_clone.state::<AppState>();
                             let should_force_close = {
                                 let mut close_map = state.close_state.lock().unwrap();
-                                let close_state = close_map.entry(label_clone.clone()).or_default();
-                                if close_state.pending_request_id.as_ref() == Some(&id_clone) {
-                                    eprintln!("[WINDOW EVENT] Flush timeout for {:?} on {:?}; forcing close fallback", id_clone, label_clone);
-                                    close_state.pending_request_id = None;
-                                    close_state.close_permitted = true;
-                                    true
+                                if let Some(close_state) = close_map.get_mut(&label_clone) {
+                                    if close_state.pending_request_id.as_ref() == Some(&id_clone) {
+                                        eprintln!("[WINDOW EVENT] Flush timeout for {:?} on {:?}; forcing close fallback", id_clone, label_clone);
+                                        close_state.pending_request_id = None;
+                                        close_state.close_permitted = true;
+                                        true
+                                    } else {
+                                        false
+                                    }
                                 } else {
                                     false
                                 }

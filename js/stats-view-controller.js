@@ -84,10 +84,14 @@ export class StatsViewController {
             this.events.on(btn, 'click', (e) => {
                 this.dom.statsSegmentedTabs.forEach(b => b.classList.remove('active'))
                 btn.classList.add('active')
-                this.statsViewMode = btn.dataset.mode || 'month'
-                if (this.statsViewMode === 'week') {
+                const nextMode = btn.dataset.mode || 'month'
+                if (nextMode !== this.statsViewMode) {
+                    const now = new Date()
+                    this.statsYear = now.getFullYear()
+                    this.statsMonth = now.getMonth() + 1
                     this.statsWeekOffset = 0
                 }
+                this.statsViewMode = nextMode
                 this.renderStatsDashboard()
             })
         });
@@ -195,6 +199,7 @@ export class StatsViewController {
                 const parsed = parseInt(val, 10)
                 if (!isNaN(parsed) && parsed > 0) {
                     this.app.setSetting('readingGoalToday', parsed, 'global')
+                    try { localStorage.setItem('linden_daily_goal_minutes', String(parsed)) } catch {}
                     if (this.app.appearance.dom.settingGoalToday) this.app.appearance.dom.settingGoalToday.value = parsed
                     await this.app.saveSettings()
                     this.renderStatsDashboard()
@@ -237,6 +242,7 @@ export class StatsViewController {
             const parsed = parseInt(e.target.value, 10)
             if (!isNaN(parsed) && parsed > 0) {
                 this.app.setSetting('readingGoalToday', parsed, 'global')
+                try { localStorage.setItem('linden_daily_goal_minutes', String(parsed)) } catch {}
                 await this.app.saveSettings()
                 if (this.app.bookshelf.shelfCategory === 'stats') this.renderStatsDashboard()
             }
@@ -709,7 +715,14 @@ export class StatsViewController {
                 </div>
             `
 
-            item.addEventListener('click', () => this.app.openBook(book.id))
+            item.addEventListener('click', async () => {
+                const liveBook = await db.getBook(book.id)
+                if (liveBook) {
+                    this.app.openBook(book.id)
+                } else {
+                    this.app.dialogs.showToast?.(t('statsView.heatmap.missingSourceWarn', { title: displayTitle }), 'warning')
+                }
+            })
             container.appendChild(item)
         })
     }
@@ -755,7 +768,14 @@ export class StatsViewController {
             `
             if (sess.bookId) {
                 item.style.cursor = 'pointer'
-                item.addEventListener('click', () => this.app.openBook(sess.bookId))
+                item.addEventListener('click', async () => {
+                    const liveBook = await db.getBook(sess.bookId)
+                    if (liveBook) {
+                        this.app.openBook(sess.bookId)
+                    } else {
+                        this.app.dialogs.showToast?.(t('statsView.heatmap.missingSourceWarn', { title: sBookTitle }), 'warning')
+                    }
+                })
             }
             container.appendChild(item)
         })
@@ -787,8 +807,11 @@ export class StatsViewController {
         listEl.classList.toggle('is-notes-list', type === 'notes')
         const stats = this.latestStats || {}
         let periodLabel = t('statsView.period.current')
-        if (stats.viewMode === 'week') periodLabel = stats.weekDateRangeStr ? t('statsView.period.thisWeekRange', { range: stats.weekDateRangeStr }) : t('statsView.period.thisWeek')
-        else if (stats.viewMode === 'month') periodLabel = isEnglish()
+        if (stats.viewMode === 'week') {
+            periodLabel = (stats.weekOffset === 0)
+                ? (stats.weekDateRangeStr ? t('statsView.period.thisWeekRange', { range: stats.weekDateRangeStr }) : t('statsView.period.thisWeek'))
+                : (stats.weekDateRangeStr || t('statsView.period.weekOffset', { offset: stats.weekOffset ?? 0 }))
+        } else if (stats.viewMode === 'month') periodLabel = isEnglish()
             ? new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' }).format(new Date(stats.targetYear, stats.targetMonth - 1, 1))
             : t('statsView.period.yearMonth', { year: stats.targetYear, month: stats.targetMonth })
         else if (stats.viewMode === 'year') periodLabel = t('statsView.period.yearOnly', { year: stats.targetYear })
@@ -827,9 +850,14 @@ export class StatsViewController {
                             <button type="button" class="stats-detail-jump-link">${escapeHTML(t('statsView.modal.openReadBtn'))}</button>
                         </div>
                     `
-                    row.addEventListener('click', () => {
-                        this.closeStatsDetailModal()
-                        this.app.openBook(b.id)
+                    row.addEventListener('click', async () => {
+                        const liveBook = await db.getBook(b.id)
+                        if (liveBook) {
+                            this.closeStatsDetailModal()
+                            this.app.openBook(b.id)
+                        } else {
+                            this.app.dialogs.showToast?.(t('statsView.heatmap.missingSourceWarn', { title: bTitle }), 'warning')
+                        }
                     })
                     listEl.appendChild(row)
                 })
@@ -877,9 +905,14 @@ export class StatsViewController {
                             <button type="button" class="stats-detail-jump-link">${escapeHTML(t('statsView.modal.rereadBtn'))}</button>
                         </div>
                     `
-                    row.addEventListener('click', () => {
-                        this.closeStatsDetailModal()
-                        this.app.openBook(b.id)
+                    row.addEventListener('click', async () => {
+                        const liveBook = await db.getBook(b.id)
+                        if (liveBook) {
+                            this.closeStatsDetailModal()
+                            this.app.openBook(b.id)
+                        } else {
+                            this.app.dialogs.showToast?.(t('statsView.heatmap.missingSourceWarn', { title: bTitle }), 'warning')
+                        }
                     })
                     listEl.appendChild(row)
                 })

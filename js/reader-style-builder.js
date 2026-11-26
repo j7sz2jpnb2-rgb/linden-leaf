@@ -124,13 +124,16 @@ export function resolveEffectiveReaderLayout(settings = {}, env = {}) {
 
     // On mobile, `margin` drives real horizontal content margins (18-24 CSS px default window)
     // plus reserved vertical breathing room clear of status/progress chrome and safe-area insets.
+    // On desktop paginated mode, safe vertical margins allow zero-reflow fullscreen viewport locking
+    // while keeping text clear of the floating 42px top bar and 38px bottom bar.
     const marginInline = resolvedEnv.isMobile && !isVertical ? margin : null
+    const isScrolledLayout = settings?.layout === 'scrolled'
     const marginTop = resolvedEnv.isMobile
         ? Math.max(12, Math.min(28, Math.round(margin * 0.85)))
-        : margin
+        : (isScrolledLayout ? margin : Math.max(58, margin))
     const marginBottom = resolvedEnv.isMobile
         ? Math.max(24, Math.min(44, margin + 8))
-        : margin
+        : (isScrolledLayout ? margin : Math.max(54, margin))
     const paginatorMargin = resolvedEnv.isMobile
         ? Math.max(marginTop, marginBottom)
         : margin
@@ -391,6 +394,14 @@ export const buildContentCSS = (settings) => {
         }
         html, body { background-color: ${bgColor} !important; color: ${textColor}; color-scheme: ${colorScheme}; }
         ::selection { background: ${selectionBg} !important; color: inherit !important; }
+        html body .tts-active-reading-segment,
+        .tts-active-reading-segment {
+            background: rgba(218, 119, 86, 0.14) !important;
+            border-left: 3px solid #da7756 !important;
+            padding-left: 6px !important;
+            border-radius: 2px !important;
+            transition: background 0.2s ease;
+        }
         ${isDark ? `
         body, body :is(p, div, span, li, blockquote, dd, dt, h1, h2, h3, h4, h5, h6, figcaption, td, th, caption) {
             color: ${textColor} !important;
@@ -836,6 +847,14 @@ export const buildContentCSS = (settings) => {
         }
         table img {
             max-inline-size: 100% !important;
+        }
+        html body .tts-active-reading-segment,
+        .tts-active-reading-segment {
+            background: rgba(218, 119, 86, 0.14) !important;
+            border-left: 3px solid #da7756 !important;
+            padding-left: 6px !important;
+            border-radius: 2px !important;
+            transition: background 0.2s ease;
         }
     `
 }

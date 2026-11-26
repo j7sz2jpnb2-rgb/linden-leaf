@@ -218,17 +218,22 @@ export class OcrService {
         this._workerInitializing = false
         this._workerInitToken = 0
         this._workerInitPromise = null
+        this._abortEpoch = 0
         this._currentJobId = 0
+        this._batchJobId = 0
         this._activeAbortController = null
         this._onStageChange = null
         this._cancelWorkerInit = null
+        this._recognizeChain = Promise.resolve()
     }
 
     /**
      * Terminate active worker and cancel any running job
      */
     async abort() {
+        this._abortEpoch++
         this._currentJobId++
+        this._batchJobId++
         this._workerInitToken++
         this._workerInitPromise = null
         this._workerInitializing = false
@@ -249,13 +254,28 @@ export class OcrService {
         }
     }
 
+    _enqueueRecognize(worker, canvas, signal) {
+        const run = async () => {
+            if (signal?.aborted) throw createCancelledError()
+            return await recognizeWithCancellation(worker, canvas, signal)
+        }
+        const next = this._recognizeChain.then(run, run)
+        this._recognizeChain = next.catch(() => {})
+        return next
+    }
+
     /**
      * Lazily get or create Tesseract worker with tokenized abort protection
      */
-    async _getWorker(onStageChange, jobId) {
+    async _getWorker(onStageChange, abortEpoch = this._abortEpoch, signal = null) {
+        if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
         this._onStageChange = onStageChange
         if (this._worker) return this._worker
-        if (this._workerInitPromise) return this._workerInitPromise
+        if (this._workerInitPromise) {
+            const worker = await this._workerInitPromise
+            if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
+            return worker
+        }
         if (typeof Tesseract === 'undefined') {
             if (typeof document !== 'undefined') {
                 try {
@@ -289,7 +309,7 @@ export class OcrService {
                     ...getOcrAssetOptions(),
                     errorHandler: error => rejectInitialization(new Error(String(error))),
                     logger: (m) => {
-                        if (initToken !== this._workerInitToken || jobId !== this._currentJobId) return
+                        if (initToken !== this._workerInitToken || abortEpoch !== this._abortEpoch) return
                         if (m.status === 'recognizing text') {
                             const pct = Math.round((m.progress || 0) * 100)
                             this._onStageChange?.(t('ocr.stage.recognizingPct', { pct }))
@@ -305,12 +325,12 @@ export class OcrService {
                 // A cancelled initialization may resolve later; do not retain
                 // its worker or let it overwrite a newer request.
                 creation.then(created => {
-                    if (initToken !== this._workerInitToken || jobId !== this._currentJobId) created.terminate().catch(() => {})
+                    if (initToken !== this._workerInitToken || abortEpoch !== this._abortEpoch) created.terminate().catch(() => {})
                 }, () => {})
                 worker = await Promise.race([creation, interrupted])
                 clearTimeout(timer)
 
-                if (initToken !== this._workerInitToken || (jobId !== undefined && jobId !== this._currentJobId)) {
+                if (initToken !== this._workerInitToken || abortEpoch !== this._abortEpoch) {
                     await worker.terminate().catch(() => {})
                     throw createCancelledError()
                 }
@@ -319,7 +339,7 @@ export class OcrService {
                     tessedit_pageseg_mode: Tesseract.PSM.AUTO
                 })
 
-                if (initToken !== this._workerInitToken || (jobId !== undefined && jobId !== this._currentJobId)) {
+                if (initToken !== this._workerInitToken || abortEpoch !== this._abortEpoch) {
                     await worker.terminate().catch(() => {})
                     throw createCancelledError()
                 }
@@ -346,25 +366,27 @@ export class OcrService {
             }
         })()
 
-        return this._workerInitPromise
+        const worker = await this._workerInitPromise
+        if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
+        return worker
     }
 
     /**
      * Recognize text from a single canvas with geometry spans mapped back to page points
      * @param {HTMLCanvasElement} canvas
      * @param {AbortSignal} [signal]
-     * @param {number} [scale=1.0] Rendering scale of canvas relative to page points
+     * @param {number|object} [scaleOrOptions=1.0] Rendering scale or options of canvas relative to page points
      * @returns {Promise<{ text: string, spans: Array<{ text: string, rect: number[], line: number }> }>}
      */
     async recognizeCanvas(canvas, signal = null, scaleOrOptions = 1.0) {
         if (!canvas) throw new Error('Canvas is required for OCR')
         if (signal?.aborted) throw createCancelledError()
-        const jobId = ++this._currentJobId
-        const worker = await this._getWorker(null, jobId)
-        if (signal?.aborted || jobId !== this._currentJobId) throw createCancelledError()
+        const abortEpoch = this._abortEpoch
+        const worker = await this._getWorker(null, abortEpoch, signal)
+        if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
         const activeSignal = signal || new AbortController().signal
-        const ocrRes = await recognizeWithCancellation(worker, canvas, activeSignal)
-        if (activeSignal.aborted || jobId !== this._currentJobId) throw createCancelledError()
+        const ocrRes = await this._enqueueRecognize(worker, canvas, activeSignal)
+        if (activeSignal.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
 
         let scale = 1.0
         let rotation = 0
@@ -495,11 +517,15 @@ export class OcrService {
         if (pages.length > MAX_OCR_PAGES) throw new Error(t('ocr.error.maxPages', { maxPages: MAX_OCR_PAGES }))
         if (!['auto', 'text_only', 'force_image'].includes(mode)) throw new Error(t('ocr.error.unsupportedMode'))
 
-        const stopping = this.abort()
-        const jobId = this._currentJobId
-        this._activeAbortController = new AbortController()
-        const signal = this._activeAbortController.signal
-        await stopping
+        const myBatchSeq = (this._batchSeq = (this._batchSeq || 0) + 1)
+        await this.abort()
+        if (myBatchSeq !== this._batchSeq) {
+            return { success: false, results: [], fullText: '', error: t('ocr.error.cancelled') }
+        }
+        const batchJobId = this._batchJobId
+        const abortEpoch = this._abortEpoch
+        const controller = this._activeAbortController = new AbortController()
+        const signal = controller.signal
 
         const results = []
         const total = pages.length
@@ -516,7 +542,7 @@ export class OcrService {
 
         try {
             for (let i = 0; i < total; i++) {
-                if (signal.aborted || jobId !== this._currentJobId) {
+                if (signal.aborted || batchJobId !== this._batchJobId || abortEpoch !== this._abortEpoch) {
                     return { success: false, results, fullText: fullTextSoFar(), error: t('ocr.error.cancelled') }
                 }
 
@@ -577,13 +603,13 @@ export class OcrService {
                         try {
                             const worker = await this._getWorker((stageMsg) => {
                                 onProgress?.(t('ocr.stage.pageStagePrefix', { page: pageNum, stage: stageMsg }), baseProgress + 20 / total)
-                            }, jobId)
+                            }, abortEpoch, signal)
 
-                            if (signal.aborted || jobId !== this._currentJobId) throw createCancelledError()
+                            if (signal.aborted || batchJobId !== this._batchJobId || abortEpoch !== this._abortEpoch) throw createCancelledError()
 
                             onProgress?.(t('ocr.stage.recognizingPage', { page: pageNum }), baseProgress + 30 / total)
-                            const ocrRes = await recognizeWithCancellation(worker, canvas, signal)
-                            if (signal.aborted || jobId !== this._currentJobId) throw createCancelledError()
+                            const ocrRes = await this._enqueueRecognize(worker, canvas, signal)
+                            if (signal.aborted || batchJobId !== this._batchJobId || abortEpoch !== this._abortEpoch) throw createCancelledError()
                             const rawOcrText = (ocrRes?.data?.text || '').trim()
                             pageText = cleanOcrChineseSpaces(rawOcrText)
                         } finally {
@@ -605,7 +631,7 @@ export class OcrService {
                     continue
                 }
 
-                if (signal.aborted || jobId !== this._currentJobId) {
+                if (signal.aborted || batchJobId !== this._batchJobId || abortEpoch !== this._abortEpoch) {
                     return { success: false, results, fullText: fullTextSoFar(), error: t('ocr.error.cancelled') }
                 }
                 commitPage({
@@ -641,7 +667,9 @@ export class OcrService {
                 error: err.message || String(err)
             }
         } finally {
-            if (jobId === this._currentJobId) await this.abort()
+            if (batchJobId === this._batchJobId && abortEpoch === this._abortEpoch) {
+                await this.abort()
+            }
         }
     }
 }

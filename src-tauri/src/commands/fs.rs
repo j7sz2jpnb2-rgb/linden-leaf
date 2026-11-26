@@ -224,7 +224,16 @@ pub async fn fs_scan_folder(
     folder_path: String,
     max_depth: Option<usize>,
 ) -> Result<FolderScanResponse, String> {
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || scan_folder_sync(&folder_path, max_depth))
+        .await
+        .map_err(|e| format!("Scan folder task failed: {e}"))?
+}
+
+pub(crate) fn scan_folder_sync(
+    folder_path: &str,
+    max_depth: Option<usize>,
+) -> Result<FolderScanResponse, String> {
+    {
         let clean = folder_path.trim().trim_matches('"').trim_matches('\'');
         let root = Path::new(clean);
         if !root.is_dir() {
@@ -239,11 +248,16 @@ pub async fn fs_scan_folder(
         let mut results = Vec::new();
         let mut errors = Vec::new();
         let mut failed_dirs = Vec::new();
+        let mut visited_dirs = std::collections::HashSet::new();
+        if let Ok(canon_root) = std::fs::canonicalize(root) {
+            visited_dirs.insert(canon_root);
+        }
 
         fn scan_dir(
             dir: &Path,
             current_depth: usize,
             max_depth: usize,
+            visited_dirs: &mut std::collections::HashSet<PathBuf>,
             results: &mut Vec<FolderBookItem>,
             errors: &mut Vec<String>,
             failed_dirs: &mut Vec<String>,
@@ -269,10 +283,22 @@ pub async fn fs_scan_folder(
                         continue;
                     }
                 };
+                // Skip symlinks and NTFS directory junctions to prevent traversal cycles.
+                let file_type = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if file_type.is_symlink() {
+                    continue;
+                }
                 let p = entry.path();
-                if p.is_dir() {
-                    scan_dir(&p, current_depth + 1, max_depth, results, errors, failed_dirs);
-                } else if p.is_file() {
+                if file_type.is_dir() {
+                    let canon = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+                    if !visited_dirs.insert(canon) {
+                        continue;
+                    }
+                    scan_dir(&p, current_depth + 1, max_depth, visited_dirs, results, errors, failed_dirs);
+                } else if file_type.is_file() {
                     let ext = p.extension()
                         .and_then(|e| e.to_str())
                         .map(|s| s.to_lowercase())
@@ -362,16 +388,30 @@ pub async fn fs_scan_folder(
             }
         }
 
-        scan_dir(root, 0, depth_limit, &mut results, &mut errors, &mut failed_dirs);
+        scan_dir(root, 0, depth_limit, &mut visited_dirs, &mut results, &mut errors, &mut failed_dirs);
         Ok(FolderScanResponse {
             files: results,
             complete: errors.is_empty(),
             errors,
             failed_dirs,
         })
-    })
-    .await
-    .map_err(|e| format!("Scan folder task failed: {e}"))?
+    }
+}
+
+static CACHED_APP_DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static CACHED_RESOURCE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_cached_app_dirs(app_data_dir: Option<PathBuf>, resource_dir: Option<PathBuf>) {
+    if let Some(dir) = app_data_dir {
+        let _ = CACHED_APP_DATA_DIR.set(dir);
+    }
+    if let Some(dir) = resource_dir {
+        let _ = CACHED_RESOURCE_DIR.set(dir);
+    }
+}
+
+pub fn resolve_resource_dir() -> Option<PathBuf> {
+    CACHED_RESOURCE_DIR.get().cloned()
 }
 
 pub fn resolve_app_data_dir() -> PathBuf {
@@ -380,9 +420,12 @@ pub fn resolve_app_data_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
+    if let Some(dir) = CACHED_APP_DATA_DIR.get() {
+        return dir.clone();
+    }
     dirs::data_dir()
         .map(|d| d.join("com.lindenleaf.reader"))
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| std::env::temp_dir().join("com.lindenleaf.reader"))
 }
 
 #[tauri::command]
@@ -406,7 +449,14 @@ pub fn fs_get_app_paths(app: tauri::AppHandle) -> Result<AppPathsInfo, String> {
     
     let snapshot_dir = crate::commands::mupdf::native_snapshot_dir_public(&app)
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| format!("{}\\pdf-native", cache_dir));
+        .unwrap_or_else(|_| {
+            let root = if cfg!(target_os = "android") && !data_dir.is_empty() {
+                Path::new(&data_dir)
+            } else {
+                Path::new(&cache_dir)
+            };
+            root.join("pdf-native").to_string_lossy().to_string()
+        });
 
     let webview_profile_dir = std::env::var("WEBVIEW2_USER_DATA_FOLDER")
         .ok()
@@ -430,17 +480,34 @@ pub fn fs_get_app_paths(app: tauri::AppHandle) -> Result<AppPathsInfo, String> {
     })
 }
 
+pub(crate) fn normalize_windows_explorer_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('"');
+    let without_verbatim = trimmed
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{}", rest))
+        .unwrap_or_else(|| trimmed.strip_prefix(r"\\?\").unwrap_or(trimmed).to_string());
+    without_verbatim.replace('/', "\\").replace('"', "")
+}
+
 #[tauri::command]
 pub fn fs_open_in_explorer(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         use std::process::Command;
-        let clean = path.trim().trim_matches('"');
-        let p = Path::new(clean);
+        let normalized = normalize_windows_explorer_path(&path);
+        if normalized.is_empty() {
+            return Err("Empty path".to_string());
+        }
+        let p = Path::new(&normalized);
         if p.is_file() {
-            let _ = Command::new("explorer").arg(format!("/select,{}", clean)).spawn();
+            let _ = Command::new("explorer")
+                .raw_arg(format!("/select,\"{}\"", normalized))
+                .spawn();
         } else {
-            let _ = Command::new("explorer").arg(clean).spawn();
+            let _ = Command::new("explorer")
+                .raw_arg(format!("\"{}\"", normalized))
+                .spawn();
         }
         Ok(())
     }
@@ -448,5 +515,52 @@ pub fn fs_open_in_explorer(path: String) -> Result<(), String> {
     {
         let _ = path;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_windows_explorer_path() {
+        assert_eq!(
+            normalize_windows_explorer_path(r#" "C:/Users/Alice/My Books, Vol 1/book.pdf" "#),
+            r"C:\Users\Alice\My Books, Vol 1\book.pdf"
+        );
+        assert_eq!(
+            normalize_windows_explorer_path(r"\\?\D:\Library\sub/test.epub"),
+            r"D:\Library\sub\test.epub"
+        );
+        assert_eq!(
+            normalize_windows_explorer_path(r"\\?\UNC\server\share/book.pdf"),
+            r"\\server\share\book.pdf"
+        );
+    }
+
+    #[test]
+    fn test_resolve_app_data_dir_never_returns_relative_dot() {
+        let dir = resolve_app_data_dir();
+        assert_ne!(dir, PathBuf::from("."));
+        assert!(dir.is_absolute());
+    }
+
+    #[test]
+    fn test_scan_folder_sync_handles_normal_files_and_skips_symlinks() {
+        let base = std::env::temp_dir().join(format!("linden_test_scan_{}", std::process::id()));
+        let sub = base.join("sub");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(base.join("a.epub"), b"epub").unwrap();
+        std::fs::write(sub.join("b.pdf"), b"pdf").unwrap();
+
+        #[cfg(target_os = "windows")]
+        let _ = std::os::windows::fs::symlink_dir(&base, sub.join("loop_link"));
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::symlink(&base, sub.join("loop_link"));
+
+        let res = scan_folder_sync(base.to_str().unwrap(), Some(10)).unwrap();
+        assert_eq!(res.files.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

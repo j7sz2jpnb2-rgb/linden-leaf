@@ -175,6 +175,7 @@ mod imp {
     struct LlRenderJob { _private: [u8; 0] }
 
     extern "C" {
+        fn ll_set_max_store_mb(max_mb: u32);
         #[cfg(test)]
         fn ll_open(path: *const c_char, password: *const c_char, error: *mut c_char, error_size: usize) -> *mut LlDoc;
         fn ll_open_with_options(path: *const c_char, password: *const c_char, error: *mut c_char,
@@ -1305,6 +1306,7 @@ mod imp {
     pub fn mupdf_set_store_limit(max_mb: u32) -> Result<u32, String> {
         let clamped = max_mb.clamp(32, 1024);
         DEFAULT_STORE_MB.store(clamped, Ordering::Relaxed);
+        unsafe { ll_set_max_store_mb(clamped); }
         Ok(clamped)
     }
 
@@ -1338,20 +1340,113 @@ mod imp {
         width: Option<f32>,
     }
 
-    fn parse_hex_color(hex: Option<&str>) -> [f32; 3] {
-        if let Some(h) = hex {
-            let clean = h.trim().trim_start_matches('#');
-            if clean.len() == 6 {
+    fn sanitize_cstring(s: &str) -> CString {
+        if !s.as_bytes().contains(&0) {
+            if let Ok(cs) = CString::new(s) {
+                return cs;
+            }
+        }
+        let cleaned: String = s.chars().filter(|&c| c != '\0').collect();
+        CString::new(cleaned).unwrap_or_default()
+    }
+
+    fn parse_css_color(raw: Option<&str>) -> ([f32; 3], Option<f32>) {
+        let fallback = ([1.0, 0.9, 0.0], None);
+        let Some(input) = raw else { return fallback; };
+        let trimmed = input.trim();
+        if trimmed.is_empty() || !trimmed.is_ascii() {
+            return fallback;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        let named = match lower.as_str() {
+            "yellow" => Some([250.0, 204.0, 21.0]),
+            "green" => Some([34.0, 197.0, 94.0]),
+            "blue" => Some([59.0, 130.0, 246.0]),
+            "pink" => Some([236.0, 72.0, 153.0]),
+            "purple" => Some([168.0, 85.0, 247.0]),
+            "red" => Some([239.0, 68.0, 68.0]),
+            "orange" => Some([249.0, 115.0, 22.0]),
+            "gray" | "grey" => Some([148.0, 163.0, 184.0]),
+            "black" => Some([0.0, 0.0, 0.0]),
+            "white" => Some([255.0, 255.0, 255.0]),
+            _ => None,
+        };
+        if let Some([r, g, b]) = named {
+            return ([r / 255.0, g / 255.0, b / 255.0], None);
+        }
+        if let Some(hex) = lower.strip_prefix('#') {
+            if hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                match hex.len() {
+                    3 | 4 => {
+                        let bytes = hex.as_bytes();
+                        let nibble = |b: u8| -> Option<f32> {
+                            let val = (b as char).to_digit(16)? as f32;
+                            Some((val * 17.0) / 255.0)
+                        };
+                        if let (Some(r), Some(g), Some(b)) = (nibble(bytes[0]), nibble(bytes[1]), nibble(bytes[2])) {
+                            let alpha = if hex.len() == 4 { nibble(bytes[3]) } else { None };
+                            return ([r, g, b], alpha);
+                        }
+                    }
+                    6 | 8 => {
+                        if let (Ok(r), Ok(g), Ok(b)) = (
+                            u8::from_str_radix(&hex[0..2], 16),
+                            u8::from_str_radix(&hex[2..4], 16),
+                            u8::from_str_radix(&hex[4..6], 16),
+                        ) {
+                            let alpha = if hex.len() == 8 {
+                                u8::from_str_radix(&hex[6..8], 16).ok().map(|a| a as f32 / 255.0)
+                            } else {
+                                None
+                            };
+                            return ([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0], alpha);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return fallback;
+        }
+        if let Some(inner) = lower
+            .strip_prefix("rgba(")
+            .or_else(|| lower.strip_prefix("rgb("))
+            .and_then(|s| s.strip_suffix(')'))
+        {
+            let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+            if parts.len() == 3 || parts.len() == 4 {
                 if let (Ok(r), Ok(g), Ok(b)) = (
-                    u8::from_str_radix(&clean[0..2], 16),
-                    u8::from_str_radix(&clean[2..4], 16),
-                    u8::from_str_radix(&clean[4..6], 16),
+                    parts[0].parse::<f32>(),
+                    parts[1].parse::<f32>(),
+                    parts[2].parse::<f32>(),
                 ) {
-                    return [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0];
+                    let alpha = if parts.len() == 4 {
+                        parts[3].parse::<f32>().ok().filter(|a| a.is_finite()).map(|a| a.clamp(0.0, 1.0))
+                    } else {
+                        None
+                    };
+                    if r.is_finite() && g.is_finite() && b.is_finite() {
+                        return ([
+                            r.clamp(0.0, 255.0) / 255.0,
+                            g.clamp(0.0, 255.0) / 255.0,
+                            b.clamp(0.0, 255.0) / 255.0,
+                        ], alpha);
+                    }
                 }
             }
         }
-        [1.0, 0.9, 0.0]
+        fallback
+    }
+
+    fn paths_refer_to_same_target(a: &Path, b: &Path) -> bool {
+        if let (Ok(ca), Ok(cb)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            return ca == cb;
+        }
+        match (a.parent(), b.parent(), a.file_name(), b.file_name()) {
+            (Some(pa), Some(pb), Some(fa), Some(fb)) if fa == fb => {
+                std::fs::canonicalize(pa).ok() == std::fs::canonicalize(pb).ok()
+            }
+            _ => a == b,
+        }
     }
 
     #[tauri::command]
@@ -1362,7 +1457,14 @@ mod imp {
     ) -> Result<bool, String> {
         let s = session(&doc_id)?;
         let file_path = s.file_path;
+        let num_pages = s.num_pages;
         let password = s.password.clone();
+        if output_path.trim().is_empty() {
+            return Err("Output path is required".into());
+        }
+        if paths_refer_to_same_target(Path::new(&output_path), &file_path) {
+            return Err("Output path cannot overwrite the active source PDF".into());
+        }
         let items: Vec<ExportAnnotationItem> = serde_json::from_str(&annotations_json)
             .map_err(|e| format!("Invalid annotations JSON: {e}"))?;
 
@@ -1371,7 +1473,7 @@ mod imp {
                 .map_err(|e| format!("Invalid input path: {e}"))?;
             let output_c = CString::new(output_path.as_str())
                 .map_err(|e| format!("Invalid output path: {e}"))?;
-            let pass_c = password.as_deref().and_then(|p| CString::new(p).ok());
+            let pass_c = password.as_deref().map(sanitize_cstring);
             let pass_ptr = pass_c.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
 
             let mut c_annots = Vec::new();
@@ -1382,6 +1484,9 @@ mod imp {
             let mut stroke_point_buffers = Vec::new();
 
             for item in &items {
+                if item.page >= num_pages {
+                    continue;
+                }
                 let a_type = match item.annot_type.as_deref().unwrap_or("highlight") {
                     "highlight" => 0,
                     "underline" => 1,
@@ -1390,12 +1495,23 @@ mod imp {
                     "ink" | "drawing" => 4,
                     _ => 0,
                 };
-                let col = parse_hex_color(item.color.as_deref());
-                let op = item.opacity.unwrap_or(0.8);
-                let r = item.rect.unwrap_or([0.0, 0.0, 100.0, 100.0]);
+                let (col, parsed_alpha) = parse_css_color(item.color.as_deref());
+                let raw_op = item.opacity.or(parsed_alpha).unwrap_or(0.8);
+                let op = if raw_op.is_finite() { raw_op.clamp(0.0, 1.0) } else { 0.8 };
+                let raw_r = item.rect.unwrap_or([0.0, 0.0, 100.0, 100.0]);
+                let r = if raw_r.iter().all(|v| v.is_finite()) {
+                    [
+                        raw_r[0].min(raw_r[2]),
+                        raw_r[1].min(raw_r[3]),
+                        raw_r[0].max(raw_r[2]),
+                        raw_r[1].max(raw_r[3]),
+                    ]
+                } else {
+                    [0.0, 0.0, 100.0, 100.0]
+                };
 
                 let t_ptr = if let Some(ref t) = item.text {
-                    let cs = CString::new(t.as_str()).unwrap_or_default();
+                    let cs = sanitize_cstring(t);
                     let ptr = cs.as_ptr();
                     text_c_strings.push(cs);
                     ptr
@@ -1404,7 +1520,7 @@ mod imp {
                 };
 
                 let a_ptr = if let Some(ref a) = item.author {
-                    let cs = CString::new(a.as_str()).unwrap_or_default();
+                    let cs = sanitize_cstring(a);
                     let ptr = cs.as_ptr();
                     author_c_strings.push(cs);
                     ptr
@@ -1413,8 +1529,19 @@ mod imp {
                 };
 
                 let (q_ptr, q_cnt) = if let Some(ref q) = item.quads {
-                    quad_buffers.push(q.clone());
-                    (quad_buffers.last().unwrap().as_ptr(), (q.len() / 8) as c_int)
+                    let mut clean_quads = Vec::with_capacity(q.len());
+                    for quad in q.chunks_exact(8) {
+                        if quad.iter().all(|v| v.is_finite()) {
+                            clean_quads.extend_from_slice(quad);
+                        }
+                    }
+                    if clean_quads.is_empty() {
+                        (std::ptr::null(), 0)
+                    } else {
+                        let cnt = (clean_quads.len() / 8) as c_int;
+                        quad_buffers.push(clean_quads);
+                        (quad_buffers.last().unwrap().as_ptr(), cnt)
+                    }
                 } else {
                     (std::ptr::null(), 0)
                 };
@@ -1423,22 +1550,36 @@ mod imp {
                     let mut counts = Vec::new();
                     let mut points = Vec::new();
                     for stroke in strokes {
-                        counts.push(stroke.len() as c_int);
-                        for p in stroke {
+                        let clean_pts: Vec<[f32; 2]> = stroke.iter().copied()
+                            .filter(|p| p[0].is_finite() && p[1].is_finite())
+                            .collect();
+                        if clean_pts.is_empty() {
+                            continue;
+                        }
+                        counts.push(clean_pts.len() as c_int);
+                        for p in clean_pts {
                             points.push(p[0]);
                             points.push(p[1]);
                         }
                     }
-                    stroke_count_buffers.push(counts);
-                    stroke_point_buffers.push(points);
-                    (
-                        stroke_count_buffers.last().unwrap().as_ptr(),
-                        stroke_point_buffers.last().unwrap().as_ptr(),
-                        strokes.len() as c_int,
-                    )
+                    if counts.is_empty() {
+                        (std::ptr::null(), std::ptr::null(), 0)
+                    } else {
+                        let cnt = counts.len() as c_int;
+                        stroke_count_buffers.push(counts);
+                        stroke_point_buffers.push(points);
+                        (
+                            stroke_count_buffers.last().unwrap().as_ptr(),
+                            stroke_point_buffers.last().unwrap().as_ptr(),
+                            cnt,
+                        )
+                    }
                 } else {
                     (std::ptr::null(), std::ptr::null(), 0)
                 };
+
+                let w = item.width.unwrap_or(2.0);
+                let clean_width = if w.is_finite() && w > 0.0 { w.clamp(0.25, 100.0) } else { 2.0 };
 
                 c_annots.push(LlExportAnnot {
                     page: item.page as c_int,
@@ -1453,7 +1594,7 @@ mod imp {
                     stroke_counts: sc_ptr,
                     stroke_points: sp_ptr,
                     stroke_count: s_cnt,
-                    width: item.width.unwrap_or(2.0),
+                    width: clean_width,
                 });
             }
 
@@ -1861,25 +2002,55 @@ pub async fn mupdf_stage_pdf_chunk(
     use std::{collections::HashMap, sync::{Mutex, Once, OnceLock}};
 
     const CHUNK_SIZE: u64 = 256 * 1024;
+    const MAX_STAGED_PDF_BYTES: u64 = 128 * 1024 * 1024;
     static UPLOADS: OnceLock<Mutex<HashMap<String, (SavedPdfWriter, u64)>>> = OnceLock::new();
     static CLEANUP: Once = Once::new();
     if upload_id.len() != 32 || !upload_id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Invalid PDF upload ID".into());
     }
+    let uploads_map = UPLOADS.get_or_init(|| Mutex::new(HashMap::new()));
+    let Some(data) = data else {
+        let removed = {
+            let mut uploads = uploads_map.lock().map_err(|e| e.to_string())?;
+            uploads.remove(&upload_id)
+        };
+        drop(removed);
+        return Ok(None);
+    };
+    if size == 0 || size > MAX_STAGED_PDF_BYTES {
+        let removed = {
+            let mut uploads = uploads_map.lock().map_err(|e| e.to_string())?;
+            uploads.remove(&upload_id)
+        };
+        drop(removed);
+        return Err("PDF snapshot exceeds 128 MiB limit or is empty".into());
+    }
     let root = imp::native_snapshot_dir_public(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let mut uploads = UPLOADS.get_or_init(|| Mutex::new(HashMap::new())).lock()
-            .map_err(|e| e.to_string())?;
-        let mut existing = uploads.remove(&upload_id);
-        let Some(data) = data else { return Ok(None); };
-
-        // Android's bridge accepts JSON. Decode only a single bounded chunk.
+        // Android's bridge accepts JSON. Decode only a single bounded chunk without holding the map mutex across I/O.
         let expected = size.checked_sub(offset).unwrap_or(0).min(CHUNK_SIZE);
         if expected == 0 || data.len() != (expected as usize).div_ceil(3) * 4 {
+            let removed = {
+                let mut uploads = uploads_map.lock().map_err(|e| e.to_string())?;
+                uploads.remove(&upload_id)
+            };
+            drop(removed);
             return Err("Invalid PDF snapshot chunk length".into());
         }
         let bytes = STANDARD.decode(data).map_err(|e| e.to_string())?;
-        if bytes.len() as u64 != expected { return Err("Invalid PDF snapshot chunk length".into()); }
+        if bytes.len() as u64 != expected {
+            let removed = {
+                let mut uploads = uploads_map.lock().map_err(|e| e.to_string())?;
+                uploads.remove(&upload_id)
+            };
+            drop(removed);
+            return Err("Invalid PDF snapshot chunk length".into());
+        }
+
+        let existing = {
+            let mut uploads = uploads_map.lock().map_err(|e| e.to_string())?;
+            uploads.remove(&upload_id)
+        };
 
         let mut snapshot = if offset == 0 && existing.is_none() {
             if !has_pdf_header_prefix(&bytes) { return Err("Saved data is not a PDF".into()); }
@@ -1896,7 +2067,7 @@ pub async fn mupdf_stage_pdf_chunk(
             });
             SavedPdfWriter::new(&root, "blob-android")?
         } else {
-            let (snapshot, original_size) = existing.take().ok_or("PDF snapshot upload is closed")?;
+            let (snapshot, original_size) = existing.ok_or("PDF snapshot upload is closed")?;
             if snapshot.written != offset || original_size != size {
                 return Err("PDF snapshot chunk is out of sequence".into());
             }
@@ -1907,6 +2078,7 @@ pub async fn mupdf_stage_pdf_chunk(
         if snapshot.written == size {
             snapshot.finish().map(Some)
         } else {
+            let mut uploads = uploads_map.lock().map_err(|e| e.to_string())?;
             uploads.insert(upload_id, (snapshot, size));
             Ok(None)
         }

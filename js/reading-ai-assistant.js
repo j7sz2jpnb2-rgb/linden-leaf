@@ -528,24 +528,35 @@ export async function requestAiCompletion({
 
         return new Promise((resolve, reject) => {
             let fullText = ''
+            let settled = false
+            const finishResolve = (val) => {
+                if (settled) return
+                settled = true
+                cleanupListeners()
+                resolve(val)
+            }
+            const finishReject = (err) => {
+                if (settled) return
+                settled = true
+                cleanupListeners()
+                reject(err instanceof Error ? err : new Error(err?.message || String(err)))
+            }
 
             Promise.all([
                 globalThis.__TAURI__.event.listen(`ai:chunk:${reqId}`, (event) => {
+                    if (settled) return
                     const delta = event.payload?.delta || ''
                     fullText = event.payload?.fullText || (fullText + delta)
                     if (onChunk) onChunk(delta, fullText)
                 }),
                 globalThis.__TAURI__.event.listen(`ai:done:${reqId}`, (event) => {
-                    cleanupListeners()
-                    resolve(resultValue(event.payload, fullText))
+                    finishResolve(resultValue(event.payload, fullText))
                 }),
                 globalThis.__TAURI__.event.listen(`ai:stopped:${reqId}`, (event) => {
-                    cleanupListeners()
-                    resolve(resultValue({ fullText: event.payload?.partialText ?? fullText, status: 'cancelled' }, fullText))
+                    finishResolve(resultValue({ fullText: event.payload?.partialText ?? fullText, status: 'cancelled' }, fullText))
                 }),
                 globalThis.__TAURI__.event.listen(`ai:error:${reqId}`, (event) => {
-                    cleanupListeners()
-                    reject(new Error(event.payload?.message || t('aiAssistant.error.requestFailed')))
+                    finishReject(new Error(event.payload?.message || t('aiAssistant.error.requestFailed')))
                 })
             ]).then(([c, d, s, e]) => {
                 unlistenChunk = c
@@ -553,9 +564,12 @@ export async function requestAiCompletion({
                 unlistenStopped = s
                 unlistenError = e
 
-                if (signal?.aborted) {
+                if (settled) {
                     cleanupListeners()
-                    reject(new DOMException('AI request aborted', 'AbortError'))
+                    return
+                }
+                if (signal?.aborted) {
+                    finishReject(new DOMException('AI request aborted', 'AbortError'))
                     return
                 }
 
@@ -572,12 +586,14 @@ export async function requestAiCompletion({
                     }
                 })
             }).then((res) => {
-                cleanupListeners()
-                resolve(resultValue(res, fullText))
+                if (settled || !res) return
+                if (res.status === 'failed') {
+                    finishReject(new Error(res.error || t('aiAssistant.error.requestFailed')))
+                    return
+                }
+                finishResolve(resultValue(res, fullText))
             }).catch((err) => {
-                cleanupListeners()
-                const msg = err?.message || String(err)
-                reject(new Error(msg))
+                finishReject(err)
             })
         })
     }

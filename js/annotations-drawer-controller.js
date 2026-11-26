@@ -107,6 +107,9 @@ export class AnnotationsDrawerController {
             })
             if (noteText !== null) {
                 await this.createHighlight('#facc15', 'highlight', noteText)
+            } else {
+                this.clearActiveTextSelection()
+                this.hideSelectionPopup()
             }
         });
         this.events.on(this.dom.btnPopupCopy, 'click', async () => {
@@ -118,11 +121,13 @@ export class AnnotationsDrawerController {
                 : (this.selectedTextInfo?.text || this._frozenSelectionSnapshot?.text || '')
             if (text) {
                 performWebSearch(this.app.settings, text, (msg, icon) => this.app.dialogs.showToast(msg, icon))
+                this.clearActiveTextSelection()
                 this.hideSelectionPopup()
             }
         });
         this.events.on(this.dom.popupDict, 'click', () => {
             const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : (this._frozenSelectionSnapshot ? { ...this._frozenSelectionSnapshot } : null)
+            this.clearActiveTextSelection()
             this.hideSelectionPopup()
             if (selInfo && selInfo.text) {
                 this.app.cards.showDictionaryCard(selInfo)
@@ -130,14 +135,16 @@ export class AnnotationsDrawerController {
         });
         this.events.on(this.dom.popupTranslatePara, 'click', async () => {
             const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : (this._frozenSelectionSnapshot ? { ...this._frozenSelectionSnapshot } : null)
+            this.clearActiveTextSelection()
             this.hideSelectionPopup()
             if (selInfo && selInfo.text) {
                 await this.app.cards.handleInPlaceParagraphTranslation(selInfo)
             }
         });
         this.events.on(this.dom.popupAi, 'click', () => {
-            // Snapshot selectedTextInfo or frozen selection snapshot BEFORE hideSelectionPopup clears it!
+            // Snapshot selectedTextInfo or frozen selection snapshot BEFORE clearing it!
             const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : (this._frozenSelectionSnapshot ? { ...this._frozenSelectionSnapshot } : null)
+            this.clearActiveTextSelection()
             this.hideSelectionPopup()
             if (this.app.aiSidebar && selInfo) {
                 this.app.aiSidebar.openWithSelection(selInfo)
@@ -175,12 +182,14 @@ export class AnnotationsDrawerController {
             if (this.clickedHighlightInfo) {
                 const hl = await this.findHighlightByCFI(this.clickedHighlightInfo.value)
                 if (hl?.text) navigator.clipboard.writeText(hl.text)
+                this.clearActiveTextSelection()
                 this.hideHighlightActionPopup()
             }
         });
         this.events.on(this.dom.hlActionDel, 'click', async () => {
             if (this.clickedHighlightInfo) {
                 await this.deleteHighlightByCFI(this.clickedHighlightInfo.value)
+                this.clearActiveTextSelection()
                 this.hideHighlightActionPopup()
             }
         });
@@ -198,9 +207,11 @@ export class AnnotationsDrawerController {
             if (this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
                 const joinedQuote = this.multiSelectedRanges.map(r => r.text).join('\n\n……\n\n')
                 this.app.cards.openQuoteCardModal(joinedQuote, resolved.chapterTitle, resolved.locationInfo)
+                this.clearActiveTextSelection()
                 this.hideSelectionPopup()
             } else if (this.selectedTextInfo?.text) {
                 this.app.cards.openQuoteCardModal(this.selectedTextInfo.text, resolved.chapterTitle, resolved.locationInfo)
+                this.clearActiveTextSelection()
                 this.hideSelectionPopup()
             }
         });
@@ -219,12 +230,15 @@ export class AnnotationsDrawerController {
                         pdfViewport: this.app.pdfViewport
                     }, sourceToc)
                     this.app.cards.openQuoteCardModal(hl.text, resolved.chapterTitle, resolved.locationInfo)
+                    this.clearActiveTextSelection()
+                    this.hideHighlightActionPopup()
                 }
             }
         });
     }
 
     resetSessionState() {
+        this.clearActiveTextSelection()
         this.hideSelectionPopup()
         this.hideHighlightActionPopup()
         this.multiSelectedRanges = []
@@ -314,6 +328,33 @@ export class AnnotationsDrawerController {
         }
     }
 
+    /** Clear active DOM text selections across foliate iframes, host window, and PDF viewport. */
+    clearActiveTextSelection({ preserveRanges = false } = {}) {
+        try {
+            this.app.foliateView?.deselect?.()
+        } catch {}
+        try {
+            const contents = this.app.foliateView?.renderer?.getContents?.() || []
+            for (const item of contents) {
+                try { (item?.doc?.defaultView?.getSelection?.() || item?.doc?.getSelection?.())?.removeAllRanges?.() } catch {}
+            }
+            const iframes = this.app.dom?.readerContentArea?.querySelectorAll?.('iframe') || []
+            for (const iframe of iframes) {
+                try { (iframe?.contentDocument?.defaultView?.getSelection?.() || iframe?.contentDocument?.getSelection?.())?.removeAllRanges?.() } catch {}
+            }
+        } catch {}
+        try { window.getSelection()?.removeAllRanges?.() } catch {}
+        try { this.app.pdfViewport?.clearSelection?.() } catch {}
+        this.clearVirtualMultiSelections()
+        if (!preserveRanges) {
+            this.multiSelectedRanges = []
+            const badge = this.dom?.popupMultiBadge || (typeof document !== 'undefined' ? document.getElementById('popup-multi-badge') : null)
+            if (badge) badge.style.display = 'none'
+        }
+        this.selectedTextInfo = null
+        this._frozenSelectionSnapshot = null
+    }
+
     hideSelectionPopup(preserveSelection = false) {
         if (this.dom.selectionPopup) {
             this.dom.selectionPopup.classList.remove('active')
@@ -335,8 +376,11 @@ export class AnnotationsDrawerController {
         const popupHeight = popup.offsetHeight || 44
         let top = rect.top - popupHeight - 10
         if (top < 10) top = rect.top + rect.height + 10
+        top = Math.max(10, Math.min(window.innerHeight - popupHeight - 10, top))
         let left = rect.left + (rect.width / 2) - (popupWidth / 2)
-        left = Math.max(12, Math.min(window.innerWidth - popupWidth - 12, left))
+        const isMobile = window.innerWidth <= 768 || document.documentElement.classList.contains('is-mobile-viewport')
+        const sideMargin = isMobile ? 8 : 12
+        left = Math.max(sideMargin, Math.min(window.innerWidth - popupWidth - sideMargin, left))
 
         popup.style.top = `${top}px`
         popup.style.left = `${left}px`
@@ -354,11 +398,24 @@ export class AnnotationsDrawerController {
     async onHighlightClicked(value, range) {
         this.app.cancelPendingReaderUIToggle()
         this.hideSelectionPopup()
+        this.app.cards?.hideDictionaryCard?.()
+        this.app.cards?.hideParaTranslationCard?.()
+        this.app.cards?.hideFootnotePopup?.()
         if (!range) return
         try {
             const rect = range.getBoundingClientRect()
             const doc = range.startContainer?.ownerDocument
-            const iframe = doc?.defaultView?.frameElement || this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView
+            const contentsIframe = doc?.defaultView?.frameElement
+            let iframe = contentsIframe
+            if (!iframe) {
+                const iframes = this.app.dom?.readerContentArea?.querySelectorAll?.('iframe') || []
+                for (const el of iframes) {
+                    if (el?.contentDocument === doc) {
+                        iframe = el
+                        break
+                    }
+                }
+            }
             const iframeRect = (iframe || this.app.foliateView).getBoundingClientRect()
             const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
             const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
@@ -427,9 +484,7 @@ export class AnnotationsDrawerController {
             if (activeSession && !activeSession.isCurrent()) return
             this.app.dialogs.showToast(t('annotations.addedMulti', { count: rangesToProcess.length }), 'success')
             this.updateSidebarNotesCount()
-            this.multiSelectedRanges = []
-            const iframe = this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView?.querySelector('iframe')
-            iframe?.contentDocument?.getSelection()?.removeAllRanges()
+            this.clearActiveTextSelection()
             this.hideSelectionPopup()
             this.loadNotesList()
             return
@@ -459,7 +514,7 @@ export class AnnotationsDrawerController {
             if (activeSession && !activeSession.isCurrent()) return
             this.app.pdfViewport.setHighlights(allHls, snapshot)
             if (!targetRef) {
-                window.getSelection()?.removeAllRanges()
+                this.clearActiveTextSelection()
                 this.hideSelectionPopup()
             }
             this.loadNotesList()
@@ -482,8 +537,7 @@ export class AnnotationsDrawerController {
                 if (this.app.foliateView && matched.cfi) {
                     await this.app.foliateView.deleteAnnotation({ value: `${matched.cfi}::${style}`, id: matched.id })
                 }
-                const iframe = this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView?.querySelector('iframe')
-                iframe?.contentDocument?.getSelection()?.removeAllRanges()
+                this.clearActiveTextSelection()
                 this.hideSelectionPopup()
                 this.loadNotesList()
                 return
@@ -508,8 +562,7 @@ export class AnnotationsDrawerController {
             }
 
             if (!targetRef) {
-                const iframe = this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView?.querySelector('iframe')
-                iframe?.contentDocument?.getSelection()?.removeAllRanges()
+                this.clearActiveTextSelection()
                 this.hideSelectionPopup()
             }
             this.loadNotesList()
@@ -550,9 +603,7 @@ export class AnnotationsDrawerController {
         }
 
         if (!targetRef) {
-            // Clear text selection
-            const iframe = this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView?.querySelector('iframe')
-            iframe?.contentDocument?.getSelection()?.removeAllRanges()
+            this.clearActiveTextSelection()
             this.hideSelectionPopup()
         }
 
@@ -566,6 +617,7 @@ export class AnnotationsDrawerController {
             // If user clicked the SAME color again -> TOGGLE OFF / CANCEL HIGHLIGHT!
             if (hl.color === newColor) {
                 await this.deleteHighlightByCFI(value)
+                this.clearActiveTextSelection()
                 this.hideHighlightActionPopup()
                 return
             }
@@ -586,6 +638,7 @@ export class AnnotationsDrawerController {
                 this.app.pdfViewport.setHighlights(allHls, this.app._currentSnapshot)
             }
             this.loadNotesList()
+            this.clearActiveTextSelection()
             this.hideHighlightActionPopup()
         }
     }
@@ -596,6 +649,7 @@ export class AnnotationsDrawerController {
             hl.note = newNote
             await db.saveHighlight(hl)
             this.loadNotesList()
+            this.clearActiveTextSelection()
             this.hideHighlightActionPopup()
         }
     }
@@ -1050,8 +1104,8 @@ export class AnnotationsDrawerController {
 
                 const customBook = {
                     bookId: note.bookId,
-                    bookTitle: note.bookTitle || bookMeta?.title || (isCurrentBook ? this.app.currentBookData?.title : '') || t('book.untitled'),
-                    author: note.bookAuthor || bookMeta?.author || (isCurrentBook ? this.app.currentBookData?.author : '') || t('book.unknownAuthor'),
+                    bookTitle: bookMeta?.title || (isCurrentBook ? this.app.currentBookData?.title : '') || note.bookTitle || t('book.untitled'),
+                    author: bookMeta?.author || (isCurrentBook ? this.app.currentBookData?.author : '') || note.bookAuthor || t('book.unknownAuthor'),
                     format
                 }
                 this.app.cards.openQuoteCardModal(note.text, resolved.chapterTitle, resolved.locationInfo, customBook)
@@ -1108,7 +1162,10 @@ export class AnnotationsDrawerController {
             const quoteText = (n.text || '').split('\n').map(l => `> ${l}`).join('\n')
             md += `${quoteText}\n\n`
             if (n.note) md += t('annotations.export.mdNote', { note: n.note })
-            md += t('annotations.export.mdItemTime', { time: new Date(n.createdAt).toLocaleString(locale) })
+            const dateStr = n.createdAt ? new Date(n.createdAt).toLocaleString(locale) : ''
+            if (dateStr && dateStr !== 'Invalid Date') {
+                md += t('annotations.export.mdItemTime', { time: dateStr })
+            }
         })
 
         const safeTitle = bookTitle.replace(/[\\/:*?"<>|]/g, '_').trim() || t('annotations.export.safeNameFallback')
@@ -1507,7 +1564,10 @@ export class AnnotationsDrawerController {
 
             card.querySelector('.act-delete')?.addEventListener('click', async (e) => {
                 e.stopPropagation()
-                if (confirm(t('annotations.confirmDelete'))) {
+                const confirmed = this.app.dialogs?.showConfirmDialog
+                    ? await this.app.dialogs.showConfirmDialog(t('common.delete'), t('annotations.confirmDelete'))
+                    : confirm(t('annotations.confirmDelete'))
+                if (confirmed) {
                     await db.deleteHighlight(note.id)
                     this.app.dialogs.showToast(t('annotations.deletedToast'), 'delete')
                     await this.renderShelfNotesList()
@@ -1536,11 +1596,12 @@ export class AnnotationsDrawerController {
         for (const n of notesToExport) {
             const b = bookMap.get(n.bookId)
             const bTitle = b?.title || n.bookTitle || t('annotations.unknownBook')
-            if (!grouped.has(bTitle)) grouped.set(bTitle, [])
-            grouped.get(bTitle).push(n)
+            const groupKey = n.bookId || `title:${bTitle}`
+            if (!grouped.has(groupKey)) grouped.set(groupKey, { title: bTitle, notes: [] })
+            grouped.get(groupKey).notes.push(n)
         }
 
-        for (const [title, bookNotes] of grouped.entries()) {
+        for (const { title, notes: bookNotes } of grouped.values()) {
             md += `## ${title}\n\n`
             bookNotes.forEach((n, idx) => {
                 const chap = n.chapterTitle && n.chapterTitle !== 'undefined' ? n.chapterTitle : t('annotations.bodyFallback')

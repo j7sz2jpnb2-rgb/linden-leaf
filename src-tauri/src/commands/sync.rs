@@ -998,7 +998,7 @@ async fn upload_book_binary_inner(
         };
     }
 
-    let client = match create_http_client(60) {
+    let client = match create_http_client(300) {
         Ok(c) => c,
         Err(e) => return BookBinaryResponse {
             success: false,
@@ -1097,7 +1097,7 @@ async fn download_book_binary_inner(
         message: e,
     })?;
 
-    let client = create_http_client(60).map_err(|e| DownloadBookBinaryError::Other {
+    let client = create_http_client(300).map_err(|e| DownloadBookBinaryError::Other {
         file_name: Some(safe_file_name.clone()),
         message: e,
     })?;

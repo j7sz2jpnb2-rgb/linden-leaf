@@ -328,6 +328,8 @@ struct BackgroundTtsStartReq<'a> {
     book_title: &'a str,
     #[serde(rename = "bookId")]
     book_id: &'a str,
+    #[serde(rename = "bookAuthor")]
+    book_author: &'a str,
     text: &'a str,
     rate: f32,
     #[serde(rename = "jobId")]
@@ -408,8 +410,14 @@ pub struct BackgroundPlaybackState {
     pub is_playing: bool,
     #[serde(default)]
     pub state: String,
+    #[serde(rename = "bookId", default)]
+    pub book_id: String,
     #[serde(rename = "bookTitle", default)]
     pub book_title: String,
+    #[serde(rename = "bookAuthor", default)]
+    pub book_author: String,
+    #[serde(default)]
+    pub locale: String,
     #[serde(default)]
     pub text: String,
     #[serde(rename = "jobId", default)]
@@ -499,6 +507,7 @@ struct ConsumeImportReq<'a> {
 struct SaveImageReq<'a> {
     base64: &'a str,
     filename: &'a str,
+    locale: &'a str,
 }
 
 #[allow(dead_code)]
@@ -507,6 +516,7 @@ struct ShareImageReq<'a> {
     base64: &'a str,
     filename: &'a str,
     title: &'a str,
+    locale: &'a str,
 }
 
 #[tauri::command]
@@ -516,6 +526,7 @@ pub fn android_start_background_tts(
     text: String,
     rate: f32,
     book_id: Option<String>,
+    book_author: Option<String>,
     job_id: Option<String>,
     utterance_id: Option<String>,
     generation: Option<i64>,
@@ -526,6 +537,7 @@ pub fn android_start_background_tts(
     {
         let bridge = get_mobile_bridge(&app_handle)?;
         let b_id = book_id.unwrap_or_default();
+        let b_author = book_author.unwrap_or_default();
         let j_id = job_id.unwrap_or_default();
         let u_id = utterance_id.unwrap_or_default();
         let v_id = voice_id.unwrap_or_default();
@@ -539,6 +551,7 @@ pub fn android_start_background_tts(
                 BackgroundTtsStartReq {
                     book_title: &book_title,
                     book_id: &b_id,
+                    book_author: &b_author,
                     text: &text,
                     rate,
                     job_id: &j_id,
@@ -554,7 +567,7 @@ pub fn android_start_background_tts(
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app_handle, book_id, book_title, text, rate, job_id, utterance_id, generation, voice_id, locale);
+        let _ = (app_handle, book_id, book_author, book_title, text, rate, job_id, utterance_id, generation, voice_id, locale);
         Ok(BackgroundTtsStartResult {
             started: false,
             value: false,
@@ -580,6 +593,8 @@ struct BackgroundTtsQueueReq<'a> {
     book_title: &'a str,
     #[serde(rename = "bookId")]
     book_id: &'a str,
+    #[serde(rename = "bookAuthor")]
+    book_author: &'a str,
     segments: &'a [TtsQueueSegment],
     #[serde(rename = "startIndex")]
     start_index: i32,
@@ -600,6 +615,7 @@ pub fn android_start_background_tts_queue(
     start_index: Option<i32>,
     rate: f32,
     book_id: Option<String>,
+    book_author: Option<String>,
     job_id: Option<String>,
     generation: Option<i64>,
     voice_id: Option<String>,
@@ -609,6 +625,7 @@ pub fn android_start_background_tts_queue(
     {
         let bridge = get_mobile_bridge(&app_handle)?;
         let b_id = book_id.unwrap_or_default();
+        let b_author = book_author.unwrap_or_default();
         let j_id = job_id.unwrap_or_default();
         let v_id = voice_id.unwrap_or_default();
         let loc = crate::commands::resolve_locale(locale.as_deref());
@@ -622,6 +639,7 @@ pub fn android_start_background_tts_queue(
                 BackgroundTtsQueueReq {
                     book_title: &book_title,
                     book_id: &b_id,
+                    book_author: &b_author,
                     segments: &segments,
                     start_index: s_idx,
                     rate,
@@ -637,7 +655,7 @@ pub fn android_start_background_tts_queue(
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app_handle, book_id, book_title, segments, start_index, rate, job_id, generation, voice_id, locale);
+        let _ = (app_handle, book_id, book_author, book_title, segments, start_index, rate, job_id, generation, voice_id, locale);
         Ok(BackgroundTtsStartResult {
             started: false,
             value: false,
@@ -924,6 +942,7 @@ pub fn android_save_image_to_gallery(
     app_handle: tauri::AppHandle,
     base64: String,
     filename: String,
+    locale: Option<String>,
 ) -> Result<ImageOperationResult, String> {
     #[cfg(target_os = "android")]
     {
@@ -931,6 +950,7 @@ pub fn android_save_image_to_gallery(
         let bridge = app_handle
             .try_state::<crate::LindenMobileBridge>()
             .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
+        let loc = crate::commands::resolve_locale(locale.as_deref());
 
         let res = bridge
             .0
@@ -939,6 +959,7 @@ pub fn android_save_image_to_gallery(
                 SaveImageReq {
                     base64: &base64,
                     filename: &filename,
+                    locale: loc,
                 },
             )
             .map_err(|e| format!("saveImageToGallery failed: {e}"))?;
@@ -947,7 +968,7 @@ pub fn android_save_image_to_gallery(
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app_handle, base64, filename);
+        let _ = (app_handle, base64, filename, locale);
         Ok(ImageOperationResult {
             success: false,
             path: None,
@@ -970,6 +991,7 @@ pub fn android_share_image(
         let bridge = app_handle
             .try_state::<crate::LindenMobileBridge>()
             .ok_or_else(|| "LindenMobileBridge not initialized".to_string())?;
+        let loc = crate::commands::resolve_locale(locale.as_deref());
 
         let res = bridge
             .0
@@ -979,6 +1001,7 @@ pub fn android_share_image(
                     base64: &base64,
                     filename: &filename,
                     title: &title,
+                    locale: loc,
                 },
             )
             .map_err(|e| format!("shareImage failed: {e}"))?;
@@ -1147,6 +1170,8 @@ pub struct NativeListeningInterval {
     pub sequence: i64,
     pub book_id: String,
     pub book_title: String,
+    #[serde(default)]
+    pub book_author: String,
     pub job_id: String,
     pub start_ms: i64,
     pub end_ms: i64,
@@ -1178,7 +1203,7 @@ pub fn android_acknowledge_tts_listening(app_handle: tauri::AppHandle, through_s
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
-struct BookExportReq { file_path: String, filename: String, share: bool }
+struct BookExportReq { file_path: String, filename: String, share: bool, locale: String }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1187,6 +1212,7 @@ struct TextExportReq {
     filename: String,
     content: String,
     mime_type: String,
+    locale: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -1261,9 +1287,10 @@ pub async fn android_export_book_file(
         if !crate::commands::fs::SUPPORTED_EXTENSIONS.contains(&ext_lower.as_str()) {
             return Err(android_export_unsupported_format_msg(en).to_string());
         }
+        let loc = crate::commands::resolve_locale(locale.as_deref()).to_string();
         let bridge = app_handle.try_state::<crate::LindenMobileBridge>()
             .ok_or("Android bridge is unavailable")?;
-        bridge.0.run_mobile_plugin::<serde_json::Value>("exportBookFile", BookExportReq { file_path, filename, share })
+        bridge.0.run_mobile_plugin::<serde_json::Value>("exportBookFile", BookExportReq { file_path, filename, share, locale: loc })
             .map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "android"))]
@@ -1279,6 +1306,7 @@ pub async fn android_export_text_file(
     filename: String,
     content: String,
     mime_type: Option<String>,
+    locale: Option<String>,
 ) -> Result<AndroidTextExportResult, String> {
     #[cfg(target_os = "android")]
     {
@@ -1289,6 +1317,7 @@ pub async fn android_export_text_file(
             .filter(|s| !s.is_empty())
             .unwrap_or("text/plain;charset=utf-8")
             .to_string();
+        let loc = crate::commands::resolve_locale(locale.as_deref()).to_string();
         let bridge = app_handle
             .try_state::<crate::LindenMobileBridge>()
             .ok_or_else(|| "Android bridge is unavailable".to_string())?;
@@ -1300,13 +1329,14 @@ pub async fn android_export_text_file(
                     filename,
                     content,
                     mime_type: resolved_mime,
+                    locale: loc,
                 },
             )
             .map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (app_handle, filename, content, mime_type);
+        let _ = (app_handle, filename, content, mime_type, locale);
         Err("Text file export via Android SAF is only available on Android".into())
     }
 }

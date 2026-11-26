@@ -712,21 +712,30 @@ export class ReaderAppearanceController {
             { color: document.getElementById('palette-bg-secondary') || bgSecondary, hex: document.getElementById('palette-bg-secondary-hex') || bgSecondaryHex, key: 'bgSecondary', defaultVal: '#f9fafb' },
             { color: document.getElementById('palette-bg-sidebar') || bgSidebar, hex: document.getElementById('palette-bg-sidebar-hex') || bgSidebarHex, key: 'bgSidebar', defaultVal: '#f3f4f6' },
             { color: document.getElementById('palette-text-main') || textMain, hex: document.getElementById('palette-text-main-hex') || textMainHex, key: 'textMain', defaultVal: '#111827' },
-            { color: document.getElementById('palette-text-muted'), hex: document.getElementById('palette-text-muted-hex'), key: 'textMuted', defaultVal: '#6b7280' },
+            { color: document.getElementById('palette-text-secondary'), hex: document.getElementById('palette-text-secondary-hex'), key: 'textSecondary', defaultVal: '#4b5563' },
             { color: document.getElementById('palette-accent') || accent, hex: document.getElementById('palette-accent-hex') || accentHex, key: 'accent', defaultVal: '#d97706' },
             { color: document.getElementById('palette-border-color'), hex: document.getElementById('palette-border-color-hex'), key: 'borderColor', defaultVal: '#e5e7eb' },
-            { color: document.getElementById('palette-reader-bg'), hex: document.getElementById('palette-reader-bg-hex'), key: 'readerBg', defaultVal: '#faf9f5' },
-            { color: document.getElementById('palette-reader-text'), hex: document.getElementById('palette-reader-text-hex'), key: 'readerText', defaultVal: '#141413' },
+            { color: document.getElementById('palette-reader-bg'), hex: document.getElementById('palette-reader-bg-hex'), key: 'readerBg', defaultVal: '#fbf0d9' },
+            { color: document.getElementById('palette-reader-text'), hex: document.getElementById('palette-reader-text-hex'), key: 'readerText', defaultVal: '#2b2319' },
             { color: document.getElementById('palette-selection-bg'), hex: document.getElementById('palette-selection-bg-hex'), key: 'selectionBg', defaultVal: '#fde68a' }
         ]
+
+        const toHex6 = (raw, fallback) => {
+            let val = String(raw || '').trim().toLowerCase()
+            if (/^#[0-9a-f]{3}$/.test(val)) {
+                val = `#${val[1]}${val[1]}${val[2]}${val[2]}${val[3]}${val[3]}`
+            } else if (/^[0-9a-f]{3}$/.test(val)) {
+                val = `#${val[0]}${val[0]}${val[1]}${val[1]}${val[2]}${val[2]}`
+            } else if (/^[0-9a-f]{6}$/.test(val)) {
+                val = '#' + val
+            }
+            return /^#[0-9a-f]{6}$/.test(val) ? val : fallback
+        }
 
         const syncInputsFromTheme = () => {
             const p = themeCustomizer.currentPalette
             for (const { color, hex, key, defaultVal } of pairs) {
-                let val = (p[key] || defaultVal).toLowerCase()
-                if (val.startsWith('rgb')) {
-                    val = defaultVal || '#fde68a'
-                }
+                const val = toHex6(p[key], defaultVal)
                 if (color) color.value = val
                 if (hex) hex.value = val
             }
@@ -763,27 +772,18 @@ export class ReaderAppearanceController {
                 })
                 hex.addEventListener('blur', () => {
                     // On blur normalize to valid 6-digit hex format
-                    let val = hex.value.trim().toLowerCase()
-                    if (!val.startsWith('#') && /^[0-9a-fA-F]{6}$/.test(val)) {
-                        val = '#' + val
-                    }
-                    if (/^#[0-9a-fA-F]{6}$/.test(val)) {
-                        hex.value = val
-                        color.value = val
-                    } else {
-                        hex.value = color.value.toLowerCase()
-                    }
+                    const normalized = toHex6(hex.value, color.value.toLowerCase())
+                    hex.value = normalized
+                    color.value = normalized
+                    onColorInput()
                 })
             }
         })
 
         btnSave?.addEventListener('click', () => {
-            const finalPalette = {
-                bgPrimary: bgPrimary?.value || '#ffffff',
-                bgSecondary: bgSecondary?.value || '#f9fafb',
-                bgSidebar: bgSidebar?.value || '#f3f4f6',
-                textMain: textMain?.value || '#111827',
-                accent: accent?.value || '#d97706'
+            const finalPalette = {}
+            for (const { color, key, defaultVal } of pairs) {
+                finalPalette[key] = color?.value || defaultVal
             }
             themeCustomizer.commit(finalPalette)
             if (this.app.foliateView) {
@@ -1219,11 +1219,13 @@ export class ReaderAppearanceController {
         const layout = resolveEffectiveReaderLayout(s, this._getViewportEnv())
 
         if (this.app.foliateView.isFixedLayout) {
+            this.app.dom?.readerView?.removeAttribute?.('data-reader-flow')
             this.app.pdfTools.dom.btnPdfSpreadToggle?.classList.toggle('active', layout.columnCount === '2')
             if (r.setSpread && this.app.foliateView.lastLocation != null) {
                 r.setSpread(layout.columnCount)
             }
         } else {
+            this.app.dom?.readerView?.setAttribute?.('data-reader-flow', layout.layout)
             r.settle?.()
             // Pass canonical layout metrics to paginator without redundant reflow attributes
             if (r.setAttribute) {

@@ -245,12 +245,13 @@ pub async fn dialog_save_text_file(
     }
     #[cfg(target_os = "android")]
     {
-        let _ = (title, locale);
+        let _ = title;
         let res = crate::commands::android::android_export_text_file(
             app_handle,
             default_name,
             content,
             mime_type,
+            locale,
         )
         .await?;
         if res.saved {

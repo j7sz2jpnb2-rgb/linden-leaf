@@ -1572,7 +1572,9 @@ export class MobileShellController {
             const userInitial = userName ? userName.charAt(0).toUpperCase() : 'R'
 
             // 3. Today's Reading Goals (Card 3 Dynamic Calculation)
-            const targetMins = Math.max(1, parseInt(localStorage.getItem('linden_daily_goal_minutes') || '30', 10) || 30)
+            const storedDailyGoal = parseInt(localStorage.getItem('linden_daily_goal_minutes') || '0', 10)
+            const settingsDailyGoal = Number(window.app?.settings?.readingGoalToday)
+            const targetMins = Math.max(1, Number.isFinite(settingsDailyGoal) && settingsDailyGoal > 0 ? settingsDailyGoal : (storedDailyGoal > 0 ? storedDailyGoal : 45))
 
             const todaySecs = Math.max(0, Number(analytics?.todaySeconds) || 0)
             const todayMins = Math.floor(todaySecs / 60)
@@ -1581,7 +1583,11 @@ export class MobileShellController {
             const todayTimeStr = todayH > 0
                 ? t('time.hoursMinutes', { hours: todayH, mins: remM })
                 : t('time.minutes', { count: todayMins })
-            const targetTimeStr = t('time.minutes', { count: targetMins })
+            const targetH = Math.floor(targetMins / 60)
+            const targetRemM = targetMins % 60
+            const targetTimeStr = targetH > 0
+                ? (targetRemM > 0 ? t('time.hoursMinutes', { hours: targetH, mins: targetRemM }) : t('time.hours', { hours: targetH }))
+                : t('time.minutes', { count: targetMins })
 
             const timePct = Math.min(100, Math.round((todayMins / targetMins) * 100))
             const encouragement = timePct >= 100
@@ -3067,7 +3073,9 @@ export class MobileShellController {
     }
 
     openGoalEditSheet() {
-        const current = Math.max(1, parseInt(localStorage.getItem('linden_daily_goal_minutes') || '30', 10) || 30)
+        const storedGoal = parseInt(localStorage.getItem('linden_daily_goal_minutes') || '0', 10)
+        const settingsGoal = Number(window.app?.settings?.readingGoalToday)
+        const current = Math.max(1, Number.isFinite(settingsGoal) && settingsGoal > 0 ? settingsGoal : (storedGoal > 0 ? storedGoal : 45))
         const group = document.getElementById('goal-time-options')
         group?.querySelectorAll('.goal-pill-btn').forEach(button => {
             button.classList.toggle('active', Number(button.dataset.time) === current)
@@ -3077,9 +3085,16 @@ export class MobileShellController {
             }
         })
         const save = document.getElementById('btn-save-reading-goal')
-        if (save) save.onclick = () => {
+        if (save) save.onclick = async () => {
             const next = Number(group?.querySelector('.goal-pill-btn.active')?.dataset.time) || current
-            localStorage.setItem('linden_daily_goal_minutes', String(next))
+            try { localStorage.setItem('linden_daily_goal_minutes', String(next)) } catch {}
+            if (window.app?.setSetting) {
+                window.app.setSetting('readingGoalToday', next, 'global')
+                if (window.app.appearance?.dom?.settingGoalToday) {
+                    window.app.appearance.dom.settingGoalToday.value = next
+                }
+                await window.app.saveSettings?.()
+            }
             this.closeAllSheets()
             this.renderHomeTab()
         }

@@ -205,6 +205,10 @@ class UniversalReaderApp {
         this.importQueue = importQueue
 
         this._foliatePageIndex = 0
+        this._dismissSelectionGesture = false
+        this._dismissSelectionTimer = null
+        this._touchTapSyntheticClickLock = null
+        this._lastGestureCaptureTime = 0
 
         this.initDOM()
 
@@ -336,6 +340,11 @@ class UniversalReaderApp {
                     this.dom.readerView.style.display = 'flex'
                     this.dom.readerView.classList.add('active')
                 }
+                await Promise.all([
+                    ensureAdvancedSettingsLoaded(this).catch(() => {}),
+                    ensureAiSidebarLoaded(this).catch(() => {}),
+                    ensureChapterTranslationLoaded(this).catch(() => {})
+                ])
                 setTimeout(async () => {
                     try {
                         await customFontManager.init(this.settings.font)
@@ -344,9 +353,6 @@ class UniversalReaderApp {
                     try {
                         this.appearance.renderReadingPresetsUI()
                     } catch (e) {}
-                    ensureAdvancedSettingsLoaded(this).catch(() => {})
-                    ensureAiSidebarLoaded(this).catch(() => {})
-                    ensureChapterTranslationLoaded(this).catch(() => {})
                 }, 0)
                 let pendingLoc = null
                 try {
@@ -688,25 +694,8 @@ class UniversalReaderApp {
     if (shell && (shell.isNowPlayingOpen || shell.activeSheet || document.body.classList.contains('mobile-settings-active'))) {
         return shell.handleBackPress()
     }
-    const popupEl = this.annotations.dom.selectionPopup
-    const highlightPopupEl = this.annotations.dom.highlightActionPopup
-    const dictCardEl = this.cards.dom.readerDictionaryCard
-    const paraCardEl = this.cards.dom.readerParaTranslationCard
-    const footnotePopupEl = document.getElementById('footnote-popup')
-    const hasReaderPopup = Boolean(
-        popupEl?.classList.contains('active') || visible(popupEl) ||
-        highlightPopupEl?.classList.contains('active') || visible(highlightPopupEl) ||
-        dictCardEl?.classList.contains('active') || visible(dictCardEl) ||
-        paraCardEl?.classList.contains('active') || visible(paraCardEl) ||
-        visible(footnotePopupEl)
-    )
-    if (hasReaderPopup) {
-        this.annotations.hideSelectionPopup()
-        this.annotations.hideHighlightActionPopup()
-        this.cards.hideDictionaryCard?.()
-        this.cards.hideParaTranslationCard?.()
-        this.cards.hideFootnotePopup?.()
-        this.pdfViewport?.clearSelection?.()
+    const hasReaderPopup = this._isReaderPopupVisible()
+    if (hasReaderPopup && this.consumeDismissalGesture({ clearSelection: true })) {
         return true
     }
     if (this.aiSidebar?.isOpen) { this.aiSidebar.close(); return true }
@@ -1875,20 +1864,26 @@ class UniversalReaderApp {
     }
 
     _bindReaderGestureEvents() {
-        let contentAreaHadActiveSelectionOnDown = false;
+        let sawContentAreaTouchPointerDown = false
         this.rootEvents.on(this.dom.readerContentArea, 'pointerdown', e => {
             this._lastContentAreaPointerDownTime = Date.now()
-            const hasDict = Boolean(this.cards.dom.readerDictionaryCard?.classList.contains('active') || (this.cards.dom.readerDictionaryCard?.style.display && this.cards.dom.readerDictionaryCard.style.display !== 'none'))
-            const hasPopup = Boolean(this.annotations.dom.selectionPopup?.classList.contains('active') || (this.annotations.dom.selectionPopup?.style.display && this.annotations.dom.selectionPopup.style.display !== 'none'))
-            const hasHighlightPopup = Boolean(this.annotations.dom.highlightActionPopup?.classList.contains('active') || (this.annotations.dom.highlightActionPopup?.style.display && this.annotations.dom.highlightActionPopup.style.display !== 'none'))
-            const hasFootnote = Boolean(this.cards.dom.footnotePopup?.classList.contains('active') || (this.cards.dom.footnotePopup?.style.display && this.cards.dom.footnotePopup.style.display !== 'none'))
-            contentAreaHadActiveSelectionOnDown = hasDict || hasPopup || hasHighlightPopup || hasFootnote
+            this.clearTouchTapSyntheticClickLock()
+            if (e.pointerType === 'touch') {
+                sawContentAreaTouchPointerDown = true
+            }
+            this.captureSelectionAndPopupStateOnGestureStart()
         }, true);
         let contentAreaTouchStartX = 0;
         let contentAreaTouchStartY = 0;
         let contentAreaTouchStartTime = 0;
         let contentAreaTouchMoved = false;
         this.rootEvents.on(this.dom.readerContentArea, 'touchstart', e => {
+            if (sawContentAreaTouchPointerDown) {
+                sawContentAreaTouchPointerDown = false
+            } else {
+                this.clearTouchTapSyntheticClickLock()
+                this.captureSelectionAndPopupStateOnGestureStart()
+            }
             if (!e.touches || e.touches.length !== 1) {
                 contentAreaTouchMoved = true
             } else {
@@ -1912,43 +1907,31 @@ class UniversalReaderApp {
             this.pageTurnController?.handleTouchMove(e)
         }, { passive: false });
         const cancelContentTouch = (e) => {
+            sawContentAreaTouchPointerDown = false
             contentAreaTouchMoved = true
+            this._clearDismissSelectionGesture()
             this.pageTurnController?.handleTouchCancel(e)
         }
         this.rootEvents.on(this.dom.readerContentArea, 'touchcancel', cancelContentTouch, { passive: true });
         this.rootEvents.on(this.dom.readerContentArea, 'pointercancel', cancelContentTouch, { passive: true });
         this.rootEvents.on(this.dom.readerContentArea, 'touchend', e => {
+            sawContentAreaTouchPointerDown = false
             this.pageTurnController?.handleTouchEnd(e)
 
             if (this.pdfViewport || this.pageTurnController?.shouldSuppressTap?.()) {
+                this._clearDismissSelectionGesture()
                 return
             }
 
             if (!contentAreaTouchMoved && (Date.now() - contentAreaTouchStartTime <= 450)) {
-                if (!e.target.closest('button, a, .selection-popup, .highlight-action-popup, .reader-dictionary-card, input, .nav-arrow-left, .nav-arrow-right')) {
+                if (!e.target.closest('button, a, .selection-popup, .highlight-action-popup, .reader-dictionary-card, .footnote-popup, .reader-para-translation-card, input, .nav-arrow-left, .nav-arrow-right')) {
                     const isMobile = (window.mobileShell?.isMobileViewport?.() ?? false) || Boolean(platformBridge?.isAndroid)
                     if (isMobile) {
-                        const winSel = window.getSelection()
-                        const hasWinSel = Boolean(winSel && !winSel.isCollapsed && winSel.toString().trim())
-                        const hasPopup = Boolean(
-                            this.annotations.dom.selectionPopup?.classList.contains('active') ||
-                            (this.annotations.dom.selectionPopup?.style.display && this.annotations.dom.selectionPopup.style.display !== 'none') ||
-                            this.cards.dom.readerDictionaryCard?.classList.contains('active') ||
-                            (this.cards.dom.readerDictionaryCard?.style.display && this.cards.dom.readerDictionaryCard.style.display !== 'none') ||
-                            contentAreaHadActiveSelectionOnDown
-                        )
-                        if (hasWinSel || hasPopup) {
-                            this.annotations.hideSelectionPopup()
-                            this.cards.hideDictionaryCard()
-                            this.cards.hideFootnotePopup()
-                            try { winSel?.removeAllRanges?.() } catch {}
-                            this.annotations._frozenSelectionSnapshot = null
-                            contentAreaHadActiveSelectionOnDown = false
-                            this.cancelPendingReaderUIToggle()
-                            this._lastContentAreaTapHandledTime = Date.now()
+                        if (this.consumeDismissalGesture({ clearSelection: true })) {
+                            this.armTouchTapSyntheticClickLock({ dismissed: true })
                             return
                         }
-                        this._lastContentAreaTapHandledTime = Date.now()
+                        this.armTouchTapSyntheticClickLock({ dismissed: false })
                         this.cancelPendingReaderUIToggle()
                         this.requestToggleReaderUI(60)
                     }
@@ -1957,16 +1940,23 @@ class UniversalReaderApp {
         });
         this.rootEvents.on(this.dom.readerContentArea, 'click', e => {
             if (this.pdfViewport || this.pageTurnController?.shouldSuppressTap?.()) {
+                this._clearDismissSelectionGesture()
                 return
             }
-            if (this._lastContentAreaTapHandledTime && (Date.now() - this._lastContentAreaTapHandledTime < 800)) {
+            const syntheticLock = this.consumeTouchTapSyntheticClickLock()
+            if (syntheticLock) {
+                if (syntheticLock.dismissed) {
+                    e.stopImmediatePropagation?.()
+                }
                 return
             }
-            if (e.target.closest('button') || e.target.closest('a') || e.target.closest('.selection-popup') || e.target.closest('.highlight-action-popup') || e.target.closest('.reader-dictionary-card') || e.target.closest('input') || e.target.closest('.nav-arrow-left') || e.target.closest('.nav-arrow-right')) {
+            if (e.target.closest('button, a, .selection-popup, .highlight-action-popup, .reader-dictionary-card, .footnote-popup, .reader-para-translation-card, input, .nav-arrow-left, .nav-arrow-right')) {
+                this._clearDismissSelectionGesture()
                 this.cancelPendingReaderUIToggle()
                 return
             }
             if (this.pdfViewport?.shouldIgnoreContentClick()) {
+                this._clearDismissSelectionGesture()
                 this.cancelPendingReaderUIToggle()
                 return
             }
@@ -1974,14 +1964,11 @@ class UniversalReaderApp {
             const isTouch = (e.pointerType === 'touch') || (window.mobileShell?.isMobileViewport?.() ?? false) || Boolean(platformBridge?.isAndroid)
             this._lastContentAreaClickTime = now
 
-            if (contentAreaHadActiveSelectionOnDown) {
-                contentAreaHadActiveSelectionOnDown = false
-                this.cancelPendingReaderUIToggle()
-                try {
-                    window.getSelection()?.removeAllRanges?.()
-                } catch (err) {}
+            if (this._dismissSelectionGesture && this.consumeDismissalGesture({ clearSelection: true })) {
+                e.stopImmediatePropagation?.()
                 return
             }
+            this._clearDismissSelectionGesture()
             const selection = window.getSelection()
             if (selection && !selection.isCollapsed && selection.toString().trim()) {
                 this.cancelPendingReaderUIToggle()
@@ -2311,8 +2298,35 @@ class UniversalReaderApp {
                     this.pdfViewport.scrollToPage(targetPage0, yRatio)
                     return
                 }
+                if (targetLoc.query && targetLoc.sectionIndex != null && this.foliateView?.search) {
+                    const targetMatchIndex = targetLoc.matchIndex || 0
+                    let currentMatchIdx = 0
+                    let matchedCfi = null
+                    for await (const match of this.foliateView.search({ query: targetLoc.query, index: targetLoc.sectionIndex })) {
+                        if (match.cfi) {
+                            if (currentMatchIdx === targetMatchIndex) {
+                                matchedCfi = match.cfi
+                                break
+                            }
+                            currentMatchIdx++
+                        }
+                    }
+                    if (matchedCfi) {
+                        await this.foliateView.goTo(matchedCfi)
+                        this.foliateView.setActiveSearchMatch?.(matchedCfi)
+                        return
+                    }
+                }
                 if (targetLoc.cfi && this.foliateView) {
                     await this.foliateView.goTo(targetLoc.cfi)
+                    return
+                }
+                if (targetLoc.href && this.foliateView) {
+                    await this.foliateView.goTo(targetLoc.href)
+                    return
+                }
+                if (targetLoc.sectionIndex != null && this.foliateView) {
+                    await this.foliateView.goTo(targetLoc.sectionIndex)
                     return
                 }
                 if (typeof targetLoc.fraction === 'number' && this.foliateView?.goToFraction) {
@@ -2437,11 +2451,8 @@ class UniversalReaderApp {
             try {
                 await navigator.clipboard.writeText(mergedText)
                 this.dialogs.showToast(t('app.copiedMultiToast', { count: this.annotations.multiSelectedRanges.length }), 'success')
-                this.annotations.clearVirtualMultiSelections()
-                this.annotations.multiSelectedRanges = []
-                const iframe = this.foliateView?.shadowRoot?.querySelector('iframe') || this.foliateView?.querySelector('iframe')
-                iframe?.contentDocument?.getSelection()?.removeAllRanges()
-                this.annotations.hideSelectionPopup()
+                this.annotations.clearActiveTextSelection?.()
+                this.annotations.hideSelectionPopup?.()
                 return true
             } catch (err) {
                 console.error('[Copy] Clipboard writeText failed:', err)
@@ -2452,7 +2463,8 @@ class UniversalReaderApp {
             try {
                 await navigator.clipboard.writeText(selection.text)
                 this.dialogs.showToast(t('app.copiedSelectionToast'), 'success')
-                if (selection.formatType !== 'pdf') this.annotations.hideSelectionPopup()
+                this.annotations.clearActiveTextSelection?.()
+                this.annotations.hideSelectionPopup?.()
                 return true
             } catch (err) {
                 console.error('[Copy] Clipboard writeText failed:', err)
@@ -2546,49 +2558,63 @@ class UniversalReaderApp {
         // A fading-out dialog still blocks interaction until its backdrop disappears.
         if ([...document.querySelectorAll('.global-modal-backdrop')].some(el => getComputedStyle(el).display !== 'none')) return
 
-        // Escape closes a reading popup or drawer after all modal dialogs are dismissed.
+        // Escape closes overlays in strict topmost-layer priority after global modal backdrops.
         if (e.key === 'Escape') {
-            if (!editing && hasPdfSelection) {
-                e.preventDefault()
-                this.annotations.hideSelectionPopup()
-                return
-            }
-            if (this.cards.dom.footnotePopup && this.cards.dom.footnotePopup.style.display !== 'none') {
-                this.cards.hideFootnotePopup()
-                return
-            }
+            const isModalShown = (el) => Boolean(el && (el.classList?.contains('show') || (el.style?.display && el.style.display !== 'none')))
             const statsDetailModal = document.getElementById('modal-stats-detail')
-            if (statsDetailModal && (statsDetailModal.classList.contains('show') || statsDetailModal.style.display !== 'none')) {
+            if (isModalShown(statsDetailModal)) {
                 this.stats.closeStatsDetailModal()
                 return
             }
             const syncModal = this.sync.dom.modalWebdavSync || document.getElementById('modal-webdav-sync')
-            if (syncModal && (syncModal.classList.contains('show') || syncModal.style.display !== 'none')) {
+            if (isModalShown(syncModal)) {
                 this.sync.closeWebdavSyncModal()
                 return
             }
-            if (this.cards.dom.quoteCardBackdrop && this.cards.dom.quoteCardBackdrop.style.display !== 'none') {
+            const quoteBackdrop = this.cards.dom.quoteCardBackdrop || document.getElementById('quote-card-backdrop')
+            if (isModalShown(quoteBackdrop)) {
                 this.cards.closeQuoteCardModal()
                 return
             }
-            if (this.bookshelf.dom.modalManageBookLists && this.bookshelf.dom.modalManageBookLists.style.display !== 'none') {
+            if (isModalShown(this.bookshelf.dom.modalManageBookLists)) {
                 this.bookshelf.closeManageBookListsModal()
                 return
             }
-            if (this.bookshelf.dom.modalCreateList && this.bookshelf.dom.modalCreateList.style.display !== 'none') {
+            if (isModalShown(this.bookshelf.dom.modalCreateList)) {
                 this.bookshelf.closeCreateListModal()
                 return
             }
             const updateModal = this.updates.dom.modalUpdateDialog || document.getElementById('modal-update-dialog')
-            if (updateModal && (updateModal.classList.contains('show') || updateModal.style.display !== 'none')) {
+            if (isModalShown(updateModal)) {
                 this.updates.closeUpdateModal()
                 return
             }
-            if (this.bookshelf.dom.modalBatchAddToList && this.bookshelf.dom.modalBatchAddToList.style.display !== 'none') {
+            if (isModalShown(this.bookshelf.dom.modalBatchAddToList)) {
                 this.bookshelf.closeBatchAddToListModal()
                 return
             }
-            if (this.annotations.activeDrawer) {
+            const ocrModal = document.getElementById('modal-pdf-ocr')
+            if (isModalShown(ocrModal)) {
+                ocrModal.classList.remove('show')
+                ocrModal.style.display = 'none'
+                return
+            }
+            if (this.pdfViewport?.getAutoScrollState().active) {
+                e.preventDefault()
+                this.pdfTools.stopAutoScroll()
+                return
+            }
+            if (!editing && (hasPdfSelection || this._isReaderPopupVisible() || this._hasActiveSelectionOrPopup())) {
+                e.preventDefault()
+                this.consumeDismissalGesture({ clearSelection: true })
+                return
+            }
+            if (this.aiSidebar?.isOpen) {
+                e.preventDefault()
+                this.aiSidebar.close()
+                return
+            }
+            if (this.annotations.activeDrawer && this.annotations.activeDrawer !== 'none') {
                 this.annotations.closeDrawer()
                 return
             }
@@ -2726,26 +2752,28 @@ class UniversalReaderApp {
                         this.search.navigateSearchMatch(e.shiftKey ? -1 : 1)
                     }
                     break
-                case 'Escape':
+                case 'Escape': {
                     if (this.pdfViewport?.getAutoScrollState().active) {
                         this.pdfTools.stopAutoScroll()
-                        break
-                    }
-                    if (this.cards.dom.quoteCardBackdrop && this.cards.dom.quoteCardBackdrop.style.display !== 'none') {
-                        this.cards.closeQuoteCardModal()
                         return
                     }
-                    if (this.search.currentSearchMatches.length > 0 || (this.search.dom.readerSearchBar && this.search.dom.readerSearchBar.style.display !== 'none')) {
+                    const searchBarEl = this.search.dom.readerSearchBar
+                    const isSearchBarOpen = Boolean(searchBarEl && (searchBarEl.classList.contains('active') || (searchBarEl.style.display && searchBarEl.style.display !== 'none')))
+                    if (this.search.currentSearchMatches.length > 0 || isSearchBarOpen) {
                         this.search.clearSearchState(false)
+                        return
                     }
-                    if (this.annotations.activeDrawer) {
+                    if (this.annotations.activeDrawer && this.annotations.activeDrawer !== 'none') {
                         this.annotations.closeDrawer()
-                    } else if (this.isCurrentlyFullscreen || document.fullscreenElement || document.webkitFullscreenElement) {
-                        this.toggleFullscreen()
+                        return
                     }
-                    this.annotations.hideSelectionPopup()
-                    this.annotations.hideHighlightActionPopup()
-                    break
+                    if (this.isCurrentlyFullscreen || document.fullscreenElement || document.webkitFullscreenElement) {
+                        this.toggleFullscreen()
+                        return
+                    }
+                    this.consumeDismissalGesture({ clearSelection: true })
+                    return
+                }
             }
         }
     }
@@ -3157,6 +3185,8 @@ class UniversalReaderApp {
 
     // Runs inside the owning App session; errors propagate to openBook's existing cleanup.
     async _openPdfSession({ initialLocation, options, bookId, readerSession, snapshot, bookData, fileObj }) {
+                this.dom.readerView?.classList.add('is-pdf-mode')
+                this.dom.readerView?.removeAttribute?.('data-reader-flow')
 
                 // Independent PDF Viewport (no iframe sandbox)
                 const nativePath = snapshot.nativePath || await db.getBookNativePath(bookId)
@@ -3202,6 +3232,7 @@ class UniversalReaderApp {
                     },
                     onTap: () => {
                         if (readerSession.isCurrent() && !window.mobileShell?.activeSheet && (!this.annotations.activeDrawer || this.annotations.activeDrawer === 'none')) {
+                            if (this.consumeDismissalGesture({ clearSelection: true })) return
                             const isMobile = (window.mobileShell?.isMobileViewport?.() ?? false) || Boolean(platformBridge?.isAndroid)
                             this.requestToggleReaderUI(isMobile ? 60 : 0)
                         }
@@ -3534,7 +3565,8 @@ this.pdfTools.applyPdfPageAppearance()
 
     // Runs inside the owning App session; errors propagate to openBook's existing cleanup.
     async _openFoliateSession({ initialLocation, bookId, readerSession, snapshot, bookData, fileObj, takePreparedEpub }) {
-const sessionView = document.createElement('foliate-view')
+            this.dom.readerView?.classList.remove('is-pdf-mode')
+            const sessionView = document.createElement('foliate-view')
             readerSession.view = sessionView
             this.foliateView = sessionView
             sessionView.style.visibility = 'hidden'
@@ -4099,7 +4131,8 @@ const sessionView = document.createElement('foliate-view')
                 return
             }
             if (this.dom.readerView) {
-                this.dom.readerView.classList.remove('active', 'closing')
+                this.dom.readerView.classList.remove('active', 'closing', 'is-pdf-mode')
+                this.dom.readerView.removeAttribute('data-reader-flow')
                 this.dom.readerView.style.display = 'none'
             }
             this._returnToLibraryView()
@@ -4108,12 +4141,12 @@ const sessionView = document.createElement('foliate-view')
         }
 
         // 1. Immediately and synchronously abort closing session so its callbacks become no-op
+        this.dom.readerView?.classList.remove('is-pdf-mode')
+        this.dom.readerView?.removeAttribute('data-reader-flow')
         this.pageTurnController?.cancelCurrent()
         this.pageTurnController?.setAdapter(null)
         closingSession.abortController?.abort()
-        if (ttsPlayer.state !== 'playing' && ttsPlayer.state !== 'paused') {
-            ttsPlayer.stop()
-        }
+        ttsPlayer.stop()
         if (this.dom.ttsPlayerBar) {
             this.dom.ttsPlayerBar.classList.remove('active')
             this.dom.ttsPlayerBar.style.display = 'none'
@@ -4283,6 +4316,12 @@ const sessionView = document.createElement('foliate-view')
         if (!this.currentBookId) return
         if (session && this._activeSession !== session) return
         this.cards.hideFootnotePopup()
+        if (!detail.isSettled) {
+            this.annotations.hideSelectionPopup((this.annotations.multiSelectedRanges?.length || 0) > 1)
+            this.annotations.hideHighlightActionPopup()
+            this.cards.hideDictionaryCard()
+            this.cards.hideParaTranslationCard?.()
+        }
         if (this.annotations.multiSelectedRanges && this.annotations.multiSelectedRanges.length > 1) {
             this.annotations.renderVirtualMultiSelections()
         }
@@ -4407,6 +4446,112 @@ const sessionView = document.createElement('foliate-view')
         }, 500)
     }
 
+    _isPopupElVisible(el) {
+        if (!el) return false
+        return Boolean(el.classList?.contains('active') || (el.style?.display && el.style.display !== 'none'))
+    }
+
+    _isReaderPopupVisible() {
+        const footnotePopup = this.cards?.dom?.footnotePopup || (typeof document !== 'undefined' ? document.getElementById('footnote-popup') : null)
+        return Boolean(
+            this._isPopupElVisible(this.annotations?.dom?.selectionPopup) ||
+            this._isPopupElVisible(this.annotations?.dom?.highlightActionPopup) ||
+            this._isPopupElVisible(this.cards?.dom?.readerDictionaryCard) ||
+            this._isPopupElVisible(footnotePopup) ||
+            this._isPopupElVisible(this.cards?.dom?.readerParaTranslationCard)
+        )
+    }
+
+    _hasActiveSelectionOrPopup() {
+        if (this._isReaderPopupVisible()) return true
+        if ((this.annotations?.multiSelectedRanges?.length || 0) > 0) return true
+        if (this.pdfViewport?._hasPdfDomSelection || (this.pdfViewport?._nativePreview?.length || 0) > 0) return true
+        try {
+            const winSel = window.getSelection?.()
+            if (winSel && !winSel.isCollapsed && winSel.toString().trim().length > 0) return true
+        } catch {}
+        try {
+            const contents = this.foliateView?.renderer?.getContents?.() || []
+            for (const content of contents) {
+                const sel = content?.doc?.defaultView?.getSelection?.() || content?.doc?.getSelection?.()
+                if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) return true
+            }
+            const iframes = this.dom?.readerContentArea?.querySelectorAll?.('iframe') || []
+            for (const iframe of iframes) {
+                const docSel = iframe?.contentDocument?.getSelection?.()
+                if (docSel && !docSel.isCollapsed && docSel.toString().trim().length > 0) return true
+            }
+        } catch {}
+        return false
+    }
+
+    _armDismissSelectionGesture() {
+        clearTimeout(this._dismissSelectionTimer)
+        this._dismissSelectionGesture = true
+        this._dismissSelectionTimer = setTimeout(() => {
+            this._dismissSelectionGesture = false
+            this._dismissSelectionTimer = null
+        }, 400)
+    }
+
+    _clearDismissSelectionGesture() {
+        clearTimeout(this._dismissSelectionTimer)
+        this._dismissSelectionGesture = false
+        this._dismissSelectionTimer = null
+    }
+
+    armTouchTapSyntheticClickLock({ dismissed = false } = {}) {
+        this.clearTouchTapSyntheticClickLock()
+        const lock = {
+            dismissed: Boolean(dismissed),
+            timer: setTimeout(() => {
+                if (this._touchTapSyntheticClickLock === lock) {
+                    this._touchTapSyntheticClickLock = null
+                }
+            }, 400)
+        }
+        this._touchTapSyntheticClickLock = lock
+    }
+
+    consumeTouchTapSyntheticClickLock() {
+        const lock = this._touchTapSyntheticClickLock
+        if (!lock) return null
+        this.clearTouchTapSyntheticClickLock()
+        return lock
+    }
+
+    clearTouchTapSyntheticClickLock() {
+        if (this._touchTapSyntheticClickLock?.timer) {
+            clearTimeout(this._touchTapSyntheticClickLock.timer)
+        }
+        this._touchTapSyntheticClickLock = null
+    }
+
+    captureSelectionAndPopupStateOnGestureStart() {
+        this._clearDismissSelectionGesture()
+        const active = this._hasActiveSelectionOrPopup()
+        if (active) {
+            this._armDismissSelectionGesture()
+        }
+        return active
+    }
+
+    consumeDismissalGesture({ clearSelection = true } = {}) {
+        const active = Boolean(this._dismissSelectionGesture || this._hasActiveSelectionOrPopup())
+        if (!active) return false
+        this.annotations?.hideSelectionPopup?.()
+        this.annotations?.hideHighlightActionPopup?.()
+        this.cards?.hideDictionaryCard?.()
+        this.cards?.hideFootnotePopup?.()
+        this.cards?.hideParaTranslationCard?.()
+        if (clearSelection) {
+            this.annotations?.clearActiveTextSelection?.()
+        }
+        this.cancelPendingReaderUIToggle()
+        this._clearDismissSelectionGesture()
+        return true
+    }
+
     cancelPendingReaderUIToggle() {
         if (this._pendingReaderUIToggleTimer) {
             clearTimeout(this._pendingReaderUIToggleTimer)
@@ -4429,54 +4574,12 @@ const sessionView = document.createElement('foliate-view')
                 return
             }
 
-            // 2. Suppress if dictionary card, selection popup, highlight popup, paragraph translation card, or footnote popup is currently visible
-            const isDictVisible = Boolean(this.cards.dom.readerDictionaryCard?.classList.contains('active') || (this.cards.dom.readerDictionaryCard?.style.display && this.cards.dom.readerDictionaryCard.style.display !== 'none'))
-            const isPopupVisible = Boolean(this.annotations.dom.selectionPopup?.classList.contains('active') || (this.annotations.dom.selectionPopup?.style.display && this.annotations.dom.selectionPopup.style.display !== 'none'))
-            const isHighlightPopupVisible = Boolean(this.annotations.dom.highlightActionPopup?.classList.contains('active') || (this.annotations.dom.highlightActionPopup?.style.display && this.annotations.dom.highlightActionPopup.style.display !== 'none'))
-            const isParaTransVisible = Boolean(this.cards.dom.readerParaTranslationCard?.classList.contains('active') || (this.cards.dom.readerParaTranslationCard?.style.display && this.cards.dom.readerParaTranslationCard.style.display !== 'none'))
-            const isFootnoteVisible = Boolean(this.cards.dom.footnotePopup?.classList.contains('active') || (this.cards.dom.footnotePopup?.style.display && this.cards.dom.footnotePopup.style.display !== 'none'))
-            if (isDictVisible || isPopupVisible || isHighlightPopupVisible || isParaTransVisible || isFootnoteVisible) {
-                this.annotations.hideSelectionPopup()
-                this.cards.hideDictionaryCard()
-                this.cards.hideParaTranslationCard?.()
-                this.cards.hideFootnotePopup()
-                this.annotations.hideHighlightActionPopup()
-                this.pdfViewport?.clearSelection?.()
+            // 2. Abort without dismissing if a dismissal gesture is armed or any selection/popup is active
+            if (this._dismissSelectionGesture || this._hasActiveSelectionOrPopup()) {
                 return
             }
 
-            // Once popups are closed, clear any lingering snapshot so it never blocks UI toggle
             this.annotations._frozenSelectionSnapshot = null
-
-            // 3. Suppress if window has text selected
-            const winSel = window.getSelection()
-            if (winSel && !winSel.isCollapsed && winSel.toString().trim().length > 0) {
-                try { winSel.removeAllRanges() } catch {}
-                return
-            }
-
-            // 4. Suppress if any reader section document has text selected
-            try {
-                let hasSectionSel = false
-                const contents = this.foliateView?.renderer?.getContents?.() || []
-                for (const content of contents) {
-                    const sel = content?.doc?.getSelection?.()
-                    if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
-                        hasSectionSel = true
-                        try { sel.removeAllRanges() } catch {}
-                    }
-                }
-                const iframes = this.dom.readerContentArea?.querySelectorAll('iframe') || []
-                for (const iframe of iframes) {
-                    const docSel = iframe?.contentDocument?.getSelection?.()
-                    if (docSel && !docSel.isCollapsed && docSel.toString().trim().length > 0) {
-                        hasSectionSel = true
-                        try { docSel.removeAllRanges() } catch {}
-                    }
-                }
-                if (hasSectionSel) return
-            } catch {}
-
             this.toggleReaderUI(forceState)
         }
 

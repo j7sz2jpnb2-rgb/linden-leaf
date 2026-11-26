@@ -6,7 +6,7 @@ export { normalizeTimestampMs, mergeSessionIntervals, calculateIntervalUnionSeco
 import { buildTranslationRevisionArchive, checkTranslationCompatibility } from './translation-job-core.js'
 import { resolveReadingState } from './tags-manager.js'
 import { withReadableBookTitle } from './book-title.js'
-import { isEnglish, t } from './i18n.js'
+import { getLocale, isEnglish, t } from './i18n.js'
 
 const DB_NAME = 'UniversalReaderDB'
 const DB_VERSION = 11
@@ -1201,16 +1201,36 @@ export const updateBookMetadata = async (id, { title, author }) => {
     if (!id) return null
     const db = await openDB()
     return new Promise((resolve, reject) => {
-        const tx = db.transaction('books', 'readwrite')
+        const stores = ['books']
+        if (title != null && db.objectStoreNames.contains('ai_conversations')) {
+            stores.push('ai_conversations')
+        }
+        const tx = db.transaction(stores, 'readwrite')
         const store = tx.objectStore('books')
         const getReq = store.get(id)
         getReq.onsuccess = () => {
             const book = getReq.result
             if (!book) return resolve(null)
-            if (title != null) book.title = title.trim()
+            const trimmedTitle = title != null ? title.trim() : null
+            if (trimmedTitle != null) book.title = trimmedTitle
             if (author != null) book.author = author.trim()
             book.updatedAt = Date.now()
             store.put(book)
+
+            if (trimmedTitle != null && stores.includes('ai_conversations')) {
+                try {
+                    const convStore = tx.objectStore('ai_conversations')
+                    const idx = convStore.index('bookId')
+                    const req = idx.getAll(id)
+                    req.onsuccess = () => {
+                        for (const conv of (req.result || [])) {
+                            if (conv.bookTitle !== trimmedTitle) {
+                                convStore.put({ ...conv, bookTitle: trimmedTitle })
+                            }
+                        }
+                    }
+                } catch {}
+            }
         }
         tx.oncomplete = () => {
             invalidateReadingStatsCache()
@@ -2441,7 +2461,7 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
         streakDays,
         activeDaysCount: activeDates.size,
         companionDays,
-        earliestDateStr: new Date(earliestTime).toLocaleDateString('zh-CN'),
+        earliestDateStr: new Date(earliestTime).toLocaleDateString(getLocale()),
         finishedCount,
         currentYearFinishedCount,
         yearFinishedCount,
@@ -2459,8 +2479,8 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
             const book = bookMap.get(note.bookId)
             return {
                 ...note,
-                bookTitle: note.bookTitle || book?.title || bookTitles.get(note.bookId) || t('db.stats.removedBook'),
-                bookFilename: note.bookFilename || book?.filename || ''
+                bookTitle: book?.title || bookTitles.get(note.bookId) || note.bookTitle || t('db.stats.removedBook'),
+                bookFilename: book?.filename || note.bookFilename || ''
             }
         }),
         periodHighlightsCount: periodHighlights.length,
@@ -2471,8 +2491,8 @@ export const getReadingStats = async (viewMode = 'month', targetYear = new Date(
             const book = bookMap.get(session.bookId)
             return {
                 ...session,
-                bookTitle: session.bookTitle || book?.title || bookTitles.get(session.bookId) || t('db.stats.removedBook'),
-                bookFilename: session.bookFilename || book?.filename || '',
+                bookTitle: book?.title || bookTitles.get(session.bookId) || session.bookTitle || t('db.stats.removedBook'),
+                bookFilename: book?.filename || session.bookFilename || '',
                 coverBlob: book?.coverBlob || null,
                 coverRevision: book?.coverRevision ?? book?.coverBlob?._revision ?? 0,
                 format: session.format || book?.format || '',

@@ -56,6 +56,24 @@ function makeAndroidTtsError(errorCode, rawDetail) {
 }
 
 
+function hasSpeakableText(text) {
+    return Boolean(text && /[\p{L}\p{N}]/u.test(text))
+}
+
+function detectSpeechLang(text, fallbackLocale = 'zh-CN') {
+    const s = String(text || '')
+    const loc = String(fallbackLocale || 'zh-CN').trim()
+    if (/[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\uFF65-\uFF9F]/.test(s)) return 'ja-JP'
+    if (/[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/.test(s)) return 'ko-KR'
+    if (/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(s)) {
+        if (/^ja/i.test(loc)) return 'ja-JP'
+        if (/zh[-_](TW|HK|MO|Hant)/i.test(loc)) return 'zh-TW'
+        return 'zh-CN'
+    }
+    if (/[A-Za-z]/.test(s)) return /^en/i.test(loc) ? loc : 'en-US'
+    return loc || 'zh-CN'
+}
+
 export class SystemTtsProvider {
     get label() { return t('tts.provider.systemLabel') }
 
@@ -104,9 +122,14 @@ export class SystemTtsProvider {
         this._stopped = false
         this._paused = false
 
+        const rawText = String(segment?.text || '')
+        if (!hasSpeakableText(rawText)) {
+            return Promise.resolve()
+        }
+
         if (platformBridge.isAndroid && platformBridge.isTauri) {
             const bookTitle = options.bookTitle || 'Linden Leaf'
-            const text = segment?.text || ''
+            const text = rawText
             const rate = options.rate || 1.0
             const jobId = options.jobId || `job_${Date.now()}`
             const utteranceId = options.utteranceId || `utt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
@@ -117,6 +140,8 @@ export class SystemTtsProvider {
                 jobId,
                 utteranceId,
                 generation,
+                bookId: options.bookId || '',
+                bookAuthor: options.bookAuthor || '',
                 voiceId: options.voiceId || '',
                 locale: options.locale || getLocale() || 'zh-CN'
             })
@@ -210,7 +235,7 @@ export class SystemTtsProvider {
         }
 
         return new Promise((resolve, reject) => {
-            const utterance = new SpeechSynthesisUtterance(segment.text)
+            const utterance = new SpeechSynthesisUtterance(rawText)
             utterance.rate = options.rate || 1.0
             utterance.pitch = options.pitch || 1.0
 
@@ -219,6 +244,7 @@ export class SystemTtsProvider {
                 const match = all.find(v => (v.voiceURI || v.name) === options.voiceId)
                 if (match) utterance.voice = match
             }
+            utterance.lang = utterance.voice?.lang || detectSpeechLang(rawText, options.locale || getLocale() || 'zh-CN')
 
             utterance.onstart = () => {
                 options.onPlaybackStarted?.()
@@ -668,6 +694,9 @@ export class TtsPlayer {
         this.generation = 0
         this.abortController = null
         this.sessionBookOwner = null
+        this._segmentOwner = null
+        this._activeLoopPromise = null
+        this._visibilityListenerBound = false
         this.lastError = null
         this.providerConfigs = {
             system: {},
@@ -794,10 +823,14 @@ export class TtsPlayer {
 
     getProviderOptions() {
         const base = this.providerConfigs[this.currentProviderName] || {}
+        const fallbackLocale = typeof getLocale === 'function' ? getLocale() : 'zh-CN'
         return {
             ...base,
             voiceId: this.voiceId || base.voiceId || '',
             rate: this.rate,
+            locale: fallbackLocale || 'zh-CN',
+            bookId: this.sessionBookOwner?.bookId || this.readerApp?.currentBookId || '',
+            bookAuthor: this.sessionBookOwner?.bookAuthor || this.readerApp?.currentBookData?.author || '',
             signal: this.abortController?.signal
         }
     }
@@ -820,18 +853,90 @@ export class TtsPlayer {
 
     attachReaderApp(app) {
         this.readerApp = app
-        this.syncNativeListening().catch(e => console.debug('Listening recovery deferred:', e))
+        if (!this._visibilityListenerBound && typeof document !== 'undefined') {
+            this._visibilityListenerBound = true
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) {
+                    this.reattachNativePlayback().catch(e => console.debug('TTS reattach deferred:', e))
+                }
+            })
+        }
+        this.reattachNativePlayback().catch(e => console.debug('Listening recovery deferred:', e))
+    }
+
+    _resolveChapterKey(app = this.readerApp) {
+        if (!app?.foliateView) return null
+        const loc = app.currentLocation || app.foliateView?.lastLocation || null
+        if (loc?.sectionIndex != null) return `sec:${loc.sectionIndex}`
+        if (loc?.tocItem?.href) return `href:${loc.tocItem.href}`
+        if (loc?.cfi) return `cfi:${String(loc.cfi).split('!')[0]}`
+        return null
+    }
+
+    _invalidateSegments() {
+        this.segments = []
+        this._segmentOwner = null
+        this.currentIndex = -1
+    }
+
+    _areSegmentsValid(app = this.readerApp, startIndex = null) {
+        if (!this.segments.length || !this._segmentOwner) return false
+        const activeBookId = app?.currentBookId || app?.currentBookData?.id || null
+        if (this._segmentOwner.bookId && activeBookId && this._segmentOwner.bookId !== activeBookId) {
+            return false
+        }
+        if (this._segmentOwner.format === 'epub') {
+            const chapterKey = this._resolveChapterKey(app)
+            if (chapterKey != null && this._segmentOwner.chapterKey != null && chapterKey !== this._segmentOwner.chapterKey) {
+                return false
+            }
+            if (this.segments.some(s => s?.element && s.element.isConnected === false)) {
+                return false
+            }
+            return true
+        }
+        if (this._segmentOwner.format === 'pdf') {
+            const curPage = app?.pdfViewport?.currentPage ?? 0
+            if (startIndex == null && !['playing', 'paused', 'preparing'].includes(this.state)) {
+                if (curPage !== this._segmentOwner.startPage) return false
+            }
+            if (curPage < this._segmentOwner.startPage || curPage > this._segmentOwner.endPage) {
+                return false
+            }
+            return true
+        }
+        return true
+    }
+
+    _ocrCharsToText(chars) {
+        if (!Array.isArray(chars) || !chars.length) return ''
+        let text = ''
+        let lastLine = null
+        for (const ch of chars) {
+            if (!ch?.text) continue
+            if (lastLine !== null && ch.line !== lastLine) text += '\n'
+            text += ch.text
+            lastLine = ch.line
+        }
+        return text.trim()
     }
 
     /**
      * Extract speakable segments from the current reading view using proper Foliate source documents
      */
-    async extractSegments() {
+    async extractSegments({ startPage = null } = {}) {
         const segments = []
-        if (!this.readerApp) return segments
+        this._segmentOwner = null
+        if (!this.readerApp) {
+            this.segments = segments
+            return segments
+        }
+
+        const app = this.readerApp
+        const activeBookId = app.currentBookId || app.currentBookData?.id || null
 
         // 1. Reflowable EPUB / TXT document
-        const foliateView = this.readerApp.foliateView
+        const foliateView = app.foliateView
         if (foliateView) {
             const renderer = foliateView.renderer
             const contentItems = (typeof foliateView.getContents === 'function' ? foliateView.getContents() : null)
@@ -862,10 +967,10 @@ export class TtsPlayer {
                     clone.querySelectorAll('sup, a[role="doc-noteref"], .footnote-ref, .footnote').forEach(n => n.remove())
                     const raw = clone.innerText || clone.textContent || ''
                     const cleaned = raw.replace(/\s+/g, ' ').trim()
-                    if (cleaned.length >= 2) {
+                    if (cleaned.length >= 1 && hasSpeakableText(cleaned)) {
                         const chunks = splitTextIntoSentences(cleaned, 800)
                         for (const chunk of chunks) {
-                            if (chunk.length >= 2) {
+                            if (chunk.length >= 1 && hasSpeakableText(chunk)) {
                                 segments.push({
                                     id: `seg_${idx++}`,
                                     index: segments.length,
@@ -878,17 +983,111 @@ export class TtsPlayer {
                     }
                 }
             }
+            this.segments = segments
+            this._segmentOwner = {
+                bookId: activeBookId,
+                chapterKey: this._resolveChapterKey(app),
+                format: 'epub'
+            }
+            return segments
         }
 
-        const viewport = this.readerApp.pdfViewport
+        const viewport = app.pdfViewport
         if (!foliateView && viewport) {
-            const driver = this.readerApp.pdfDriver || viewport.driver
-            const bookId = this.readerApp.currentBookId
-            const text = await driver.getPagePlainText(viewport.currentPage ?? 0)
-            if (this.readerApp.currentBookId !== bookId || this.readerApp.pdfViewport !== viewport) return []
-            for (const chunk of splitTextIntoSentences(text, 800)) {
-                if (chunk.length >= 2) segments.push({ id: 'seg_pdf_' + segments.length, index: segments.length, text: chunk, format: 'pdf' })
+            const driver = app.pdfDriver || viewport.driver
+            const numPages = Math.max(1, viewport.numPages || driver?.numPages || 1)
+            const firstPage = Math.max(0, Math.min(startPage != null ? startPage : (viewport.currentPage ?? 0), numPages - 1))
+            const maxPagesPerBatch = 10
+            const maxCharsPerBatch = 50000
+            let totalChars = 0
+            let endPage = firstPage
+            const docHash = app.currentBookData?.documentHash || activeBookId
+
+            for (let p = firstPage; p < numPages && (p - firstPage) < maxPagesPerBatch && totalChars < maxCharsPerBatch; p++) {
+                let text = ''
+                if (typeof driver?.getPagePlainText === 'function') {
+                    text = await driver.getPagePlainText(p).catch(() => '')
+                }
+                if (app.currentBookId !== activeBookId || app.pdfViewport !== viewport) {
+                    this.segments = []
+                    return []
+                }
+                if (!hasSpeakableText(text)) {
+                    const memOcr = viewport._pageOcrData?.get?.(p)
+                    if (memOcr?.length) {
+                        text = this._ocrCharsToText(memOcr)
+                    } else if (docHash && typeof db?.getSetting === 'function') {
+                        const cached = await db.getSetting(`linden_ocr_${docHash}_p${p}`).catch(() => null)
+                        if (app.currentBookId !== activeBookId || app.pdfViewport !== viewport) {
+                            this.segments = []
+                            return []
+                        }
+                        if (Array.isArray(cached) && cached.length) {
+                            viewport.setPageOcrData?.(p, cached)
+                            text = cached.map(s => s?.text || '').join(' ').trim()
+                        }
+                    }
+                }
+                if (!hasSpeakableText(text) && p === firstPage && typeof driver?.renderPageBitmap === 'function') {
+                    let canvas = null
+                    try {
+                        const ocrMod = await import('./ocr-service.js')
+                        const activeOcr = ocrMod?.ocrService || ocrMod?.default
+                        const scale = 1.5
+                        const pageSize = viewport.pageSizes?.[p] || driver.pageSizes?.[p] || null
+                        const bmp = await driver.renderPageBitmap(p, scale, this.abortController?.signal)
+                        canvas = bmp?.canvas || (bmp?.tagName === 'CANVAS' ? bmp : null)
+                        if (app.currentBookId !== activeBookId || app.pdfViewport !== viewport) {
+                            this.segments = []
+                            return []
+                        }
+                        if (canvas && activeOcr?.recognizeCanvas) {
+                            const recognized = await activeOcr.recognizeCanvas(canvas, this.abortController?.signal, {
+                                scale,
+                                originX: driver?.kind === 'mupdf' ? (pageSize?.x0 || 0) : 0,
+                                originY: driver?.kind === 'mupdf' ? (pageSize?.y0 || 0) : 0
+                            })
+                            if (app.currentBookId !== activeBookId || app.pdfViewport !== viewport) {
+                                this.segments = []
+                                return []
+                            }
+                            if (recognized?.spans?.length) {
+                                viewport.setPageOcrData?.(p, recognized.spans)
+                                if (docHash && typeof db?.setSetting === 'function') {
+                                    db.setSetting(`linden_ocr_${docHash}_p${p}`, recognized.spans).catch(() => {})
+                                }
+                                text = recognized.text || ''
+                            }
+                        }
+                    } catch (_) {
+                    } finally {
+                        if (canvas) { canvas.width = 0; canvas.height = 0 }
+                    }
+                }
+
+                endPage = p
+                if (!hasSpeakableText(text)) continue
+                for (const chunk of splitTextIntoSentences(text, 800)) {
+                    if (chunk.length >= 1 && hasSpeakableText(chunk)) {
+                        segments.push({
+                            id: 'seg_pdf_' + segments.length,
+                            index: segments.length,
+                            text: chunk,
+                            format: 'pdf',
+                            page: p
+                        })
+                        totalChars += chunk.length
+                    }
+                }
             }
+            this.segments = segments
+            this._segmentOwner = {
+                bookId: activeBookId,
+                startPage: firstPage,
+                endPage,
+                format: 'pdf'
+            }
+            return segments
         }
 
         this.segments = segments
@@ -904,12 +1103,19 @@ export class TtsPlayer {
         const activeBookId = app?.currentBookId || app?.currentBookData?.id || null
         if (this.sessionBookOwner?.bookId && activeBookId && this.sessionBookOwner.bookId !== activeBookId) {
             this.stop(true)
-            this.segments = []
+            this._invalidateSegments()
         }
 
         if (this.state === 'paused' && (startIndex === null || startIndex === this.currentIndex)) {
-            this.resume()
-            return
+            if (this._areSegmentsValid(app, startIndex)) {
+                this.resume()
+                return
+            }
+            this.stop(true)
+        }
+
+        if (!this._areSegmentsValid(app, startIndex)) {
+            this._invalidateSegments()
         }
 
         this.lastError = null
@@ -919,6 +1125,10 @@ export class TtsPlayer {
             this.abortController.abort()
         }
         this.abortController = new AbortController()
+        if (this._activeLoopPromise) {
+            try { await this._activeLoopPromise } catch (_) {}
+            if (this.generation !== myGen || this._stopRequested) return
+        }
 
         this.setState('preparing')
 
@@ -926,20 +1136,24 @@ export class TtsPlayer {
             await this.extractSegments()
         }
 
+        const postBookId = app?.currentBookId || app?.currentBookData?.id || null
+        if (this.state === 'paused' || this._stopRequested || this.generation !== myGen || postBookId !== activeBookId) {
+            return
+        }
+
         if (this.segments.length === 0) {
             this.sessionBookOwner = null
+            this._segmentOwner = null
             this.setState('stopped')
             throw new Error(t('tts.error.noReadableText'))
         }
-
-        if (this.state === 'paused' || this._stopRequested || this.generation !== myGen) return
 
         const target = startIndex !== null ? startIndex : (this.currentIndex >= 0 ? this.currentIndex : 0)
         this.currentIndex = Math.max(0, Math.min(target, this.segments.length - 1))
         this._listenStartTime = null
         const now = Date.now()
         this.sessionBookOwner = {
-            bookId: app?.currentBookId || app?.currentBookData?.id || null,
+            bookId: activeBookId,
             bookTitle: app?.currentBookData?.title || t('book.untitled'),
             bookAuthor: app?.currentBookData?.author || app?.currentBookMeta?.author || '',
             startTimestamp: now
@@ -990,6 +1204,7 @@ export class TtsPlayer {
                     jobId,
                     generation,
                     bookId: owner?.bookId || '',
+                    bookAuthor: owner?.bookAuthor || '',
                     voiceId: opts.voiceId || '',
                     locale: getLocale() || 'zh-CN'
                 }
@@ -1027,6 +1242,10 @@ export class TtsPlayer {
     async playbackLoop(gen) {
         this._loopRunning = true
         const loopOwner = this.sessionBookOwner
+        let finishedCleanly = false
+        let resolveLoopExit = null
+        const loopPromise = new Promise(resolve => { resolveLoopExit = resolve })
+        this._activeLoopPromise = loopPromise
         try {
             while (this.state === 'playing' && this.currentIndex < this.segments.length && !this._stopRequested && this.generation === gen) {
                 const seg = this.segments[this.currentIndex]
@@ -1057,6 +1276,7 @@ export class TtsPlayer {
 
                 try {
                     await this.provider.play(seg, opts)
+                    if (this.generation !== gen || this._stopRequested) break
                     // Close segment interval cleanly upon actual completion
                     if (this._currentSegmentStartTime) {
                         const now = Date.now()
@@ -1080,24 +1300,51 @@ export class TtsPlayer {
 
                 this.currentIndex++
 
+                if (this.currentIndex >= this.segments.length &&
+                    this._segmentOwner?.format === 'pdf' &&
+                    this.sleepTimerDurationMinutes !== 'end_of_chapter') {
+                    const vp = this.readerApp?.pdfViewport
+                    const numPages = vp?.numPages ?? this.readerApp?.pdfDriver?.numPages ?? 0
+                    let nextPage = (this._segmentOwner.endPage ?? -1) + 1
+                    while (nextPage < numPages && !this._stopRequested && this.generation === gen && this.state === 'playing') {
+                        vp?.goToPage?.(nextPage)
+                        const nextSegs = await this.extractSegments({ startPage: nextPage })
+                        if (this._stopRequested || this.generation !== gen || this.state !== 'playing') break
+                        if (nextSegs.length > 0) {
+                            this.currentIndex = 0
+                            break
+                        }
+                        nextPage = (this._segmentOwner?.endPage ?? nextPage) + 1
+                    }
+                }
+
                 // Check sleep timer end-of-chapter condition
                 if (this.sleepTimerDurationMinutes === 'end_of_chapter' && this.currentIndex >= this.segments.length) {
+                    finishedCleanly = true
                     this.clearHighlight()
                     this.flushListeningSession(false, loopOwner)
                     this.setSleepTimer(0)
+                    this._invalidateSegments()
                     this.setState('stopped')
                     this.readerApp?.showToast?.(t('tts.toast.chapterDoneTimerStopped'), 'info')
                     return
                 }
             }
         } finally {
+            if (this._activeLoopPromise === loopPromise) {
+                this._activeLoopPromise = null
+            }
+            resolveLoopExit?.()
             if (this.generation === gen) {
                 this._loopRunning = false
                 if (this.state !== 'paused') {
                     this.clearHighlight()
                 }
-                this.flushListeningSession(this.state === 'paused', loopOwner)
-                if (this.currentIndex >= this.segments.length && !this._stopRequested) {
+                const keepOnPause = this.state === 'paused' && !finishedCleanly
+                this.flushListeningSession(keepOnPause, loopOwner)
+                if (!finishedCleanly && this.currentIndex >= this.segments.length && !this._stopRequested) {
+                    this._invalidateSegments()
+                    this.sessionBookOwner = null
                     this.setState('stopped')
                     this.readerApp?.showToast?.(t('tts.toast.chapterDone'), 'info')
                 }
@@ -1107,12 +1354,27 @@ export class TtsPlayer {
 
     highlightSegment(segment) {
         this.clearHighlight()
-        if (!segment?.element) return
+        if (!segment) return
+        if (segment.format === 'pdf' && segment.page != null) {
+            const vp = this.readerApp?.pdfViewport
+            if (vp && vp.currentPage !== segment.page) {
+                vp.goToPage?.(segment.page)
+            }
+            return
+        }
+        if (!segment.element) return
 
         try {
             segment.element.classList.add('tts-active-reading-segment')
             this.activeHighlightEl = segment.element
-            segment.element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+            const renderer = this.readerApp?.foliateView?.renderer
+            if (typeof renderer?.scrollToAnchor === 'function' && segment.element.isConnected) {
+                Promise.resolve(renderer.scrollToAnchor(segment.element)).catch(() => {
+                    try { segment.element.scrollIntoView({ behavior: 'smooth', block: 'center' }) } catch (_) {}
+                })
+            } else {
+                segment.element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+            }
         } catch (_) {}
     }
 
@@ -1287,8 +1549,16 @@ export class TtsPlayer {
     }
 
     resume(notifyProvider = true) {
-        if (this.state !== 'paused') return
         const app = this.readerApp || (typeof window !== 'undefined' ? window.app : null)
+        if (this.state === 'stopped' || this.state === 'idle') {
+            if (notifyProvider && (app?.currentBookId || app?.currentBookData?.id || this.segments.length > 0)) {
+                this.play().catch(e => {
+                    this.readerApp?.showToast?.(e?.message || String(e), 'warning')
+                })
+            }
+            return
+        }
+        if (this.state !== 'paused') return
         const activeBookId = app?.currentBookId || app?.currentBookData?.id || null
         if (this.sessionBookOwner?.bookId && activeBookId && this.sessionBookOwner.bookId !== activeBookId) {
             this.stop(true)
@@ -1330,6 +1600,11 @@ export class TtsPlayer {
         } else {
             if (notifyProvider) this.provider.stop()
             this._stopRequested = false
+            if (this.currentIndex < 0) this.currentIndex = 0
+            if (!this.segments.length) {
+                this.play(0).catch(e => this.readerApp?.showToast?.(e?.message || String(e), 'warning'))
+                return
+            }
             this.playbackLoop(++this.generation)
         }
     }
@@ -1352,7 +1627,10 @@ export class TtsPlayer {
                 .then(() => this.syncNativeListening()).catch(e => console.debug('Listening stop sync deferred:', e))
         } else this.provider.stop()
         this.clearHighlight()
-        if (resetIndex) this.currentIndex = -1
+        if (resetIndex) {
+            this._invalidateSegments()
+            this.sessionBookOwner = null
+        }
     }
 
     next() {
@@ -1465,37 +1743,115 @@ export class TtsPlayer {
         if (this._nativeSync) return this._nativeSync
         this._nativeSync = (async () => {
             let snapshot
-            do {
-                this._nativeSyncRequested = false
-                snapshot = await platformBridge.getBackgroundPlaybackState()
-                const intervals = [...(snapshot?.listeningIntervals || [])].sort((a, b) => a.sequence - b.sequence)
-                let through = 0
-                for (const interval of intervals) {
-                    let start = Number(interval.startMs)
-                    const end = Number(interval.endMs)
-                    if (!interval.bookId || !(end > start)) continue
-                    let part = 0
-                    while (start < end) {
-                        const date = new Date(start)
-                        const midnight = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime()
-                        const until = Math.min(end, midnight)
-                        const dateKey = db.toLocalDateKey(date)
-                        const author = interval.bookAuthor || (window.app?.currentBookData?.id === interval.bookId ? window.app?.currentBookData?.author : '') || window.app?.currentBookMeta?.author || ''
-                        await db.recordReadingSession({
-                            id: `android_tts_${interval.jobId}_${interval.sequence}_${part++}`,
-                            bookId: interval.bookId, bookTitle: interval.bookTitle, bookAuthor: author,
-                            startTime: start, endTime: until, durationSeconds: (until - start) / 1000,
-                            activeIntervals: [[start, until]], kind: 'listen', isListening: true, date: dateKey
-                        })
-                        start = until
+            let through = 0
+            try {
+                do {
+                    this._nativeSyncRequested = false
+                    snapshot = await platformBridge.getBackgroundPlaybackState()
+                    const intervals = [...(snapshot?.listeningIntervals || [])].sort((a, b) => a.sequence - b.sequence)
+                    for (const interval of intervals) {
+                        const seq = Number(interval.sequence) || 0
+                        let start = Number(interval.startMs)
+                        const end = Number(interval.endMs)
+                        if (!interval.bookId || !(end > start)) {
+                            if (seq > through) through = seq
+                            continue
+                        }
+                        let part = 0
+                        while (start < end) {
+                            const date = new Date(start)
+                            const midnight = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime()
+                            const until = Math.min(end, midnight)
+                            const dateKey = typeof db?.toLocalDateKey === 'function'
+                                ? db.toLocalDateKey(date)
+                                : date.toLocaleDateString('en-CA')
+                            const author = interval.bookAuthor || (window.app?.currentBookData?.id === interval.bookId ? window.app?.currentBookData?.author : '') || window.app?.currentBookMeta?.author || ''
+                            await db.recordReadingSession({
+                                id: `android_tts_${interval.jobId}_${interval.sequence}_${part++}`,
+                                bookId: interval.bookId, bookTitle: interval.bookTitle, bookAuthor: author,
+                                startTime: start, endTime: until, durationSeconds: (until - start) / 1000,
+                                activeIntervals: [[start, until]], kind: 'listen', isListening: true, date: dateKey
+                            })
+                            start = until
+                        }
+                        if (seq > through) through = seq
                     }
-                    through = interval.sequence
+                    if (through > 0) {
+                        await platformBridge.acknowledgeTtsListening(through)
+                        through = 0
+                    }
+                } while (this._nativeSyncRequested)
+            } finally {
+                if (through > 0) {
+                    await platformBridge.acknowledgeTtsListening(through).catch(() => {})
                 }
-                if (through > 0) await platformBridge.acknowledgeTtsListening(through)
-            } while (this._nativeSyncRequested)
+            }
             return snapshot
         })().finally(() => { this._nativeSync = null })
         return this._nativeSync
+    }
+
+    async reattachNativePlayback() {
+        if (!platformBridge.isAndroid || !platformBridge.isTauri) return null
+        const snapshot = await this.syncNativeListening()
+        if (!snapshot || !snapshot.jobId || !['playing', 'paused', 'preparing'].includes(snapshot.state)) {
+            return snapshot
+        }
+        const app = this.readerApp
+        const activeBookId = app?.currentBookId || app?.currentBookData?.id || ''
+        if (snapshot.bookId && activeBookId && snapshot.bookId !== activeBookId) {
+            return snapshot
+        }
+        if (this._nativeQueue?.jobId === snapshot.jobId) {
+            if (Number.isInteger(snapshot.queueIndex) && snapshot.queueIndex >= 0) {
+                this.currentIndex = snapshot.queueIndex
+            }
+            this.setState(snapshot.state)
+            return snapshot
+        }
+        const gen = Math.max(this.generation + 1, Number(snapshot.generation) || 1)
+        this.generation = gen
+        this._nativeQueue = { jobId: snapshot.jobId, generation: Number(snapshot.generation) || 0 }
+        this._lastNativeEventSeq = Number(snapshot.eventSeq) || 0
+        this.sessionBookOwner = {
+            bookId: snapshot.bookId || activeBookId || null,
+            bookTitle: snapshot.bookTitle || app?.currentBookData?.title || t('book.untitled'),
+            bookAuthor: snapshot.bookAuthor || app?.currentBookData?.author || app?.currentBookMeta?.author || '',
+            startTimestamp: Date.now()
+        }
+        if (this.segments.length === 0 && app) {
+            await this.extractSegments().catch(() => [])
+        }
+        if (Number.isInteger(snapshot.queueIndex) && snapshot.queueIndex >= 0) {
+            this.currentIndex = this.segments.length > 0
+                ? Math.min(snapshot.queueIndex, this.segments.length - 1)
+                : snapshot.queueIndex
+        }
+        this.setState(snapshot.state)
+        if (this.segments[this.currentIndex]) {
+            this.highlightSegment(this.segments[this.currentIndex])
+        }
+        return snapshot
+    }
+
+    async _advancePdfNativeQueueAfterCompletion(owner) {
+        const vp = this.readerApp?.pdfViewport
+        const numPages = vp?.numPages ?? this.readerApp?.pdfDriver?.numPages ?? 0
+        let nextPage = (this._segmentOwner?.endPage ?? -1) + 1
+        while (nextPage < numPages && !this._stopRequested) {
+            vp?.goToPage?.(nextPage)
+            const nextSegs = await this.extractSegments({ startPage: nextPage })
+            if (this._stopRequested) return
+            if (nextSegs.length > 0) {
+                await this.play(0)
+                return
+            }
+            nextPage = (this._segmentOwner?.endPage ?? nextPage) + 1
+        }
+        this.sessionBookOwner = null
+        this._invalidateSegments()
+        this.setState('stopped')
+        this.readerApp?.showToast?.(t('tts.toast.chapterShortDone'), 'info')
     }
 
     handleNativePlaybackEvent(data, synchronize = true) {
@@ -1527,20 +1883,36 @@ export class TtsPlayer {
             case 'playbackpaused':
                 this.setState('paused')
                 break
-            case 'playbackcompleted':
+            case 'playbackcompleted': {
                 this._nativeQueue = null
-                this.sessionBookOwner = null
                 this.sleepTimerDurationMinutes = 0
                 this.sleepTimerRemainingSeconds = 0
                 this.clearHighlight()
+                const vp = this.readerApp?.pdfViewport
+                const numPages = vp?.numPages ?? this.readerApp?.pdfDriver?.numPages ?? 0
+                if (this._segmentOwner?.format === 'pdf' &&
+                    this._segmentOwner.endPage + 1 < numPages &&
+                    !this._stopRequested) {
+                    this._advancePdfNativeQueueAfterCompletion(owner).catch(e => {
+                        this.sessionBookOwner = null
+                        this._invalidateSegments()
+                        this.setState('stopped')
+                        this.readerApp?.showToast?.(e?.message || String(e), 'warning')
+                    })
+                    break
+                }
+                this.sessionBookOwner = null
+                this._invalidateSegments()
                 this.setState('stopped')
                 this.readerApp?.showToast?.(t('tts.toast.chapterShortDone'), 'info')
                 break
+            }
             case 'playbackstopped':
                 this._nativeQueue = null
                 this.sessionBookOwner = null
                 this.sleepTimerDurationMinutes = 0
                 this.sleepTimerRemainingSeconds = 0
+                this._invalidateSegments()
                 this.clearHighlight()
                 this.setState('stopped')
                 break
@@ -1550,6 +1922,7 @@ export class TtsPlayer {
                 this.lastError = { code, message: msg, detail: String(data.error || ''), timestamp: Date.now() }
                 this._nativeQueue = null
                 this.sessionBookOwner = null
+                this._invalidateSegments()
                 this.clearHighlight()
                 this.setState('stopped')
                 this.readerApp?.showToast?.(msg, 'warning')
@@ -1580,6 +1953,15 @@ export class TtsPlayer {
 
     initMediaSession() {
         if (typeof navigator === 'undefined' || !navigator.mediaSession) return
+        if (platformBridge.isAndroid && platformBridge.isTauri && this.currentProviderName === 'system') {
+            try {
+                for (const action of ['play', 'pause', 'stop', 'previoustrack', 'nexttrack']) {
+                    navigator.mediaSession.setActionHandler(action, null)
+                }
+                navigator.mediaSession.metadata = null
+            } catch (_) {}
+            return
+        }
         try {
             navigator.mediaSession.setActionHandler('play', () => this.resume())
             navigator.mediaSession.setActionHandler('pause', () => this.pause())
@@ -1593,6 +1975,7 @@ export class TtsPlayer {
 
     updateMediaSessionMetadata() {
         if (typeof navigator === 'undefined' || !navigator.mediaSession || !window.MediaMetadata) return
+        if (platformBridge.isAndroid && platformBridge.isTauri && this.currentProviderName === 'system') return
         const bookData = this.readerApp?.currentBookData || {}
         navigator.mediaSession.metadata = new window.MediaMetadata({
             title: bookData.title || t('tts.mediaTitleFallback'),

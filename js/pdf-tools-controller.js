@@ -109,26 +109,38 @@ export class PdfToolsController {
                 this.app.dialogs.showToast(t('pdfTools.ocrTocPdfOnly'), 'info')
                 return
             }
+            this._tocOcrAbortController?.abort()
+            const controller = this._tocOcrAbortController = new AbortController()
+            const { signal } = controller
             const expectedBookId = this.app.currentBookId
             const expectedBookData = this.app.currentBookData
             const expectedEpoch = this.app._currentBookEpoch
             const targetViewport = this.app.pdfViewport
             const pageIndex = targetViewport?.currentPage ?? 0
+            const isStale = () => signal.aborted || this.app.currentBookId !== expectedBookId ||
+                this.app.currentBookData !== expectedBookData ||
+                (expectedEpoch != null && this.app._currentBookEpoch !== expectedEpoch)
             this.app.dialogs.showToast(t('pdfTools.extractingToc', { page: pageIndex + 1 }), 'info')
             let canvas = null
             try {
                 const ocrMod = await import('./ocr-service.js')
+                if (isStale()) return
                 const activeOcr = ocrMod?.ocrService || ocrMod?.default || ocrMod
                 const driver = this.app.pdfDriver || targetViewport?.driver
+                const scale = 1.5
+                const pageSize = targetViewport?.pageSizes?.[pageIndex] || driver?.pageSizes?.[pageIndex] || null
                 if (typeof driver?.renderPageBitmap === 'function') {
-                    const bmp = await driver.renderPageBitmap(pageIndex, 1.5)
+                    const bmp = await driver.renderPageBitmap(pageIndex, scale, signal)
                     canvas = bmp?.canvas || bmp
                 }
+                if (isStale()) return
                 if (canvas && activeOcr?.recognizeCanvas) {
-                    const result = await activeOcr.recognizeCanvas(canvas, null, 1.5)
-                    if (this.app.currentBookId !== expectedBookId || this.app.currentBookData !== expectedBookData || (expectedEpoch != null && this.app._currentBookEpoch !== expectedEpoch)) {
-                        return
-                    }
+                    const result = await activeOcr.recognizeCanvas(canvas, signal, {
+                        scale,
+                        originX: driver?.kind === 'mupdf' ? (pageSize?.x0 || 0) : 0,
+                        originY: driver?.kind === 'mupdf' ? (pageSize?.y0 || 0) : 0
+                    })
+                    if (isStale()) return
                     if (result?.text) {
                         const lines = result.text.split('\n')
                         await this.parseOcrTocAndApply(lines, 0, { interactiveConfirm: true })
@@ -136,8 +148,13 @@ export class PdfToolsController {
                     }
                 }
             } catch (err) {
-                this.app.dialogs.showToast(t('pdfTools.ocrTocFailed', { error: err.message || err }), 'warning')
+                if (!isStale()) {
+                    this.app.dialogs.showToast(t('pdfTools.ocrTocFailed', { error: err.message || err }), 'warning')
+                }
             } finally {
+                if (this._tocOcrAbortController === controller) {
+                    this._tocOcrAbortController = null
+                }
                 if (canvas) {
                     canvas.width = 0
                     canvas.height = 0
@@ -205,13 +222,26 @@ export class PdfToolsController {
             const val = parseFloat(e.target.value) || 100
             this.setPDFZoom(val / 100)
         });
+        this.events.on(this.dom.pdfZoomPercentInput, 'focus', e => {
+            this._zoomInputInitialVal = e.target.value
+            this._zoomCommittedByEnter = false
+        });
         this.events.on(this.dom.pdfZoomPercentInput, 'keydown', e => {
             if (e.key === 'Enter') {
+                this._zoomCommittedByEnter = true
                 this.parseAndSetPDFZoom(e.target.value)
+                this._zoomInputInitialVal = e.target.value
                 e.target.blur()
             }
         });
         this.events.on(this.dom.pdfZoomPercentInput, 'blur', e => {
+            if (this._zoomCommittedByEnter) {
+                this._zoomCommittedByEnter = false
+                return
+            }
+            const unchanged = this._zoomInputInitialVal != null && e.target.value === this._zoomInputInitialVal
+            this._zoomInputInitialVal = null
+            if (unchanged) return
             this.parseAndSetPDFZoom(e.target.value)
         });
         this.events.on(document.getElementById('setting-pdf-page-appearance'), 'change', e => {
@@ -393,7 +423,15 @@ const select = document.getElementById('setting-pdf-page-appearance')
 
     updatePdfZoomControls(scale, mode = null) {
         const percentage = Math.round(scale * 100)
-        if (this.dom.pdfZoomSlider) this.dom.pdfZoomSlider.value = percentage
+        if (this.dom.pdfZoomSlider) {
+            if (this.app.pdfViewport?.options) {
+                const minPct = Math.round((this.app.pdfViewport.options.minScale ?? 0.1) * 100)
+                const maxPct = Math.round((this.app.pdfViewport.options.maxScale ?? 3.5) * 100)
+                this.dom.pdfZoomSlider.min = String(minPct)
+                this.dom.pdfZoomSlider.max = String(maxPct)
+            }
+            this.dom.pdfZoomSlider.value = percentage
+        }
         if (this.dom.pdfZoomPercentInput) this.dom.pdfZoomPercentInput.value = `${percentage}%`
         this.dom.btnPdfFitWidth?.classList.toggle('active', mode === 'fit-width')
         this.dom.btnPdfFitPage?.classList.toggle('active', mode === 'fit-page')
@@ -444,24 +482,29 @@ const select = document.getElementById('setting-pdf-page-appearance')
     }
 
     stepPDFZoom(deltaPct) {
-        const currSliderVal = this.app.pdfViewport ? Math.round(this.app.pdfViewport.scale * 100) : (parseFloat(this.dom.pdfZoomSlider?.value) || 100)
-        const nextVal = Math.max(30, Math.min(300, currSliderVal + deltaPct))
+        const vp = this.app.pdfViewport
+        const minPct = vp ? Math.round((vp.options?.minScale ?? 0.1) * 100) : 30
+        const maxPct = vp ? Math.round((vp.options?.maxScale ?? 3.5) * 100) : 300
+        const currSliderVal = vp ? Math.round(vp.scale * 100) : (parseFloat(this.dom.pdfZoomSlider?.value) || 100)
+        const nextVal = Math.max(minPct, Math.min(maxPct, currSliderVal + deltaPct))
         this.setPDFZoom(nextVal / 100)
     }
 
     parseAndSetPDFZoom(inputVal) {
         if (!inputVal) return
         const str = String(inputVal).trim().toLowerCase()
-        if (str.includes('宽') || str === 'fit-width' || str === 'fit width' || str === 'width' || str === 'fit w') {
+        const fitWidthLabel = String(t('pdf.fitWidthBtn') || '').trim().toLowerCase()
+        const fitPageLabel = String(t('pdf.fitPageBtn') || '').trim().toLowerCase()
+        if (str.includes('宽') || str === 'fit-width' || str === 'fit width' || str === 'width' || str === 'fit w' || (fitWidthLabel && str === fitWidthLabel)) {
             this.setPDFZoom('fit-width')
-        } else if (str.includes('页') || str === 'fit-page' || str === 'fit page' || str === 'page' || str === 'auto' || str === 'fit p') {
+        } else if (str.includes('页') || str === 'fit-page' || str === 'fit page' || str === 'page' || str === 'auto' || str === 'fit p' || (fitPageLabel && str === fitPageLabel)) {
             this.setPDFZoom('fit-page')
         } else {
             const num = parseFloat(str.replace('%', ''))
-            if (!isNaN(num) && num > 0) {
+            if (Number.isFinite(num) && num > 0) {
                 this.setPDFZoom(num / 100)
-            } else {
-                this.setPDFZoom('fit-page')
+            } else if (this.app.pdfViewport) {
+                this.updatePdfZoomControls(this.app.pdfViewport.scale, this.app.pdfViewport.zoomMode)
             }
         }
     }
@@ -588,6 +631,52 @@ const select = document.getElementById('setting-pdf-page-appearance')
             })
         }
         if (!savePath) return
+        await this.app.drawing?.flushPendingWrites?.()
+
+        const driver = this.app.pdfDriver || this.app.pdfViewport?.driver
+        const pageDimsCache = new Map()
+        const resolvePageDims = async (page) => {
+            const known = this.app.pdfViewport?.pageSizes?.[page] || driver?.pageSizes?.[page]
+            if (known?.width > 0 && known?.height > 0) return known
+            if (pageDimsCache.has(page)) return pageDimsCache.get(page)
+            let loaded = null
+            if (typeof driver?.getPageSizes === 'function') {
+                try {
+                    const arr = await driver.getPageSizes(page, 1)
+                    if (arr?.[0]?.width > 0 && arr?.[0]?.height > 0) loaded = arr[0]
+                } catch (_) {}
+            }
+            const resolved = loaded || { width: 612, height: 792, x0: 0, y0: 0 }
+            pageDimsCache.set(page, resolved)
+            return resolved
+        }
+
+        const parseColorWithAlpha = (rawColor, fallbackHex = '#ffeb3b', fallbackAlpha = 1.0) => {
+            const toHex = (r, g, b) => '#' + [r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')
+            const s = String(rawColor || '').trim()
+            if (!s) return { hex: fallbackHex, alpha: fallbackAlpha }
+            const rgbaMatch = s.match(/^rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)(?:\s*,\s*([0-9.]+))?\s*\)$/i)
+            if (rgbaMatch) {
+                const alpha = rgbaMatch[4] != null ? Math.max(0, Math.min(1, parseFloat(rgbaMatch[4]))) : fallbackAlpha
+                return { hex: toHex(Number(rgbaMatch[1]), Number(rgbaMatch[2]), Number(rgbaMatch[3])), alpha: Number.isFinite(alpha) ? alpha : fallbackAlpha }
+            }
+            const named = {
+                yellow: '#facc15', green: '#22c55e', blue: '#3b82f6', pink: '#ec4899',
+                purple: '#a855f7', red: '#ef4444', orange: '#f97316', gray: '#94a3b8'
+            }
+            if (named[s.toLowerCase()]) return { hex: named[s.toLowerCase()], alpha: fallbackAlpha }
+            if (/^#[0-9a-f]{8}$/i.test(s)) {
+                const alpha = Math.max(0, Math.min(1, parseInt(s.slice(7, 9), 16) / 255))
+                return { hex: `#${s.slice(1, 7).toLowerCase()}`, alpha }
+            }
+            if (/^#[0-9a-f]{6}$/i.test(s)) {
+                return { hex: s.toLowerCase(), alpha: fallbackAlpha }
+            }
+            if (/^#[0-9a-f]{3}$/i.test(s)) {
+                return { hex: `#${s[1]}${s[1]}${s[2]}${s[2]}${s[3]}${s[3]}`.toLowerCase(), alpha: fallbackAlpha }
+            }
+            return { hex: fallbackHex, alpha: fallbackAlpha }
+        }
 
         // Query real highlights and ink drawings for the active book
         const activeDb = this.app.db || db
@@ -605,7 +694,7 @@ const select = document.getElementById('setting-pdf-page-appearance')
             this.app.dialogs.showToast(t('pdfTools.readAnnotationsFailed', { error: e.message || String(e) }), 'error')
             return
         }
-        const numPages = this.app.pdfDriver?.numPages || this.app.pdfViewport?.numPages || 0
+        const numPages = driver?.numPages || this.app.pdfViewport?.numPages || 0
         const items = []
 
         for (const hl of highlights || []) {
@@ -614,19 +703,30 @@ const select = document.getElementById('setting-pdf-page-appearance')
                 : [{
                     page: hl.pdfTarget?.page ?? hl.page ?? 0,
                     quads: hl.pdfTarget?.quads || hl.quads || [],
-                    rects: hl.pdfTarget?.rects || (hl.rect ? [hl.rect] : [])
+                    rects: hl.pdfTarget?.rects || (Array.isArray(hl.rects) && hl.rects.length > 0 ? hl.rects : (hl.rect ? [hl.rect] : []))
                 }]
 
             for (const seg of segments) {
                 const page = seg.page ?? hl.pdfTarget?.page ?? hl.page ?? 0
-                const pageDims = this.app.pdfViewport?.pageSizes?.[page] || this.app.pdfDriver?.pageSizes?.[page] || { width: 612, height: 792, x0: 0, y0: 0 }
+                const pageDims = await resolvePageDims(page)
                 const pageW = pageDims.width || 612
                 const pageH = pageDims.height || 792
                 const pageX0 = pageDims.x0 || 0
                 const pageY0 = pageDims.y0 || 0
 
                 const quads = (seg.quads || []).flat()
-                let rect = seg.rects?.[0] || seg.rect || hl.pdfTarget?.rects?.[0] || hl.rect
+                const rawRects = (seg.rects && seg.rects.length > 0)
+                    ? seg.rects
+                    : (seg.rect ? [seg.rect] : (hl.pdfTarget?.rects?.length ? hl.pdfTarget.rects : (hl.rect ? [hl.rect] : [])))
+                const normalizeRect = (r) => {
+                    if (!Array.isArray(r) || r.length < 4) return null
+                    if (r[0] <= 1 && r[1] <= 1 && r[2] <= 1 && r[3] <= 1 && (r[2] > 0 || r[3] > 0)) {
+                        return [pageX0 + r[0] * pageW, pageY0 + r[1] * pageH, pageX0 + r[2] * pageW, pageY0 + r[3] * pageH]
+                    }
+                    return [r[0], r[1], r[2], r[3]]
+                }
+                let rect = null
+                const rectQuads = []
                 if (quads.length >= 8) {
                     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
                     for (let i = 0; i < quads.length; i += 2) {
@@ -636,10 +736,18 @@ const select = document.getElementById('setting-pdf-page-appearance')
                         maxY = Math.max(maxY, quads[i + 1])
                     }
                     rect = [minX, minY, maxX, maxY]
-                } else if (rect && rect.length >= 4) {
-                    if (rect[0] <= 1 && rect[1] <= 1 && rect[2] <= 1 && rect[3] <= 1 && (rect[2] > 0 || rect[3] > 0)) {
-                        rect = [pageX0 + rect[0] * pageW, pageY0 + rect[1] * pageH, pageX0 + rect[2] * pageW, pageY0 + rect[3] * pageH]
+                } else if (rawRects.length > 0) {
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+                    for (const rawR of rawRects) {
+                        const nr = normalizeRect(rawR)
+                        if (!nr) continue
+                        minX = Math.min(minX, nr[0], nr[2])
+                        maxX = Math.max(maxX, nr[0], nr[2])
+                        minY = Math.min(minY, nr[1], nr[3])
+                        maxY = Math.max(maxY, nr[1], nr[3])
+                        rectQuads.push(nr[0], nr[1], nr[2], nr[1], nr[0], nr[3], nr[2], nr[3])
                     }
+                    rect = Number.isFinite(minX) ? [minX, minY, maxX, maxY] : [pageX0 + 36, pageY0 + 36, pageX0 + 60, pageY0 + 60]
                 } else {
                     rect = [pageX0 + 36, pageY0 + 36, pageX0 + 60, pageY0 + 60]
                 }
@@ -650,21 +758,23 @@ const select = document.getElementById('setting-pdf-page-appearance')
                 else if (rawKind === 'strikeout' || rawKind === 'strike' || rawKind === 'strikethrough') mappedType = 'strikeout'
                 else if (rawKind === 'note' || rawKind === 'text') mappedType = 'note'
                 else if (rawKind === 'ink' || rawKind === 'drawing') mappedType = 'ink'
-                else if (!quads.length && !(seg.rects?.length || hl.pdfTarget?.rects?.length) && hl.note) mappedType = 'note'
+                else if (!quads.length && !rawRects.length && hl.note) mappedType = 'note'
 
-                let exportQuads = quads
-                if (!exportQuads.length && (mappedType === 'highlight' || mappedType === 'underline' || mappedType === 'strikeout') && rect?.length >= 4) {
-                    exportQuads = [rect[0], rect[1], rect[2], rect[1], rect[0], rect[3], rect[2], rect[3]]
+                let exportQuads = quads.length >= 8 ? quads : []
+                if (!exportQuads.length && (mappedType === 'highlight' || mappedType === 'underline' || mappedType === 'strikeout')) {
+                    if (rectQuads.length >= 8) exportQuads = rectQuads
+                    else if (rect?.length >= 4) exportQuads = [rect[0], rect[1], rect[2], rect[1], rect[0], rect[3], rect[2], rect[3]]
                 }
                 if (mappedType === 'note' && rect?.length >= 4 && (rect[2] - rect[0] < 12 || rect[3] - rect[1] < 12)) {
                     rect = [rect[0], rect[1], rect[0] + 24, rect[1] + 24]
                 }
 
+                const hlColor = parseColorWithAlpha(hl.color || '#ffeb3b', '#ffeb3b', hl.opacity ?? 0.8)
                 items.push({
                     page,
                     type: mappedType,
-                    color: hl.color || '#ffeb3b',
-                    opacity: hl.opacity ?? 0.8,
+                    color: hlColor.hex,
+                    opacity: hl.opacity ?? hlColor.alpha,
                     rect: rect || [0, 0, 100, 100],
                     quads: exportQuads.length ? exportQuads : undefined,
                     text: hl.note || hl.text || undefined,
@@ -777,11 +887,12 @@ const select = document.getElementById('setting-pdf-page-appearance')
                 try {
                     const drawing = await activeDb.getPdfPageDrawing(this.app.currentBookId, p, snapshot)
                     if (drawing?.strokes?.length) {
-                        const pageDims = this.app.pdfViewport?.pageSizes?.[p] || this.app.pdfDriver?.pageSizes?.[p] || { width: 612, height: 792, x0: 0, y0: 0 }
+                        const pageDims = await resolvePageDims(p)
                         const pageW = pageDims.width || 612
                         const pageH = pageDims.height || 792
                         const pageX0 = pageDims.x0 || 0
                         const pageY0 = pageDims.y0 || 0
+                        const ptPerVirtualPx = pageW / 800
                         const allStrokes = drawing.strokes
                         const validStrokes = []
 
@@ -790,7 +901,7 @@ const select = document.getElementById('setting-pdf-page-appearance')
                             if (!s || s.tool === 'eraser') continue
                             const pts = Array.isArray(s) ? s : (s.points || [])
                             if (!pts.length) continue
-                            const penWidth = Number(s.width ?? drawing.width) || 2.0
+                            const penWidthPt = (Number(s.width ?? drawing.width) || (s.tool === 'marker' ? 18 : 3)) * ptPerVirtualPx
 
                             // Collect subsequent erasers on this page
                             const erasersAfter = []
@@ -801,7 +912,8 @@ const select = document.getElementById('setting-pdf-page-appearance')
                                 if (erPts.length > 0) {
                                     erasersAfter.push({
                                         points: erPts,
-                                        width: Number(er.width) || 20
+                                        width: Number(er.width) || 24,
+                                        widthPt: (Number(er.width) || 24) * ptPerVirtualPx
                                     })
                                 }
                             }
@@ -811,7 +923,7 @@ const select = document.getElementById('setting-pdf-page-appearance')
                                 const py = (Number(pts[0][1]) || 0) * pageH
                                 let ptErased = false
                                 for (const er of erasersAfter) {
-                                    const r = Math.max((er.width + penWidth) / 2, Math.min(pageW, pageH) * Math.max(0.025, er.width / 800))
+                                    const r = (er.widthPt + penWidthPt) / 2
                                     for (let q = 0; q < er.points.length; q++) {
                                         const e1x = (Number(er.points[q][0]) || 0) * pageW
                                         const e1y = (Number(er.points[q][1]) || 0) * pageH
@@ -843,7 +955,7 @@ const select = document.getElementById('setting-pdf-page-appearance')
 
                                 const erasedIntervals = []
                                 for (const er of erasersAfter) {
-                                    const r = Math.max((er.width + penWidth) / 2, Math.min(pageW, pageH) * Math.max(0.025, er.width / 800))
+                                    const r = (er.widthPt + penWidthPt) / 2
                                     if (er.points.length === 1) {
                                         const ex = (Number(er.points[0][0]) || 0) * pageW
                                         const ey = (Number(er.points[0][1]) || 0) * pageH
@@ -919,17 +1031,23 @@ const select = document.getElementById('setting-pdf-page-appearance')
                             for (const s of validStrokes) {
                                 const pts = Array.isArray(s) ? s : (s.points || [])
                                 if (pts.length === 0) continue
-                                const color = s.color || drawing.color || '#ff0000'
-                                const opacity = s.opacity ?? drawing.opacity ?? 1.0
-                                const width = s.width ?? drawing.width ?? 2.0
-                                const key = `${color}__${opacity}__${width}`
+                                const rawColor = s.color || drawing.color || (s.tool === 'marker' ? 'rgba(250, 204, 21, 0.45)' : '#ef4444')
+                                const defaultAlpha = s.tool === 'marker' ? 0.45 : 1.0
+                                const parsed = parseColorWithAlpha(rawColor, '#ef4444', defaultAlpha)
+                                const opacity = s.opacity ?? drawing.opacity ?? parsed.alpha
+                                const rawWidth = Number(s.width ?? drawing.width) || (s.tool === 'marker' ? 18 : 3)
+                                const width = Math.max(0.5, rawWidth * ptPerVirtualPx)
+                                const key = `${parsed.hex}__${opacity}__${width}`
                                 if (!strokeGroups.has(key)) {
-                                    strokeGroups.set(key, { color, opacity, width, pointLists: [] })
+                                    strokeGroups.set(key, { color: parsed.hex, opacity, width, pointLists: [] })
                                 }
                                 const mappedPts = pts.map(pt => [
                                     pageX0 + (Number(pt[0]) || 0) * pageW,
                                     pageY0 + (Number(pt[1]) || 0) * pageH
                                 ])
+                                if (mappedPts.length === 1) {
+                                    mappedPts.push([mappedPts[0][0] + 0.05, mappedPts[0][1]])
+                                }
                                 strokeGroups.get(key).pointLists.push(mappedPts)
                             }
 

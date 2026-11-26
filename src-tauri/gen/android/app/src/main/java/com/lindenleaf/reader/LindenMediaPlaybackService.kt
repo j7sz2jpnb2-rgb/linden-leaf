@@ -46,6 +46,7 @@ class LindenMediaPlaybackService : Service() {
     private data class QueueData(
         val bookId: String,
         val title: String,
+        val bookAuthor: String = "",
         val texts: ArrayList<String>,
         val utterances: ArrayList<String>,
         val index: Int,
@@ -92,6 +93,8 @@ class LindenMediaPlaybackService : Service() {
         var currentBookId = ""
             private set
         var currentBookTitle = ""
+            private set
+        var currentBookAuthor = ""
             private set
         var currentText = ""
             private set
@@ -142,7 +145,8 @@ class LindenMediaPlaybackService : Service() {
             generation: Long = 0L,
             bookId: String = "",
             voiceId: String = "",
-            locale: String = "zh-CN"
+            locale: String = "zh-CN",
+            bookAuthor: String = ""
         ) = startSpeakingQueue(
             context,
             bookTitle,
@@ -154,7 +158,8 @@ class LindenMediaPlaybackService : Service() {
             generation,
             bookId,
             voiceId,
-            locale
+            locale,
+            bookAuthor
         )
 
         fun startSpeakingQueue(
@@ -168,7 +173,8 @@ class LindenMediaPlaybackService : Service() {
             generation: Long = 0L,
             bookId: String = "",
             voiceId: String = "",
-            locale: String = "zh-CN"
+            locale: String = "zh-CN",
+            bookAuthor: String = ""
         ) {
             require(queueTexts.isNotEmpty() && queueTexts.any { it.isNotBlank() }) {
                 val en = LindenNativeBridge.isEnglishLocale(locale)
@@ -180,6 +186,7 @@ class LindenMediaPlaybackService : Service() {
             pendingQueues[id] = QueueData(
                 bookId = bookId,
                 title = bookTitle,
+                bookAuthor = bookAuthor,
                 texts = queueTexts,
                 utterances = queueUtterances,
                 index = startIndex,
@@ -604,6 +611,19 @@ class LindenMediaPlaybackService : Service() {
 
     private fun isEnglishLocale(): Boolean = currentLocale.startsWith("en", ignoreCase = true)
 
+    private fun syncNotificationChannel(locale: String = currentLocale) {
+        if (Build.VERSION.SDK_INT >= 26) {
+            val channelName = LindenNativeBridge.l10n(
+                LindenNativeBridge.isEnglishLocale(locale),
+                "听书播放",
+                "Audio Playback"
+            )
+            val channel = NotificationChannel(CHANNEL_ID, channelName, NotificationManager.IMPORTANCE_LOW)
+            channel.setShowBadge(false)
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+        }
+    }
+
     private fun tearDownTts() {
         mainHandler.removeCallbacks(ttsInitTimeoutRunnable)
         val old = tts
@@ -858,15 +878,35 @@ class LindenMediaPlaybackService : Service() {
         if (intent?.action == ACTION_PLAY_QUEUE) {
             val key = intent.getStringExtra(EXTRA_JOB_ID) ?: ""
             val queue = pendingQueues.remove(key)
-            if (queue != null) begin(queue)
-            else if (!foreground && texts.isEmpty()) stopSelf()
+            if (queue != null) {
+                if (queue.texts.isEmpty() || queue.texts.all { it.isBlank() }) {
+                    if (Build.VERSION.SDK_INT >= 26) ensureForegroundNotification()
+                    if (pendingQueues.isEmpty()) stopPlayback()
+                } else {
+                    begin(queue)
+                }
+            } else if (!foreground && texts.isEmpty() && pendingQueues.isEmpty()) {
+                if (Build.VERSION.SDK_INT >= 26) ensureForegroundNotification()
+                removeNotification()
+                stopSelf()
+            } else if (Build.VERSION.SDK_INT >= 26 && !foreground) {
+                ensureForegroundNotification()
+            }
         } else {
+            if (Build.VERSION.SDK_INT >= 26 && !foreground) {
+                ensureForegroundNotification()
+            }
             handleAction(intent?.action ?: "")
+            if (!wantsPlayback && texts.isEmpty() && pendingQueues.isEmpty()) {
+                removeNotification()
+                stopSelf()
+            }
         }
         return START_NOT_STICKY
     }
 
     private fun begin(queue: QueueData) {
+        if (queue.texts.isEmpty()) return
         runId = null
         try { tts?.stop() } catch (_: Exception) {}
         finishInterval()
@@ -877,11 +917,13 @@ class LindenMediaPlaybackService : Service() {
         queueTotalCount = texts.size
         currentBookId = queue.bookId
         currentBookTitle = queue.title
+        currentBookAuthor = queue.bookAuthor
         currentJobId = queue.jobId
         currentGeneration = queue.generation
         currentRate = queue.rate
         currentVoiceId = queue.voiceId
         currentLocale = queue.locale
+        syncNotificationChannel(currentLocale)
         completedUtteranceId = ""
         completedGeneration = 0L
         lastError = ""
@@ -917,14 +959,37 @@ class LindenMediaPlaybackService : Service() {
     }
 
     private fun languageCandidatesFor(text: String): List<Locale> {
-        val hasCjk = text.any { ch ->
+        val hasKana = text.any { ch ->
+            ch in '\u3040'..'\u309F' || ch in '\u30A0'..'\u30FF' ||
+                ch in '\u31F0'..'\u31FF' || ch in '\uFF65'..'\uFF9F'
+        }
+        val hasHangul = text.any { ch ->
+            ch in '\uAC00'..'\uD7AF' || ch in '\u1100'..'\u11FF' || ch in '\u3130'..'\u318F'
+        }
+        val hasHan = text.any { ch ->
             ch in '\u3400'..'\u4DBF' || ch in '\u4E00'..'\u9FFF' || ch in '\uF900'..'\uFAFF'
         }
         val hasLatin = text.any { ch -> ch in 'A'..'Z' || ch in 'a'..'z' }
+        val appLocale = run {
+            val tag = currentLocale.trim()
+            if (tag.isNotBlank()) Locale.forLanguageTag(tag) else null
+        }
         return when {
-            hasCjk -> listOf(Locale.SIMPLIFIED_CHINESE, Locale.CHINESE, Locale.TRADITIONAL_CHINESE)
+            hasKana -> listOf(Locale.JAPANESE, Locale.JAPAN)
+            hasHangul -> listOf(Locale.KOREAN, Locale.KOREA)
+            hasHan -> when {
+                currentLocale.startsWith("ja", ignoreCase = true) ->
+                    listOf(Locale.JAPANESE, Locale.JAPAN, Locale.SIMPLIFIED_CHINESE, Locale.TRADITIONAL_CHINESE)
+                currentLocale.contains("TW", ignoreCase = true) ||
+                    currentLocale.contains("HK", ignoreCase = true) ||
+                    currentLocale.contains("MO", ignoreCase = true) ||
+                    currentLocale.contains("Hant", ignoreCase = true) ->
+                    listOf(Locale.TRADITIONAL_CHINESE, Locale.SIMPLIFIED_CHINESE, Locale.CHINESE)
+                else ->
+                    listOf(Locale.SIMPLIFIED_CHINESE, Locale.CHINESE, Locale.TRADITIONAL_CHINESE)
+            }
             hasLatin -> listOf(Locale.US, Locale.ENGLISH, Locale.UK)
-            else -> listOf(Locale.getDefault(), Locale.SIMPLIFIED_CHINESE, Locale.US)
+            else -> listOfNotNull(appLocale, Locale.getDefault(), Locale.SIMPLIFIED_CHINESE, Locale.US).distinct()
         }
     }
 
@@ -937,10 +1002,10 @@ class LindenMediaPlaybackService : Service() {
             return
         }
 
-        if (currentText.isBlank()) {
+        if (currentText.isBlank() || !currentText.any { it.isLetterOrDigit() }) {
             mainHandler.post {
                 if (wantsPlayback && !destroyed) {
-                    handleSegmentCompleted(emitSegmentEvent = false)
+                    handleSegmentCompleted(emitSegmentEvent = true)
                 }
             }
             return
@@ -1205,7 +1270,7 @@ class LindenMediaPlaybackService : Service() {
     private fun finishInterval() {
         if (activeEpochStart > 0L) {
             val end = activeEpochStart + maxOf(0L, SystemClock.elapsedRealtime() - activeElapsedStart)
-            ListeningJournal.add(this, currentBookId, currentBookTitle, currentJobId, activeEpochStart, end)
+            ListeningJournal.add(this, currentBookId, currentBookTitle, currentBookAuthor, currentJobId, activeEpochStart, end)
             activeEpochStart = 0L
             activeElapsedStart = 0L
         }
@@ -1275,6 +1340,14 @@ class LindenMediaPlaybackService : Service() {
                 .putString(MediaMetadata.METADATA_KEY_ARTIST, segText)
                 .build()
         )
+    }
+
+    private fun ensureForegroundNotification() {
+        if (foreground) return
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        else startForeground(NOTIFICATION_ID, notification)
+        foreground = true
     }
 
     private fun publish(ensureForeground: Boolean = false) {
@@ -1414,12 +1487,12 @@ private object ListeningJournal {
             store.finishWrite(out)
         } catch (e: Exception) { store.failWrite(out); throw e }
     }
-    @Synchronized fun add(context: Context, bookId: String, title: String, jobId: String, start: Long, end: Long) {
+    @Synchronized fun add(context: Context, bookId: String, title: String, bookAuthor: String, jobId: String, start: Long, end: Long) {
         load(context)
         if (bookId.isBlank() || end <= start) return
         sequence++
         records.add(JSONObject().put("sequence", sequence).put("bookId", bookId).put("bookTitle", title)
-            .put("jobId", jobId).put("startMs", start).put("endMs", end))
+            .put("bookAuthor", bookAuthor).put("jobId", jobId).put("startMs", start).put("endMs", end))
         try { save(context) } catch (e: Exception) { android.util.Log.w("LindenTts", "Listening save deferred", e) }
     }
     @Synchronized fun pending(context: Context): JSONArray {

@@ -348,6 +348,26 @@ export class ChapterTranslationManager {
         return null
     }
 
+    /** Extract visible source text while excluding any injected inline bilingual target containers. */
+    _getOwnSourceText(el) {
+        if (!el) return ''
+        if (!el.querySelector?.('.linden-bilingual-target') || !el.childNodes) {
+            return el.textContent ? el.textContent.trim() : ''
+        }
+        let out = ''
+        const walk = (node) => {
+            for (const ch of node.childNodes || []) {
+                if (ch.nodeType === 3) {
+                    out += ch.nodeValue ?? ch.textContent ?? ''
+                } else if (ch.nodeType === 1 && !ch.classList?.contains('linden-bilingual-target') && !ch.closest?.('.linden-bilingual-target')) {
+                    walk(ch)
+                }
+            }
+        }
+        walk(el)
+        return out.trim()
+    }
+
     /**
      * Extract paragraphs safely from current section DOM.
      * Extracts only leaf semantic blocks to prevent duplicating containers and children.
@@ -373,9 +393,15 @@ export class ChapterTranslationManager {
             if (el.closest?.('script, style, nav, [aria-hidden="true"], .footnote-popup')) return
 
             // Leaf semantic block check: avoid duplicating parent container and its child paragraphs
-            if (el.querySelector('p, blockquote, h1, h2, h3, h4, h5, h6, li, div, td, th')) return
+            // Ignore injected .linden-bilingual-target blocks inside container elements (td/th/li).
+            const nestedBlocks = el.querySelectorAll('p, blockquote, h1, h2, h3, h4, h5, h6, li, div, td, th')
+            for (const child of nestedBlocks) {
+                if (!child.classList?.contains('linden-bilingual-target') && !child.closest?.('.linden-bilingual-target')) {
+                    return
+                }
+            }
 
-            const rawText = el.textContent ? el.textContent.trim() : ''
+            const rawText = this._getOwnSourceText(el)
             if (!rawText || rawText.length < 2) return
 
             const paraId = `p_${pIndex++}`
@@ -906,6 +932,23 @@ export class ChapterTranslationManager {
             body.linden-trans-mode-target .linden-bilingual-source {
                 display: none !important;
             }
+            body.linden-trans-mode-target [data-linden-container-source="true"] {
+                font-size: 0 !important;
+                line-height: 0 !important;
+            }
+            body.linden-trans-mode-target [data-linden-container-source="true"]::marker {
+                font-size: 1rem !important;
+            }
+            body.linden-trans-mode-target [data-linden-container-source="true"] > :not(.linden-bilingual-target) {
+                display: none !important;
+            }
+            body.linden-trans-mode-target [data-linden-container-source="true"] > .linden-bilingual-target {
+                font-size: 1rem !important;
+                line-height: 1.6 !important;
+                border-left: none;
+                padding-left: 0;
+                opacity: 1;
+            }
             body.linden-trans-mode-target .linden-bilingual-target {
                 border-left: none;
                 padding-left: 0;
@@ -960,7 +1003,15 @@ export class ChapterTranslationManager {
             const sourceEl = this.displayElementMap.get(p.id)
             if (!sourceEl || !sourceEl.parentNode) return
 
-            sourceEl.classList.add('linden-bilingual-source')
+            const tag = (p.tag || (sourceEl.tagName ? sourceEl.tagName.toLowerCase() : 'div'))
+            const isContainedItem = tag === 'td' || tag === 'th' || tag === 'li'
+            if (isContainedItem) {
+                sourceEl.classList.remove('linden-bilingual-source')
+                sourceEl.setAttribute('data-linden-container-source', 'true')
+            } else {
+                sourceEl.removeAttribute('data-linden-container-source')
+                sourceEl.classList.add('linden-bilingual-source')
+            }
             sourceEl.setAttribute('data-linden-source-id', p.id)
             if (!sourceEl.hasAttribute('data-linden-script')) {
                 const letters = p.text.match(/\p{L}/gu) || []
@@ -975,16 +1026,17 @@ export class ChapterTranslationManager {
                 sourceEl.classList.remove('linden-long-paragraph')
             }
 
-            let targetEl = sourceEl.nextElementSibling
+            const escapedAnchor = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(p.id) : p.id
+            let targetEl = isContainedItem
+                ? Array.from(sourceEl.children || []).find(el => el.classList?.contains('linden-bilingual-target') && el.getAttribute('data-target-anchor') === p.id)
+                : sourceEl.nextElementSibling
             if (!targetEl || !targetEl.classList.contains('linden-bilingual-target') || targetEl.getAttribute('data-target-anchor') !== p.id) {
-                targetEl = doc.querySelector?.(`.linden-bilingual-target[data-target-anchor="${p.id}"]`)
+                targetEl = doc.querySelector?.(`.linden-bilingual-target[data-target-anchor="${escapedAnchor}"]`)
             }
 
             if (!targetEl) {
-                const tag = sourceEl.tagName ? sourceEl.tagName.toLowerCase() : 'div'
-                if (tag === 'li') {
-                    targetEl = doc.createElement('li')
-                    targetEl.style.listStyle = 'none'
+                if (isContainedItem) {
+                    targetEl = doc.createElement('div')
                 } else if (tag === 'p') {
                     targetEl = doc.createElement('p')
                 } else if (tag === 'tr') {
@@ -1000,7 +1052,11 @@ export class ChapterTranslationManager {
                 targetEl.setAttribute('role', 'region')
                 targetEl.setAttribute('aria-label', t('chapterTrans.ariaTranslated'))
                 targetEl.setAttribute('lang', 'zh-Hans')
-                sourceEl.insertAdjacentElement('afterend', targetEl)
+                if (isContainedItem) {
+                    sourceEl.appendChild(targetEl)
+                } else {
+                    sourceEl.insertAdjacentElement('afterend', targetEl)
+                }
             }
 
             const textTarget = targetEl.tagName === 'TR' ? (targetEl.firstElementChild || targetEl) : targetEl
@@ -1065,8 +1121,9 @@ export class ChapterTranslationManager {
             doc.body.classList.remove('linden-trans-mode-source', 'linden-trans-mode-bilingual', 'linden-trans-mode-target', 'linden-derived-view-active')
         }
         doc.querySelectorAll?.('.linden-bilingual-target')?.forEach(el => el.remove())
-        doc.querySelectorAll?.('.linden-bilingual-source')?.forEach(el => {
+        doc.querySelectorAll?.('.linden-bilingual-source, [data-linden-container-source="true"]')?.forEach(el => {
             el.classList.remove('linden-bilingual-source', 'linden-long-paragraph')
+            el.removeAttribute('data-linden-container-source')
             el.removeAttribute('data-linden-source-id')
             el.removeAttribute('data-linden-script')
         })
@@ -1091,7 +1148,8 @@ export class ChapterTranslationManager {
         if (!paraEl) return
         this.displayElementMap.set(paraId, paraEl)
         const doc = paraEl.ownerDocument || document
-        const targetEl = doc.querySelector?.(`.linden-bilingual-target[data-target-anchor="${paraId}"]`)
+        const escapedAnchor = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(paraId) : paraId
+        const targetEl = doc.querySelector?.(`.linden-bilingual-target[data-target-anchor="${escapedAnchor}"]`)
         if (targetEl) {
             targetEl.textContent = transText
             targetEl.classList.remove('pending')

@@ -1016,14 +1016,26 @@ int ll_get_page_plain_text(ll_doc *d, int number, char **out_text) {
 int ll_export_annotated_pdf(const char *input_path, const char *output_path,
                            const char *password,
                            const ll_export_annot *annots, int annot_count) {
-    if (!input_path || !output_path) return LL_ERROR;
+    if (!input_path || !output_path || annot_count < 0) return LL_ERROR;
+    if (annot_count > 0 && !annots) return LL_ERROR;
 
-    fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_UNLIMITED);
+    size_t store_bytes = ((size_t)ll_get_max_store_mb()) * 1024 * 1024;
+    fz_context *ctx = fz_new_context(NULL, NULL, store_bytes);
     if (!ctx) return LL_ERROR;
 
     pdf_document *pdf = NULL;
+    pdf_page *page = NULL;
+    pdf_annot *annot = NULL;
+    fz_quad *qv = NULL;
+    fz_point *ink_pts = NULL;
+    int *ink_counts = NULL;
     int result = LL_OK;
     fz_var(pdf);
+    fz_var(page);
+    fz_var(annot);
+    fz_var(qv);
+    fz_var(ink_pts);
+    fz_var(ink_counts);
     fz_var(result);
 
     fz_try(ctx) {
@@ -1047,7 +1059,7 @@ int ll_export_annotated_pdf(const char *input_path, const char *output_path,
             }
             if (page_annot_count == 0) continue;
 
-            pdf_page *page = pdf_load_page(ctx, pdf, p);
+            page = pdf_load_page(ctx, pdf, p);
             if (!page) continue;
 
             for (int i = 0; i < annot_count; i++) {
@@ -1064,15 +1076,19 @@ int ll_export_annotated_pdf(const char *input_path, const char *output_path,
                     default: atype = PDF_ANNOT_HIGHLIGHT; break;
                 }
 
-                pdf_annot *annot = pdf_create_annot(ctx, page, atype);
+                annot = pdf_create_annot(ctx, page, atype);
                 if (!annot) continue;
 
-                fz_rect r = { ea->rect[0], ea->rect[1], ea->rect[2], ea->rect[3] };
+                float rx0 = ea->rect[0], ry0 = ea->rect[1], rx1 = ea->rect[2], ry1 = ea->rect[3];
+                fz_rect r = (ll_isfinite(rx0) && ll_isfinite(ry0) && ll_isfinite(rx1) && ll_isfinite(ry1))
+                    ? fz_make_rect(rx0 < rx1 ? rx0 : rx1, ry0 < ry1 ? ry0 : ry1, rx0 > rx1 ? rx0 : rx1, ry0 > ry1 ? ry0 : ry1)
+                    : fz_make_rect(0.0f, 0.0f, 100.0f, 100.0f);
                 /* Text markup and ink derive their bounds from QuadPoints/InkList. */
                 if (pdf_annot_has_rect(ctx, annot)) pdf_set_annot_rect(ctx, annot, r);
                 pdf_set_annot_color(ctx, annot, 3, ea->color);
-                if (ea->opacity > 0.0f) {
-                    pdf_set_annot_opacity(ctx, annot, ea->opacity);
+                if (ll_isfinite(ea->opacity)) {
+                    float op = ea->opacity < 0.0f ? 0.0f : (ea->opacity > 1.0f ? 1.0f : ea->opacity);
+                    pdf_set_annot_opacity(ctx, annot, op);
                 }
                 if (ea->text && ea->text[0]) {
                     pdf_set_annot_contents(ctx, annot, ea->text);
@@ -1082,42 +1098,115 @@ int ll_export_annotated_pdf(const char *input_path, const char *output_path,
                 }
 
                 if ((ea->type == 0 || ea->type == 1 || ea->type == 2) && ea->quads && ea->quad_count > 0) {
-                    fz_quad *qv = malloc(sizeof(fz_quad) * (size_t)ea->quad_count);
+                    qv = malloc(sizeof(fz_quad) * (size_t)ea->quad_count);
                     if (qv) {
+                        int valid_quads = 0;
                         for (int q = 0; q < ea->quad_count; q++) {
-                            qv[q].ul.x = ea->quads[q * 8 + 0];
-                            qv[q].ul.y = ea->quads[q * 8 + 1];
-                            qv[q].ur.x = ea->quads[q * 8 + 2];
-                            qv[q].ur.y = ea->quads[q * 8 + 3];
-                            qv[q].ll.x = ea->quads[q * 8 + 4];
-                            qv[q].ll.y = ea->quads[q * 8 + 5];
-                            qv[q].lr.x = ea->quads[q * 8 + 6];
-                            qv[q].lr.y = ea->quads[q * 8 + 7];
+                            const float *qs = &ea->quads[q * 8];
+                            int all_finite = 1;
+                            for (int k = 0; k < 8; k++) {
+                                if (!ll_isfinite(qs[k])) { all_finite = 0; break; }
+                            }
+                            if (!all_finite) continue;
+                            float top_dx = qs[2] - qs[0], top_dy = qs[3] - qs[1];
+                            float bot_dx = qs[6] - qs[4], bot_dy = qs[7] - qs[5];
+                            float left_dx = qs[4] - qs[0], left_dy = qs[5] - qs[1];
+                            if ((top_dx * top_dx + top_dy * top_dy) < 1e-6f &&
+                                (bot_dx * bot_dx + bot_dy * bot_dy) < 1e-6f) continue;
+                            if ((left_dx * left_dx + left_dy * left_dy) < 1e-6f) continue;
+                            qv[valid_quads].ul.x = qs[0];
+                            qv[valid_quads].ul.y = qs[1];
+                            qv[valid_quads].ur.x = qs[2];
+                            qv[valid_quads].ur.y = qs[3];
+                            qv[valid_quads].ll.x = qs[4];
+                            qv[valid_quads].ll.y = qs[5];
+                            qv[valid_quads].lr.x = qs[6];
+                            qv[valid_quads].lr.y = qs[7];
+                            valid_quads++;
                         }
-                        pdf_set_annot_quad_points(ctx, annot, ea->quad_count, qv);
+                        if (valid_quads > 0) {
+                            pdf_set_annot_quad_points(ctx, annot, valid_quads, qv);
+                        }
                         free(qv);
+                        qv = NULL;
                     }
                 }
 
                 if (ea->type == 4 && ea->stroke_counts && ea->stroke_points && ea->stroke_count > 0) {
-                    pdf_set_annot_ink_list(ctx, annot, ea->stroke_count, ea->stroke_counts,
-                                           (const fz_point *)ea->stroke_points);
-                    if (ea->width > 0.0f) {
+                    size_t total_pts = 0;
+                    int valid_strokes = 0;
+                    for (int s = 0; s < ea->stroke_count; s++) {
+                        int c = ea->stroke_counts[s];
+                        if (c > 0) {
+                            total_pts += (size_t)(c == 1 ? 2 : c);
+                            valid_strokes++;
+                        }
+                    }
+                    if (valid_strokes > 0 && total_pts > 0) {
+                        ink_counts = malloc(sizeof(int) * (size_t)valid_strokes);
+                        ink_pts = malloc(sizeof(fz_point) * total_pts);
+                        if (ink_counts && ink_pts) {
+                            size_t src_off = 0;
+                            size_t dst_off = 0;
+                            int out_s = 0;
+                            for (int s = 0; s < ea->stroke_count; s++) {
+                                int c = ea->stroke_counts[s];
+                                if (c <= 0) continue;
+                                int stroke_valid_pts = 0;
+                                size_t stroke_start = dst_off;
+                                for (int k = 0; k < c; k++) {
+                                    float px = ea->stroke_points[(src_off + (size_t)k) * 2 + 0];
+                                    float py = ea->stroke_points[(src_off + (size_t)k) * 2 + 1];
+                                    if (ll_isfinite(px) && ll_isfinite(py)) {
+                                        ink_pts[dst_off++] = fz_make_point(px, py);
+                                        stroke_valid_pts++;
+                                    }
+                                }
+                                src_off += (size_t)c;
+                                if (stroke_valid_pts == 1) {
+                                    /* Ensure 1-point dots stroke a minimal segment for MuPDF appearance. */
+                                    fz_point p0 = ink_pts[stroke_start];
+                                    ink_pts[dst_off++] = fz_make_point(p0.x + 0.05f, p0.y);
+                                    stroke_valid_pts = 2;
+                                }
+                                if (stroke_valid_pts >= 2) {
+                                    ink_counts[out_s++] = stroke_valid_pts;
+                                } else {
+                                    dst_off = stroke_start;
+                                }
+                            }
+                            if (out_s > 0) {
+                                pdf_set_annot_ink_list(ctx, annot, out_s, ink_counts, ink_pts);
+                            }
+                        }
+                        free(ink_counts);
+                        ink_counts = NULL;
+                        free(ink_pts);
+                        ink_pts = NULL;
+                    }
+                    if (ll_isfinite(ea->width) && ea->width > 0.0f) {
                         pdf_set_annot_border(ctx, annot, ea->width);
                     }
                 }
 
                 pdf_update_annot(ctx, annot);
                 pdf_drop_annot(ctx, annot);
+                annot = NULL;
             }
 
             pdf_update_page(ctx, page);
             pdf_drop_page(ctx, page);
+            page = NULL;
         }
 
         pdf_save_document(ctx, pdf, output_path, &pdf_default_write_options);
     }
     fz_always(ctx) {
+        free(qv);
+        free(ink_pts);
+        free(ink_counts);
+        if (annot) pdf_drop_annot(ctx, annot);
+        if (page) pdf_drop_page(ctx, page);
         if (pdf) pdf_drop_document(ctx, pdf);
     }
     fz_catch(ctx) {

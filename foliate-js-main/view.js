@@ -4,6 +4,7 @@ import { Overlayer } from './overlayer.js'
 import { textWalker } from './text-walker.js'
 
 const SEARCH_PREFIX = 'foliate-search:'
+const ACTIVE_SEARCH_PREFIX = 'foliate-search-active:'
 
 const defaultCfiFilter = node => {
     if (node && node.nodeType === 1) {
@@ -317,14 +318,14 @@ class History extends EventTarget {
     #index = -1
     pushState(x) {
         const last = this.#arr[this.#index]
-        if (last === x || last?.fraction && last.fraction === x.fraction) return
+        if (last === x || (last?.fraction != null && last.fraction === x?.fraction)) return
         this.#arr[++this.#index] = x
         this.#arr.length = this.#index + 1
         this.dispatchEvent(new Event('index-change'))
     }
     replaceState(x) {
         const index = this.#index
-        this.#arr[index] = x
+        if (index >= 0) this.#arr[index] = x
     }
     back() {
         const index = this.#index
@@ -375,6 +376,7 @@ export class View extends HTMLElement {
     #pageProgress
     #searchResults = new Map()
     #searchHighlights = new Map()
+    #activeSearchMarker = null
     #searchDraw
     #searchDrawOptions
     #cursorAutohider = new CursorAutohider(this, () =>
@@ -671,7 +673,7 @@ export class View extends HTMLElement {
         const overlayer = new Overlayer()
         doc.addEventListener('click', e => {
             const [value, range] = overlayer.hitTest(e)
-            if (value && !value.startsWith(SEARCH_PREFIX)) {
+            if (value && !value.startsWith(SEARCH_PREFIX) && !value.startsWith(ACTIVE_SEARCH_PREFIX)) {
                 this.#emit('show-annotation', { value, index, range })
             }
         }, false)
@@ -681,7 +683,12 @@ export class View extends HTMLElement {
 
         this.#emit('create-overlay', { index })
         if (this._pendingActiveSearchCfi) {
-            setTimeout(() => this.setActiveSearchMatch(this._pendingActiveSearchCfi), 10)
+            const pendingCfi = this._pendingActiveSearchCfi
+            setTimeout(() => {
+                if (this._pendingActiveSearchCfi === pendingCfi) {
+                    this.setActiveSearchMatch(pendingCfi)
+                }
+            }, 10)
         }
         return overlayer
     }
@@ -935,28 +942,37 @@ export class View extends HTMLElement {
         }
         if (!signal?.aborted) yield 'done'
     }
-    setActiveSearchMatch(cfi) {
-        if (!cfi) return
-        this._pendingActiveSearchCfi = cfi
+    #clearActiveSearchMarker() {
+        if (this.#activeSearchMarker) {
+            const { value, index } = this.#activeSearchMarker
+            this.#activeSearchMarker = null
+            try { this.#getOverlayer(index)?.overlayer?.remove?.(value) } catch (e) {}
+        }
         const contents = this.renderer?.getContents?.() || []
-        for (const { doc } of contents) {
+        for (const { doc, overlayer } of contents) {
             if (doc?.defaultView?.CSS?.highlights) {
                 let activeHl = doc.defaultView.CSS.highlights.get('foliate-search-active')
-                if (!activeHl) {
-                    activeHl = new doc.defaultView.Highlight()
-                    doc.defaultView.CSS.highlights.set('foliate-search-active', activeHl)
-                }
-                activeHl.clear()
+                if (activeHl) activeHl.clear()
+            }
+            if (overlayer && this._activeSearchMarkerValue) {
+                try { overlayer.remove?.(this._activeSearchMarkerValue) } catch (e) {}
             }
         }
-        const resolved = this.resolveNavigation(cfi)
-        if (!resolved) return
+        this._activeSearchMarkerValue = null
+    }
+    async setActiveSearchMatch(cfi) {
+        if (!cfi) return
+        this._pendingActiveSearchCfi = cfi
+        this.#clearActiveSearchMarker()
+        const resolved = await this.resolveNavigation(cfi)
+        if (!resolved || this._pendingActiveSearchCfi !== cfi) return
         const { index, anchor } = resolved
         const obj = this.#getOverlayer(index)
         if (obj?.doc) {
             try {
                 const range = typeof anchor === 'function' ? anchor(obj.doc) : anchor
-                if (obj.doc.defaultView?.CSS?.highlights && range) {
+                if (!range) return
+                if (obj.doc.defaultView?.CSS?.highlights) {
                     this.#ensureSearchHighlightStyle(obj.doc)
                     let activeHl = obj.doc.defaultView.CSS.highlights.get('foliate-search-active')
                     if (!activeHl) {
@@ -965,6 +981,11 @@ export class View extends HTMLElement {
                     }
                     activeHl.clear()
                     activeHl.add(range)
+                } else if (obj.overlayer) {
+                    const activeValue = ACTIVE_SEARCH_PREFIX + cfi
+                    this._activeSearchMarkerValue = activeValue
+                    this.#activeSearchMarker = { value: activeValue, index }
+                    obj.overlayer.add(activeValue, range, Overlayer.highlight, { color: 'rgba(249, 115, 22, 0.45)' })
                 }
             } catch (e) {
                 console.warn('Failed to set active search highlight:', e)
@@ -973,6 +994,7 @@ export class View extends HTMLElement {
     }
     clearSearch() {
         this._pendingActiveSearchCfi = null
+        this.#clearActiveSearchMarker()
         this.#searchHighlights.clear()
         for (const list of this.#searchResults.values())
             for (const item of list) this.deleteAnnotation(item)

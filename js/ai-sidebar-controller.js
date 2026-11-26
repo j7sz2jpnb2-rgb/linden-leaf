@@ -37,6 +37,8 @@ import {
 } from './reading-ai-assistant.js'
 
 import {
+    getBook,
+    getAllBooks,
     saveAiConversation,
     getAiConversation,
     getAiConversationsByBook,
@@ -195,7 +197,7 @@ export class AiSidebarController {
 
         // Input & Keys
         this.dom.aiChatInput?.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
                 e.preventDefault()
                 this.handleSendMessage()
             }
@@ -1419,6 +1421,11 @@ export class AiSidebarController {
         try {
             // Support cross-book navigation if reference belongs to another book
             if (ref.bookId && this.app?.currentBookId && ref.bookId !== this.app.currentBookId) {
+                const targetBook = await getBook(ref.bookId)
+                if (!targetBook) {
+                    this.app?.showToast?.(t('statsView.heatmap.missingSourceWarn', { title: t('aiSidebar.unspecifiedBook') }), 'warning')
+                    return
+                }
                 if (typeof this.app.openBook === 'function') {
                     const initLoc = ref.cfi ? { cfi: ref.cfi } : (typeof ref.pageIndex === 'number' ? { type: 'pdf', page: ref.pageIndex + 1, pageIndex: ref.pageIndex, yRatio: typeof ref.yRatio === 'number' ? ref.yRatio : 0 } : null)
                     await this.app.openBook(ref.bookId, initLoc)
@@ -1648,8 +1655,29 @@ export class AiSidebarController {
         }, 200)
     }
 
+    async _refreshLiveBookTitlesMap() {
+        try {
+            const books = await getAllBooks()
+            this._liveBookTitlesMap = new Map((books || []).map(b => [b.id, b.title]))
+        } catch {
+            this._liveBookTitlesMap = new Map()
+        }
+        return this._liveBookTitlesMap
+    }
+
+    _resolveConversationBookTitle(conv) {
+        if (!conv) return ''
+        if (conv.bookId && conv.bookId !== 'general' && this._liveBookTitlesMap?.has(conv.bookId)) {
+            return this._liveBookTitlesMap.get(conv.bookId) || conv.bookTitle || ''
+        }
+        return conv.bookTitle || ''
+    }
+
     async loadAllHistoryConversations() {
-        const list = await getAllAiConversations()
+        const [list] = await Promise.all([
+            getAllAiConversations(),
+            this._refreshLiveBookTitlesMap()
+        ])
         this._cachedHistoryList = list || []
         this.renderHistoryList(this._cachedHistoryList)
 
@@ -1658,20 +1686,73 @@ export class AiSidebarController {
         }
     }
 
-    filterHistoryList() {
-        const query = (this.dom.inputAiHistorySearch?.value || '').trim().toLowerCase()
-        if (!this._cachedHistoryList) return
+    async _filterConversationsWithMessageSearch(list, query, generationCheck) {
+        if (!list) return []
+        if (!query) return list
 
-        if (!query) {
-            this.renderHistoryList(this._cachedHistoryList)
-            return
+        const directMatches = new Set()
+        const filtered = list.filter(c => {
+            const resolvedBookTitle = this._resolveConversationBookTitle(c)
+            const match = (c.title || '').toLowerCase().includes(query) ||
+                          resolvedBookTitle.toLowerCase().includes(query)
+            if (match) directMatches.add(c.id)
+            return match
+        })
+
+        if (!this._convSearchTextCache) {
+            this._convSearchTextCache = new Map()
+        }
+        const candidates = list.filter(c => !directMatches.has(c.id))
+        const deepMatches = []
+        const missing = []
+
+        for (const conv of candidates) {
+            const cached = this._convSearchTextCache.get(conv.id)
+            const curTime = conv.updatedAt || conv.createdAt || 0
+            if (cached && cached.updatedAt === curTime) {
+                if (cached.text.includes(query)) {
+                    deepMatches.push(conv)
+                }
+            } else {
+                missing.push(conv)
+            }
         }
 
-        const filtered = this._cachedHistoryList.filter(c =>
-            (c.title || '').toLowerCase().includes(query) ||
-            (c.bookTitle || '').toLowerCase().includes(query)
+        for (let i = 0; i < missing.length; i += 4) {
+            if (!generationCheck()) return null
+            const matches = await Promise.all(missing.slice(i, i + 4).map(async conv => {
+                try {
+                    const msgs = await getAiMessages(conv.id)
+                    const fullText = msgs.map(m => `${m.content || ''} ${m.quoteText || ''} ${m.referenceSnapshot?.selectedText || ''}`).join(' ').toLowerCase()
+                    if (this._convSearchTextCache.size > 500) {
+                        const firstKey = this._convSearchTextCache.keys().next().value
+                        this._convSearchTextCache.delete(firstKey)
+                    }
+                    this._convSearchTextCache.set(conv.id, {
+                        text: fullText,
+                        updatedAt: conv.updatedAt || conv.createdAt || 0
+                    })
+                    return fullText.includes(query) ? conv : null
+                } catch { return null }
+            }))
+            deepMatches.push(...matches.filter(Boolean))
+        }
+        if (!generationCheck()) return null
+        return [...filtered, ...deepMatches]
+    }
+
+    async filterHistoryList() {
+        const generation = this._modalFilterGeneration = (this._modalFilterGeneration || 0) + 1
+        const query = (this.dom.inputAiHistorySearch?.value || '').trim().toLowerCase()
+        if (!this._cachedHistoryList) return
+        const combined = await this._filterConversationsWithMessageSearch(
+            this._cachedHistoryList,
+            query,
+            () => generation === this._modalFilterGeneration
         )
-        this.renderHistoryList(filtered)
+        if (combined) {
+            this.renderHistoryList(combined)
+        }
     }
 
     renderHistoryList(conversations) {
@@ -1692,10 +1773,11 @@ export class AiSidebarController {
             item.dataset.convId = conv.id
 
             const dateStr = new Date(conv.updatedAt || conv.createdAt || Date.now()).toLocaleDateString(getLocale())
+            const liveBookTitle = this._resolveConversationBookTitle(conv)
             item.innerHTML = `
                 <div class="ai-history-card-title">${escapeUntrustedHtml(this.formatLocalizedConversationTitle(conv))}</div>
                 <div class="ai-history-card-meta">
-                    <span class="ai-history-card-book">${escapeUntrustedHtml(this.formatLocalizedConversationBookTitle(conv.bookTitle, 'aiSidebar.unspecifiedBook'))}</span>
+                    <span class="ai-history-card-book">${escapeUntrustedHtml(this.formatLocalizedConversationBookTitle(liveBookTitle, 'aiSidebar.unspecifiedBook'))}</span>
                     <span>${dateStr}</span>
                 </div>
             `
@@ -1712,11 +1794,13 @@ export class AiSidebarController {
         this._selectedHistoryConvId = convId
         const conv = await getAiConversation(convId)
         if (!conv) return
+        const liveBook = conv.bookId && conv.bookId !== 'general' ? await getBook(conv.bookId) : null
+        const liveBookTitle = liveBook?.title || this._resolveConversationBookTitle(conv)
 
         if (this.dom.aiHistoryActiveTitle) this.dom.aiHistoryActiveTitle.innerText = this.formatLocalizedConversationTitle(conv)
         if (this.dom.aiHistoryActiveMeta) {
             const dateStr = new Date(conv.createdAt || Date.now()).toLocaleString(getLocale())
-            const bookLabel = conv.bookTitle ? this.formatLocalizedConversationBookTitle(conv.bookTitle, 'aiSidebar.unspecifiedBook') : ''
+            const bookLabel = liveBookTitle ? this.formatLocalizedConversationBookTitle(liveBookTitle, 'aiSidebar.unspecifiedBook') : ''
             this.dom.aiHistoryActiveMeta.innerText = t('aiSidebar.createdAtMeta', { book: bookLabel, date: dateStr })
         }
 
@@ -1756,6 +1840,13 @@ export class AiSidebarController {
             return
         }
 
+        const liveBook = await getBook(conv.bookId)
+        if (!liveBook) {
+            const missingTitle = this._resolveConversationBookTitle(conv) || t('aiSidebar.unspecifiedBook')
+            this.app?.showToast?.(t('statsView.heatmap.missingSourceWarn', { title: missingTitle }), 'warning')
+            return
+        }
+
         this.closeHistoryModal()
 
         // Get messages to find the first referenceSnapshot if available
@@ -1767,6 +1858,7 @@ export class AiSidebarController {
         const initialLoc = refToUse.cfi || (typeof refToUse.pageIndex === 'number' ? refToUse.pageIndex : null)
         if (typeof this.app?.openBook === 'function') {
             await this.app.openBook(conv.bookId, initialLoc)
+            const liveTitle = liveBook.title || conv.bookTitle || ''
             // If the book was opened in-place in the current window:
             if (this.app.currentBookId === conv.bookId) {
                 let attempts = 0
@@ -1777,11 +1869,11 @@ export class AiSidebarController {
                 if (refToUse.cfi || refToUse.pageIndex != null) {
                     await this.jumpToReference(refToUse)
                 } else {
-                    this.app?.showToast?.(t('aiSidebar.toastOpenedBook', { title: conv.bookTitle || '' }), 'success')
+                    this.app?.showToast?.(t('aiSidebar.toastOpenedBook', { title: liveTitle }), 'success')
                 }
             } else {
                 // Book was opened or focused in satellite window; initialLoc already dispatched via openBook
-                this.app?.showToast?.(t('aiSidebar.toastFocusedBook', { title: conv.bookTitle || '' }), 'book')
+                this.app?.showToast?.(t('aiSidebar.toastFocusedBook', { title: liveTitle }), 'book')
             }
         }
     }
@@ -1790,10 +1882,12 @@ export class AiSidebarController {
         const targetId = convId || this._selectedHistoryConvId || this._selectedWorkspaceConvId
         const conv = await getAiConversation(targetId)
         if (!conv) return
+        const liveBook = conv.bookId && conv.bookId !== 'general' ? await getBook(conv.bookId) : null
+        const exportBookTitle = liveBook?.title || this._resolveConversationBookTitle(conv)
 
         const msgs = await getAiMessages(conv.id)
         let md = `# ${conv.title || t('aiSidebar.exportDefaultHeading')}\n\n`
-        md += `- ${t('aiSidebar.exportBookLabel')}: ${conv.bookTitle || t('aiSidebar.auditStatusUnknown')}\n`
+        md += `- ${t('aiSidebar.exportBookLabel')}: ${exportBookTitle || t('aiSidebar.auditStatusUnknown')}\n`
         md += `- ${t('aiSidebar.exportTimeLabel')}: ${new Date().toLocaleString(getLocale())}\n\n---\n\n`
 
         msgs.forEach((m, idx) => {
@@ -1829,7 +1923,11 @@ export class AiSidebarController {
         if (!targetId) return
         const conv = await getAiConversation(targetId)
         const titleStr = conv?.title ? `"${conv.title}"` : t('aiSidebar.thisSession')
-        if (confirm(t('aiSidebar.confirmDeleteConv', { title: titleStr }))) {
+        const msg = t('aiSidebar.confirmDeleteConv', { title: titleStr })
+        const confirmed = this.app?.dialogs?.showConfirmDialog
+            ? await this.app.dialogs.showConfirmDialog(t('common.delete'), msg)
+            : confirm(msg)
+        if (confirmed) {
             await deleteAiConversation(targetId)
             this.app?.showToast?.(t('aiSidebar.toastConvDeleted'), 'info')
             if (isWorkspace) {
@@ -1844,7 +1942,11 @@ export class AiSidebarController {
     }
 
     async handleClearAllHistory(isWorkspace = false) {
-        if (confirm(t('aiSidebar.confirmClearAllHistory'))) {
+        const msg = t('aiSidebar.confirmClearAllHistory')
+        const confirmed = this.app?.dialogs?.showConfirmDialog
+            ? await this.app.dialogs.showConfirmDialog(t('common.delete'), msg)
+            : confirm(msg)
+        if (confirmed) {
             await clearAllAiHistory()
             this.app?.showToast?.(t('aiSidebar.toastClearedAllHistory'), 'info')
             if (isWorkspace) {
@@ -1861,7 +1963,10 @@ export class AiSidebarController {
 
     async renderHistoryWorkspace() {
         try {
-            const list = await getAllAiConversations()
+            const [list] = await Promise.all([
+                getAllAiConversations(),
+                this._refreshLiveBookTitlesMap()
+            ])
             this._cachedWorkspaceList = list || []
 
             if (this.dom.aiHistoryTotalCount) {
@@ -1919,62 +2024,14 @@ export class AiSidebarController {
         const generation = this._workspaceFilterGeneration = (this._workspaceFilterGeneration || 0) + 1
         const query = (this.dom.inputAiHistoryPageSearch?.value || '').trim().toLowerCase()
         if (!this._cachedWorkspaceList) return
-
-        if (!query) {
-            this.renderWorkspaceConversationsList(this._cachedWorkspaceList)
-            return
+        const combined = await this._filterConversationsWithMessageSearch(
+            this._cachedWorkspaceList,
+            query,
+            () => generation === this._workspaceFilterGeneration
+        )
+        if (combined) {
+            this.renderWorkspaceConversationsList(combined)
         }
-
-        const directMatches = new Set()
-        const filtered = this._cachedWorkspaceList.filter(c => {
-            const match = (c.title || '').toLowerCase().includes(query) ||
-                          (c.bookTitle || '').toLowerCase().includes(query)
-            if (match) directMatches.add(c.id)
-            return match
-        })
-
-        // P07: Cache searchable text for conversations to prevent N database reads on each keystroke
-        if (!this._convSearchTextCache) {
-            this._convSearchTextCache = new Map()
-        }
-        const candidates = this._cachedWorkspaceList.filter(c => !directMatches.has(c.id))
-        const deepMatches = []
-        const missing = []
-
-        for (const conv of candidates) {
-            const cached = this._convSearchTextCache.get(conv.id)
-            const curTime = conv.updatedAt || conv.createdAt || 0
-            if (cached && cached.updatedAt === curTime) {
-                if (cached.text.includes(query)) {
-                    deepMatches.push(conv)
-                }
-            } else {
-                missing.push(conv)
-            }
-        }
-
-        for (let i = 0; i < missing.length; i += 4) {
-            if (generation !== this._workspaceFilterGeneration) return
-            const matches = await Promise.all(missing.slice(i, i + 4).map(async conv => {
-                try {
-                    const msgs = await getAiMessages(conv.id)
-                    const fullText = msgs.map(m => `${m.content || ''} ${m.quoteText || ''} ${m.referenceSnapshot?.selectedText || ''}`).join(' ').toLowerCase()
-                    if (this._convSearchTextCache.size > 500) {
-                        const firstKey = this._convSearchTextCache.keys().next().value
-                        this._convSearchTextCache.delete(firstKey)
-                    }
-                    this._convSearchTextCache.set(conv.id, {
-                        text: fullText,
-                        updatedAt: conv.updatedAt || conv.createdAt || 0
-                    })
-                    return fullText.includes(query) ? conv : null
-                } catch { return null }
-            }))
-            deepMatches.push(...matches.filter(Boolean))
-        }
-        if (generation !== this._workspaceFilterGeneration) return
-        const combined = [...filtered, ...deepMatches]
-        this.renderWorkspaceConversationsList(combined)
     }
 
     renderWorkspaceConversationsList(conversations) {
@@ -2000,10 +2057,11 @@ export class AiSidebarController {
             card.dataset.convId = conv.id
 
             const dateStr = new Date(conv.updatedAt || conv.createdAt || Date.now()).toLocaleDateString(getLocale())
+            const liveBookTitle = this._resolveConversationBookTitle(conv)
             card.innerHTML = `
                 <div class="ai-history-card-title">${escapeUntrustedHtml(this.formatLocalizedConversationTitle(conv))}</div>
                 <div class="ai-history-card-meta">
-                    <span class="ai-history-card-book">${escapeUntrustedHtml(this.formatLocalizedConversationBookTitle(conv.bookTitle, 'aiSidebar.unspecifiedBook'))}</span>
+                    <span class="ai-history-card-book">${escapeUntrustedHtml(this.formatLocalizedConversationBookTitle(liveBookTitle, 'aiSidebar.unspecifiedBook'))}</span>
                     <span>${dateStr}</span>
                 </div>
             `
@@ -2039,8 +2097,9 @@ export class AiSidebarController {
             this.dom.aiHistoryPageTitle.innerText = this.formatLocalizedConversationTitle(conv)
         }
         if (this.dom.aiHistoryPageMeta) {
+            const liveBookTitle = this._resolveConversationBookTitle(conv)
             const dateStr = new Date(conv.createdAt || Date.now()).toLocaleString(getLocale())
-            this.dom.aiHistoryPageMeta.innerText = t('aiSidebar.workspaceActiveMeta', { book: this.formatLocalizedConversationBookTitle(conv.bookTitle, 'aiSidebar.workspaceUnlinkedBook'), count: msgs?.length || 0, date: dateStr })
+            this.dom.aiHistoryPageMeta.innerText = t('aiSidebar.workspaceActiveMeta', { book: this.formatLocalizedConversationBookTitle(liveBookTitle, 'aiSidebar.workspaceUnlinkedBook'), count: msgs?.length || 0, date: dateStr })
         }
 
         // Show/hide buttons

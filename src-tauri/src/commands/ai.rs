@@ -536,10 +536,9 @@ pub fn ai_get_status(state: tauri::State<'_, AiState>, purpose: Option<AiRequest
     }
 }
 
-#[tauri::command]
-pub fn ai_abort_request(state: tauri::State<'_, AiState>, request_id: Option<String>) -> bool {
-    let mut active = state.active_request_id.lock().unwrap();
-    let should_abort = match (active.as_deref(), request_id.as_deref()) {
+pub(crate) fn abort_request_inner(state: &AiState, request_id: Option<&str>) -> bool {
+    let active = state.active_request_id.lock().unwrap();
+    let should_abort = match (active.as_deref(), request_id) {
         (Some(cur), Some(req)) => cur == req,
         (Some(_), None) => true,
         _ => false,
@@ -547,7 +546,7 @@ pub fn ai_abort_request(state: tauri::State<'_, AiState>, request_id: Option<Str
 
     if should_abort {
         let mut tx_guard = state.abort_tx.lock().unwrap();
-        let matches_req = match (tx_guard.as_ref(), request_id.as_deref()) {
+        let matches_req = match (tx_guard.as_ref(), request_id) {
             (Some((cur_req, _)), Some(req)) => cur_req == req,
             (Some(_), None) => true,
             _ => false,
@@ -557,17 +556,16 @@ pub fn ai_abort_request(state: tauri::State<'_, AiState>, request_id: Option<Str
                 let _ = tx.send(());
             }
         }
-        if let Some(ref req) = request_id {
-            if active.as_deref() == Some(req) {
-                *active = None;
-            }
-        } else {
-            *active = None;
-        }
+        // Leave `active_request_id` owned until `RequestLockGuard::drop` runs after cleanup/audit.
         true
     } else {
         false
     }
+}
+
+#[tauri::command]
+pub fn ai_abort_request(state: tauri::State<'_, AiState>, request_id: Option<String>) -> bool {
+    abort_request_inner(&state, request_id.as_deref())
 }
 
 #[tauri::command]
@@ -821,7 +819,6 @@ pub async fn ai_request_chat_completion(
         if payload.purpose == AiRequestPurpose::Chat {
             hashes.insert(payload_hash, (req_id.clone(), Instant::now()));
         }
-        increment_today_count();
     }
     let _guard = RequestLockGuard {
         state: &state,
@@ -951,6 +948,8 @@ pub async fn ai_request_chat_completion(
         return Err(sanitized);
     }
 
+    increment_today_count();
+
     // 7. Process SSE Stream with Stop / Abort Interruption
     let mut byte_buffer: Vec<u8> = Vec::new();
     let mut full_text = String::new();
@@ -958,6 +957,7 @@ pub async fn ai_request_chat_completion(
     let mut finish_reason: Option<String> = None;
     let mut was_cancelled = false;
     let mut has_stream_error = false;
+    let mut last_stream_error: Option<String> = None;
     let mut received_done = false;
 
     loop {
@@ -991,6 +991,7 @@ pub async fn ai_request_chat_completion(
                                 Err(raw) => {
                                     has_stream_error = true;
                                     let message = sanitize_error_message_localized(500, &raw, payload.locale.as_deref());
+                                    last_stream_error = Some(message.clone());
                                     let _ = window.emit(&format!("ai:error:{}", req_id), serde_json::json!({ "status": 500, "message": message }));
                                 }
                             }
@@ -1013,6 +1014,7 @@ pub async fn ai_request_chat_completion(
                                 Err(raw) => {
                                     has_stream_error = true;
                                     let message = sanitize_error_message_localized(500, &raw, payload.locale.as_deref());
+                                    last_stream_error = Some(message.clone());
                                     let _ = window.emit(&format!("ai:error:{}", req_id), serde_json::json!({ "status": 500, "message": message }));
                                 }
                             }
@@ -1022,6 +1024,7 @@ pub async fn ai_request_chat_completion(
                     Err(e) => {
                         has_stream_error = true;
                         let err_msg = ai_stream_interrupted_msg(en, &e);
+                        last_stream_error = Some(err_msg.clone());
                         let _ = window.emit(
                             &format!("ai:error:{}", req_id),
                             serde_json::json!({
@@ -1071,6 +1074,13 @@ pub async fn ai_request_chat_completion(
         duration_ms: start_time.elapsed().as_millis(),
         error_message: ai_audit_terminal_message(en, was_cancelled, has_stream_error, final_status),
     });
+
+    if has_stream_error && !was_cancelled {
+        return Err(last_stream_error.unwrap_or_else(|| {
+            ai_audit_terminal_message(en, false, true, final_status)
+                .unwrap_or_else(|| "Stream failed".to_string())
+        }));
+    }
 
     if !was_cancelled && !has_stream_error {
         let _ = window.emit(
@@ -1314,6 +1324,31 @@ mod tests {
             let active = state.active_request_id.lock().unwrap();
             assert!(active.is_none());
         }
+    }
+
+    #[test]
+    fn test_abort_request_preserves_lock_until_guard_drop() {
+        let state = AiState::default();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        *state.active_request_id.lock().unwrap() = Some("req_abort_1".to_string());
+        *state.abort_tx.lock().unwrap() = Some(("req_abort_1".to_string(), tx));
+
+        let guard = RequestLockGuard {
+            state: &state,
+            request_id: "req_abort_1".to_string(),
+            final_status: Mutex::new("failed".to_string()),
+        };
+
+        assert!(abort_request_inner(&state, Some("req_abort_1")));
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(
+            state.active_request_id.lock().unwrap().as_deref(),
+            Some("req_abort_1"),
+            "abort must keep request lock until stream guard drops"
+        );
+
+        drop(guard);
+        assert!(state.active_request_id.lock().unwrap().is_none());
     }
 }
 

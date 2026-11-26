@@ -185,22 +185,32 @@ fn is_explicitly_uninstalled() -> bool {
     false
 }
 
+fn resolve_bundled_db_path_from(
+    resource_dir: Option<&Path>,
+    exe_dir: Option<&Path>,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(res_dir) = resource_dir {
+        candidates.push(res_dir.join("resources").join("dictionary").join("ecdict.db"));
+        candidates.push(res_dir.join("dictionary").join("ecdict.db"));
+    }
+    if let Some(exe) = exe_dir {
+        candidates.push(exe.join("resources").join("dictionary").join("ecdict.db"));
+        candidates.push(exe.join("dictionary").join("ecdict.db"));
+        candidates.push(exe.join("..").join("Resources").join("resources").join("dictionary").join("ecdict.db"));
+    }
+    let cwd_base = cwd.map(Path::to_path_buf).unwrap_or_default();
+    candidates.push(cwd_base.join("resources").join("dictionary").join("ecdict.db"));
+
+    candidates.into_iter().find(|p| p.exists())
+}
+
 fn get_bundled_db_path() -> Option<PathBuf> {
-    // 1. Check relative to current working dir
-    let cwd_bundled = PathBuf::from("resources").join("dictionary").join("ecdict.db");
-    if cwd_bundled.exists() {
-        return Some(cwd_bundled);
-    }
-    // 2. Check relative to executable directory (production release)
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let exe_bundled = exe_dir.join("resources").join("dictionary").join("ecdict.db");
-            if exe_bundled.exists() {
-                return Some(exe_bundled);
-            }
-        }
-    }
-    None
+    let res_dir = crate::commands::fs::resolve_resource_dir();
+    let exe_path = std::env::current_exe().ok();
+    let exe_dir = exe_path.as_deref().and_then(|p| p.parent());
+    resolve_bundled_db_path_from(res_dir.as_deref(), exe_dir, None)
 }
 
 fn get_effective_db_path() -> Option<PathBuf> {
@@ -667,8 +677,8 @@ pub fn dict_lookup(word: String, locale: Option<String>) -> DictLookupResult {
 #[tauri::command]
 pub fn dict_uninstall(locale: Option<String>) -> Result<bool, String> {
     let en = is_en_locale(locale.as_deref());
-    invalidate_cached_dict_conn();
     let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    invalidate_cached_dict_conn();
     let db_path = get_dict_db_path();
     let meta_path = get_dict_meta_path();
     if db_path.exists() {
@@ -894,21 +904,61 @@ pub fn convert_csv_to_sqlite_localized(
 }
 
 #[tauri::command]
-pub fn dict_install_from_file(source_path: String, locale: Option<String>) -> Result<DictStatus, String> {
+pub async fn dict_install_from_file(source_path: String, locale: Option<String>) -> Result<DictStatus, String> {
     let en = is_en_locale(locale.as_deref());
-    let src = Path::new(&source_path);
+    tokio::task::spawn_blocking(move || dict_install_from_file_sync(source_path, locale))
+        .await
+        .map_err(|e| {
+            if en {
+                format!("Dictionary import task failed: {}", e)
+            } else {
+                format!("词典导入任务失败: {}", e)
+            }
+        })?
+}
+
+fn dict_install_from_file_sync(source_path: String, locale: Option<String>) -> Result<DictStatus, String> {
+    let en = is_en_locale(locale.as_deref());
+    let resolved_path = if source_path == "resources/dictionary/ecdict.db" && !Path::new(&source_path).exists() {
+        get_bundled_db_path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| source_path.clone())
+    } else {
+        source_path.clone()
+    };
+    let src = Path::new(&resolved_path);
     if !src.exists() {
         return Err(l10n(en, "所选词典文件不存在", "Selected dictionary file does not exist").to_string());
     }
 
     let _guard = InstallingGuard::new_localized(en)?;
+    // Reset any stale download cancellation flag before starting a local import.
+    DOWNLOAD_CANCEL.store(false, Ordering::SeqCst);
     let dest = get_dict_db_path();
     let tmp = get_dict_storage_dir().join("ecdict.db.tmp");
-    let is_csv = source_path.to_lowercase().ends_with(".csv");
+    let is_csv = resolved_path.to_lowercase().ends_with(".csv");
 
     let count: u64 = if is_csv {
         let _ = fs::remove_file(&tmp);
-        convert_csv_to_sqlite_localized(src, &tmp, None, en)?
+        let progress_cb = |rows: u64| {
+            update_download_progress(|p| {
+                p.phase = "indexing".to_string();
+                p.entries_processed = rows;
+                p.percent = ((rows as f64 / 770000.0) * 100.0).min(99.0) as u32;
+                p.message = if en {
+                    format!("Indexing dictionary entries: {}...", rows)
+                } else {
+                    format!("正在索引词条: {}...", rows)
+                };
+            });
+        };
+        match convert_csv_to_sqlite_localized(src, &tmp, Some(&progress_cb), en) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
     } else {
         // Validate SQLite database
         let conn = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| {
@@ -1020,6 +1070,7 @@ pub fn dict_install_from_file(source_path: String, locale: Option<String>) -> Re
                         format!("遍历 stardict 失败: {}", e)
                     }
                 })?;
+                let mut imported_rows: u64 = 0;
                 while let Some(row) = rows.next().map_err(|e| {
                     if en {
                         format!("Failed to read stardict row: {}", e)
@@ -1027,6 +1078,15 @@ pub fn dict_install_from_file(source_path: String, locale: Option<String>) -> Re
                         format!("读取条目失败: {}", e)
                     }
                 })? {
+                    if imported_rows % 5000 == 0 && DOWNLOAD_CANCEL.load(Ordering::SeqCst) {
+                        drop(rows);
+                        drop(stmt);
+                        drop(ins);
+                        drop(tx);
+                        drop(dest_conn);
+                        let _ = fs::remove_file(&tmp);
+                        return Err(l10n(en, "操作已由用户取消", "Operation cancelled by user").to_string());
+                    }
                     let w: String = row.get(0).map_err(|e| {
                         if en {
                             format!("Failed to read word column: {}", e)
@@ -1047,6 +1107,7 @@ pub fn dict_install_from_file(source_path: String, locale: Option<String>) -> Re
                                 format!("导入词条失败: {}", e)
                             }
                         })?;
+                    imported_rows += 1;
                 }
             }
             tx.commit().map_err(|e| {
@@ -1097,8 +1158,8 @@ pub fn dict_install_from_file(source_path: String, locale: Option<String>) -> Re
     let bak_dest = dest.with_extension("bak");
     let bak_meta = meta_path.with_extension("bak");
     {
-        invalidate_cached_dict_conn();
         let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        invalidate_cached_dict_conn();
         // Preserve and restore existing backup if destination db is missing (e.g. from an interrupted install)
         if !dest.exists() && bak_dest.exists() {
             let _ = fs::rename(&bak_dest, &dest);
@@ -1492,8 +1553,8 @@ pub async fn dict_download_and_install(
     let bak_db = dest_db.with_extension("bak");
     let bak_meta = meta_path.with_extension("bak");
     {
-        invalidate_cached_dict_conn();
         let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        invalidate_cached_dict_conn();
         // Preserve and restore existing backup if destination db is missing (e.g. from an interrupted install)
         if !dest_db.exists() && bak_db.exists() {
             let _ = fs::rename(&bak_db, &dest_db);
@@ -1717,9 +1778,11 @@ pub fn dict_migrate_storage(
     })?;
     let _ = fs::remove_file(&test_file);
 
-    invalidate_cached_dict_conn();
-    let src_db = get_dict_db_path();
-    let src_meta = get_dict_meta_path();
+    {
+        let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        invalidate_cached_dict_conn();
+        let src_db = get_dict_db_path();
+        let src_meta = get_dict_meta_path();
 
     if src_db.exists() {
         let unique_id = format!("{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
@@ -1777,10 +1840,8 @@ pub fn dict_migrate_storage(
         }
     }
 
-    {
-        let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let meta_file = crate::commands::fs::resolve_app_data_dir()
-            .join("resources_config.json");
+    let meta_file = crate::commands::fs::resolve_app_data_dir()
+        .join("resources_config.json");
         let conf = serde_json::json!({
             "dictionaryDir": target.to_string_lossy().to_string(),
             "migratedAt": chrono_or_now()
@@ -1989,6 +2050,39 @@ read,riːd,\"look at and comprehend\",\"v. 阅读\\nn. 读物\",v,,,,,p:reads,\n
         let _ = fs::remove_file(&csv_file);
         let _ = fs::remove_file(&db_file);
         let _ = fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_bundled_db_path_prioritizes_resource_and_exe_over_cwd() {
+        let base = std::env::temp_dir().join(format!("linden_test_bundled_{}", std::process::id()));
+        let res_dir = base.join("res");
+        let exe_dir = base.join("exe");
+        let cwd_dir = base.join("cwd");
+        let res_db = res_dir.join("resources").join("dictionary").join("ecdict.db");
+        let exe_db = exe_dir.join("resources").join("dictionary").join("ecdict.db");
+        let cwd_db = cwd_dir.join("resources").join("dictionary").join("ecdict.db");
+
+        let _ = fs::create_dir_all(res_db.parent().unwrap());
+        let _ = fs::create_dir_all(exe_db.parent().unwrap());
+        let _ = fs::create_dir_all(cwd_db.parent().unwrap());
+        fs::write(&res_db, b"res").unwrap();
+        fs::write(&exe_db, b"exe").unwrap();
+        fs::write(&cwd_db, b"cwd").unwrap();
+
+        assert_eq!(
+            resolve_bundled_db_path_from(Some(&res_dir), Some(&exe_dir), Some(&cwd_dir)),
+            Some(res_db.clone())
+        );
+        assert_eq!(
+            resolve_bundled_db_path_from(None, Some(&exe_dir), Some(&cwd_dir)),
+            Some(exe_db.clone())
+        );
+        assert_eq!(
+            resolve_bundled_db_path_from(None, Some(&base.join("missing_exe")), Some(&cwd_dir)),
+            Some(cwd_db.clone())
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
 

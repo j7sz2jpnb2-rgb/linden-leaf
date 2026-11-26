@@ -87,18 +87,22 @@ export class ReaderCardsController {
     bindEvents() {
         if (this._bound) return
         this._bound = true;
-        this.events.on(this.dom.btnCloseDictCard, 'click', () => this.hideDictionaryCard());
+        this.events.on(this.dom.btnCloseDictCard, 'click', () => {
+            this.hideDictionaryCard()
+            this.app.annotations?.clearActiveTextSelection?.()
+            this.app.annotations?.hideSelectionPopup?.()
+        });
         this.dom.dictColorDots?.forEach(dot => {
-            this.events.on(dot, 'click', (e) => {
+            this.events.on(dot, 'click', async (e) => {
                 e.stopPropagation()
                 const color = dot.dataset.color || '#facc15'
-                this.app.annotations.createHighlight(color, 'highlight')
+                await this.app.annotations.createHighlight(color, 'highlight')
                 this.hideDictionaryCard()
             })
         });
-        this.events.on(this.dom.btnDictUnderline, 'click', (e) => {
+        this.events.on(this.dom.btnDictUnderline, 'click', async (e) => {
             e.stopPropagation()
-            this.app.annotations.createHighlight('#2563eb', 'underline')
+            await this.app.annotations.createHighlight('#2563eb', 'underline')
             this.hideDictionaryCard()
         });
         this.events.on(this.dom.btnDictNote, 'click', async (e) => {
@@ -114,6 +118,9 @@ export class ReaderCardsController {
             })
             if (noteText !== null) {
                 await this.app.annotations.createHighlight('#facc15', 'highlight', noteText)
+            } else {
+                this.app.annotations?.clearActiveTextSelection?.()
+                this.app.annotations?.hideSelectionPopup?.()
             }
             this.hideDictionaryCard()
         });
@@ -134,6 +141,8 @@ export class ReaderCardsController {
         this.events.on(this.dom.btnDictSearch, 'click', () => {
             const word = this._currentDictResult?.word || this._currentDictResult?.normalizedWord
             this.hideDictionaryCard()
+            this.app.annotations?.clearActiveTextSelection?.()
+            this.app.annotations?.hideSelectionPopup?.()
             if (word) {
                 performWebSearch(this.app.settings, word, (msg, icon) => this.app.dialogs.showToast(msg, icon))
             }
@@ -141,6 +150,8 @@ export class ReaderCardsController {
         this.events.on(this.dom.btnDictAskAi, 'click', () => {
             const word = this._currentDictResult?.word || this._currentDictResult?.normalizedWord
             this.hideDictionaryCard()
+            this.app.annotations?.clearActiveTextSelection?.()
+            this.app.annotations?.hideSelectionPopup?.()
             if (word && this.app.aiSidebar) {
                 this.app.aiSidebar.openWithSelection({ text: word, chapterOrPage: t('cards.dict.aiLabel') })
             }
@@ -148,7 +159,11 @@ export class ReaderCardsController {
         this.events.on(this.app.appearance.dom.settingDictEnabled, 'change', (e) => {
             this.app.dictionaryService?.setEnabled(e.target.checked)
         });
-        this.events.on(this.dom.btnCloseParaTrans, 'click', () => this.hideParaTranslationCard());
+        this.events.on(this.dom.btnCloseParaTrans, 'click', () => {
+            this.hideParaTranslationCard()
+            this.app.annotations?.clearActiveTextSelection?.()
+            this.app.annotations?.hideSelectionPopup?.()
+        });
         this.events.on(this.dom.btnParaTransCopy, 'click', () => {
             if (this._currentParaTranslation) {
                 navigator.clipboard?.writeText(this._currentParaTranslation).then(() => {
@@ -159,6 +174,8 @@ export class ReaderCardsController {
         this.events.on(this.dom.btnParaTransToAi, 'click', () => {
             const original = this._currentParaOriginal || ''
             this.hideParaTranslationCard()
+            this.app.annotations?.clearActiveTextSelection?.()
+            this.app.annotations?.hideSelectionPopup?.()
             if (original && this.app.aiSidebar) {
                 this.app.aiSidebar.openWithSelection({ text: original, chapterOrPage: t('cards.para.aiLabel') })
             }
@@ -195,12 +212,6 @@ export class ReaderCardsController {
                 }
             })
         }
-        this.events.on(window, 'keydown', (e) => {
-            if (e.key === 'Escape') {
-                this.hideDictionaryCard()
-                this.hideParaTranslationCard()
-            }
-        });
         this.events.on(this.dom.btnQuoteClose, 'click', () => this.closeQuoteCardModal());
         this.events.on(this.dom.quoteCardBackdrop, 'click', e => {
             if (e.target === this.dom.quoteCardBackdrop) this.closeQuoteCardModal()
@@ -328,7 +339,7 @@ export class ReaderCardsController {
             }
         });
         this.events.on(this.dom.inputAiPrompt, 'keydown', e => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
                 const q = (this.dom.inputAiPrompt?.value || '').trim()
                 const text = (this._activeAiSnapshot?.selectedText || '').trim()
                 if (q) {
@@ -443,7 +454,7 @@ export class ReaderCardsController {
         const rect = selectionInfo.rect
         card.style.display = 'flex'
         if (rect && rect.top != null && rect.left != null) {
-            const cardWidth = 290
+            const cardWidth = card.offsetWidth || Math.min(290, window.innerWidth - 24)
             const cardHeight = card.offsetHeight || 190
             const rectHeight = rect.height || 24
             const rectBottom = (rect.bottom != null && !isNaN(rect.bottom)) ? rect.bottom : (rect.top + rectHeight)
@@ -504,33 +515,11 @@ export class ReaderCardsController {
         this._currentParaOriginal = selectionInfo.text
         this._currentParaTranslation = ''
 
+        this._paraTransSelectionRect = selectionInfo.rect || null
         card.style.display = 'flex'
         content.innerHTML = `<span style="color: var(--text-muted); font-size: 0.82rem;">${escapeHTML(t('cards.para.preparing'))}</span>`
 
-        // Position near selection
-        const rect = selectionInfo.rect
-        if (rect && rect.top != null && rect.left != null) {
-            const cardWidth = 380
-            const cardHeight = card.offsetHeight || 160
-            const rectHeight = rect.height || 24
-            const rectBottom = (rect.bottom != null && !isNaN(rect.bottom)) ? rect.bottom : (rect.top + rectHeight)
-            let left = rect.left + ((rect.width || 0) / 2) - (cardWidth / 2)
-            if (left + cardWidth > window.innerWidth - 20) {
-                left = window.innerWidth - cardWidth - 20
-            }
-            if (left < 10) left = 10
-            let top = rectBottom + 8
-            if (top + cardHeight > window.innerHeight - 10) {
-                top = Math.max(10, rect.top - cardHeight - 8)
-            }
-            card.style.transform = 'none'
-            card.style.left = `${left}px`
-            card.style.top = `${top}px`
-        } else {
-            card.style.left = '50%'
-            card.style.top = '50%'
-            card.style.transform = 'translate(-50%, -50%)'
-        }
+        this._repositionParaTranslationCard()
 
         const originalText = selectionInfo.text.trim()
         const renderBilingualContent = (translatedText, isStreaming = false) => {
@@ -596,11 +585,13 @@ export class ReaderCardsController {
                     if (!isCurrent()) return
                     this._currentParaTranslation = fullText
                     content.innerHTML = renderBilingualContent(fullText, true)
+                    this._repositionParaTranslationCard()
                 }
             })
             if (!isCurrent()) return
             this._currentParaTranslation = response.fullText
             content.innerHTML = renderBilingualContent(response.fullText, false)
+            this._repositionParaTranslationCard()
             const message = {
                 id: 'msg_asst_' + reqId, conversationId: convId, role: 'assistant', content: response.fullText,
                 referenceSnapshot: reference, createdAt: Date.now(), status: response.status, usage: response.usage || null
@@ -616,12 +607,39 @@ export class ReaderCardsController {
         }
     }
 
+    _repositionParaTranslationCard() {
+        const card = this.dom.readerParaTranslationCard
+        if (!card || card.style.display === 'none') return
+        const rect = this._paraTransSelectionRect
+        if (rect && rect.top != null && rect.left != null) {
+            const cardWidth = card.offsetWidth || Math.min(380, window.innerWidth - 20)
+            const cardHeight = card.offsetHeight || 160
+            const rectHeight = rect.height || 24
+            const rectBottom = (rect.bottom != null && !isNaN(rect.bottom)) ? rect.bottom : (rect.top + rectHeight)
+            let left = rect.left + ((rect.width || 0) / 2) - (cardWidth / 2)
+            left = Math.max(10, Math.min(window.innerWidth - cardWidth - 10, left))
+            let top = rectBottom + 8
+            if (top + cardHeight > window.innerHeight - 10) {
+                const aboveTop = rect.top - cardHeight - 8
+                top = aboveTop >= 10 ? aboveTop : Math.max(10, window.innerHeight - cardHeight - 10)
+            }
+            card.style.transform = 'none'
+            card.style.left = `${left}px`
+            card.style.top = `${top}px`
+        } else {
+            card.style.left = '50%'
+            card.style.top = '50%'
+            card.style.transform = 'translate(-50%, -50%)'
+        }
+    }
+
     hideParaTranslationCard() {
         this._paraTransAbortController?.abort()
         this._paraTransAbortController = null
         if (this.dom.readerParaTranslationCard) {
             this.dom.readerParaTranslationCard.style.display = 'none'
         }
+        this._paraTransSelectionRect = null
         this._currentParaOriginal = null
         this._currentParaTranslation = null
     }

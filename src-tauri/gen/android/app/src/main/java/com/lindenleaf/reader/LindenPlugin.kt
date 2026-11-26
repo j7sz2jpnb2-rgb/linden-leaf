@@ -284,6 +284,43 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    @Command
+    fun openExternalUrl(invoke: Invoke) {
+        val url = invoke.getArgs().getString("url", "")?.trim() ?: ""
+        val uri = try { android.net.Uri.parse(url) } catch (_: Exception) { null }
+        val scheme = uri?.scheme?.lowercase()
+        if (uri == null || scheme !in setOf("https", "http", "mailto") || (scheme != "mailto" && uri.host.isNullOrBlank())) {
+            val res = JSObject()
+            res.put("opened", false)
+            invoke.resolve(res)
+            return
+        }
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            var started = false
+            val latch = java.util.concurrent.CountDownLatch(1)
+            activity.runOnUiThread {
+                try {
+                    activity.startActivity(intent)
+                    started = true
+                } catch (_: Exception) {
+                } finally {
+                    latch.countDown()
+                }
+            }
+            latch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+            val res = JSObject()
+            res.put("opened", started)
+            invoke.resolve(res)
+        } catch (_: Exception) {
+            val res = JSObject()
+            res.put("opened", false)
+            invoke.resolve(res)
+        }
+    }
+
     private fun resolveTtsLaunchError(e: Exception): Pair<String, String> {
         val raw = e.message ?: e.toString()
         val prefixes = listOf(
@@ -329,6 +366,7 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
             val utteranceId = args.optString("utteranceId", "")
             val generation = args.optLong("generation", 0L)
             val bookId = args.optString("bookId", "")
+            val bookAuthor = args.optString("bookAuthor", "")
             val voiceId = args.optString("voiceId", "")
             val locale = args.optString("locale", "zh-CN")
 
@@ -355,7 +393,8 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
                 generation,
                 bookId,
                 voiceId,
-                locale
+                locale,
+                bookAuthor
             )
             invoke.resolve(buildStartResult(true, "", "", diag.optInt("engineCount", serviceCount)))
         } catch (e: Exception) {
@@ -375,6 +414,7 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
             val jobId = args.optString("jobId", "")
             val generation = args.optLong("generation", 0L)
             val bookId = args.optString("bookId", "")
+            val bookAuthor = args.optString("bookAuthor", "")
             val voiceId = args.optString("voiceId", "")
             val locale = args.optString("locale", "zh-CN")
 
@@ -415,7 +455,8 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
                 generation,
                 bookId,
                 voiceId,
-                locale
+                locale,
+                bookAuthor
             )
             invoke.resolve(buildStartResult(true, "", "", diag.optInt("engineCount", serviceCount)))
         } catch (e: Exception) {
@@ -535,22 +576,24 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun exportBookFile(invoke: Invoke) {
         val main = activity as? MainActivity
+        val args = invoke.getArgs()
+        val locale = args.optString("locale", "")
         if (main == null) {
             invoke.reject(
-                LindenNativeBridge.l10n(LindenNativeBridge.isEnglishLocale(), "文件导出暂不可用", "File export is unavailable")
+                LindenNativeBridge.l10n(LindenNativeBridge.isEnglishLocale(locale), "文件导出暂不可用", "File export is unavailable")
             )
             return
         }
-        val args = invoke.getArgs()
         main.exportBookFile(args.getString("filePath"), args.optString("filename", "book.epub"),
-            args.optBoolean("share", false)) { result -> invoke.resolve(JSObject(result.toString())) }
+            args.optBoolean("share", false), locale) { result -> invoke.resolve(JSObject(result.toString())) }
     }
 
     @Command
     fun exportTextFile(invoke: Invoke) {
         val main = activity as? MainActivity
         val args = invoke.getArgs()
-        val en = LindenNativeBridge.isEnglishLocale(args.optString("locale", ""))
+        val locale = args.optString("locale", "")
+        val en = LindenNativeBridge.isEnglishLocale(locale)
         if (main == null) {
             invoke.reject(LindenNativeBridge.l10n(en, "文件导出暂不可用", "File export is unavailable"))
             return
@@ -558,7 +601,7 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
         val filename = args.optString("filename", "export.txt").ifBlank { "export.txt" }
         val content = args.optString("content", "")
         val mimeType = args.optString("mimeType", "text/plain; charset=utf-8").ifBlank { "text/plain; charset=utf-8" }
-        main.exportTextFile(filename, content, mimeType) { result ->
+        main.exportTextFile(filename, content, mimeType, locale) { result ->
             if (result.has("error") && !result.optBoolean("saved", false) && !result.optBoolean("cancelled", false)) {
                 invoke.reject(result.optString("error", LindenNativeBridge.l10n(en, "文件导出失败", "File export failed")))
             } else {
@@ -660,7 +703,10 @@ class LindenPlugin(private val activity: Activity) : Plugin(activity) {
             val res = JSObject()
             res.put("isPlaying", LindenMediaPlaybackService.isPlaying)
             res.put("state", LindenMediaPlaybackService.playbackState)
+            res.put("bookId", LindenMediaPlaybackService.currentBookId)
             res.put("bookTitle", LindenMediaPlaybackService.currentBookTitle)
+            res.put("bookAuthor", LindenMediaPlaybackService.currentBookAuthor)
+            res.put("locale", LindenMediaPlaybackService.currentLocale)
             res.put("text", LindenMediaPlaybackService.currentText)
             res.put("jobId", LindenMediaPlaybackService.currentJobId)
             res.put("utteranceId", LindenMediaPlaybackService.currentUtteranceId)

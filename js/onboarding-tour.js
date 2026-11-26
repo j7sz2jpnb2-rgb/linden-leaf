@@ -10,7 +10,7 @@ export const ONBOARDING_STEPS = [
         get eyebrow() { return t('tour.step1.eyebrow') },
         get title() { return t('tour.step1.title') },
         get body() { return t('tour.step1.body') },
-        targetSelectors: ['#btn-import', '#btn-link-folder'],
+        targetSelectors: ['#btn-import', '#btn-link-folder', '#btn-mobile-import-book'],
         spotlightPad: { top: 6, right: 8, bottom: 6, left: 8 },
         requiresExpandedSidebar: false,
         placement: 'bottom'
@@ -20,7 +20,7 @@ export const ONBOARDING_STEPS = [
         get eyebrow() { return t('tour.step2.eyebrow') },
         get title() { return t('tour.step2.title') },
         get body() { return t('tour.step2.body') },
-        targetSelectors: ['#sidebar-custom-lists-group', '#nav-cat-notes', '#nav-cat-stats', '#nav-cat-ai-history'],
+        targetSelectors: ['#sidebar-custom-lists-group', '#nav-cat-notes', '#nav-cat-stats', '#nav-cat-ai-history', '#tab-btn-notes'],
         spotlightPad: { top: 6, right: 8, bottom: 6, left: 8 },
         requiresExpandedSidebar: true,
         placement: 'right'
@@ -42,9 +42,15 @@ export const ONBOARDING_STEPS = [
     {
         id: 'settings-and-safety',
         get eyebrow() { return t('tour.step4.eyebrow') },
-        get title() { return t('tour.step4.title') },
-        get body() { return t('tour.step4.body') },
-        targetSelectors: ['#sidebar-user-section'],
+        get title() {
+            const isMobile = typeof document !== 'undefined' && document.documentElement.classList.contains('is-mobile-viewport')
+            return isMobile ? t('tour.step4.mobileTitle') : t('tour.step4.title')
+        },
+        get body() {
+            const isMobile = typeof document !== 'undefined' && document.documentElement.classList.contains('is-mobile-viewport')
+            return isMobile ? t('tour.step4.mobileBody') : t('tour.step4.body')
+        },
+        targetSelectors: ['#sidebar-user-section', '#tab-btn-me'],
         spotlightPad: { top: 4, right: 6, bottom: 4, left: 6 },
         requiresExpandedSidebar: true,
         placement: 'right-end'
@@ -270,9 +276,9 @@ export class OnboardingTourController {
     }
 
     _syncSidebarForStep(step) {
+        if (document.documentElement.classList.contains('is-mobile-viewport') || window.innerWidth < 768) return
         const bookshelfView = document.getElementById('bookshelf-view')
         if (!bookshelfView || getComputedStyle(bookshelfView).display === 'none') return
-        if (window.innerWidth < 768) return
         const shouldCollapse = !step.requiresExpandedSidebar
         bookshelfView.classList.toggle('sidebar-collapsed', shouldCollapse)
         if (this.app?.bookshelf) {
@@ -333,14 +339,18 @@ export class OnboardingTourController {
 
     _resolveVisibleTargetRect(selectors, step = null) {
         if (!Array.isArray(selectors) || selectors.length === 0) return null
+        const isMobileViewport = document.documentElement.classList.contains('is-mobile-viewport')
         const bookshelfView = document.getElementById('bookshelf-view')
-        if (!bookshelfView || getComputedStyle(bookshelfView).display === 'none') return null
+        const mobileRoot = document.getElementById('mobile-shell-root')
+        const shelfVisible = Boolean(bookshelfView && getComputedStyle(bookshelfView).display !== 'none')
+        const mobileVisible = Boolean(isMobileViewport && mobileRoot && getComputedStyle(mobileRoot).display !== 'none')
+        if (!shelfVisible && !mobileVisible) return null
 
         const vw = window.innerWidth
         const vh = window.innerHeight
-        const sidebarEl = bookshelfView.querySelector('.leaf-sidebar')
+        const sidebarEl = shelfVisible ? bookshelfView.querySelector('.leaf-sidebar') : null
         let settledSidebarShiftX = 0
-        if (step?.requiresExpandedSidebar && vw >= 768 && sidebarEl && !bookshelfView.classList.contains('sidebar-collapsed')) {
+        if (step?.requiresExpandedSidebar && !isMobileViewport && vw >= 768 && sidebarEl && !bookshelfView.classList.contains('sidebar-collapsed')) {
             const viewRect = bookshelfView.getBoundingClientRect()
             const sbRect = sidebarEl.getBoundingClientRect()
             settledSidebarShiftX = viewRect.left - sbRect.left
@@ -354,7 +364,7 @@ export class OnboardingTourController {
             if (!el) continue
             const style = getComputedStyle(el)
             if (style.display === 'none') continue
-            const inExpandingSidebar = Boolean(step?.requiresExpandedSidebar && sidebarEl && sidebarEl.contains(el) && !bookshelfView.classList.contains('sidebar-collapsed'))
+            const inExpandingSidebar = Boolean(step?.requiresExpandedSidebar && !isMobileViewport && sidebarEl && sidebarEl.contains(el) && !bookshelfView.classList.contains('sidebar-collapsed'))
             if (!inExpandingSidebar && style.visibility === 'hidden') continue
             const rawRect = el.getBoundingClientRect()
             if (rawRect.width <= 0 || rawRect.height <= 0) continue

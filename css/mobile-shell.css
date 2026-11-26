@@ -179,6 +179,44 @@ html.is-mobile-viewport .quote-card-preview * {
   font-family: inherit !important;
 }
 
+html.is-mobile-viewport #quote-card-backdrop {
+  padding: calc(10px + var(--safe-top, 0px)) 8px calc(10px + var(--safe-bottom, 0px));
+}
+html.is-mobile-viewport #quote-card-dialog,
+html.is-mobile-viewport .quote-modal-dialog {
+  flex-direction: column !important;
+  width: 96vw !important;
+  max-width: 96vw !important;
+  height: 92dvh !important;
+  max-height: 92dvh !important;
+}
+html.is-mobile-viewport .quote-card-preview-viewport {
+  flex: 0 0 auto;
+  width: 100%;
+  max-height: 44dvh;
+  padding: 14px;
+  border-radius: 14px 14px 0 0;
+  border-right: none;
+  border-bottom: 1px solid var(--border-color);
+  box-sizing: border-box;
+}
+html.is-mobile-viewport .quote-controls-column {
+  width: 100% !important;
+  flex: 1 1 auto !important;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: calc(12px + var(--safe-bottom, 0px));
+}
+html.is-mobile-viewport .quote-controls-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+html.is-mobile-viewport .quote-action-buttons {
+  padding: 12px 16px calc(12px + var(--safe-bottom, 0px));
+}
+
 html.is-mobile-viewport #modern-hero-threshold,
 html.is-mobile-viewport .modern-hero-threshold,
 html.is-mobile-viewport #bookshelf-header,
@@ -3394,15 +3432,15 @@ html.is-mobile-viewport .wechat-stats-card {
   padding: 16px 12px !important;
 }
 html.is-mobile-viewport .stats-chart-wrapper {
-  padding: 0.5rem 0.25rem 1.25rem 1.95rem !important;
+  padding: 0.5rem 0.25rem 1.25rem 3.45rem !important;
 }
 html.is-mobile-viewport .stats-grid-lines {
-  left: 1.95rem !important;
+  left: 3.45rem !important;
   right: 0.25rem !important;
 }
 html.is-mobile-viewport .stats-grid-line span {
-  margin-left: -1.95rem !important;
-  width: 1.75rem !important;
+  margin-left: -3.35rem !important;
+  width: 3.15rem !important;
 }
 
 html.is-mobile-viewport #mobile-subview-header {

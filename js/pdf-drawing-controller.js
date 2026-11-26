@@ -19,6 +19,9 @@ export class PdfDrawingMutationQueue {
         next.then(cleanup, cleanup)
         return next
     }
+    waitForPage(bookId, pageIndex) {
+        return this._queues.get(`${bookId}:${pageIndex}`) || Promise.resolve()
+    }
     async drainAll(timeoutMs = 5000) {
         const promises = Array.from(this._queues.values())
         if (promises.length === 0) return
@@ -112,11 +115,20 @@ export class PdfDrawingController {
             const now = Date.now()
             for (const pIdx of targetPageIndices) {
                 this._clearPdfPageStrokesCache(bookId, pIdx)
+                const prefix = `${bookId}:${pIdx}`
+                const clearGen = this._drawingPageGenerations?.get(prefix) || 0
                 this._clearPageOverlayCanvases(pIdx)
                 this._enqueuePdfDrawingMutation(bookId, pIdx, snapshot, async () => {
                     await db.clearPdfPageDrawing(bookId, pIdx, true, now, snapshot)
-                    if (this.app.currentBookId === bookId && this.app.currentPdfPageIndex === pIdx) {
-                        this._currentPdfPageStrokes = []
+                    if (this.app.currentBookId === bookId &&
+                        (this._drawingPageGenerations?.get(prefix) || 0) === clearGen) {
+                        const key = this._getPdfDrawingCacheKey(bookId, pIdx, snapshot)
+                        if (!this._pdfPageStrokesCache.has(key)) {
+                            this._pdfPageStrokesCache.set(key, [])
+                        }
+                        if (this.app.currentPdfPageIndex === pIdx) {
+                            this._currentPdfPageStrokes = this._pdfPageStrokesCache.get(key)
+                        }
                     }
                 }).catch(err => console.warn('[PdfDrawing] Clear mutation error:', err))
             }
@@ -260,6 +272,7 @@ export class PdfDrawingController {
                     ctx.clearRect(0, 0, activeCanvas.width, activeCanvas.height)
                 }
             }
+            return
         }
         const activeObj = this.getPdfActiveDocAndTarget()
         if (activeObj?.container) {
@@ -285,6 +298,7 @@ export class PdfDrawingController {
         const strokes = await this.loadPdfPageStrokes(pageIdx, readerSession)
         if (!baseCanvas || !strokes || (readerSession && !readerSession.isCurrent())) return
         const ctx = baseCanvas.getContext('2d')
+        if (!ctx) return
         ctx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
         strokes.forEach(stroke => this.drawSingleStrokeOnCanvas(ctx, stroke, baseCanvas.width, baseCanvas.height))
     }
@@ -303,38 +317,50 @@ export class PdfDrawingController {
         if (this._pdfPageStrokesCache.has(key)) {
             strokes = this._pdfPageStrokesCache.get(key)
         } else {
-            if (!this._inFlightDrawingLoads) this._inFlightDrawingLoads = new Map()
-            let loadPromise = this._inFlightDrawingLoads.get(key)
-            if (!loadPromise) {
-                loadPromise = db.getPdfPageDrawing(bookId, pageIdx, snapshot).finally(() => {
-                    if (this._inFlightDrawingLoads.get(key) === loadPromise) this._inFlightDrawingLoads.delete(key)
-                })
-                this._inFlightDrawingLoads.set(key, loadPromise)
-            }
-            const drawingRecord = await loadPromise
+            await this._pdfMutationQueue?.waitForPage?.(bookId, pageIdx)
             if (sessionGeneration !== this._sessionGeneration) return
             if (session && !session.isCurrent()) return
             if (this.app.currentBookId !== bookId) return
-
-            const curGen = this._drawingPageGenerations?.get(prefix) || 0
-            if (curGen !== startGen) {
-                return
-            }
+            if ((this._drawingPageGenerations?.get(prefix) || 0) !== startGen) return
 
             if (this._pdfPageStrokesCache.has(key)) {
-                const currentCache = this._pdfPageStrokesCache.get(key) || []
-                const diskStrokes = drawingRecord?.strokes || []
-                const existingKeys = new Set(currentCache.map(s => s.id || JSON.stringify(s.points?.[0])))
-                for (const ds of diskStrokes) {
-                    const dKey = ds.id || JSON.stringify(ds.points?.[0])
-                    if (!existingKeys.has(dKey)) {
-                        currentCache.unshift(ds)
-                    }
-                }
-                strokes = currentCache
+                strokes = this._pdfPageStrokesCache.get(key)
             } else {
-                strokes = drawingRecord?.strokes || []
-                this._pdfPageStrokesCache.set(key, strokes)
+                if (!this._inFlightDrawingLoads) this._inFlightDrawingLoads = new Map()
+                let loadPromise = this._inFlightDrawingLoads.get(key)
+                if (!loadPromise) {
+                    loadPromise = db.getPdfPageDrawing(bookId, pageIdx, snapshot).finally(() => {
+                        if (this._inFlightDrawingLoads.get(key) === loadPromise) this._inFlightDrawingLoads.delete(key)
+                    })
+                    this._inFlightDrawingLoads.set(key, loadPromise)
+                }
+                const drawingRecord = await loadPromise
+                if (sessionGeneration !== this._sessionGeneration) return
+                if (session && !session.isCurrent()) return
+                if (this.app.currentBookId !== bookId) return
+
+                const curGen = this._drawingPageGenerations?.get(prefix) || 0
+                if (curGen !== startGen) {
+                    return
+                }
+
+                if (this._pdfPageStrokesCache.has(key)) {
+                    const currentCache = this._pdfPageStrokesCache.get(key) || []
+                    const diskStrokes = drawingRecord?.strokes || []
+                    const existingKeys = new Set(currentCache.map(s => s.id || JSON.stringify(s.points?.[0])))
+                    const missing = []
+                    for (const ds of diskStrokes) {
+                        const dKey = ds.id || JSON.stringify(ds.points?.[0])
+                        if (!existingKeys.has(dKey)) {
+                            missing.push(ds)
+                        }
+                    }
+                    if (missing.length) currentCache.unshift(...missing)
+                    strokes = currentCache
+                } else {
+                    strokes = drawingRecord?.strokes || []
+                    this._pdfPageStrokesCache.set(key, strokes)
+                }
             }
         }
 
@@ -358,12 +384,17 @@ export class PdfDrawingController {
             overlayWrapper = document.createElement('div')
             overlayWrapper.className = 'pdf-draw-overlay-wrapper'
             overlayWrapper.dataset.pageIndex = String(pageIdx)
+            const metrics = this.app.pdfViewport?._getPageBoxMetrics?.(pageIdx)
             Object.assign(overlayWrapper.style, {
                 position: 'absolute',
                 top: '0px',
                 left: '0px',
-                width: '100%',
-                height: '100%',
+                width: metrics ? `${metrics.uncroppedWidth}px` : '100%',
+                height: metrics ? `${metrics.uncroppedHeight}px` : '100%',
+                transform: (metrics && (metrics.contentOffsetX !== 0 || metrics.contentOffsetY !== 0))
+                    ? `translate(${metrics.contentOffsetX}px, ${metrics.contentOffsetY}px)`
+                    : '',
+                transformOrigin: '0 0',
                 zIndex: '50',
                 pointerEvents: 'none'
             })
@@ -436,9 +467,16 @@ export class PdfDrawingController {
         const activeCanvas = overlayWrapper.querySelector('.pdf-draw-active-canvas')
         if (!baseCanvas || !activeCanvas) return
 
+        const metrics = this.app.pdfViewport?._getPageBoxMetrics?.(pageIdx)
         const p = this.app.pdfViewport?.pageOffsets?.[pageIdx]
-        const cssW = p?.width || slot.offsetWidth || 800
-        const cssH = p?.height || slot.offsetHeight || 1100
+        const cssW = metrics?.uncroppedWidth || p?.width || slot.offsetWidth || 800
+        const cssH = metrics?.uncroppedHeight || p?.height || slot.offsetHeight || 1100
+        overlayWrapper.style.width = `${cssW}px`
+        overlayWrapper.style.height = `${cssH}px`
+        overlayWrapper.style.transform = (metrics && (metrics.contentOffsetX !== 0 || metrics.contentOffsetY !== 0))
+            ? `translate(${metrics.contentOffsetX}px, ${metrics.contentOffsetY}px)`
+            : ''
+        overlayWrapper.style.transformOrigin = '0 0'
         const dpr = Math.min(window.devicePixelRatio || 1, 2)
         let backingW = Math.max(1, Math.round(cssW * dpr))
         let backingH = Math.max(1, Math.round(cssH * dpr))
@@ -591,6 +629,7 @@ export class PdfDrawingController {
         let activePointerId = null
         let isDrawing = false
         let currentStroke = null
+        let strokeOwner = null
         let rafId = null
         let lastDrawnPointIndex = 0
 
@@ -625,14 +664,30 @@ export class PdfDrawingController {
             }
 
             const strokeToSave = currentStroke
+            const owner = strokeOwner
             currentStroke = null
-            const session = readerSession || this.app._activeSession
-            const bookId = this.app.currentBookId
-            const snapshot = this.app._currentSnapshot || {}
+            strokeOwner = null
+            const session = owner?.session || readerSession || this.app._activeSession
+            const bookId = owner?.bookId || this.app.currentBookId
+            const snapshot = owner?.snapshot || this.app._currentSnapshot || {}
+            const isSameActiveSession = Boolean(bookId && (!session || session.isCurrent()) && this.app.currentBookId === bookId)
 
-            if (commit && strokeToSave && strokeToSave.points.length > 0 && bookId) {
+            if (commit && strokeToSave && strokeToSave.points.length > 0 && isSameActiveSession) {
                 const strokes = this._getOrInitPageStrokes(bookId, pageIdx, snapshot)
-                strokes.push(strokeToSave)
+                const isNoOpEraser = strokeToSave.tool === 'eraser' && strokes.every(s => !s || s.tool === 'eraser')
+                if (!isNoOpEraser) {
+                    strokes.push(strokeToSave)
+                    this._enqueuePdfDrawingMutation(bookId, pageIdx, snapshot, async () => {
+                        const drawingRecord = await db.getPdfPageDrawing(bookId, pageIdx, snapshot)
+                        const existingStrokes = drawingRecord?.strokes || []
+                        existingStrokes.push(strokeToSave)
+                        await db.savePdfPageDrawing(bookId, pageIdx, existingStrokes, snapshot)
+                        if (session && !session.isCurrent()) return
+                        if (this.app.currentBookId === bookId && this.app.currentPdfPageIndex === pageIdx) {
+                            this._currentPdfPageStrokes = existingStrokes
+                        }
+                    }).catch(err => console.warn('[PdfDrawing] Save mutation error:', err))
+                }
 
                 const baseCtx = baseCanvas.getContext('2d')
                 baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
@@ -644,28 +699,19 @@ export class PdfDrawingController {
                     const activeCtx = activeCanvas.getContext('2d')
                     activeCtx.clearRect(0, 0, activeCanvas.width, activeCanvas.height)
                 }
-
-                this._enqueuePdfDrawingMutation(bookId, pageIdx, snapshot, async () => {
-                    const drawingRecord = await db.getPdfPageDrawing(bookId, pageIdx, snapshot)
-                    const existingStrokes = drawingRecord?.strokes || []
-                    existingStrokes.push(strokeToSave)
-                    await db.savePdfPageDrawing(bookId, pageIdx, existingStrokes, snapshot)
-                    if (session && !session.isCurrent()) return
-                    if (this.app.currentBookId === bookId && this.app.currentPdfPageIndex === pageIdx) {
-                        this._currentPdfPageStrokes = existingStrokes
-                    }
-                }).catch(err => console.warn('[PdfDrawing] Save mutation error:', err))
             } else {
                 if (activeCanvas !== baseCanvas) {
                     const activeCtx = activeCanvas.getContext('2d')
                     activeCtx.clearRect(0, 0, activeCanvas.width, activeCanvas.height)
                 }
-                const strokes = this._getOrInitPageStrokes(bookId, pageIdx, snapshot)
-                const baseCtx = baseCanvas.getContext('2d')
-                baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
-                strokes.forEach(s => {
-                    this.drawSingleStrokeOnCanvas(baseCtx, s, baseCanvas.width, baseCanvas.height)
-                })
+                if (isSameActiveSession) {
+                    const strokes = this._getOrInitPageStrokes(bookId, pageIdx, snapshot)
+                    const baseCtx = baseCanvas.getContext('2d')
+                    baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height)
+                    strokes.forEach(s => {
+                        this.drawSingleStrokeOnCanvas(baseCtx, s, baseCanvas.width, baseCanvas.height)
+                    })
+                }
             }
         }
 
@@ -684,6 +730,11 @@ export class PdfDrawingController {
 
             lastDrawnPointIndex = 0
             isDrawing = true
+            strokeOwner = {
+                bookId: this.app.currentBookId,
+                snapshot: this.app._currentSnapshot || {},
+                session: readerSession || this.app._activeSession
+            }
             const [nx, ny] = getCoords(e)
             currentStroke = {
                 id: `stroke_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,

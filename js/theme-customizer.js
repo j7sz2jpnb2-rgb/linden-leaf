@@ -97,6 +97,32 @@ export class ThemeCustomizer {
         return p
     }
 
+    get isDarkPalette() {
+        const raw = (this.currentPalette?.readerBg || DEFAULT_SEMANTIC_PALETTE.readerBg || '#ffffff').trim()
+        let r = 255, g = 255, b = 255
+        if (raw.startsWith('#')) {
+            const hex = raw.slice(1)
+            if (hex.length === 3 || hex.length === 4) {
+                r = parseInt(hex[0] + hex[0], 16)
+                g = parseInt(hex[1] + hex[1], 16)
+                b = parseInt(hex[2] + hex[2], 16)
+            } else if (hex.length >= 6) {
+                r = parseInt(hex.slice(0, 2), 16)
+                g = parseInt(hex.slice(2, 4), 16)
+                b = parseInt(hex.slice(4, 6), 16)
+            }
+        } else {
+            const m = raw.match(/rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/)
+            if (m) {
+                r = Number(m[1])
+                g = Number(m[2])
+                b = Number(m[3])
+            }
+        }
+        const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return Number.isFinite(lum) && lum < 0.5
+    }
+
     /**
      * Generate CSS variable overrides
      * @param {object} palette
@@ -119,16 +145,22 @@ export class ThemeCustomizer {
         return `
             :root {
                 --bg-primary: ${p.bgPrimary} !important;
+                --bg-app: ${p.bgPrimary} !important;
                 --bg-secondary: ${p.bgSecondary} !important;
+                --bg-card: ${p.bgSecondary} !important;
                 --bg-sidebar: ${p.bgSidebar} !important;
                 --text-main: ${p.textMain} !important;
                 --text-primary: ${p.textMain} !important;
                 --text-secondary: ${p.textSecondary} !important;
+                --text-muted: ${p.textSecondary} !important;
                 --border-color: ${p.borderColor} !important;
                 --accent: ${p.accent} !important;
+                --accent-primary: ${p.accent} !important;
                 --accent-purple: ${p.accent} !important;
                 --reader-bg: ${p.readerBg} !important;
+                --book-bg: ${p.readerBg} !important;
                 --reader-text: ${p.readerText} !important;
+                --book-color: ${p.readerText} !important;
                 --selection-bg: ${p.selectionBg} !important;
             }
             #books-workspace,

@@ -426,7 +426,10 @@ export class FoliateSectionBinder {
 
         // Chapter bilingual translation auto-restore or section tracking (Disabled for PC Candidate)
         const bookId = this.app.currentBookData?.id || this.app.currentBook?.id || this.app.bookId
-        if (FEATURE_CHAPTER_TRANSLATION_ENABLED && bookId && this.app.chapterTranslationManager) {
+        const contents = this.app.foliateView?.renderer?.getContents?.()
+        const activeContent = Array.isArray(contents) && contents.length > 0 ? contents[0] : null
+        const isActiveDoc = !activeContent || (activeContent.index === index && (!activeContent.doc || activeContent.doc === doc))
+        if (FEATURE_CHAPTER_TRANSLATION_ENABLED && bookId && this.app.chapterTranslationManager && isActiveDoc) {
             this.app.chapterTranslationManager.onSectionChanged(bookId, index, doc).catch(err => {
                 console.warn('[ChapterTrans] Section change hook warning:', err)
             })
@@ -498,7 +501,9 @@ export class FoliateSectionBinder {
         }
 
         let selectionTimeout = null
+        let selectionDebounceTimer = null
         let isCtrlActive = false
+        let sawDocTouchPointerDown = false
 
         const iframeKeyHandler = e => {
             if (e.key === 'Control' || e.key === 'Meta') {
@@ -521,8 +526,8 @@ export class FoliateSectionBinder {
                 this.isCtrlPressed = false
             }
         })
-        let hadActiveSelectionOrPopupOnPointerDown = false
         this.events.on(doc, 'pointerdown', e => {
+            this.app.clearTouchTapSyntheticClickLock?.()
             const isTouch = (e.pointerType === 'touch') || (window.mobileShell?.isMobileViewport?.() ?? false) || Boolean(platformBridge?.isAndroid)
             const now = Date.now()
             if (!isTouch && e.detail > 1) {
@@ -532,29 +537,17 @@ export class FoliateSectionBinder {
                 }
             }
             this._lastDocPointerDownTime = now
-            const hasDict = Boolean(this.app.cards.dom.readerDictionaryCard?.classList.contains('active') || (this.app.cards.dom.readerDictionaryCard?.style.display && this.app.cards.dom.readerDictionaryCard.style.display !== 'none'))
-            const hasPopup = Boolean(this.app.annotations.dom.selectionPopup?.classList.contains('active') || (this.app.annotations.dom.selectionPopup?.style.display && this.app.annotations.dom.selectionPopup.style.display !== 'none'))
-            const hasHighlightPopup = Boolean(this.app.annotations.dom.highlightActionPopup?.classList.contains('active') || (this.app.annotations.dom.highlightActionPopup?.style.display && this.app.annotations.dom.highlightActionPopup.style.display !== 'none'))
-            const hasFootnote = Boolean(this.app.cards.dom.footnotePopup?.classList.contains('active') || (this.app.cards.dom.footnotePopup?.style.display && this.app.cards.dom.footnotePopup.style.display !== 'none'))
-            const hasParaTrans = Boolean(this.app.cards.dom.readerParaTranslationCard?.classList.contains('active') || (this.app.cards.dom.readerParaTranslationCard?.style.display && this.app.cards.dom.readerParaTranslationCard.style.display !== 'none'))
-            hadActiveSelectionOrPopupOnPointerDown = hasDict || hasPopup || hasHighlightPopup || hasFootnote || hasParaTrans
 
             const hasCtrl = e.ctrlKey || e.metaKey || isCtrlActive || this.isCtrlPressed
             this._pointerDownWithCtrl = hasCtrl
             this._activeSelectionGestureCtrl = hasCtrl
-
-            if (this.app.cards.dom.readerDictionaryCard && this.app.cards.dom.readerDictionaryCard.style.display !== 'none') {
-                if (!this.app.cards.dom.readerDictionaryCard.contains(e.target)) {
-                    this.app.cards.hideDictionaryCard()
-                }
+            if (e.pointerType === 'touch') {
+                sawDocTouchPointerDown = true
             }
-            if (e.button === 0 && !hasCtrl) {
-                // Normal click without Ctrl immediately clears previous multi-selections
-                if (this.app.annotations.multiSelectedRanges && this.app.annotations.multiSelectedRanges.length > 0) {
-                    this.app.annotations.clearVirtualMultiSelections()
-                    this.app.annotations.multiSelectedRanges = []
-                    if (this.app.annotations.dom.popupMultiBadge) this.app.annotations.dom.popupMultiBadge.style.display = 'none'
-                }
+            if (!hasCtrl) {
+                this.app.captureSelectionAndPopupStateOnGestureStart?.()
+            } else {
+                this.app._clearDismissSelectionGesture?.()
             }
         })
         this.events.on(doc, 'contextmenu', e => {
@@ -577,7 +570,7 @@ export class FoliateSectionBinder {
                     index,
                     bookId: this.app.currentBookId
                 }
-                const iframe = doc.defaultView?.frameElement || this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView
+                const iframe = doc.defaultView?.frameElement || this.app.foliateView?.renderer?.querySelector?.('iframe') || this.app.foliateView
                 const iframeRect = (iframe || this.app.foliateView).getBoundingClientRect()
                 this.app.annotations.showSelectionPopup({
                     top: iframeRect.top + e.clientY,
@@ -606,7 +599,7 @@ export class FoliateSectionBinder {
                     rect = clientRects[0]
                 }
                 
-                const iframe = doc.defaultView?.frameElement || this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView
+                const iframe = doc.defaultView?.frameElement || this.app.foliateView?.renderer?.querySelector?.('iframe') || this.app.foliateView
                 const iframeRect = (iframe || this.app.foliateView).getBoundingClientRect()
                 const scaleX = iframe.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
                 const scaleY = iframe.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
@@ -710,6 +703,7 @@ export class FoliateSectionBinder {
             if (selectionTimeout) cancelTimer(selectionTimeout)
             const sel = doc.getSelection()
             if (!sel || sel.isCollapsed || sel.toString().trim().length === 0) {
+                if (selectionDebounceTimer) cancelTimer(selectionDebounceTimer)
                 const isCtrlHolding = isCtrlActive || this.isCtrlPressed || this._pointerDownWithCtrl
                 if (!isCtrlHolding && (!this.app.annotations.multiSelectedRanges || this.app.annotations.multiSelectedRanges.length <= 1)) {
                     this.app.annotations.clearVirtualMultiSelections()
@@ -757,8 +751,10 @@ export class FoliateSectionBinder {
         }, { passive: true })
 
         this.events.on(doc, 'pointercancel', () => {
+            sawDocTouchPointerDown = false
             isDragGesture = false
             docTouchMoved = true
+            this.app._clearDismissSelectionGesture?.()
             this.app.cancelPendingReaderUIToggle()
         }, { passive: true })
 
@@ -772,6 +768,12 @@ export class FoliateSectionBinder {
 
         // Mobile clean tap detection fallback for iframe document
         this.events.on(doc, 'touchstart', e => {
+            if (sawDocTouchPointerDown) {
+                sawDocTouchPointerDown = false
+            } else {
+                this.app.clearTouchTapSyntheticClickLock?.()
+                this.app.captureSelectionAndPopupStateOnGestureStart?.()
+            }
             if (!e.touches || e.touches.length !== 1) {
                 docTouchMoved = true
                 this.app.pageTurnController?.cancelCurrent?.()
@@ -796,21 +798,43 @@ export class FoliateSectionBinder {
         }, { passive: true })
 
         this.events.on(doc, 'touchcancel', () => {
+            sawDocTouchPointerDown = false
             docTouchMoved = true
             isDragGesture = false
+            this.app._clearDismissSelectionGesture?.()
             this.app.cancelPendingReaderUIToggle()
         }, { passive: true })
 
+        const isAnnotationHit = (point) => {
+            if (!point || point.clientX == null || point.clientY == null) return false
+            try {
+                const contents = this.app.foliateView?.renderer?.getContents?.() || []
+                const item = contents.find(x => x.doc === doc && x.overlayer) || contents.find(x => x.overlayer)
+                const [val] = item?.overlayer?.hitTest?.(point) || []
+                return Boolean(val && typeof val === 'string' && !val.startsWith('foliate-search:'))
+            } catch {
+                return false
+            }
+        }
+
         this.events.on(doc, 'touchend', e => {
+            sawDocTouchPointerDown = false
             if (this.app.pageTurnController?.shouldSuppressTap?.()) {
                 docTouchMoved = true
-                this._lastDocTapHandledTime = Date.now()
+                this.app.armTouchTapSyntheticClickLock?.({ dismissed: true })
+                this.app._clearDismissSelectionGesture?.()
                 this.app.cancelPendingReaderUIToggle()
                 return
             }
-            if (docTouchMoved) return
+            if (docTouchMoved) {
+                this.app._clearDismissSelectionGesture?.()
+                return
+            }
             const dur = Date.now() - docTouchStartTime
-            if (dur > 450) return
+            if (dur > 450) {
+                this.app._clearDismissSelectionGesture?.()
+                return
+            }
             if (this.app.drawing.pdfDrawTool) return
             if (e.target?.closest?.(
                 'a, button, input, textarea, [data-wr-footernote], [zy-footnote], [data-note], ' +
@@ -830,46 +854,25 @@ export class FoliateSectionBinder {
             if (!isMobile) return
 
             if (window.mobileShell?.activeSheet || (this.app.annotations.activeDrawer && this.app.annotations.activeDrawer !== 'none')) {
+                this.app._clearDismissSelectionGesture?.()
                 this.app.cancelPendingReaderUIToggle()
                 return
             }
 
-            const sel = doc.getSelection()
-            const winSel = window.getSelection()
-            const hasSel = Boolean((sel && !sel.isCollapsed && sel.toString().trim().length > 0) ||
-                           (winSel && !winSel.isCollapsed && winSel.toString().trim().length > 0))
-            const hasPopup = Boolean(
-                this.app.annotations.dom.selectionPopup?.classList.contains('active') ||
-                (this.app.annotations.dom.selectionPopup?.style.display && this.app.annotations.dom.selectionPopup.style.display !== 'none') ||
-                this.app.annotations.dom.highlightActionPopup?.classList.contains('active') ||
-                (this.app.annotations.dom.highlightActionPopup?.style.display && this.app.annotations.dom.highlightActionPopup.style.display !== 'none') ||
-                this.app.cards.dom.readerDictionaryCard?.classList.contains('active') ||
-                (this.app.cards.dom.readerDictionaryCard?.style.display && this.app.cards.dom.readerDictionaryCard.style.display !== 'none') ||
-                this.app.cards.dom.footnotePopup?.classList.contains('active') ||
-                (this.app.cards.dom.footnotePopup?.style.display && this.app.cards.dom.footnotePopup.style.display !== 'none') ||
-                this.app.cards.dom.readerParaTranslationCard?.classList.contains('active') ||
-                (this.app.cards.dom.readerParaTranslationCard?.style.display && this.app.cards.dom.readerParaTranslationCard.style.display !== 'none') ||
-                hadActiveSelectionOrPopupOnPointerDown
-            )
-
-            if (hasSel || hasPopup) {
-                this.app.annotations.hideSelectionPopup()
-                this.app.cards.hideDictionaryCard()
-                this.app.cards.hideFootnotePopup()
-                this.app.cards.hideParaTranslationCard?.()
-                this.app.annotations.hideHighlightActionPopup()
-                try {
-                    sel?.removeAllRanges?.()
-                    winSel?.removeAllRanges?.()
-                } catch {}
-                this.app.annotations._frozenSelectionSnapshot = null
-                hadActiveSelectionOrPopupOnPointerDown = false
-                this.app.cancelPendingReaderUIToggle()
-                this._lastDocTapHandledTime = Date.now()
+            if (this.app.consumeDismissalGesture?.({ clearSelection: true })) {
+                if (selectionTimeout) cancelTimer(selectionTimeout)
+                if (selectionDebounceTimer) cancelTimer(selectionDebounceTimer)
+                this.app.armTouchTapSyntheticClickLock?.({ dismissed: true })
                 return
             }
 
-            this._lastDocTapHandledTime = Date.now()
+            const touch = e.changedTouches?.[0]
+            if (isAnnotationHit(touch ? { clientX: touch.clientX, clientY: touch.clientY } : null)) {
+                this.app.cancelPendingReaderUIToggle()
+                return
+            }
+
+            this.app.armTouchTapSyntheticClickLock?.({ dismissed: false })
             this.app.cancelPendingReaderUIToggle()
             this.app.requestToggleReaderUI(60)
         }, { passive: true })
@@ -877,12 +880,19 @@ export class FoliateSectionBinder {
         // Click on page: Intercept footnotes/links; full-screen tap toggles reader toolbars
         this.events.on(doc, 'click', async e => {
             if (this.app.pageTurnController?.shouldSuppressTap?.()) {
+                this.app._clearDismissSelectionGesture?.()
                 e.preventDefault()
                 e.stopPropagation()
                 e.stopImmediatePropagation?.()
                 return
             }
-            if (this._lastDocTapHandledTime && (Date.now() - this._lastDocTapHandledTime < 800)) {
+            const syntheticLock = this.app.consumeTouchTapSyntheticClickLock?.()
+            if (syntheticLock) {
+                if (syntheticLock.dismissed) {
+                    e.preventDefault?.()
+                    e.stopPropagation?.()
+                    e.stopImmediatePropagation?.()
+                }
                 return
             }
             if (this.app.drawing.pdfDrawTool) {
@@ -892,6 +902,7 @@ export class FoliateSectionBinder {
                 isDragGesture = false
                 const sel = doc.getSelection()
                 if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
+                    this.app._clearDismissSelectionGesture?.()
                     return
                 }
             }
@@ -915,7 +926,7 @@ export class FoliateSectionBinder {
                     e.stopImmediatePropagation()
                     const rect = standaloneFootnote.getBoundingClientRect()
                     const doc = standaloneFootnote.ownerDocument
-                    const iframe = doc?.defaultView?.frameElement || this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView
+                    const iframe = doc?.defaultView?.frameElement || this.app.foliateView?.renderer?.querySelector?.('iframe') || this.app.foliateView
                     const iframeRect = (iframe || this.app.foliateView).getBoundingClientRect()
                     const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
                     const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
@@ -1034,7 +1045,7 @@ export class FoliateSectionBinder {
                         
                         const rect = a.getBoundingClientRect()
                         const doc = a.ownerDocument
-                        const iframe = doc?.defaultView?.frameElement || this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView
+                        const iframe = doc?.defaultView?.frameElement || this.app.foliateView?.renderer?.querySelector?.('iframe') || this.app.foliateView
                         const iframeRect = (iframe || this.app.foliateView).getBoundingClientRect()
                         const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
                         const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
@@ -1071,7 +1082,10 @@ export class FoliateSectionBinder {
             if (!a && e.target) {
                 const targetMark = e.target.closest('[id*="filepos"], [id^="fn"], [id^="note"]') || (e.target.id && /(?:filepos|fn|note)\d+/i.test(e.target.id) ? e.target : null)
                 if (targetMark && targetMark.id) {
-                    const noteAnchor = doc.querySelector(`a[href="#${targetMark.id}"]`)
+                    const escapedId = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+                        ? CSS.escape(targetMark.id)
+                        : targetMark.id.replace(/["\\]/g, '\\$&')
+                    const noteAnchor = doc.querySelector(`a[href="#${escapedId}"]`)
                     if (noteAnchor) {
                         const footnoteText = this.app.cards.extractFootnoteFromTarget(noteAnchor.closest('li, p, blockquote, dd') || noteAnchor, noteAnchor)
                         if (footnoteText) {
@@ -1079,7 +1093,7 @@ export class FoliateSectionBinder {
                             e.stopPropagation()
                             e.stopImmediatePropagation()
                             const rect = targetMark.getBoundingClientRect()
-                            const iframe = doc?.defaultView?.frameElement || this.app.foliateView?.shadowRoot?.querySelector('iframe') || this.app.foliateView
+                            const iframe = doc?.defaultView?.frameElement || this.app.foliateView?.renderer?.querySelector?.('iframe') || this.app.foliateView
                             const iframeRect = (iframe || this.app.foliateView).getBoundingClientRect()
                             const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
                             const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
@@ -1121,15 +1135,15 @@ export class FoliateSectionBinder {
             }
             this._lastDocClickTime = now
 
-            if (hadActiveSelectionOrPopupOnPointerDown) {
-                hadActiveSelectionOrPopupOnPointerDown = false
-                this.app.cancelPendingReaderUIToggle()
-                try {
-                    doc.getSelection()?.removeAllRanges?.()
-                    window.getSelection()?.removeAllRanges?.()
-                } catch (err) {}
+            const hasCtrl = e.ctrlKey || e.metaKey || isCtrlActive || this.isCtrlPressed
+            if (!hasCtrl && this.app._dismissSelectionGesture && this.app.consumeDismissalGesture?.({ clearSelection: true })) {
+                if (selectionTimeout) cancelTimer(selectionTimeout)
+                if (selectionDebounceTimer) cancelTimer(selectionDebounceTimer)
+                e.stopImmediatePropagation?.()
                 return
             }
+            this.app._clearDismissSelectionGesture?.()
+
             const sel = doc.getSelection()
             if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
                 this.app.cancelPendingReaderUIToggle()
@@ -1137,7 +1151,11 @@ export class FoliateSectionBinder {
                 return
             }
 
-            const hasCtrl = e.ctrlKey || e.metaKey || isCtrlActive || this.isCtrlPressed
+            if (isAnnotationHit({ clientX: e.clientX, clientY: e.clientY })) {
+                this.app.cancelPendingReaderUIToggle()
+                return
+            }
+
             if (!hasCtrl) {
                 this.app.annotations.clearVirtualMultiSelections()
                 this.app.annotations.multiSelectedRanges = []
@@ -1201,13 +1219,13 @@ export class FoliateSectionBinder {
         }, { passive: false })
 
         // Multi-event listeners for robust text selection with debounce
-        let selectionDebounceTimer = null
         const triggerCheckSelection = (e) => {
             if (this.app.pageTurnController?.shouldSuppressTap?.()) {
                 const s = doc.getSelection?.()
                 if (!s || s.isCollapsed || !s.toString().trim()) return
             }
-            cancelTimer(selectionDebounceTimer)
+            if (selectionTimeout) cancelTimer(selectionTimeout)
+            if (selectionDebounceTimer) cancelTimer(selectionDebounceTimer)
             selectionDebounceTimer = schedule(() => {
                 checkSelection(e)
             }, 40)

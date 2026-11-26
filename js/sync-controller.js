@@ -1094,12 +1094,30 @@ export class SyncController {
                     if (opened || this._pendingOAuth !== pendingSession || pendingSession.consumed || pendingSession.cancelled) return
                     opened = true
                     if (login?.authUrl) {
-                        if (window.platformBridge?.openExternal) {
-                            window.platformBridge.openExternal(login.authUrl)
-                        } else if (typeof window !== 'undefined' && window.open) {
-                            window.open(login.authUrl, '_blank')
-                        }
-                        this.app.dialogs.showToast(t('syncCtrl.oauthOpenedBrowser'))
+                        const openPromise = window.platformBridge?.openExternal
+                            ? Promise.resolve(window.platformBridge.openExternal(login.authUrl))
+                            : (typeof window !== 'undefined' && window.open
+                                ? Promise.resolve(Boolean(window.open(login.authUrl, '_blank', 'noopener,noreferrer')))
+                                : Promise.resolve(false))
+                        openPromise.then((ok) => {
+                            if (this._pendingOAuth !== pendingSession || pendingSession.consumed || pendingSession.cancelled) return
+                            if (ok === false) {
+                                pendingSession.cancelled = true
+                                pendingSession.abortController.abort()
+                                if (this._pendingOAuth === pendingSession) this._pendingOAuth = null
+                                if (cancelButton?.style) cancelButton.style.display = 'none'
+                                this.app.dialogs.showToast(t('syncCtrl.oauthStartFailed', { error: 'Unable to open browser' }), 'error')
+                                return
+                            }
+                            this.app.dialogs.showToast(t('syncCtrl.oauthOpenedBrowser'))
+                        }).catch((openErr) => {
+                            if (this._pendingOAuth !== pendingSession || pendingSession.consumed || pendingSession.cancelled) return
+                            pendingSession.cancelled = true
+                            pendingSession.abortController.abort()
+                            if (this._pendingOAuth === pendingSession) this._pendingOAuth = null
+                            if (cancelButton?.style) cancelButton.style.display = 'none'
+                            this.app.dialogs.showToast(t('syncCtrl.oauthStartFailed', { error: openErr?.message || String(openErr) }), 'error')
+                        })
                     }
                 }
 

@@ -485,7 +485,10 @@ pub fn window_is_always_on_top(window: Window) -> bool {
 }
 
 #[tauri::command]
-pub async fn shell_open_external(url: String) -> Result<bool, String> {
+pub async fn shell_open_external(
+    #[allow(unused)] app: tauri::AppHandle,
+    url: String,
+) -> Result<bool, String> {
     let Some(safe_url) = validate_external_url(&url) else {
         return Ok(false);
     };
@@ -510,9 +513,36 @@ pub async fn shell_open_external(url: String) -> Result<bool, String> {
         Ok(true)
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     {
-        eprintln!("[shell_open_external] Process spawn is unsupported on mobile; delegate to mobile intent/browser handler: {}", safe_url);
+        use tauri::Manager;
+        #[derive(serde::Serialize)]
+        struct OpenExternalArgs {
+            url: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct OpenExternalResult {
+            #[serde(default)]
+            opened: bool,
+        }
+        let Some(bridge) = app.try_state::<crate::LindenMobileBridge>() else {
+            return Ok(false);
+        };
+        match bridge
+            .0
+            .run_mobile_plugin::<OpenExternalResult>("openExternalUrl", OpenExternalArgs { url: safe_url })
+        {
+            Ok(res) => Ok(res.opened),
+            Err(e) => {
+                eprintln!("[shell_open_external] Android openExternalUrl failed: {}", e);
+                Ok(false)
+            }
+        }
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        eprintln!("[shell_open_external] Process spawn is unsupported on iOS; delegate to mobile intent/browser handler: {}", safe_url);
         Ok(false)
     }
 }
@@ -543,6 +573,26 @@ pub struct BootContextResponse {
     pub pending_files: Vec<String>,
 }
 
+pub(crate) fn take_initial_boot_files_for_window(
+    initial: &mut Vec<(Option<String>, String)>,
+    win_label: &str,
+) -> Vec<String> {
+    let mut matched = Vec::new();
+    initial.retain(|(target_lbl, path)| {
+        let matches_window = match target_lbl {
+            Some(lbl) => lbl == win_label,
+            None => win_label == "main",
+        };
+        if matches_window {
+            matched.push(path.clone());
+            false
+        } else {
+            true
+        }
+    });
+    matched
+}
+
 #[tauri::command]
 pub fn app_get_boot_context(
     window: Window,
@@ -551,15 +601,8 @@ pub fn app_get_boot_context(
     let start_ms = init_process_start_epoch_ms();
     let win_label = window.label().to_string();
     let initial_for_window: Vec<String> = {
-        let initial = state.initial_boot_files.lock().unwrap();
-        initial
-            .iter()
-            .filter_map(|(target_lbl, path)| match target_lbl {
-                Some(lbl) if lbl == &win_label => Some(path.clone()),
-                None if win_label == "main" => Some(path.clone()),
-                _ => None,
-            })
-            .collect()
+        let mut initial = state.initial_boot_files.lock().unwrap();
+        take_initial_boot_files_for_window(&mut initial, &win_label)
     };
     let pending_for_window: Vec<String> = {
         let queue = state.pending_files.lock().unwrap();
@@ -848,6 +891,28 @@ mod tests {
         assert_eq!(validate_external_url("https://example.com/\r\nInjected"), None);
         assert_eq!(validate_external_url("https://example.com/test\0bad"), None);
         assert_eq!(validate_external_url("   "), None);
+    }
+
+    #[test]
+    fn test_take_initial_boot_files_consumes_once_per_window() {
+        let mut queue = vec![
+            (None, "C:\\books\\first.pdf".to_string()),
+            (Some("reader-2".to_string()), "C:\\books\\second.epub".to_string()),
+        ];
+
+        assert_eq!(
+            take_initial_boot_files_for_window(&mut queue, "main"),
+            vec!["C:\\books\\first.pdf".to_string()]
+        );
+        // Subsequent boot context query (e.g., WebView reload) must see empty boot queue.
+        assert!(take_initial_boot_files_for_window(&mut queue, "main").is_empty());
+
+        // Entries targeting other windows remain intact until that window consumes them.
+        assert_eq!(
+            take_initial_boot_files_for_window(&mut queue, "reader-2"),
+            vec!["C:\\books\\second.epub".to_string()]
+        );
+        assert!(queue.is_empty());
     }
 }
 

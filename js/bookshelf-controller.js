@@ -397,7 +397,7 @@ export class BookshelfController {
             this.handleBatchAddTag()
         });
         this.events.on(this.dom.inputBatchTag, 'keydown', e => {
-            if (e.key === 'Enter') this.handleBatchAddTag()
+            if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) this.handleBatchAddTag()
         });
             this.bindOverviewEvents();
     }
@@ -2028,7 +2028,7 @@ export class BookshelfController {
                 return
             }
 
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
                 e.preventDefault()
                 let book = (this.currentBooksList || []).find(b => b.id === bookId)
                 if (!book) book = await db.getBook(bookId)
