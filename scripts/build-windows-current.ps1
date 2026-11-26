@@ -112,8 +112,8 @@ if ($Deploy) {
     Write-Host "=== 4. Syncing to Desktop Target (-Deploy requested) ===" -ForegroundColor Cyan
     $appDataTarget = Join-Path $env:LOCALAPPDATA 'Linden Leaf\linden-leaf.exe'
     if (Test-Path -LiteralPath (Split-Path -Parent $appDataTarget)) {
-        Get-Process -Name "*linden*" -ErrorAction SilentlyContinue | Where-Object {
-            try { $_.Path -notlike "*v2.0.*" } catch { $true }
+        Get-Process -Name "linden-leaf" -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.Path -eq $appDataTarget } catch { $false }
         } | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 300
         Copy-Item -LiteralPath $binary -Destination $appDataTarget -Force

@@ -41,9 +41,9 @@ export class ImportFolderController {
         if (this._bound) return
         this._bound = true;
         this.events.on(this.dom.btnImport, 'click', async () => {
-            if (window.electronAPI?.openFileDialog) {
+            if (typeof platformBridge !== 'undefined' && platformBridge.openFileDialog) {
                 try {
-                    const fileItems = await window.electronAPI.openFileDialog()
+                    const fileItems = await platformBridge.openFileDialog()
                     if (fileItems && fileItems.length > 0) {
                         this.app.importQueue.enqueue(fileItems)
                     }

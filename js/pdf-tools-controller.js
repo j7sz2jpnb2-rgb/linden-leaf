@@ -409,10 +409,15 @@ export class PdfToolsController {
 
     applyPdfPageAppearance() {
         const setting = ['auto', 'original', 'night'].includes(this.app.settings.pdfPageAppearance) ? this.app.settings.pdfPageAppearance : 'auto'
-        const theme = document.documentElement.getAttribute('data-theme')
-        const night = setting === 'night' || (setting === 'auto' && ['dark', 'black'].includes(theme))
-        this.app.pdfViewport?.setPageAppearance(night ? 'night' : 'original')
-const select = document.getElementById('setting-pdf-page-appearance')
+        const theme = document.documentElement.getAttribute('data-theme') || 'light'
+        const palette = this.app.appearance?.resolveThemePalette?.(theme)
+        this.app.pdfViewport?.setPageAppearance({
+            appearance: setting,
+            theme,
+            customBackground: palette?.readerBg || null,
+            customForeground: palette?.readerText || null,
+        })
+        const select = document.getElementById('setting-pdf-page-appearance')
         if (select) select.value = setting
         if (this.dom.btnPdfSpreadToggle && this.app.pdfViewport) {
             const spreadMode = this.app.pdfViewport.getSpreadMode ? this.app.pdfViewport.getSpreadMode() : (this.app.settings.pdfSpreadMode || 'none')

@@ -1,5 +1,5 @@
 // js/platformBridge.js - Universal Cross-Platform Bridge for Linden Leaf
-// Unifies Electron IPC, Tauri 2.0 Rust commands, and Web/Browser fallback into a clean Promise-based API.
+// Unifies Tauri 2.0 Rust commands and Web/Browser fallback into a clean Promise-based API.
 import { getLocale, t } from './i18n.js'
 
 const withLocale = (cfg) => ({ ...(cfg || {}), locale: cfg?.locale || getLocale() })
@@ -7,19 +7,6 @@ const withLocale = (cfg) => ({ ...(cfg || {}), locale: cfg?.locale || getLocale(
 class PlatformBridge {
     constructor() {
         this._initEnvironment();
-    }
-
-    /**
-     * Auto-detect current runtime environment
-     */
-        /**
-     * Get underlying native Electron API (guaranteed not to return this platformBridge wrapper)
-     */
-    _getNativeElectron() {
-        if (typeof window === 'undefined') return null;
-        const api = window.electronAPI;
-        if (api && api !== this && this.isElectron) return api;
-        return null;
     }
 
     get isTauri() {
@@ -30,17 +17,9 @@ class PlatformBridge {
     }
 
     _initEnvironment() {
-        const rawApi = typeof window !== 'undefined' ? window.electronAPI : null;
-        this.isElectron = Boolean(
-            typeof window !== 'undefined' &&
-            ((rawApi && rawApi !== this) || window.process?.versions?.electron)
-        );
-
         if (this.isTauri) {
             this.platform = 'tauri';
             this._setupLoggingBridge();
-        } else if (this.isElectron) {
-            this.platform = 'electron';
         } else {
             this.platform = 'web';
             if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
@@ -141,12 +120,11 @@ class PlatformBridge {
     getCapabilities() {
         const os = this.getOS();
         const isTauri = this.isTauri;
-        const isElectron = this.isElectron;
         const isAndroid = os === 'android';
         const isWindows = os === 'windows';
 
         return Object.freeze({
-            platform: this.platform, // 'tauri' | 'electron' | 'web'
+            platform: this.platform, // 'tauri' | 'web'
             os,
             isAndroid,
             isWindows,
@@ -158,12 +136,12 @@ class PlatformBridge {
             // Persistent permissions require Android ContentResolver takePersistableUriPermission - NOT yet implemented
             hasPersistentUriPermission: false,
             // Streaming copy to app-private cache snapshot
-            hasPrivateCacheStreaming: Boolean((isTauri && isWindows) || isElectron),
+            hasPrivateCacheStreaming: Boolean(isTauri && isWindows),
             // Secure credential storage (Windows DPAPI)
-            hasSecureStorage: Boolean((isTauri && isWindows) || isElectron),
+            hasSecureStorage: Boolean(isTauri && isWindows),
             hasExternalBrowserIntent: true,
             // Desktop window controls (minimize, maximize, close)
-            hasWindowControls: Boolean((isTauri || isElectron) && !isAndroid)
+            hasWindowControls: Boolean(isTauri && !isAndroid)
         });
     }
 
@@ -351,10 +329,6 @@ class PlatformBridge {
      * @returns {Promise<Array<{ filePath: string, filename: string, buffer?: ArrayBuffer }> | null>}
      */
     async openFileDialog() {
-        if (this._getNativeElectron()?.openFileDialog) {
-            return await this._getNativeElectron().openFileDialog();
-        }
-
         if (this.isTauri) {
             try {
                 const items = await this._invokeTauri('dialog_open_file', { locale: getLocale() });
@@ -458,10 +432,6 @@ class PlatformBridge {
         if (!pathStr) return null;
         if (options.signal?.aborted) {
             throw new DOMException('The operation was aborted', 'AbortError');
-        }
-
-        if (this._getNativeElectron()?.readFileBuffer) {
-            return await this._getNativeElectron().readFileBuffer(pathStr);
         }
 
         if (this.isTauri) {
@@ -645,10 +615,6 @@ class PlatformBridge {
      * Minimize window
      */
     async windowMinimize() {
-        if (this._getNativeElectron()?.minimize) {
-            this._getNativeElectron().minimize();
-            return;
-        }
         if (this.isTauri) {
             try {
                 if (window.__TAURI__?.window?.getCurrentWindow) {
@@ -667,10 +633,6 @@ class PlatformBridge {
      */
 
     async windowMaximize() {
-        if (this._getNativeElectron()?.maximize) {
-            this._getNativeElectron().maximize();
-            return;
-        }
         if (this.isTauri) {
             try {
                 if (window.__TAURI__?.window?.getCurrentWindow) {
@@ -688,10 +650,6 @@ class PlatformBridge {
      * Close window
      */
     async windowClose() {
-        if (this._getNativeElectron()?.close) {
-            this._getNativeElectron().close();
-            return;
-        }
         if (this.isTauri) {
             try {
                 if (window.__TAURI__?.window?.getCurrentWindow) {
@@ -850,9 +808,6 @@ class PlatformBridge {
     }
 
     async dialogPickFolder(options = {}) {
-        if (this._getNativeElectron()?.openDirectoryDialog) {
-            return await this._getNativeElectron().openDirectoryDialog(options);
-        }
         if (this.isTauri) {
             try {
                 const title = typeof options === 'string' ? options : (options?.title || null);
@@ -912,6 +867,38 @@ class PlatformBridge {
             } catch (e) {
                 console.warn('[PlatformBridge] fs_write_file failed:', e);
                 throw e;
+            }
+        }
+        return false;
+    }
+
+    async writeBinaryFile(filePath, bytesBase64) {
+        if (this.isTauri) {
+            try {
+                await this._invokeTauri('fs_write_binary_file', {
+                    filePath,
+                    bytesBase64: typeof bytesBase64 === 'string' ? bytesBase64 : ''
+                });
+                return true;
+            } catch (e) {
+                console.warn('[PlatformBridge] fs_write_binary_file failed:', e);
+                throw e;
+            }
+        }
+        return false;
+    }
+
+    async setWindowTitlebarTheme({ bgHex, textHex = null, isDark = false } = {}) {
+        if (this.isTauri && !this.isAndroid && bgHex) {
+            try {
+                await this._invokeTauri('window_set_titlebar_theme', {
+                    bgHex: String(bgHex),
+                    textHex: textHex ? String(textHex) : null,
+                    isDark: Boolean(isDark)
+                });
+                return true;
+            } catch (e) {
+                console.debug('[PlatformBridge] window_set_titlebar_theme unavailable:', e);
             }
         }
         return false;
@@ -1042,19 +1029,6 @@ class PlatformBridge {
         const windowMode = options?.windowMode || (bookId ? 'reader' : 'shelf');
         const title = options?.title ? String(options.title) : null;
 
-        if (this._getNativeElectron()?.openNewWindow) {
-            try {
-                const res = await this._getNativeElectron().openNewWindow({
-                    bookId,
-                    windowMode,
-                    title
-                });
-                if (res?.success) return res;
-            } catch (e) {
-                console.warn('[PlatformBridge] Electron openNewWindow failed:', e);
-            }
-        }
-
         if (this.isTauri) {
             try {
                 const res = await this._invokeTauri('window_open_new', {
@@ -1110,9 +1084,6 @@ class PlatformBridge {
      * @returns {Promise<boolean>}
      */
     async isWindowMaximized() {
-        if (this._getNativeElectron()?.isMaximized) {
-            return await this._getNativeElectron().isMaximized();
-        }
         if (this.isTauri) {
             try {
                 if (window.__TAURI__?.window?.getCurrentWindow) {
@@ -1130,10 +1101,6 @@ class PlatformBridge {
      * Toggle fullscreen mode
      */
     async toggleFullscreen() {
-        if (this._getNativeElectron()?.toggleFullscreen) {
-            this._getNativeElectron().toggleFullscreen();
-            return;
-        }
         if (this.isTauri) {
             try {
                 await this._invokeTauri('window_toggle_fullscreen');
@@ -1157,9 +1124,6 @@ class PlatformBridge {
      * @returns {Promise<boolean>}
      */
     async isFullscreen() {
-        if (this._getNativeElectron()?.isFullscreen) {
-            return await this._getNativeElectron().isFullscreen();
-        }
         if (this.isTauri) {
             try {
                 return await this._invokeTauri('window_is_fullscreen');
@@ -1176,10 +1140,6 @@ class PlatformBridge {
      * @returns {function(): void} Unsubscribe function
      */
     onFullscreenChange(callback) {
-        if (this._getNativeElectron()?.onFullscreenChange) {
-            return this._getNativeElectron().onFullscreenChange(callback);
-        }
-
         if (this.isTauri) {
             const currentWin = window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow?.();
             const listenFn = typeof currentWin?.listen === 'function'
@@ -1227,14 +1187,6 @@ class PlatformBridge {
      * @returns {function(): void & { ready: Promise<void> }}
      */
     onOpenFile(callback) {
-        if (this._getNativeElectron()?.onOpenFile) {
-            const unsub = this._getNativeElectron().onOpenFile(callback);
-            if (typeof unsub === 'function' && !unsub.ready) {
-                unsub.ready = Promise.resolve();
-            }
-            return unsub;
-        }
-
         if (this.isTauri && window.__TAURI__?.event?.listen) {
             let unlistenFn = null;
             const readyPromise = window.__TAURI__.event.listen('app:open-file', async (event) => {
@@ -1268,15 +1220,10 @@ class PlatformBridge {
     }
 
     /**
-     * Hook before application quits to flush state (Electron / Web beforeunload)
+     * Hook before application quits to flush state (Tauri / Web beforeunload)
      * @param {function(): void} callback
      */
     onFlushBeforeQuit(callback) {
-        if (this._getNativeElectron()?.onFlushBeforeQuit) {
-            this._getNativeElectron().onFlushBeforeQuit(callback);
-            return;
-        }
-
         if (typeof window !== 'undefined') {
             window.addEventListener('beforeunload', () => {
                 callback();
@@ -1324,10 +1271,6 @@ class PlatformBridge {
      * @param {string|null} [requestId=null]
      */
     flushComplete(requestId = null) {
-        if (this._getNativeElectron()?.flushComplete) {
-            this._getNativeElectron().flushComplete(requestId);
-            return;
-        }
         if (this.isTauri) {
             this._invokeTauri('app_flush_complete', { requestId, request_id: requestId }).catch((err) => {
                 console.warn('[PlatformBridge] app_flush_complete invoke failed:', err);
@@ -1339,9 +1282,6 @@ class PlatformBridge {
      * Notify backend that renderer is ready to receive pending files
      */
     async rendererReady() {
-        if (this._getNativeElectron()?.rendererReady) {
-            return await this._getNativeElectron().rendererReady();
-        }
         if (this.isTauri) {
             try {
                 return await this._invokeTauri('app_renderer_ready');
@@ -1374,10 +1314,6 @@ class PlatformBridge {
     async openExternal(url) {
         const safeUrl = this._isSafeExternalUrl(url);
         if (!safeUrl) return false;
-        if (this._getNativeElectron()?.openExternal) {
-            const opened = await this._getNativeElectron().openExternal(safeUrl);
-            if (opened !== false) return Boolean(opened ?? true);
-        }
         if (this.isTauri) {
             if (window.__TAURI__?.shell?.open) {
                 try {
@@ -1406,9 +1342,6 @@ class PlatformBridge {
      * @returns {Promise<string>}
      */
     async getVersion() {
-        if (this._getNativeElectron()?.getVersion) {
-            return await this._getNativeElectron().getVersion();
-        }
         if (this.isTauri) {
             try {
                 if (window.__TAURI__?.app?.getVersion) {
@@ -1436,9 +1369,6 @@ class PlatformBridge {
      */
     async checkGitHubRelease(repo) {
         const loc = getLocale();
-        if (this._getNativeElectron()?.checkGitHubRelease) {
-            return await this._getNativeElectron().checkGitHubRelease(repo, loc);
-        }
         // Tauri & Web: query GitHub Releases API directly (with 403 raw package.json fallback)
         try {
             const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
@@ -1451,8 +1381,8 @@ class PlatformBridge {
                         if (rawRes.ok) {
                             const pkg = await rawRes.json();
                             const fallbackData = {
-                                tag_name: `v${pkg.version || '0.1.0'}`,
-                                name: `Linden Leaf v${pkg.version || '0.1.0'}`,
+                                tag_name: `v${pkg.version || '1.0.0'}`,
+                                name: `Linden Leaf v${pkg.version || '1.0.0'}`,
                                 html_url: `https://github.com/${repo}/releases`,
                                 body: t('updater.viewOnGithub')
                             };
@@ -1494,10 +1424,6 @@ class PlatformBridge {
      * @returns {Promise<object>}
      */
     async getSyncConfig() {
-        if (this._getNativeElectron()?.syncGetConfig) {
-            return await this._getNativeElectron().syncGetConfig();
-        }
-
         if (this.isTauri) {
             try {
                 return await this._invokeTauri('sync_get_config');
@@ -1540,10 +1466,6 @@ class PlatformBridge {
      * @returns {Promise<boolean>}
      */
     async saveSyncConfig(config) {
-        if (this._getNativeElectron()?.syncSaveConfig) {
-            return await this._getNativeElectron().syncSaveConfig(config);
-        }
-
         if (this.isTauri) {
             try {
                 return await this._invokeTauri('sync_save_config', { config, newConfig: config, new_config: config });
@@ -1584,9 +1506,6 @@ class PlatformBridge {
      */
     async secureStoreCredential(key, value) {
         if (!key) return false;
-        if (this._getNativeElectron()?.secureStoreCredential) {
-            return await this._getNativeElectron().secureStoreCredential(key, value);
-        }
         if (this.isTauri) {
             try {
                 return await this._invokeTauri('secure_store_credential', { key, value });
@@ -1610,9 +1529,6 @@ class PlatformBridge {
      */
     async secureLoadCredential(key) {
         if (!key) return null;
-        if (this._getNativeElectron()?.secureLoadCredential) {
-            return await this._getNativeElectron().secureLoadCredential(key);
-        }
         if (this.isTauri) {
             try {
                 return await this._invokeTauri('secure_load_credential', { key });
@@ -1635,9 +1551,6 @@ class PlatformBridge {
      */
     async secureHasCredential(key) {
         if (!key) return false;
-        if (this._getNativeElectron()?.secureHasCredential) {
-            return await this._getNativeElectron().secureHasCredential(key);
-        }
         if (this.isTauri) {
             try {
                 return await this._invokeTauri('secure_has_credential', { key });
@@ -1660,9 +1573,6 @@ class PlatformBridge {
      */
     async secureDeleteCredential(key) {
         if (!key) return false;
-        if (this._getNativeElectron()?.secureDeleteCredential) {
-            return await this._getNativeElectron().secureDeleteCredential(key);
-        }
         if (this.isTauri) {
             try {
                 return await this._invokeTauri('secure_delete_credential', { key });
@@ -1737,10 +1647,6 @@ class PlatformBridge {
      */
     async testSyncConnection(config) {
         const localizedConfig = withLocale(config);
-        if (this._getNativeElectron()?.syncTestConnection) {
-            return await this._getNativeElectron().syncTestConnection(localizedConfig);
-        }
-
         if (this.isTauri) {
             try {
                 const res = await this._invokeTauri('sync_test_connection', { config: localizedConfig, newConfig: localizedConfig });
@@ -1765,10 +1671,6 @@ class PlatformBridge {
      */
     async fetchRemoteSyncState(config) {
         const localizedConfig = withLocale(config);
-        if (this._getNativeElectron()?.syncFetchRemote) {
-            return await this._getNativeElectron().syncFetchRemote(localizedConfig);
-        }
-
         if (this.isTauri) {
             try {
                 const res = await this._invokeTauri('sync_fetch_remote', { config: localizedConfig });
@@ -1794,10 +1696,6 @@ class PlatformBridge {
      */
     async saveRemoteSyncState(config, data, etag = null, summaryMarkdown = null) {
         const localizedConfig = withLocale(config);
-        if (this._getNativeElectron()?.syncSaveRemote) {
-            return await this._getNativeElectron().syncSaveRemote(localizedConfig, data, etag, summaryMarkdown);
-        }
-
         if (this.isTauri) {
             try {
                 const res = await this._invokeTauri('sync_save_remote', {
@@ -1882,10 +1780,6 @@ class PlatformBridge {
      */
     async uploadBookBinary(config, fileName, buffer) {
         const localizedConfig = withLocale(config);
-        if (this._getNativeElectron()?.syncUploadBookBinary) {
-            return await this._getNativeElectron().syncUploadBookBinary(localizedConfig, fileName, buffer);
-        }
-
         if (this.isTauri) {
             const u8 = buffer instanceof Uint8Array
                 ? buffer
@@ -1937,10 +1831,6 @@ class PlatformBridge {
      */
     async downloadBookBinary(config, fileName) {
         const localizedConfig = withLocale(config);
-        if (this._getNativeElectron()?.syncDownloadBookBinary) {
-            return await this._getNativeElectron().syncDownloadBookBinary(localizedConfig, fileName);
-        }
-
         if (this.isTauri) {
             try {
                 const raw = await this._invokeTauri('sync_download_book_binary_raw', {
@@ -2004,10 +1894,6 @@ class PlatformBridge {
      */
     async deleteBookBinary(config, fileName) {
         const localizedConfig = withLocale(config);
-        if (this._getNativeElectron()?.syncDeleteBookBinary) {
-            return await this._getNativeElectron().syncDeleteBookBinary(localizedConfig, fileName);
-        }
-
         if (this.isTauri) {
             try {
                 const res = await this._invokeTauri('sync_delete_book_binary', { config: localizedConfig, fileName, file_name: fileName });
@@ -2600,9 +2486,7 @@ class PlatformBridge {
         }
     }
 
-    // ==========================================
-    // Backward Compatibility Aliases (matching electronAPI exactly)
-    // ==========================================
+    // Legacy compatibility aliases on platformBridge
     get syncGetConfig() { return this.getSyncConfig.bind(this); }
     get syncSaveConfig() { return this.saveSyncConfig.bind(this); }
     get syncRevealPassword() { return this.revealSyncPassword.bind(this); }
@@ -2621,12 +2505,8 @@ class PlatformBridge {
 // Instantiate singleton
 export const platformBridge = new PlatformBridge();
 
-// Expose on global window for legacy/direct script usage
 if (typeof window !== 'undefined') {
     window.platformBridge = platformBridge;
-    if (!window.electronAPI) {
-        window.electronAPI = platformBridge;
-    }
 }
 
 export default platformBridge;

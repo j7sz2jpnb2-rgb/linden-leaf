@@ -1,6 +1,8 @@
 import { DomEvents } from './dom-events.js'
 import * as db from './db.js'
 import * as syncEngine from './syncEngine.js'
+import { getSafeCloudFileName as buildSafeCloudFileName } from './book-metadata.js'
+import { platformBridge } from './platformBridge.js'
 import { escapeHTML } from './ui-format.js'
 import { getLocale, t } from './i18n.js'
 
@@ -286,9 +288,9 @@ export class SyncController {
     }
 
     async initSyncService() {
-        if (!window.electronAPI?.syncGetConfig) return
+        if (!platformBridge?.getSyncConfig) return
         try {
-            this.syncConfig = await window.electronAPI.syncGetConfig()
+            this.syncConfig = await platformBridge.getSyncConfig()
             if (this.syncConfig?.disableAutoSync && typeof window !== 'undefined') {
                 window.__LINDEN_DISABLE_AUTO_SYNC__ = true
             }
@@ -395,10 +397,8 @@ export class SyncController {
         btnPickFolder?.addEventListener('click', async () => {
             try {
                 let folder = null
-                if (window.platformBridge?.dialogPickFolder) {
-                    folder = await window.platformBridge.dialogPickFolder({ title: t('modal.localSyncDir') })
-                } else if (window.electronAPI?.openDirectoryDialog) {
-                    folder = await window.electronAPI.openDirectoryDialog()
+                if (platformBridge?.dialogPickFolder) {
+                    folder = await platformBridge.dialogPickFolder({ title: t('modal.localSyncDir') })
                 }
                 if (folder) {
                     const input = document.getElementById('sync-input-local-folder')
@@ -651,15 +651,15 @@ export class SyncController {
     async saveSyncConfig(overrideConfig = null) {
         const baseCfg = this.getSyncConfigFromUI()
         const cfg = { ...baseCfg, ...(overrideConfig || {}) }
-        if (window.electronAPI?.syncSaveConfig) {
+        if (platformBridge?.saveSyncConfig) {
             try {
-                const ok = await window.electronAPI.syncSaveConfig(cfg)
+                const ok = await platformBridge.saveSyncConfig(cfg)
                 if (ok === false) {
                     console.error('[CloudSync] syncSaveConfig returned false')
                     return false
                 }
-                if (window.electronAPI.syncGetConfig) {
-                    const refreshed = await window.electronAPI.syncGetConfig()
+                if (platformBridge.getSyncConfig) {
+                    const refreshed = await platformBridge.getSyncConfig()
                     if (refreshed) {
                         this.syncConfig = {
                             ...this.syncConfig,
@@ -736,8 +736,8 @@ export class SyncController {
                 } catch (pErr) {
                     res = { success: false, error: pErr.message || String(pErr) }
                 }
-            } else if (window.electronAPI?.syncTestConnection) {
-                res = await window.electronAPI.syncTestConnection(config)
+            } else if (platformBridge?.testSyncConnection) {
+                res = await platformBridge.testSyncConnection(config)
             } else {
                 res = { success: true, message: t('syncCtrl.webdavTestOk') }
             }
@@ -1285,19 +1285,6 @@ export class SyncController {
     }
 
     getSafeCloudFileName(book) {
-        if (!book) return 'book.epub'
-        if (book.cloudBackup?.fileName) {
-            const savedName = String(book.cloudBackup.fileName).trim()
-            if (savedName && !/[\\/%?#\0:*"><|]/.test(savedName) && !savedName.startsWith('.')) {
-                return savedName
-            }
-        }
-        const fmt = (book.format || 'epub').toLowerCase().replace(/[^a-z0-9]/g, '') || 'epub'
-        const safeId = (book.id || 'book').replace(/[^a-zA-Z0-9_-]/g, '_')
-        let rawKey = (book.stableKey || '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5.-]/g, '_').trim()
-        if (rawKey.startsWith('.')) rawKey = rawKey.replace(/^\.+/, '')
-        if (rawKey.length > 50) rawKey = rawKey.slice(0, 50)
-        const baseName = (rawKey && rawKey !== safeId) ? `${rawKey}_${safeId}` : safeId
-        return `${baseName}.${fmt}`
+        return buildSafeCloudFileName(book)
     }
 }

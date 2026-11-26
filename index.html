@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="light" data-startup-view="pending">
 <head>
   <meta charset="utf-8"/>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://api.github.com https://github.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; frame-src 'self' blob: data:; font-src 'self' data: blob:; img-src 'self' data: blob: https://avatars.githubusercontent.com https://github.com; media-src 'self' data: blob:; connect-src 'self' data: blob: http: https: https://api.github.com https://github.com https://*.github.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline' blob: data:; object-src 'none'; base-uri 'self';"/>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' blob: data: https://api.github.com https://github.com; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; frame-src 'self' blob: data:; font-src 'self' data: blob:; img-src 'self' data: blob: https://avatars.githubusercontent.com https://github.com; media-src 'self' data: blob:; connect-src 'self' data: blob: http: https: https://api.github.com https://github.com https://*.github.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline' blob: data:; object-src 'none'; base-uri 'self';"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
   <title>Linden Leaf - 现代化全格式电子书阅读器</title>
   <!-- Initial background styles to prevent a white flash during startup -->
@@ -335,6 +335,10 @@
             <button class="nav-item" data-category="favorite" id="nav-cat-favorite">
               <svg class="icon icon-sm" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
               <span data-i18n="nav.favorites">收藏的书</span>
+            </button>
+            <button class="nav-item" data-category="archived" id="nav-cat-archived" hidden>
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+              <span data-i18n="nav.archivedBooks">已封存图书</span>
             </button>
           </div>
 
@@ -920,11 +924,11 @@
                   </div>
 
                   <div class="shelf-notes-color-filters" id="shelf-notes-color-filters" title="点击已选颜色可取消筛选" data-i18n-title="notes.colorToggleClear">
-                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#facc15" title="黄色" data-i18n-title="notes.colorYellow"><span class="color-dot" style="background:#c89b3c;"></span></button>
-                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#4ade80" title="绿色" data-i18n-title="notes.colorGreen"><span class="color-dot" style="background:#5f8c6c;"></span></button>
-                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#60a5fa" title="蓝色" data-i18n-title="notes.colorBlue"><span class="color-dot" style="background:#5f85a8;"></span></button>
-                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#c084fc" title="紫色" data-i18n-title="notes.colorPurple"><span class="color-dot" style="background:#8d74a8;"></span></button>
-                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#f87171" title="红色" data-i18n-title="notes.colorRed"><span class="color-dot" style="background:#9e4c5a;"></span></button>
+                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#facc15" title="黄色" data-i18n-title="notes.colorYellow"><span class="color-dot color-yellow"></span></button>
+                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#4ade80" title="绿色" data-i18n-title="notes.colorGreen"><span class="color-dot color-green"></span></button>
+                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#60a5fa" title="蓝色" data-i18n-title="notes.colorBlue"><span class="color-dot color-blue"></span></button>
+                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#f472b6" title="粉色" data-i18n-title="readerToolbar.hlPink"><span class="color-dot color-pink"></span></button>
+                    <button type="button" class="notes-color-pill color-dot-pill" data-color="#a855f7" title="紫色" data-i18n-title="notes.colorPurple"><span class="color-dot color-purple"></span></button>
                   </div>
 
                   <span class="shelf-notes-toolbar-sep" aria-hidden="true"></span>
@@ -1049,6 +1053,16 @@
               <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
             </svg>
           </button>
+          <div id="reader-toolbar-overflow-wrap" class="reader-toolbar-overflow-wrap" hidden>
+            <button id="btn-reader-toolbar-overflow" class="btn-tool" type="button" aria-haspopup="menu" aria-expanded="false" title="更多菜单工具" data-i18n-title="toolbar.overflowTitle">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/>
+                <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>
+                <circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>
+              </svg>
+            </button>
+            <div id="reader-toolbar-overflow-menu" class="reader-toolbar-overflow-menu" role="menu" hidden></div>
+          </div>
         </div>
       </header>
 
@@ -1075,6 +1089,22 @@
 
       <!-- Reader Content Area (Safe Viewport) -->
       <div id="reader-content-area" class="reader-content-area">
+        <!-- Reader Transient State Pills (Peek / Cross-Page Anchor / Portal) -->
+        <div id="reader-state-banners" class="reader-state-banners">
+          <div id="reader-peek-banner" class="reader-state-pill reader-state-pill--peek" hidden>
+            <span class="state-pill-dot"></span>
+            <span data-i18n="reader.peekBannerText">临时查阅 · 不计进度</span>
+            <button type="button" id="btn-promote-peek" class="state-pill-btn" data-i18n="reader.peekPromoteBtn">转为正式阅读</button>
+          </div>
+          <div id="epub-anchor-banner" class="reader-state-pill reader-state-pill--anchor" hidden>
+            <span id="epub-anchor-text" data-i18n="reader.anchorArmed">已锚定起点 — 请翻页后选择终点</span>
+            <button type="button" id="btn-cancel-epub-anchor" class="state-pill-btn" data-i18n="common.cancel">取消</button>
+          </div>
+          <div id="reader-portal-banner" class="reader-state-pill reader-state-pill--portal" hidden>
+            <span id="portal-banner-text" data-i18n="reader.portalArmed">传送门起点已就绪 — 点击目标高亮即可连接</span>
+            <button type="button" id="btn-cancel-portal-arm" class="state-pill-btn" data-i18n="common.cancel">取消</button>
+          </div>
+        </div>
         <!-- Side Arrow Jump Click Targets -->
         <button id="btn-nav-left" class="nav-arrow-btn nav-arrow-left" title="上一页 (←)" data-i18n-title="reader.prevPageTitle">
           <svg class="icon icon-lg" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
@@ -1219,7 +1249,7 @@
         <button id="btn-pdf-ocr-extract" class="btn-zoom-preset" title="提取或识别页面文字" data-i18n-title="pdf.extractTextTitle" style="color: var(--accent-purple); font-weight: 600;" data-i18n="pdf.extractTextBtn">提取文字</button>
         <div class="zoom-divider"></div>
         <!-- Auto-Scroll, Split View, Scan Presets -->
-        <button id="btn-toggle-auto-scroll" class="btn-zoom-preset" title="自动滚动" data-i18n-title="pdf.autoScrollTitle" aria-label="自动滚动" data-i18n-aria-label="pdf.autoScrollBtn" data-i18n="pdf.autoScrollBtn">自动滚</button>
+        <button id="btn-toggle-auto-scroll" class="btn-zoom-preset" title="自动滚动" data-i18n-title="pdf.autoScrollTitle" aria-label="自动滚动" data-i18n-aria-label="pdf.autoScrollBtn" data-i18n="pdf.autoScrollBtn">自动滚动</button>
         <button id="btn-pdf-split-viewport" class="btn-zoom-preset" title="分屏副视口" data-i18n-title="pdf.splitViewTitle" aria-label="分屏副视口" data-i18n-aria-label="pdf.splitViewBtn" data-i18n="pdf.splitViewBtn">分屏</button>
         <button id="btn-scan-gray-boost" class="btn-zoom-preset" title="灰底增强" data-i18n-title="pdf.grayBoostTitle" aria-label="灰底增强" data-i18n-aria-label="pdf.grayBoostBtn" data-i18n="pdf.grayBoostBtn">灰底增强</button>
         <button id="btn-scan-text-darken" class="btn-zoom-preset" title="字迹加深" data-i18n-title="pdf.textDarkenTitle" aria-label="字迹加深" data-i18n-aria-label="pdf.textDarkenBtn" data-i18n="pdf.textDarkenBtn">字迹加深</button>
@@ -1320,6 +1350,8 @@
               <span data-i18n="common.exportMarkdown">导出 Markdown</span>
             </button>
           </div>
+          <div id="sidebar-inline-note-composer-host"></div>
+          <div id="reader-portals-host" class="reader-portals-host" hidden></div>
           <div id="notes-list-container"></div>
         </div>
 
@@ -2007,6 +2039,28 @@
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
+                <div class="control-row settings-row-pair desktop-only">
+                  <span class="control-label" data-i18n="settings.directShelfLanding">默认直接进入书架（跳过扉页）</span>
+                  <label class="toggle-switch" title="开启后打开应用或回到首页直接进入书架网格，跳过欢迎扉页" data-i18n-title="settings.directShelfLandingTip">
+                    <input type="checkbox" id="setting-direct-shelf-landing" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row settings-row-pair desktop-only">
+                  <span class="control-label" data-i18n="settings.readerTopBarAutoHide">阅读顶栏自动淡出隐藏</span>
+                  <label class="toggle-switch" title="阅读时淡出顶部栏，鼠标移至顶部自动显现" data-i18n-title="settings.readerTopBarAutoHideTip">
+                    <input type="checkbox" id="setting-reader-topbar-autohide" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="reader-toolbar-custom-block desktop-only">
+                  <div class="reader-toolbar-custom-header">
+                    <span class="control-label" data-i18n="settings.readerToolbarTitle">自定义阅读顶栏菜单</span>
+                    <button type="button" id="btn-reset-reader-toolbar" class="btn-text-mini" data-i18n="settings.readerToolbarReset">恢复默认</button>
+                  </div>
+                  <p class="reader-toolbar-custom-hint" data-i18n="settings.readerToolbarHint">取消勾选的按钮会自动收进顶栏右侧“···”更多菜单，随时可用</p>
+                  <div id="reader-toolbar-customize-list" class="reader-toolbar-customize-list"></div>
+                </div>
                 <div class="control-row settings-row-pair">
                   <span class="control-label" data-i18n="settings.reduceMotion">遵循系统减少动效</span>
                   <label class="toggle-switch">
@@ -2292,28 +2346,39 @@
     <!-- Selection Toolbar -->
     <div id="selection-popup" style="display: none;">
       <span id="popup-multi-badge" class="multi-sel-badge" style="display: none;" data-i18n="readerToolbar.selectedOne">已选 1 处</span>
-      <div class="color-dot color-yellow" data-color="#facc15" title="黄色荧光笔" data-i18n-title="pdf.hlYellowAria"></div>
-      <div class="color-dot color-green" data-color="#4ade80" title="绿色荧光笔" data-i18n-title="pdf.hlGreenAria"></div>
-      <div class="color-dot color-blue" data-color="#60a5fa" title="蓝色荧光笔" data-i18n-title="readerToolbar.hlBlue"></div>
-      <div class="color-dot color-pink" data-color="#f472b6" title="粉色荧光笔" data-i18n-title="readerToolbar.hlPink"></div>
-      <div style="width: 1px; height: 18px; background: var(--border-color); margin: 0 2px;"></div>
-      <button id="popup-underline" class="btn-tool" style="width: 28px; height: 28px; font-weight: 700; text-decoration: underline;" title="实线下划线" data-i18n-title="readerToolbar.underline">U</button>
-      <button id="popup-note" class="btn-tool" style="width: 28px; height: 28px;" title="写想法/笔记" data-i18n-title="readerToolbar.addNote">
+      <div class="popup-pen-styles" id="popup-pen-styles" role="group">
+        <button id="popup-style-highlight" type="button" class="btn-tool popup-pen-style-btn active" data-style="highlight" title="荧光笔" data-i18n-title="readerToolbar.styleHighlight">
+          <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="m14 3 7 7-9 9H5v-7Z"/><path d="m10 7 7 7M3 22h14"/></svg>
+        </button>
+        <button id="popup-underline" type="button" class="btn-tool popup-pen-style-btn" data-style="underline" style="font-weight: 700; text-decoration: underline;" title="实线下划线" data-i18n-title="readerToolbar.underline">U</button>
+        <button id="popup-dashed" type="button" class="btn-tool popup-pen-style-btn" data-style="dashed" style="font-weight: 700;" title="虚线下划线" data-i18n-title="readerToolbar.dashedUnderline">┄</button>
+        <button id="popup-squiggly" type="button" class="btn-tool popup-pen-style-btn" data-style="squiggly" style="font-weight: 700;" title="波浪线" data-i18n-title="readerToolbar.squiggly">∿</button>
+      </div>
+      <div class="popup-divider"></div>
+      <div class="color-dot color-yellow active" data-color="#facc15" title="琥珀黄" data-i18n-title="pdf.hlYellowAria"></div>
+      <div class="color-dot color-green" data-color="#4ade80" title="竹青绿" data-i18n-title="pdf.hlGreenAria"></div>
+      <div class="color-dot color-blue" data-color="#60a5fa" title="霁青蓝" data-i18n-title="readerToolbar.hlBlue"></div>
+      <div class="color-dot color-pink" data-color="#f472b6" title="珊瑚粉" data-i18n-title="readerToolbar.hlPink"></div>
+      <div class="color-dot color-purple" data-color="#a855f7" title="丁香紫" data-i18n-title="notes.colorPurple"></div>
+      <div class="popup-divider"></div>
+      <button id="popup-anchor-start" type="button" class="btn-tool" style="width: 28px; height: 28px;" title="锚定跨页起点" data-i18n-title="readerToolbar.anchorStart">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"/><line x1="12" y1="8" x2="12" y2="21"/><path d="M5 12H2a10 10 0 0 0 20 0h-3"/></svg>
+      </button>
+      <button id="popup-note" type="button" class="btn-tool" style="width: 28px; height: 28px;" title="写想法/笔记" data-i18n-title="readerToolbar.addNote">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
       </button>
-      <button id="popup-copy" class="btn-tool" style="width: 28px; height: 28px;" title="复制文本 (支持 Ctrl 多选合并复制)" data-i18n-title="readerToolbar.copyMerge">
+      <button id="popup-copy" type="button" class="btn-tool" style="width: 28px; height: 28px;" title="复制文本 (支持 Ctrl 多选合并复制)" data-i18n-title="readerToolbar.copyMerge">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
       </button>
-      <button id="popup-dict" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-green); font-size: 13px;" title="查词典（本地英汉释义）" data-i18n-title="readerToolbar.lookupDict"><svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 3H20v19H6.5A2.5 2.5 0 0 1 4 19.5v-14A2.5 2.5 0 0 1 6.5 3Z"/></svg></button>
-      <button id="popup-ai" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple); font-size: 13px;" title="AI 翻译与智能问答" data-i18n-title="readerToolbar.aiAsk" aria-label="AI 翻译与智能问答" data-i18n-aria-label="readerToolbar.aiAsk"><svg class="icon" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/></svg></button>
-      <button id="popup-search" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-blue);" title="网页搜索 / 百科查词" data-i18n-title="readerToolbar.webSearch">
+      <button id="popup-dict" type="button" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-green); font-size: 13px;" title="查词典（本地英汉释义）" data-i18n-title="readerToolbar.lookupDict"><svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 3H20v19H6.5A2.5 2.5 0 0 1 4 19.5v-14A2.5 2.5 0 0 1 6.5 3Z"/></svg></button>
+      <button id="popup-ai" type="button" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple); font-size: 13px;" title="AI 翻译与智能问答" data-i18n-title="readerToolbar.aiAsk" aria-label="AI 翻译与智能问答" data-i18n-aria-label="readerToolbar.aiAsk"><svg class="icon" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/></svg></button>
+      <button id="popup-search" type="button" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-blue);" title="网页搜索 / 百科查词" data-i18n-title="readerToolbar.webSearch">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       </button>
-      <button id="popup-dashed" class="btn-tool" style="width: 28px; height: 28px; font-weight: 700; border-bottom: 2px dashed var(--text-muted); border-radius: 4px; font-size: 11px;" title="虚线下划线" data-i18n-title="readerToolbar.dashedUnderline">┄</button>
-      <button id="popup-share" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple);" title="生成精美书摘图片 (可一键复制到剪贴板)" data-i18n-title="readerToolbar.shareQuote">
+      <button id="popup-share" type="button" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple);" title="生成精美书摘图片 (可一键复制到剪贴板)" data-i18n-title="readerToolbar.shareQuote">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
       </button>
-      <button id="popup-translate-para" class="btn-tool" style="display: none; width: auto; height: 28px; padding: 0 6px; font-size: 11px; color: var(--accent-purple); font-weight: 600;" title="整段就地翻译 (高级设置)" data-i18n-title="readerToolbar.translateParaTitle" data-i18n="readerToolbar.translateParaBtn">译本段</button>
+      <button id="popup-translate-para" type="button" class="btn-tool" style="display: none; width: auto; height: 28px; padding: 0 6px; font-size: 11px; color: var(--accent-purple); font-weight: 600;" title="整段就地翻译 (高级设置)" data-i18n-title="readerToolbar.translateParaTitle" data-i18n="readerToolbar.translateParaBtn">译本段</button>
     </div>
 
     <!-- Standalone Offline Dictionary Card (Decoupled from AI, no 10s cooldown, instant POS & definition) -->
@@ -2324,6 +2389,7 @@
           <div class="color-dot color-green dict-color-dot" data-color="#4ade80" title="绿色高亮" data-i18n-title="readerToolbar.wordHlGreen" style="width: 14px; height: 14px; border-radius: 50%; cursor: pointer;"></div>
           <div class="color-dot color-blue dict-color-dot" data-color="#60a5fa" title="蓝色高亮" data-i18n-title="readerToolbar.wordHlBlue" style="width: 14px; height: 14px; border-radius: 50%; cursor: pointer;"></div>
           <div class="color-dot color-pink dict-color-dot" data-color="#f472b6" title="粉色高亮" data-i18n-title="readerToolbar.wordHlPink" style="width: 14px; height: 14px; border-radius: 50%; cursor: pointer;"></div>
+          <div class="color-dot color-purple dict-color-dot" data-color="#a855f7" title="紫色高亮" data-i18n-title="notes.colorPurple" style="width: 14px; height: 14px; border-radius: 50%; cursor: pointer;"></div>
           <div style="width: 1px; height: 14px; background: var(--border-color); margin: 0 2px;"></div>
           <button type="button" class="btn-tool" id="btn-dict-underline" style="width: 22px; height: 22px; font-size: 11px; font-weight: 700; text-decoration: underline; padding: 0;" title="实线下划线" data-i18n-title="readerToolbar.underline">U</button>
           <button type="button" class="btn-tool" id="btn-dict-note" style="width: 22px; height: 22px; padding: 2px;" title="添加想法/批注" data-i18n-title="readerToolbar.wordNote">
@@ -2375,21 +2441,35 @@
 
     <!-- Highlight Click Action Popup -->
     <div id="highlight-action-popup" style="display: none;">
+      <div class="popup-pen-styles" id="hl-action-styles" role="group">
+        <button type="button" class="btn-tool popup-pen-style-btn hl-action-style-btn" data-style="highlight" title="荧光笔" data-i18n-title="readerToolbar.styleHighlight">
+          <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="m14 3 7 7-9 9H5v-7Z"/><path d="m10 7 7 7M3 22h14"/></svg>
+        </button>
+        <button type="button" class="btn-tool popup-pen-style-btn hl-action-style-btn" data-style="underline" style="font-weight: 700; text-decoration: underline;" title="实线下划线" data-i18n-title="readerToolbar.underline">U</button>
+        <button type="button" class="btn-tool popup-pen-style-btn hl-action-style-btn" data-style="dashed" style="font-weight: 700;" title="虚线下划线" data-i18n-title="readerToolbar.dashedUnderline">┄</button>
+        <button type="button" class="btn-tool popup-pen-style-btn hl-action-style-btn" data-style="squiggly" style="font-weight: 700;" title="波浪线" data-i18n-title="readerToolbar.squiggly">∿</button>
+      </div>
+      <div class="popup-divider"></div>
       <div class="color-dot color-yellow" data-color="#facc15" title="改黄色" data-i18n-title="readerToolbar.editYellow"></div>
       <div class="color-dot color-green" data-color="#4ade80" title="改绿色" data-i18n-title="readerToolbar.editGreen"></div>
       <div class="color-dot color-blue" data-color="#60a5fa" title="改蓝色" data-i18n-title="readerToolbar.editBlue"></div>
       <div class="color-dot color-pink" data-color="#f472b6" title="改粉色" data-i18n-title="readerToolbar.editPink"></div>
-      <div style="width: 1px; height: 18px; background: var(--border-color); margin: 0 3px;"></div>
-      <button id="hl-action-note" class="btn-tool" style="width: 28px; height: 28px;" title="编辑想法" data-i18n-title="readerToolbar.editNote">
+      <div class="color-dot color-purple" data-color="#a855f7" title="改紫色" data-i18n-title="notes.colorPurple"></div>
+      <div class="popup-divider"></div>
+      <button id="hl-action-snap" type="button" class="btn-tool" style="width: auto; height: 28px; padding: 0 6px; font-size: 11px; font-weight: 600;" title="扩展到整句" data-i18n-title="readerToolbar.snapSentence" data-i18n="readerToolbar.snapSentenceShort">扩句</button>
+      <button id="hl-action-note" type="button" class="btn-tool" style="width: 28px; height: 28px;" title="编辑想法" data-i18n-title="readerToolbar.editNote">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
       </button>
-      <button id="hl-action-copy" class="btn-tool" style="width: 28px; height: 28px;" title="复制划线文本" data-i18n-title="readerToolbar.copyHl">
+      <button id="hl-action-portal" type="button" class="btn-tool" style="width: 28px; height: 28px;" title="建立双向传送门" data-i18n-title="readerToolbar.linkPortal">
+        <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+      </button>
+      <button id="hl-action-copy" type="button" class="btn-tool" style="width: 28px; height: 28px;" title="复制划线文本" data-i18n-title="readerToolbar.copyHl">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
       </button>
-      <button id="hl-action-share" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple);" title="生成精美书摘图片 (可一键复制到剪贴板)" data-i18n-title="readerToolbar.shareQuote">
+      <button id="hl-action-share" type="button" class="btn-tool" style="width: 28px; height: 28px; color: var(--accent-purple);" title="生成精美书摘图片 (可一键复制到剪贴板)" data-i18n-title="readerToolbar.shareQuote">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
       </button>
-      <button id="hl-action-del" class="btn-tool" style="width: 28px; height: 28px; color: #ef4444;" title="删除划线" data-i18n-title="readerToolbar.deleteHl">
+      <button id="hl-action-del" type="button" class="btn-tool" style="width: 28px; height: 28px; color: #ef4444;" title="删除划线" data-i18n-title="readerToolbar.deleteHl">
         <svg class="icon icon-sm" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
     </div>
@@ -2493,7 +2573,7 @@
             </button>
             <button id="btn-quote-download" class="btn-secondary-action">
               <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              <span data-i18n="modal.quoteSaveBtn">保存图片</span>
+              <span data-i18n="modal.quoteSaveBtn">另存为图片</span>
             </button>
           </div>
 

@@ -5,7 +5,7 @@ import { reconcileBookSyncMeta, mergeDrawingStrokes, mergeSyncData } from './syn
 export { reconcileBookSyncMeta, mergeDrawingStrokes, mergeSyncData } from './sync-model.js'
 // js/syncEngine.js - Multi-device WebDAV & Nutstore Sync and Conflict Resolution Engine
 import * as db from './db.js'
-import { checkTranslationCompatibility, buildTranslationRevisionArchive } from './translation-job-core.js'
+import { SYNC_STORAGE_KEYS, stripSensitiveConfigFields } from './sync-config-contract.js'
 import { getLocale, t } from './i18n.js'
 
 let _activeSyncPromise = null
@@ -19,6 +19,7 @@ export const exportSyncPayload = async () => {
     const allSessions = await db.getAllReadingSessions()
     const deletedRecords = await db.getAllDeletedRecords()
     const allPdfDrawings = (typeof db.getAllPdfDrawings === 'function') ? (await db.getAllPdfDrawings()) : []
+    const allPortals = (typeof db.getAllPortals === 'function') ? (await db.getAllPortals()) : []
     const settings = (await db.getSetting('readerSettings')) || (await db.getSetting('reader_settings')) || {}
 
     // Enrich reading sessions with bookTitle and bookAuthor if missing from book records
@@ -38,22 +39,28 @@ export const exportSyncPayload = async () => {
     // Reading presets
     let readingPresets = []
     try {
-        const rawPresets = typeof localStorage !== 'undefined' ? localStorage.getItem('linden_reading_presets_v1') : null
+        const rawPresets = typeof localStorage !== 'undefined' ? localStorage.getItem(SYNC_STORAGE_KEYS.readingPresets) : null
         if (rawPresets) readingPresets = JSON.parse(rawPresets) || []
-    } catch (_) {}
+    } catch (err) {
+        console.warn('[syncEngine] readingPresets export parse failed:', err)
+    }
 
     // Custom semantic palette
     let customPalette = null
     try {
-        const rawPalette = typeof localStorage !== 'undefined' ? localStorage.getItem('linden_custom_semantic_palette_v1') : null
+        const rawPalette = typeof localStorage !== 'undefined' ? localStorage.getItem(SYNC_STORAGE_KEYS.customPalette) : null
         if (rawPalette) customPalette = JSON.parse(rawPalette)
-    } catch (_) {}
+    } catch (err) {
+        console.warn('[syncEngine] customPalette export parse failed:', err)
+    }
 
     // User name
     let userName = ''
     try {
-        userName = (typeof localStorage !== 'undefined' ? (localStorage.getItem('linden_user_name') || '') : '').trim()
-    } catch (_) {}
+        userName = (typeof localStorage !== 'undefined' ? (localStorage.getItem(SYNC_STORAGE_KEYS.userName) || '') : '').trim()
+    } catch (err) {
+        console.warn('[syncEngine] userName export read failed:', err)
+    }
 
     // Single book setting overrides
     const bookSettingsOverrides = {}
@@ -61,32 +68,35 @@ export const exportSyncPayload = async () => {
         if (typeof localStorage !== 'undefined') {
             for (let i = 0; i < localStorage.length; i++) {
                 const k = localStorage.key(i)
-                if (k && k.startsWith('linden_book_settings_')) {
-                    const bId = k.replace('linden_book_settings_', '')
+                if (k && k.startsWith(SYNC_STORAGE_KEYS.bookSettingsPrefix)) {
+                    const bId = k.replace(SYNC_STORAGE_KEYS.bookSettingsPrefix, '')
                     try {
                         bookSettingsOverrides[bId] = JSON.parse(localStorage.getItem(k))
-                    } catch (_) {}
+                    } catch (err) {
+                        console.warn(`[syncEngine] bookSettings override parse failed (${bId}):`, err)
+                    }
                 }
             }
         }
-    } catch (_) {}
+    } catch (err) {
+        console.warn('[syncEngine] bookSettings overrides scan failed:', err)
+    }
 
     // Safe advanced settings (without sensitive keys)
     let advancedSettings = {}
     try {
         const rawAdv = typeof localStorage !== 'undefined'
-            ? (localStorage.getItem('linden_advanced_settings_config') || localStorage.getItem('linden_advanced_settings'))
+            ? (localStorage.getItem(SYNC_STORAGE_KEYS.advancedConfig) || localStorage.getItem(SYNC_STORAGE_KEYS.legacyAdvancedConfig))
             : null
         if (rawAdv) {
             const parsed = JSON.parse(rawAdv)
             if (parsed && typeof parsed === 'object') {
-                const safe = { ...parsed }
-                const sensitiveKeys = ['ttsApiKey', 'apiKey', 'secret', 'password', 'token', 'auth', 'privateKey', 'dictStoragePath', 'customDirectory']
-                for (const sk of sensitiveKeys) delete safe[sk]
-                advancedSettings = safe
+                advancedSettings = stripSensitiveConfigFields(parsed)
             }
         }
-    } catch (_) {}
+    } catch (err) {
+        console.warn('[syncEngine] advancedSettings export parse failed:', err)
+    }
 
     let chapterTranslations = []
     const syncChapterTrans = (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_chapter_translations') : 'false') === 'true'
@@ -111,6 +121,7 @@ export const exportSyncPayload = async () => {
         bookmarks: allBookmarks,
         readingSessions: enrichedSessions,
         pdfDrawings: allPdfDrawings,
+        portals: allPortals,
         chapterTranslations,
         deletedRecords: deletedRecords || []
     }
@@ -166,6 +177,8 @@ export const applyMergedPayload = async (mergedPayload, customDb = null) => {
                     await activeDb.deleteBookmark(tomb.id, false, delTime)
                 } else if (tomb.type === 'custom_list') {
                     await activeDb.deleteCustomList(tomb.id, false, delTime)
+                } else if (tomb.type === 'portal' || tomb.type === 'portals') {
+                    if (typeof activeDb.deletePortal === 'function') await activeDb.deletePortal(tomb.id, false, delTime)
                 } else if (tomb.type === 'pdfDrawing' || tomb.type === 'pdf_drawings') {
                     const parts = tomb.id.split('_page_')
                     const localDrawing = parts.length === 2 && typeof activeDb.getPdfPageDrawing === 'function' ? await activeDb.getPdfPageDrawing(parts[0], parseInt(parts[1], 10)) : null
@@ -331,6 +344,12 @@ export const applyMergedPayload = async (mergedPayload, customDb = null) => {
                     localBook.customAuthor = reconciled.customAuthor
                     changed = true
                 }
+                if (Boolean(localBook.isArchived) !== Boolean(reconciled.isArchived) || (reconciled.archivedUpdatedAt || 0) > (localBook.archivedUpdatedAt || 0)) {
+                    localBook.isArchived = Boolean(reconciled.isArchived)
+                    localBook.archivedAt = reconciled.archivedAt ?? null
+                    localBook.archivedUpdatedAt = reconciled.archivedUpdatedAt || 0
+                    changed = true
+                }
                 if (changed) {
                     // Check if book was deleted right before saving
                     const liveCheck = typeof activeDb.getBook === 'function' ? await activeDb.getBook(localBook.id) : null
@@ -461,28 +480,34 @@ export const applyMergedPayload = async (mergedPayload, customDb = null) => {
     // G2. Apply Reading Presets
     if (Array.isArray(mergedPayload.readingPresets) && typeof localStorage !== 'undefined') {
         try {
-            localStorage.setItem('linden_reading_presets_v1', JSON.stringify(mergedPayload.readingPresets))
+            localStorage.setItem(SYNC_STORAGE_KEYS.readingPresets, JSON.stringify(mergedPayload.readingPresets))
             if (typeof window !== 'undefined' && window.readingPresetsManager?.load) {
                 window.readingPresetsManager.load()
             }
-        } catch (_) {}
+        } catch (err) {
+            console.warn('[syncEngine] failed to apply readingPresets:', err)
+        }
     }
 
     // G3. Apply Custom Semantic Palette
     if (mergedPayload.customPalette && typeof localStorage !== 'undefined') {
         try {
-            localStorage.setItem('linden_custom_semantic_palette_v1', JSON.stringify(mergedPayload.customPalette))
+            localStorage.setItem(SYNC_STORAGE_KEYS.customPalette, JSON.stringify(mergedPayload.customPalette))
             if (typeof window !== 'undefined' && window.themeCustomizer?.load) {
                 window.themeCustomizer.load()
             }
-        } catch (_) {}
+        } catch (err) {
+            console.warn('[syncEngine] failed to apply customPalette:', err)
+        }
     }
 
     // G4. Apply User Name
     if (mergedPayload.userName && typeof localStorage !== 'undefined') {
         try {
-            localStorage.setItem('linden_user_name', mergedPayload.userName)
-        } catch (_) {}
+            localStorage.setItem(SYNC_STORAGE_KEYS.userName, mergedPayload.userName)
+        } catch (err) {
+            console.warn('[syncEngine] failed to apply userName:', err)
+        }
     }
 
     // G5. Apply Book Settings Overrides
@@ -490,31 +515,29 @@ export const applyMergedPayload = async (mergedPayload, customDb = null) => {
         try {
             for (const [bId, ov] of Object.entries(mergedPayload.bookSettingsOverrides)) {
                 if (bId && ov && typeof ov === 'object') {
-                    localStorage.setItem(`linden_book_settings_${bId}`, JSON.stringify(ov))
+                    localStorage.setItem(`${SYNC_STORAGE_KEYS.bookSettingsPrefix}${bId}`, JSON.stringify(ov))
                 }
             }
-        } catch (_) {}
+        } catch (err) {
+            console.warn('[syncEngine] failed to apply bookSettingsOverrides:', err)
+        }
     }
 
     // G6. Apply Safe Advanced Settings (strip sensitive keys and non-loopback offline endpoints from remote payload)
     if (mergedPayload.advancedSettings && typeof localStorage !== 'undefined') {
         try {
-            const rawCur = localStorage.getItem('linden_advanced_settings_config') || localStorage.getItem('linden_advanced_settings')
+            const rawCur = localStorage.getItem(SYNC_STORAGE_KEYS.advancedConfig) || localStorage.getItem(SYNC_STORAGE_KEYS.legacyAdvancedConfig)
             const curAdv = rawCur ? JSON.parse(rawCur) : {}
-            const safeIncoming = { ...mergedPayload.advancedSettings }
-            const blockedKeys = new Set(['ttsapikey', 'apikey', 'secret', 'password', 'token', 'auth', 'privatekey', 'dictstoragepath', 'customdirectory', 'ttsofflineendpoint'])
-            for (const key of Object.keys(safeIncoming)) {
-                if (blockedKeys.has(key.toLowerCase())) {
-                    delete safeIncoming[key]
-                }
-            }
+            const safeIncoming = stripSensitiveConfigFields(mergedPayload.advancedSettings)
             const mergedAdv = { ...curAdv, ...safeIncoming }
-            localStorage.setItem('linden_advanced_settings_config', JSON.stringify(mergedAdv))
+            localStorage.setItem(SYNC_STORAGE_KEYS.advancedConfig, JSON.stringify(mergedAdv))
             if (typeof window !== 'undefined') {
                 window.app?.advancedSettings?.load?.()
                 window.app?.advancedSettings?.applyAllSettings?.()
             }
-        } catch (_) {}
+        } catch (err) {
+            console.warn('[syncEngine] failed to apply advancedSettings:', err)
+        }
     }
 
     // H. Apply PDF Drawings (with BookId Remapping and Local Tombstone / Edit Protection)
@@ -594,28 +617,166 @@ export const applyMergedPayload = async (mergedPayload, customDb = null) => {
         }
     }
 
+    // J. Apply Reader Portals (with BookId Remapping and Local Tombstone / Edit Protection)
+    if (Array.isArray(mergedPayload.portals) && mergedPayload.portals.length > 0) {
+        const localPortals = (typeof activeDb.getAllPortals === 'function') ? (await activeDb.getAllPortals()) : []
+        const localPortalMap = new Map((localPortals || []).map(p => [p.id, p]))
+        const preparedPortals = []
+        for (const p of mergedPayload.portals) {
+            if (!p || !p.id) continue
+            const targetSourceBookId = (p.sourceBookId && bookIdRemap.has(p.sourceBookId)) ? bookIdRemap.get(p.sourceBookId) : p.sourceBookId
+            const targetTargetBookId = (p.targetBookId && bookIdRemap.has(p.targetBookId)) ? bookIdRemap.get(p.targetBookId) : p.targetBookId
+            if ((targetSourceBookId && deletedBookIds.includes(targetSourceBookId)) || (targetTargetBookId && deletedBookIds.includes(targetTargetBookId))) {
+                continue
+            }
+            const incomingTime = p.updatedAt || p.createdAt || 0
+            const localTomb = allDeleted.find(t => t && t.id === p.id)
+            if (localTomb && (localTomb.deletedAt || 0) >= incomingTime) continue
+            const existing = localPortalMap.get(p.id)
+            if (existing && (existing.updatedAt || existing.createdAt || 0) > incomingTime) continue
+            preparedPortals.push({
+                ...p,
+                sourceBookId: targetSourceBookId,
+                targetBookId: targetTargetBookId
+            })
+        }
+        if (preparedPortals.length > 0) {
+            if (typeof activeDb.savePortalsBatch === 'function') {
+                await activeDb.savePortalsBatch(preparedPortals)
+            } else if (typeof activeDb.savePortal === 'function') {
+                for (const p of preparedPortals) await activeDb.savePortal(p)
+            }
+        }
+    }
+
     return { success: true, pendingAutoDownloads: pendingAutoDownloads || [], deletedBookIds: deletedBookIds || [] }
 }
 
 /**
  * 4. Master Full Sync Lifecycle Executor with Mutex and ETag Optimistic Concurrency
  */
+export const MAX_SYNC_PAYLOAD_BYTES = 50 * 1024 * 1024
+
+const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
+const isValidRecordId = (v) => typeof v === 'string' && v.trim().length > 0 && v.length <= 512
+const isOptionalFiniteNumber = (v) => v === undefined || v === null || (typeof v === 'number' && Number.isFinite(v))
+
+const validateStrokeCoordinates = (strokes) => {
+    if (strokes === undefined || strokes === null) return true
+    if (!Array.isArray(strokes)) return false
+    for (const s of strokes) {
+        if (!isPlainObject(s)) return false
+        if (s.points !== undefined) {
+            if (!Array.isArray(s.points)) return false
+            for (const pt of s.points) {
+                if (Array.isArray(pt)) {
+                    if (pt.length < 2 || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) return false
+                } else if (isPlainObject(pt)) {
+                    if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return false
+                } else {
+                    return false
+                }
+            }
+        }
+    }
+    return true
+}
+
 export function validateSyncPayload(data) {
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    if (!isPlainObject(data)) {
         throw new Error(t('syncEngine.error.invalidFormat'))
     }
     const version = data.schemaVersion ?? data.version
-    if (typeof version !== 'number') {
+    if (typeof version !== 'number' || !Number.isInteger(version)) {
         throw new Error(t('syncEngine.error.missingVersion'))
     }
     if (version > 4) {
         throw new Error(t('syncEngine.error.unsupportedVersion', { version }))
     }
-    const knownKeys = ['booksMeta', 'highlights', 'bookmarks', 'readingSessions', 'customLists', 'deletedRecords', 'pdfDrawings']
-    if (version < 1 || !knownKeys.some(k => Object.prototype.hasOwnProperty.call(data, k)) || knownKeys.some(k => Object.prototype.hasOwnProperty.call(data, k) && !Array.isArray(data[k]))) {
+    const coreCollectionKeys = ['booksMeta', 'highlights', 'bookmarks', 'readingSessions', 'customLists', 'deletedRecords', 'pdfDrawings']
+    const optionalCollectionKeys = ['chapterTranslations', 'readingPresets', 'portals']
+    const allCollectionKeys = [...coreCollectionKeys, ...optionalCollectionKeys]
+    if (version < 1 || !coreCollectionKeys.some(k => Object.prototype.hasOwnProperty.call(data, k))) {
         throw new Error(t('syncEngine.error.invalidSchema'))
     }
+    for (const key of allCollectionKeys) {
+        if (!Object.prototype.hasOwnProperty.call(data, key)) continue
+        const arr = data[key]
+        if (!Array.isArray(arr)) {
+            throw new Error(t('syncEngine.error.invalidSchema'))
+        }
+        for (const item of arr) {
+            if (!isPlainObject(item)) {
+                throw new Error(t('syncEngine.error.invalidSchema'))
+            }
+            if (key === 'deletedRecords') {
+                if (!isValidRecordId(item.id || item.recordId)) {
+                    throw new Error(t('syncEngine.error.invalidSchema'))
+                }
+                if (!isOptionalFiniteNumber(item.deletedAt)) {
+                    throw new Error(t('syncEngine.error.invalidSchema'))
+                }
+            } else {
+                if (item.id !== undefined && !isValidRecordId(item.id)) {
+                    throw new Error(t('syncEngine.error.invalidSchema'))
+                }
+                if (!isOptionalFiniteNumber(item.updatedAt) || !isOptionalFiniteNumber(item.createdAt) || !isOptionalFiniteNumber(item.lastReadAt)) {
+                    throw new Error(t('syncEngine.error.invalidSchema'))
+                }
+            }
+            if (key === 'booksMeta' && item.progress !== undefined && item.progress !== null) {
+                if (!isPlainObject(item.progress)) {
+                    throw new Error(t('syncEngine.error.invalidSchema'))
+                }
+                if (item.progress.fraction !== undefined && item.progress.fraction !== null) {
+                    const frac = item.progress.fraction
+                    if (typeof frac !== 'number' || !Number.isFinite(frac) || frac < 0 || frac > 1.0001) {
+                        throw new Error(t('syncEngine.error.invalidSchema'))
+                    }
+                }
+            }
+            if (key === 'pdfDrawings' && !validateStrokeCoordinates(item.strokes)) {
+                throw new Error(t('syncEngine.error.invalidSchema'))
+            }
+        }
+    }
     return true
+}
+
+export function parseAndValidateSyncPayload(
+    rawOrData,
+    {
+        maxBytes = MAX_SYNC_PAYLOAD_BYTES,
+        emptyErrorKey = 'syncEngine.error.corruptEmpty',
+        parseErrorKey = 'syncEngine.error.corruptJson',
+        includeParseDetail = true,
+    } = {}
+) {
+    let parsed = rawOrData
+    if (typeof rawOrData === 'string') {
+        if (rawOrData.length > maxBytes ||
+            (rawOrData.length * 3 > maxBytes && new TextEncoder().encode(rawOrData).byteLength > maxBytes)) {
+            throw new Error(t('syncEngine.error.invalidSchema'))
+        }
+        const trimmed = rawOrData.trim()
+        if (!trimmed) {
+            throw new Error(t(emptyErrorKey))
+        }
+        try {
+            parsed = JSON.parse(trimmed)
+        } catch (e) {
+            throw new Error(includeParseDetail ? t(parseErrorKey, { detail: e.message }) : t(parseErrorKey))
+        }
+    } else if (rawOrData && typeof rawOrData === 'object') {
+        const serialized = JSON.stringify(rawOrData)
+        if (typeof serialized === 'string' && serialized.length * 3 > maxBytes) {
+            if (serialized.length > maxBytes || new TextEncoder().encode(serialized).byteLength > maxBytes) {
+                throw new Error(t('syncEngine.error.invalidSchema'))
+            }
+        }
+    }
+    validateSyncPayload(parsed)
+    return parsed
 }
 
 export const previewSyncPayload = async (config, provider) => {
@@ -624,16 +785,21 @@ export const previewSyncPayload = async (config, provider) => {
         const res = await provider.readFile('linden_sync_data.json')
         if (!res || res.error || res.authError || res.offline || res.invalid || res.status === 'invalid' || res.status === 'offline' || res.status === 'auth-error' || res.status === 401 || res.status === 403) throw new Error(res?.error || t('syncEngine.error.remoteReadFailed'))
         if (!(res.missing || res.status === 'missing')) {
-            if (res.content == null || (typeof res.content === 'string' && !res.content.trim())) throw new Error(t('syncEngine.error.remoteEmpty'))
-            try { remoteData = typeof res.content === 'string' ? JSON.parse(res.content) : res.content } catch (_) { throw new Error(t('syncEngine.error.remoteCorrupt')) }
-            validateSyncPayload(remoteData)
+            if (res.content == null) throw new Error(t('syncEngine.error.remoteEmpty'))
+            remoteData = parseAndValidateSyncPayload(res.content, {
+                emptyErrorKey: 'syncEngine.error.remoteEmpty',
+                parseErrorKey: 'syncEngine.error.remoteCorrupt',
+                includeParseDetail: false,
+            })
         }
     } else {
-        const bridge = typeof window !== 'undefined' ? (window.platformBridge || window.electronAPI) : null
+        const bridge = typeof window !== 'undefined' ? window.platformBridge : null
         if (!bridge?.syncFetchRemote) throw new Error(t('syncEngine.error.noCloudRead'))
         const res = await bridge.syncFetchRemote(config)
         if (!res || res.error) throw new Error(res?.error || t('syncEngine.error.remoteReadFailed'))
-        if (res.exists) { remoteData = res.data; validateSyncPayload(remoteData) }
+        if (res.exists && res.data != null) {
+            remoteData = parseAndValidateSyncPayload(res.data)
+        }
     }
     const localData = await exportSyncPayload()
     const summarize = data => ({ books: data?.booksMeta?.length || 0, highlights: data?.highlights?.length || 0, bookmarks: data?.bookmarks?.length || 0, sessions: data?.readingSessions?.length || 0 })
@@ -650,7 +816,7 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
         } catch (_) {}
     }
 
-    const bridge = (typeof window !== 'undefined' ? (window.platformBridge || window.electronAPI) : null)
+    const bridge = (typeof window !== 'undefined' ? window.platformBridge : null)
     if (!activeProvider && (!bridge?.syncFetchRemote || !bridge?.syncSaveRemote)) {
         throw new Error(t('syncEngine.error.noDesktopSyncApi'))
     }
@@ -681,18 +847,7 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
             if (fileRes.status === 'missing' || fileRes.missing) {
                 remoteData = null
             } else if (fileRes.content !== undefined && fileRes.content !== null) {
-                const rawStr = typeof fileRes.content === 'string' ? fileRes.content.trim() : null
-                if (typeof fileRes.content === 'string' && !rawStr) {
-                    throw new Error(t('syncEngine.error.corruptEmpty'))
-                }
-                try {
-                    remoteData = rawStr ? JSON.parse(rawStr) : fileRes.content
-                } catch (e) {
-                    console.warn('[Sync] Failed to parse remote JSON:', e)
-                    remoteData = null
-                    throw new Error(t('syncEngine.error.corruptJson', { detail: e.message }))
-                }
-                validateSyncPayload(remoteData)
+                remoteData = parseAndValidateSyncPayload(fileRes.content)
             } else {
                 throw new Error(t('syncEngine.error.readInvalid'))
             }
@@ -703,15 +858,15 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
             if (remoteRes.error) {
                 throw new Error(t('syncEngine.error.readFailed', { detail: remoteRes.error }))
             }
-            remoteData = remoteRes.exists ? remoteRes.data : null
-            if (remoteData) {
-                validateSyncPayload(remoteData)
-            }
+            remoteData = (remoteRes.exists && remoteRes.data != null)
+                ? parseAndValidateSyncPayload(remoteRes.data)
+                : null
             remoteEtag = remoteRes.etag || null
         }
 
         onProgress(t('syncEngine.progress.merging'), 'merge')
-        let { merged, stats } = mergeSyncData(localPayload, remoteData)
+        const syncNowMs = Date.now()
+        let { merged, stats } = mergeSyncData(localPayload, remoteData, { nowMs: syncNowMs, localClientId: localPayload.clientId })
 
         let maxRetries = 2
         let currentRemoteEtag = remoteEtag
@@ -738,21 +893,16 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
                     if (reFetch.missing) {
                         reRemoteData = null
                     } else if (reFetch.content !== undefined && reFetch.content !== null) {
-                        const rawStr = typeof reFetch.content === 'string' ? reFetch.content.trim() : null
-                        if (typeof reFetch.content === 'string' && !rawStr) {
-                            throw new Error(t('syncEngine.error.refetchEmpty'))
-                        }
-                        try {
-                            reRemoteData = rawStr ? JSON.parse(rawStr) : reFetch.content
-                        } catch (e) {
-                            throw new Error(t('syncEngine.error.refetchParse', { detail: e.message }))
-                        }
-                        validateSyncPayload(reRemoteData)
+                        reRemoteData = parseAndValidateSyncPayload(reFetch.content, {
+                            emptyErrorKey: 'syncEngine.error.refetchEmpty',
+                            parseErrorKey: 'syncEngine.error.refetchParse',
+                            includeParseDetail: true,
+                        })
                     } else {
                         throw new Error(t('syncEngine.error.refetchInvalid'))
                     }
                     currentRemoteEtag = reFetch?.etag || null
-                    const reMergedResult = mergeSyncData(localPayload, reRemoteData)
+                    const reMergedResult = mergeSyncData(localPayload, reRemoteData, { nowMs: Date.now(), localClientId: localPayload.clientId })
                     merged = reMergedResult.merged
                     stats = reMergedResult.stats
                     continue
@@ -768,8 +918,11 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
                     await new Promise(r => setTimeout(r, 600 * (2 - maxRetries)))
                     const reFetch = await bridge.syncFetchRemote(config)
                     if (reFetch.error) throw new Error(t('syncEngine.error.refetchBridgeFailed', { detail: reFetch.error }))
+                    const reBridgeData = (reFetch.exists && reFetch.data != null)
+                        ? parseAndValidateSyncPayload(reFetch.data)
+                        : null
                     currentRemoteEtag = reFetch.etag || null
-                    const reMergedResult = mergeSyncData(localPayload, reFetch.exists ? reFetch.data : null)
+                    const reMergedResult = mergeSyncData(localPayload, reBridgeData, { nowMs: Date.now(), localClientId: localPayload.clientId })
                     merged = reMergedResult.merged
                     stats = reMergedResult.stats
                     continue

@@ -1,6 +1,7 @@
 
 
 import { t, isEnglish, getIntlLocale } from './i18n.js'
+import { getHighlightUiHex } from './highlight-palette.js'
 
 export const DEFAULT_READER_NAME = 'Op. 1'
 
@@ -156,16 +157,7 @@ export function renderEditorialCoverHTML(book = {}, options = {}) {
     `
 }
 
-const WARM_HIGHLIGHT_DISPLAY_MAP = Object.freeze({
-    '#facc15': '#c89b3c',
-    '#4ade80': '#5f8c6c',
-    '#60a5fa': '#5f85a8',
-    '#c084fc': '#8d74a8',
-    '#f87171': '#9e4c5a',
-})
-
-/** Map vivid highlighter ink hexes to calm Warm Annotated Paper display tones. */
-export function mapHighlightDisplayColor(rawColor) {
-    const key = String(rawColor || '').trim().toLowerCase()
-    return WARM_HIGHLIGHT_DISPLAY_MAP[key] || rawColor || '#c89b3c'
+/** Map vivid highlighter ink hexes to calm Warm Annotated Paper Morandi display tones. */
+export function mapHighlightDisplayColor(rawColor, isDark = false) {
+    return getHighlightUiHex(rawColor, isDark)
 }

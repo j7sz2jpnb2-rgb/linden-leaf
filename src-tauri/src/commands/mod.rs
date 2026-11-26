@@ -6,6 +6,7 @@ pub mod mupdf;
 pub mod ai;
 pub mod dictionary;
 pub mod android;
+pub mod security;
 
 pub use dialog::*;
 pub use fs::*;
@@ -15,6 +16,7 @@ pub use mupdf::*;
 pub use ai::*;
 pub use dictionary::*;
 pub use android::*;
+pub use security::*;
 
 /// Normalizes an optional locale string into `"en"` or `"zh-CN"`.
 /// Defaults to `"zh-CN"` when `locale` is `None`, empty, or unrecognized.

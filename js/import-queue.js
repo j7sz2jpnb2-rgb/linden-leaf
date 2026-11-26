@@ -8,6 +8,7 @@ import { normalizeCoverBlob } from './pdf-cover.js'
 import { platformBridge } from './platformBridge.js'
 import { extractPdfCover } from './pdf-cover.js'
 import { resolveBookTitle } from './book-title.js'
+import { SUPPORTED_IMPORT_FORMATS } from './book-metadata.js'
 import { t } from './i18n.js'
 
 export const findDuplicateBook = (existingBooks, { format, fileName = '', fileObj = {}, metadata = {}, computedStableKey = '' }) => {
@@ -397,8 +398,7 @@ export class ImportQueue {
                 else if (raw.type === 'application/epub+zip') ext = 'epub'
             }
 
-            const SUPPORTED_EXTS = ['epub', 'mobi', 'azw', 'azw3', 'pdf', 'docx', 'txt', 'md', 'cbz', 'fb2']
-            if (!SUPPORTED_EXTS.includes(ext)) {
+            if (!SUPPORTED_IMPORT_FORMATS.includes(ext)) {
                 throw new Error(t('importQueue.error.unsupportedFormat', { ext }))
             }
 

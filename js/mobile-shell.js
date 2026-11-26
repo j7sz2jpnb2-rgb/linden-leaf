@@ -1928,7 +1928,10 @@ export class MobileShellController {
         const rects = firstSegment?.rects?.length ? firstSegment.rects : target?.rects
         const yRatio = rects?.[0]?.[1] ?? 0
         const isPdf = Boolean(target || highlight.formatType === 'pdf')
-        const location = highlight.cfi ? { cfi: highlight.cfi } : (isPdf ? { page: page + 1, yRatio } : null)
+        const highlightColor = highlight.color || '#facc15'
+        const location = highlight.cfi
+            ? { cfi: highlight.cfi, highlightId: highlight.id, highlightColor, isHighlightJump: true }
+            : (isPdf ? { page: page + 1, yRatio, highlightId: highlight.id, rects, highlightColor, isHighlightJump: true } : null)
 
         if (String(app.currentBookId) !== String(bookId)) {
             return app.openBook(bookId, location)
@@ -1937,9 +1940,16 @@ export class MobileShellController {
         document.getElementById('reader-view').style.display = 'block'
         if (app.pdfViewport && isPdf) {
             app.pdfViewport.goToPage(page, yRatio)
-            app.pdfViewport.pulseHighlight?.(page, highlight.id, rects)
+            app.pdfViewport.pulseHighlight?.(page, highlight.id, rects, highlightColor)
         } else if (highlight.cfi && app.foliateView) {
             await app.foliateView.goTo(highlight.cfi)
+            const theme = document.documentElement.getAttribute('data-theme')
+            const isDark = theme === 'dark' || theme === 'black'
+            app.foliateView.pulseHighlight?.(highlight.cfi, {
+                color: highlightColor,
+                isDark,
+                writingMode: app.settings?.writingMode,
+            })
         }
     }
 
@@ -2121,26 +2131,10 @@ export class MobileShellController {
                     const bId = item.dataset.bookId
                     const hlId = item.dataset.hlId
                     const hl = highlights.find(h => String(h.id) === String(hlId))
-                    const target = hl?.pdfTarget || {}
-                    const firstSegment = Array.isArray(target.segments) ? target.segments[0] : null
-                    const page = firstSegment?.page ?? target.page ?? 0
-                    const rects = firstSegment?.rects?.length ? firstSegment.rects : target.rects
-                    const firstRect = rects?.[0]
-                    const yRatio = firstRect ? firstRect[1] : 0
-                    const loc = hl?.cfi ? { cfi: hl.cfi } : ((hl?.pdfTarget || hl?.formatType === 'pdf') ? { page: page + 1, yRatio } : null)
-
-                    if (window.app?.currentBookId && String(window.app.currentBookId) === String(bId)) {
-                        this.setReaderInView(true)
-                        const readerView = document.getElementById('reader-view')
-                        if (readerView) readerView.style.display = 'block'
-                        if (window.app.pdfViewport && (hl?.pdfTarget || hl?.formatType === 'pdf')) {
-                            window.app.pdfViewport.goToPage(page, yRatio)
-                            window.app.pdfViewport.pulseHighlight?.(page, hl.id, rects)
-                        } else if (hl?.cfi && window.app.foliateView) {
-                            window.app.foliateView.goTo(hl.cfi)
-                        }
-                    } else {
-                        await window.app?.openBook?.(bId, loc)
+                    if (hl) {
+                        await this.locateNote(hl)
+                    } else if (bId) {
+                        await window.app?.openBook?.(bId)
                     }
                 })
             })

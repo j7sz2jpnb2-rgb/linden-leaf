@@ -4,12 +4,38 @@ import { checkTranslationCompatibility, buildTranslationRevisionArchive } from '
 import { mergeSessionIntervals, calculateIntervalUnionSeconds, remapPdfDrawingId, getSessionDur } from './reading-data.js'
 import { sanitizeSyncFormat, sanitizeCloudFileName } from './book-metadata.js'
 
-export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localClientId = '', incomingClientId = '') => {
-    const isIncomingNewer = (inTime, locTime) => {
+export const TOMBSTONE_TTL_MS = 60 * 24 * 60 * 60 * 1000 // 60 days TTL to prevent infinite JSON bloat
+
+const canonicalSerialize = (value) => {
+    if (value === null || value === undefined) return 'null'
+    if (typeof value !== 'object') return JSON.stringify(value)
+    if (Array.isArray(value)) return '[' + value.map(canonicalSerialize).join(',') + ']'
+    const keys = Object.keys(value).sort()
+    return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalSerialize(value[k])).join(',') + '}'
+}
+
+// Strict total order on equal timestamps: writerId/clientId -> canonical content digest.
+// Guarantees commutativity: pickWinner(A, B) === pickWinner(B, A) regardless of merge direction.
+const compareCanonicalTieBreak = (a, b, aClient = '', bClient = '') => {
+    const aWriter = String(a?.writerId || a?.clientId || aClient || '')
+    const bWriter = String(b?.writerId || b?.clientId || bClient || '')
+    if (aWriter !== bWriter) return aWriter > bWriter ? 1 : -1
+    const aCanon = canonicalSerialize(a)
+    const bCanon = canonicalSerialize(b)
+    if (aCanon !== bCanon) return aCanon > bCanon ? 1 : -1
+    return 0
+}
+
+export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localClientId = '', incomingClientId = '', options = {}) => {
+    const nowMs = Number.isFinite(options?.nowMs) ? options.nowMs : Date.now()
+    const isIncomingNewer = (inTime, locTime, inVal, locVal) => {
         const iT = inTime || 0
         const lT = locTime || 0
         if (iT !== lT) return iT > lT
-        return (incomingClientId || '') > (localClientId || '')
+        const inId = String(incomingClientId || '')
+        const locId = String(localClientId || '')
+        if (inId !== locId) return inId > locId
+        return canonicalSerialize(inVal) > canonicalSerialize(locVal)
     }
 
     // 1. Tags: LWW based on explicit tagsUpdatedAt. Missing incoming tags never deletes local tags.
@@ -27,14 +53,14 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
     let statusUpdatedAt = localBook.statusUpdatedAt || 0
     let completedAt = localBook.completedAt !== undefined ? localBook.completedAt : null
 
-    if (incomingMeta.readingStatus && isIncomingNewer(incomingMeta.statusUpdatedAt, localBook.statusUpdatedAt)) {
+    if (incomingMeta.readingStatus && isIncomingNewer(incomingMeta.statusUpdatedAt, localBook.statusUpdatedAt, incomingMeta.readingStatus, localBook.readingStatus)) {
         readingStatus = incomingMeta.readingStatus
         statusUpdatedAt = incomingMeta.statusUpdatedAt || 0
         // Explicitly preserve null when un-marking finished!
         if (incomingMeta.completedAt !== undefined) {
             completedAt = incomingMeta.completedAt
         } else {
-            completedAt = (incomingMeta.readingStatus === 'finished') ? (incomingMeta.statusUpdatedAt || Date.now()) : null
+            completedAt = (incomingMeta.readingStatus === 'finished') ? (incomingMeta.statusUpdatedAt || nowMs) : null
         }
     }
 
@@ -71,7 +97,7 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
         if (inFrac !== locFrac) {
             isIncomingReadNewer = inFrac > locFrac
         } else {
-            isIncomingReadNewer = String(incomingClientId || '') > String(localClientId || '')
+            isIncomingReadNewer = compareCanonicalTieBreak(incomingMeta.progress, localBook.progress, incomingClientId, localClientId) > 0
         }
     }
 
@@ -80,12 +106,12 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
     const totalReadingSeconds = Math.max(localBook.totalReadingSeconds || 0, incomingMeta.totalReadingSeconds || 0)
     const totalListeningSeconds = Math.max(localBook.totalListeningSeconds || 0, incomingMeta.totalListeningSeconds || 0)
 
-    // 6. Cloud Backup: newer uploadedAt wins
+    // 6. Cloud Backup: newer uploadedAt wins (deterministic tie-break on equal timestamp)
     let cloudBackup = localBook.cloudBackup || null
     if (incomingMeta.cloudBackup) {
         const inUp = incomingMeta.cloudBackup.uploadedAt || 0
         const locUp = localBook.cloudBackup?.uploadedAt || 0
-        if (inUp >= locUp || !localBook.cloudBackup?.hasBackup) {
+        if (!localBook.cloudBackup?.hasBackup || inUp > locUp || (inUp === locUp && compareCanonicalTieBreak(incomingMeta.cloudBackup, localBook.cloudBackup, incomingClientId, localClientId) > 0)) {
             cloudBackup = incomingMeta.cloudBackup
         }
     }
@@ -93,7 +119,7 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
     // 7. Rating: LWW based on ratingUpdatedAt. Explicit null propagates to cancel/clear rating across devices.
     let rating = localBook.rating !== undefined ? localBook.rating : null
     let ratingUpdatedAt = localBook.ratingUpdatedAt || 0
-    if (incomingMeta.ratingUpdatedAt !== undefined && isIncomingNewer(incomingMeta.ratingUpdatedAt, localBook.ratingUpdatedAt)) {
+    if (incomingMeta.ratingUpdatedAt !== undefined && isIncomingNewer(incomingMeta.ratingUpdatedAt, localBook.ratingUpdatedAt, incomingMeta.rating, localBook.rating)) {
         rating = incomingMeta.rating !== undefined ? incomingMeta.rating : null
         ratingUpdatedAt = incomingMeta.ratingUpdatedAt || 0
     }
@@ -101,11 +127,24 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
     // 8. Custom Title & Custom Author: LWW based on updatedAt
     let customTitle = localBook.customTitle !== undefined ? localBook.customTitle : null
     let customAuthor = localBook.customAuthor !== undefined ? localBook.customAuthor : null
-    if (incomingMeta.customTitle !== undefined && isIncomingNewer(incomingMeta.updatedAt, localBook.updatedAt)) {
+    if (incomingMeta.customTitle !== undefined && isIncomingNewer(incomingMeta.updatedAt, localBook.updatedAt, incomingMeta.customTitle, localBook.customTitle)) {
         customTitle = incomingMeta.customTitle
     }
-    if (incomingMeta.customAuthor !== undefined && isIncomingNewer(incomingMeta.updatedAt, localBook.updatedAt)) {
+    if (incomingMeta.customAuthor !== undefined && isIncomingNewer(incomingMeta.updatedAt, localBook.updatedAt, incomingMeta.customAuthor, localBook.customAuthor)) {
         customAuthor = incomingMeta.customAuthor
+    }
+
+    // 9. Archive state: LWW based on archivedUpdatedAt (preserves notes & progress while hiding from active shelf)
+    let isArchived = Boolean(localBook.isArchived)
+    let archivedAt = localBook.archivedAt ?? null
+    let archivedUpdatedAt = localBook.archivedUpdatedAt || 0
+    if (incomingMeta.archivedUpdatedAt !== undefined || incomingMeta.isArchived !== undefined) {
+        const inArchTime = incomingMeta.archivedUpdatedAt || 0
+        if (isIncomingNewer(inArchTime, archivedUpdatedAt, Boolean(incomingMeta.isArchived), isArchived)) {
+            isArchived = Boolean(incomingMeta.isArchived)
+            archivedAt = isArchived ? (incomingMeta.archivedAt ?? inArchTime ?? nowMs) : null
+            archivedUpdatedAt = inArchTime
+        }
     }
 
     return {
@@ -122,6 +161,9 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
         ratingUpdatedAt,
         customTitle,
         customAuthor,
+        isArchived,
+        archivedAt,
+        archivedUpdatedAt,
         progress,
         lastReadAt,
         totalReadingSeconds,
@@ -165,19 +207,27 @@ export const mergeDrawingStrokes = (strokesA = [], strokesB = []) => {
             const existing = strokeMap.get(key)
             const sTime = s.updatedAt || s.timestamp || 0
             const exTime = existing.updatedAt || existing.timestamp || 0
-            if (sTime > exTime) {
+            if (sTime > exTime || (sTime === exTime && compareCanonicalTieBreak(s, existing) > 0)) {
                 strokeMap.set(key, s)
             }
         }
     }
-    return Array.from(strokeMap.values())
+    return Array.from(strokeMap.entries())
+        .sort(([ka], [kb]) => (ka < kb ? -1 : ka > kb ? 1 : 0))
+        .map(([, val]) => val)
 }
 
-export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
+export const mergeSyncData = (localPayload = {}, remotePayload = null, options = {}) => {
+    const nowMs = Number.isFinite(options?.nowMs) ? options.nowMs : Date.now()
+    const effectiveLocalClientId = options?.localClientId
+        ?? localPayload?.clientId
+        ?? (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '')
+        ?? ''
+
     if (!remotePayload || typeof remotePayload !== 'object') {
         return {
             merged: localPayload || {},
-            stats: { booksUpdated: 0, highlightsAdded: 0, sessionsAdded: 0, listsAdded: 0 }
+            stats: { booksUpdated: 0, highlightsAdded: 0, sessionsAdded: 0, listsAdded: 0, staleDeviceWarning: false }
         }
     }
 
@@ -185,15 +235,24 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         booksUpdated: 0,
         highlightsAdded: 0,
         sessionsAdded: 0,
-        listsAdded: 0
+        listsAdded: 0,
+        staleDeviceWarning: false,
+        tombstoneHorizonAt: 0
     }
 
-    const maxAllowedTime = Date.now() + 60 * 1000 // Allow max 1 min clock drift
-    const clampTime = (t) => (typeof t === 'number' && !isNaN(t) ? Math.min(t, maxAllowedTime) : 0)
+    const maxAllowedTime = nowMs + 60 * 1000 // Allow max 1 min clock drift
+    const clampTime = (t) => (typeof t === 'number' && Number.isFinite(t) ? Math.min(t, maxAllowedTime) : 0)
 
     // A. Merge Tombstones (Deleted Records with plural/singular normalization and 60-day TTL)
-    const TOMBSTONE_MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000 // 60 days TTL to prevent infinite JSON bloat
-    const minTombstoneTime = Date.now() - TOMBSTONE_MAX_AGE_MS
+    const minTombstoneTime = nowMs - TOMBSTONE_TTL_MS
+    stats.tombstoneHorizonAt = minTombstoneTime
+
+    // Detect if either device has been offline longer than the tombstone retention window
+    const localLastSync = Number(localPayload.lastSyncedAt || 0)
+    const remoteLastSync = Number(remotePayload.lastSyncedAt || 0)
+    if ((localLastSync > 0 && localLastSync < minTombstoneTime) || (remoteLastSync > 0 && remoteLastSync < minTombstoneTime)) {
+        stats.staleDeviceWarning = true
+    }
 
     const normalizeTombType = t => {
         if (!t) return 'unknown'
@@ -382,7 +441,7 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         } else {
             const localReadTime = localBook.lastReadAt || 0
             const remoteReadTime = rLastRead || 0
-            const reconciled = reconcileBookSyncMeta(localBook, cleanRemoteBook, localPayload.clientId, remotePayload.clientId)
+            const reconciled = reconcileBookSyncMeta(localBook, cleanRemoteBook, effectiveLocalClientId, remotePayload.clientId, { nowMs })
 
             if (remoteReadTime > localReadTime || cleanRemoteBook.totalReadingSeconds !== localBook.totalReadingSeconds || cleanRemoteBook.totalListeningSeconds !== localBook.totalListeningSeconds) {
                 stats.booksUpdated++
@@ -409,6 +468,9 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
                 completedAt: reconciled.completedAt,
                 rating: reconciled.rating,
                 ratingUpdatedAt: reconciled.ratingUpdatedAt,
+                isArchived: reconciled.isArchived,
+                archivedAt: reconciled.archivedAt,
+                archivedUpdatedAt: reconciled.archivedUpdatedAt,
                 isFavorite: reconciled.isFavorite,
                 favoriteUpdatedAt: reconciled.favoriteUpdatedAt,
                 listsUpdatedAt: reconciled.listsUpdatedAt,
@@ -450,14 +512,15 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
     ;(localPayload.highlights || []).forEach(h => {
         if (!h || !h.id) return
         const localUpdated = clampTime(h.updatedAt) || clampTime(h.createdAt) || 0
+        const localRec = { ...h, updatedAt: localUpdated, createdAt: clampTime(h.createdAt) }
         if (!hlMap.has(h.id)) {
-            hlMap.set(h.id, { ...h, updatedAt: localUpdated })
+            hlMap.set(h.id, localRec)
             stats.highlightsAdded++
         } else {
             const remoteH = hlMap.get(h.id)
             const remoteUpdated = (remoteH.updatedAt || remoteH.createdAt || 0)
-            const isLocalNewer = localUpdated > remoteUpdated || (localUpdated === remoteUpdated && (localPayload.clientId || '') >= (remotePayload.clientId || ''))
-            const newer = isLocalNewer ? { ...h, updatedAt: localUpdated } : remoteH
+            const isLocalNewer = localUpdated > remoteUpdated || (localUpdated === remoteUpdated && compareCanonicalTieBreak(localRec, remoteH, effectiveLocalClientId, remotePayload.clientId) > 0)
+            const newer = isLocalNewer ? localRec : remoteH
             hlMap.set(h.id, newer)
         }
     })
@@ -485,13 +548,14 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
     ;(localPayload.bookmarks || []).forEach(b => {
         if (!b || !b.id) return
         const localCreated = clampTime(b.createdAt) || 0
+        const localRec = { ...b, createdAt: localCreated }
         if (!bmMap.has(b.id)) {
-            bmMap.set(b.id, { ...b, createdAt: localCreated })
+            bmMap.set(b.id, localRec)
         } else {
             const remoteB = bmMap.get(b.id)
             const remoteCreated = remoteB.createdAt || 0
-            const isLocalNewer = localCreated > remoteCreated || (localCreated === remoteCreated && (localPayload.clientId || '') >= (remotePayload.clientId || ''))
-            const newer = isLocalNewer ? { ...b, createdAt: localCreated } : remoteB
+            const isLocalNewer = localCreated > remoteCreated || (localCreated === remoteCreated && compareCanonicalTieBreak(localRec, remoteB, effectiveLocalClientId, remotePayload.clientId) > 0)
+            const newer = isLocalNewer ? localRec : remoteB
             bmMap.set(b.id, newer)
         }
     })
@@ -560,12 +624,23 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         }
     })
 
-    // G. Merge Settings (LWW on updatedAt)
-    const localSetTime = localPayload.settings?.updatedAt || 0
-    const remoteSetTime = remotePayload.settings?.updatedAt || 0
-    const mergedSettings = remoteSetTime > localSetTime ? remotePayload.settings : localPayload.settings
+    // G. Merge Settings (Deterministic LWW on updatedAt)
+    const localSetTime = clampTime(localPayload.settings?.updatedAt)
+    const remoteSetTime = clampTime(remotePayload.settings?.updatedAt)
+    let mergedSettings = localPayload.settings
+    if (!localPayload.settings) {
+        mergedSettings = remotePayload.settings
+    } else if (remotePayload.settings) {
+        if (remoteSetTime > localSetTime) {
+            mergedSettings = remotePayload.settings
+        } else if (remoteSetTime === localSetTime) {
+            mergedSettings = compareCanonicalTieBreak(remotePayload.settings, localPayload.settings, remotePayload.clientId, effectiveLocalClientId) > 0
+                ? remotePayload.settings
+                : localPayload.settings
+        }
+    }
 
-    // G2. Merge Reading Presets (Union by ID with LWW, max 10)
+    // G2. Merge Reading Presets (Deterministic LWW union by ID, stable sort BEFORE 10-item cap)
     const presetMap = new Map()
     ;(remotePayload.readingPresets || []).forEach(p => {
         if (p && p.id) presetMap.set(p.id, { ...p, updatedAt: clampTime(p.updatedAt) || clampTime(p.createdAt) })
@@ -573,30 +648,52 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
     ;(localPayload.readingPresets || []).forEach(p => {
         if (!p || !p.id) return
         const localUpdated = clampTime(p.updatedAt) || clampTime(p.createdAt) || 0
+        const localRec = { ...p, updatedAt: localUpdated }
         if (!presetMap.has(p.id)) {
-            presetMap.set(p.id, { ...p, updatedAt: localUpdated })
+            presetMap.set(p.id, localRec)
         } else {
             const remP = presetMap.get(p.id)
             const remUpdated = remP.updatedAt || remP.createdAt || 0
-            if (localUpdated >= remUpdated) {
-                presetMap.set(p.id, { ...p, updatedAt: localUpdated })
+            if (localUpdated > remUpdated || (localUpdated === remUpdated && compareCanonicalTieBreak(localRec, remP, effectiveLocalClientId, remotePayload.clientId) > 0)) {
+                presetMap.set(p.id, localRec)
             }
         }
     })
-    const mergedReadingPresets = Array.from(presetMap.values()).slice(0, 10)
+    const mergedReadingPresets = Array.from(presetMap.values())
+        .sort((a, b) => {
+            const tDiff = (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0)
+            if (tDiff !== 0) return tDiff
+            return String(a.id).localeCompare(String(b.id))
+        })
+        .slice(0, 10)
 
-    // G3. Merge Custom Semantic Palette (LWW)
+    // G3. Merge Custom Semantic Palette (Deterministic LWW)
     let mergedCustomPalette = localPayload.customPalette || null
     if (remotePayload.customPalette) {
-        if (!mergedCustomPalette || (remotePayload.customPalette.updatedAt || 0) >= (mergedCustomPalette.updatedAt || 0)) {
+        if (!mergedCustomPalette) {
             mergedCustomPalette = remotePayload.customPalette
+        } else {
+            const remPalTime = clampTime(remotePayload.customPalette.updatedAt)
+            const locPalTime = clampTime(mergedCustomPalette.updatedAt)
+            if (remPalTime > locPalTime || (remPalTime === locPalTime && compareCanonicalTieBreak(remotePayload.customPalette, mergedCustomPalette, remotePayload.clientId, effectiveLocalClientId) > 0)) {
+                mergedCustomPalette = remotePayload.customPalette
+            }
         }
     }
 
-    // G4. Merge User Name (Prefer non-empty / newer)
+    // G4. Merge User Name (Deterministic preference for non-empty / newer)
     const locUserName = (localPayload.userName || '').trim()
     const remUserName = (remotePayload.userName || '').trim()
-    const mergedUserName = remUserName && (!locUserName || (remotePayload.updatedAt || 0) > (localPayload.updatedAt || 0)) ? remUserName : (locUserName || remUserName)
+    const locPayTime = clampTime(localPayload.updatedAt)
+    const remPayTime = clampTime(remotePayload.updatedAt)
+    let mergedUserName = locUserName || remUserName
+    if (locUserName && remUserName) {
+        if (remPayTime > locPayTime) {
+            mergedUserName = remUserName
+        } else if (remPayTime === locPayTime) {
+            mergedUserName = compareCanonicalTieBreak(remUserName, locUserName, remotePayload.clientId, effectiveLocalClientId) > 0 ? remUserName : locUserName
+        }
+    }
 
     // G5. Merge Book Settings Overrides (Remap bookIds, LWW)
     const mergedBookSettingsOverrides = {}
@@ -641,12 +738,13 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         } else {
             const remoteD = drawingMap.get(localId)
             const mergedStrokes = mergeDrawingStrokes(remoteD.strokes || [], localRecord.strokes || [])
-            const isLocalNewer = localUpdated >= (remoteD.updatedAt || 0)
+            const remUp = remoteD.updatedAt || 0
+            const isLocalNewer = localUpdated > remUp || (localUpdated === remUp && compareCanonicalTieBreak(localRecord, remoteD, effectiveLocalClientId, remotePayload.clientId) > 0)
             const baseRecord = isLocalNewer ? localRecord : remoteD
             drawingMap.set(localId, {
                 ...baseRecord,
                 strokes: mergedStrokes,
-                updatedAt: Math.max(localUpdated, remoteD.updatedAt || 0)
+                updatedAt: Math.max(localUpdated, remUp)
             })
         }
     })
@@ -703,14 +801,20 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
             const remoteCt = ctMap.get(key)
             // Strict version compatibility: sourceHash, parserVersion, targetLanguage, promptVersion
             const isCompatible = checkTranslationCompatibility(ct, remoteCt)
+            const locCtUp = ct.updatedAt || 0
+            const remCtUp = remoteCt.updatedAt || 0
+            const isLocalCtNewer =
+                locCtUp > remCtUp ||
+                (locCtUp === remCtUp &&
+                    compareCanonicalTieBreak(ct, remoteCt, localPayload.clientId, remotePayload.clientId) >= 0)
 
             if (!isCompatible) {
                 // Incompatible versions MUST NOT be mixed. Retain both as conflict revisions.
-                const primary = (ct.updatedAt || 0) >= (remoteCt.updatedAt || 0) ? structuredClone(ct) : structuredClone(remoteCt)
-                const secondary = (ct.updatedAt || 0) >= (remoteCt.updatedAt || 0) ? structuredClone(remoteCt) : structuredClone(ct)
+                const primary = structuredClone(isLocalCtNewer ? ct : remoteCt)
+                const secondary = structuredClone(isLocalCtNewer ? remoteCt : ct)
                 if (!Array.isArray(primary.conflictRevisions)) primary.conflictRevisions = []
                 const existingRevIds = new Set(primary.conflictRevisions.map(r => r.revisionId).filter(Boolean))
-                const secRevId = secondary.revisionId || `conflict_${secondary.updatedAt || Date.now()}`
+                const secRevId = secondary.revisionId || `conflict_${secondary.updatedAt || nowMs}`
                 if (!existingRevIds.has(secRevId)) {
                     primary.conflictRevisions.push({
                         revisionId: secRevId,
@@ -733,6 +837,7 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
                         }
                     }
                 }
+                primary.conflictRevisions.sort((a, b) => String(a?.revisionId || '').localeCompare(String(b?.revisionId || '')))
                 ctMap.set(key, primary)
             } else if (Array.isArray(ct.paragraphs) && Array.isArray(remoteCt.paragraphs)) {
                 const paraMap = new Map()
@@ -750,13 +855,18 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
                             paraMap.set(p.id, structuredClone(p))
                         } else if (!pCompleted && remPCompleted) {
                             // keep remote completed paragraph
-                        } else if ((ct.updatedAt || 0) >= (remoteCt.updatedAt || 0)) {
+                        } else if (
+                            locCtUp > remCtUp ||
+                            (locCtUp === remCtUp &&
+                                compareCanonicalTieBreak(p, remP, localPayload.clientId, remotePayload.clientId) >= 0)
+                        ) {
                             paraMap.set(p.id, structuredClone(p))
                         }
                     }
                 })
                 const mergedParas = Array.from(paraMap.values())
-                const maxUpdated = Math.max(ct.updatedAt || 0, remoteCt.updatedAt || 0)
+                    .sort((a, b) => String(a?.id || '').localeCompare(String(b?.id || ''), undefined, { numeric: true }))
+                const maxUpdated = Math.max(locCtUp, remCtUp)
                 const expectedTotal = Math.max(Number(ct.totalParagraphs) || 0, Number(remoteCt.totalParagraphs) || 0)
 
                 // Strict completion condition: ALL expected paragraphs must be verified completed with non-empty translation
@@ -765,16 +875,18 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
                     ? mergedParas.length >= expectedTotal
                     : (ct.status === 'completed' || remoteCt.status === 'completed')
                 const allCompleted = mergedParas.length > 0 && !hasIncomplete && meetsTotalCount
+                const winner = isLocalCtNewer ? ct : remoteCt
+                const loser = isLocalCtNewer ? remoteCt : ct
 
                 ctMap.set(key, {
-                    ...remoteCt,
-                    ...ct,
+                    ...loser,
+                    ...winner,
                     status: allCompleted ? 'completed' : 'partial',
                     paragraphs: mergedParas,
                     totalParagraphs: expectedTotal > 0 ? expectedTotal : mergedParas.length,
                     updatedAt: maxUpdated
                 })
-            } else if ((ct.updatedAt || 0) >= (remoteCt.updatedAt || 0)) {
+            } else if (isLocalCtNewer) {
                 ctMap.set(key, structuredClone(ct))
             }
         }
@@ -795,13 +907,54 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         return true
     })
 
+    // I. Merge Persistent Bidirectional Portals (LWW by ID with bookId remapping and tombstone check)
+    const portalMap = new Map()
+    ;(remotePayload.portals || []).forEach(p => {
+        if (!p || !p.id) return
+        const sId = bookIdRemap.get(p.sourceBookId) || p.sourceBookId
+        const tId = bookIdRemap.get(p.targetBookId) || p.targetBookId
+        portalMap.set(p.id, {
+            ...structuredClone(p),
+            sourceBookId: sId,
+            targetBookId: tId,
+            updatedAt: clampTime(p.updatedAt) || clampTime(p.createdAt) || 0,
+        })
+    })
+    ;(localPayload.portals || []).forEach(p => {
+        if (!p || !p.id) return
+        const locUp = clampTime(p.updatedAt) || clampTime(p.createdAt) || 0
+        const locRec = { ...structuredClone(p), updatedAt: locUp }
+        if (!portalMap.has(p.id)) {
+            portalMap.set(p.id, locRec)
+        } else {
+            const remP = portalMap.get(p.id)
+            const remUp = remP.updatedAt || remP.createdAt || 0
+            if (locUp > remUp || (locUp === remUp && compareCanonicalTieBreak(locRec, remP, effectiveLocalClientId, remotePayload.clientId) > 0)) {
+                portalMap.set(p.id, locRec)
+            }
+        }
+    })
+    const mergedPortals = Array.from(portalMap.values()).filter(p => {
+        if (!p || !p.id) return false
+        const tombKey = `portal:${p.id}`
+        if (tombstoneMap.has(tombKey)) {
+            const tomb = tombstoneMap.get(tombKey)
+            if ((tomb.deletedAt || 0) >= (p.updatedAt || p.createdAt || 0)) return false
+        }
+        if ((p.sourceBookId && tombstoneMap.has(`book:${p.sourceBookId}`)) ||
+            (p.targetBookId && tombstoneMap.has(`book:${p.targetBookId}`))) {
+            return false
+        }
+        return true
+    })
+
     // Retain unknown top-level schema properties from remotePayload to prevent clobbering future schema extensions
     const unknownRemoteFields = {}
     if (remotePayload && typeof remotePayload === 'object') {
         const knownKeys = new Set([
-            'version', 'clientId', 'deviceName', 'updatedAt', 'settings',
+            'version', 'clientId', 'deviceName', 'updatedAt', 'lastSyncedAt', 'tombstoneHorizonAt', 'settings',
             'customLists', 'booksMeta', 'highlights', 'bookmarks',
-            'readingSessions', 'pdfDrawings', 'chapterTranslations', 'deletedRecords',
+            'readingSessions', 'pdfDrawings', 'chapterTranslations', 'portals', 'deletedRecords',
             'readingPresets', 'customPalette', 'userName', 'bookSettingsOverrides', 'advancedSettings'
         ])
         for (const [k, v] of Object.entries(remotePayload)) {
@@ -811,11 +964,22 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         }
     }
 
+    const byStableId = (a, b) => String(a?.id || '').localeCompare(String(b?.id || ''))
+    const dedupedTombstones = Array.from(
+        new Map(
+            Array.from(tombstoneMap.values())
+                .filter(t => t && t.id)
+                .map(t => [`${t.type || 'unknown'}:${t.id}`, t])
+        ).values()
+    ).sort((a, b) => `${a.type}:${a.id}`.localeCompare(`${b.type}:${b.id}`))
+
     const merged = {
         ...unknownRemoteFields,
         version: Math.max(localPayload.version || 1, remotePayload.version || 1),
-        clientId: localPayload.clientId || (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || '',
-        updatedAt: Date.now(),
+        clientId: effectiveLocalClientId,
+        updatedAt: nowMs,
+        lastSyncedAt: nowMs,
+        tombstoneHorizonAt: minTombstoneTime,
         settings: mergedSettings,
         readingPresets: mergedReadingPresets,
         customPalette: mergedCustomPalette,
@@ -825,14 +989,15 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null) => {
         customLists: mergedCustomLists.map(l => ({
             ...l,
             bookIds: Array.isArray(l.bookIds) ? l.bookIds.map(id => bookIdRemap.get(id) || id) : []
-        })),
-        booksMeta: mergedBooksMeta,
-        highlights: mergedHighlights,
-        bookmarks: mergedBookmarks,
-        readingSessions: mergedSessions,
-        pdfDrawings: mergedPdfDrawings,
-        chapterTranslations: mergedChapterTranslations,
-        deletedRecords: Array.from(tombstoneMap.values())
+        })).sort(byStableId),
+        booksMeta: mergedBooksMeta.sort(byStableId),
+        highlights: mergedHighlights.sort(byStableId),
+        bookmarks: mergedBookmarks.sort(byStableId),
+        readingSessions: mergedSessions.sort(byStableId),
+        pdfDrawings: mergedPdfDrawings.sort(byStableId),
+        chapterTranslations: mergedChapterTranslations.sort(byStableId),
+        portals: mergedPortals.sort(byStableId),
+        deletedRecords: dedupedTombstones
     }
 
     return { merged, stats }

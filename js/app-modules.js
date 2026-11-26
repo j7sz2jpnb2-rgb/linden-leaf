@@ -6,13 +6,19 @@ export let _statsHeatmapMod = null
 
 export let _statsHeatmapPromise = null
 
-export const ensureStatsHeatmapModule = () => {
+export const ensureStatsHeatmapModule = (loader = () => import('./stats-heatmap.js')) => {
     if (_statsHeatmapMod) return Promise.resolve(_statsHeatmapMod)
     if (!_statsHeatmapPromise) {
-        _statsHeatmapPromise = import('./stats-heatmap.js').then(mod => {
-            _statsHeatmapMod = mod
-            return mod
-        })
+        _statsHeatmapPromise = Promise.resolve()
+            .then(() => loader())
+            .then(mod => {
+                _statsHeatmapMod = mod
+                return mod
+            })
+            .catch(err => {
+                _statsHeatmapPromise = null
+                throw err
+            })
     }
     return _statsHeatmapPromise
 }
@@ -44,10 +50,15 @@ export const renderCalendarHeatmap = (container, targetYear, onSelectDay) => {
 
 export let _advancedSettingsModPromise = null
 
-export const ensureAdvancedSettingsLoaded = (appInstance) => {
+export const ensureAdvancedSettingsLoaded = (appInstance, loader = () => import('./advanced-settings.js')) => {
     if (appInstance?.advancedSettings?._isRealInstance) return Promise.resolve(appInstance.advancedSettings)
     if (!_advancedSettingsModPromise) {
-        _advancedSettingsModPromise = import('./advanced-settings.js')
+        _advancedSettingsModPromise = Promise.resolve()
+            .then(() => loader())
+            .catch(err => {
+                _advancedSettingsModPromise = null
+                throw err
+            })
     }
     return _advancedSettingsModPromise.then(({ advancedSettings }) => {
         advancedSettings._isRealInstance = true
@@ -83,10 +94,15 @@ export const ensureAdvancedSettingsLoaded = (appInstance) => {
 
 export let _aiSidebarModPromise = null
 
-export const ensureAiSidebarLoaded = (appInstance) => {
+export const ensureAiSidebarLoaded = (appInstance, loader = () => import('./ai-sidebar-controller.js')) => {
     if (appInstance?.aiSidebar?._isRealInstance) return Promise.resolve(appInstance.aiSidebar)
     if (!_aiSidebarModPromise) {
-        _aiSidebarModPromise = import('./ai-sidebar-controller.js')
+        _aiSidebarModPromise = Promise.resolve()
+            .then(() => loader())
+            .catch(err => {
+                _aiSidebarModPromise = null
+                throw err
+            })
     }
     return _aiSidebarModPromise.then(({ AiSidebarController }) => {
         if (appInstance && !appInstance.aiSidebar?._isRealInstance) {
@@ -100,10 +116,15 @@ export const ensureAiSidebarLoaded = (appInstance) => {
 
 export let _chapterTransModPromise = null
 
-export const ensureChapterTranslationLoaded = (appInstance) => {
+export const ensureChapterTranslationLoaded = (appInstance, loader = () => import('./chapter-translation-manager.js')) => {
     if (appInstance?.chapterTranslationManager?._isRealInstance) return Promise.resolve(appInstance.chapterTranslationManager)
     if (!_chapterTransModPromise) {
-        _chapterTransModPromise = import('./chapter-translation-manager.js')
+        _chapterTransModPromise = Promise.resolve()
+            .then(() => loader())
+            .catch(err => {
+                _chapterTransModPromise = null
+                throw err
+            })
     }
     return _chapterTransModPromise.then(({ chapterTranslationManager }) => {
         chapterTranslationManager._isRealInstance = true

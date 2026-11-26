@@ -244,10 +244,10 @@ export class Overlayer {
         if (this.#map.has(key)) this.remove(key)
         if (typeof range === 'function') range = range(this.#svg.getRootNode())
         const rects = getTextRects(range, options?.writingMode)
-        const opts = { ...options, filterId: this.#filterId, rootSvg: this.#svg }
+        const opts = { ...options, filterId: this.#filterId, rootSvg: this.#svg, annotationKey: key }
         const element = draw(rects, opts)
         this.#svg.append(element)
-        this.#map.set(key, { range, draw, options, element, rects })
+        this.#map.set(key, { range, draw, options: opts, element, rects })
     }
     remove(key) {
         if (!this.#map.has(key)) return
@@ -279,6 +279,7 @@ export class Overlayer {
             this.#svg.append(el)
             obj.element = el
             obj.rects = rects
+            obj.options = opts
         }
     }
     hitTest(e) {
@@ -289,13 +290,22 @@ export class Overlayer {
         const offsetY = cRect ? cRect.top : 0
         const x = (e?.clientX ?? e?.x ?? 0) - offsetX
         const y = (e?.clientY ?? e?.y ?? 0) - offsetY
+        const badgeEl = e?.target?.closest?.('.linden-note-badge')
+        const badgeKey = badgeEl?.dataset?.annotationKey || null
+        if (badgeKey && this.#map.has(badgeKey)) {
+            return [badgeKey, this.#map.get(badgeKey).range, { hitBadge: true }]
+        }
         const arr = Array.from(this.#map.entries())
         // loop in reverse to hit more recently added items first
         for (let i = arr.length - 1; i >= 0; i--) {
             const [key, obj] = arr[i]
+            const badgeBox = obj.options?.badgeBox
+            if (badgeBox && x >= badgeBox.left - 3 && x <= badgeBox.right + 3 && y >= badgeBox.top - 3 && y <= badgeBox.bottom + 3) {
+                return [key, obj.range, { hitBadge: true }]
+            }
             for (const { left, top, right, bottom } of obj.rects) {
                 if (top - 3 <= y && left - 3 <= x && bottom + 3 >= y && right + 3 >= x) {
-                    return [key, obj.range]
+                    return [key, obj.range, { hitBadge: false }]
                 }
             }
         }
@@ -325,6 +335,67 @@ static underline(rects, options = {}) {
                 g.append(el)
             }
         }
+        return Overlayer.appendNoteBadgeIfNeeded(g, rects, options)
+    }
+    static appendNoteBadgeIfNeeded(g, rects, options = {}) {
+        if (!options?.hasNote || !rects?.length) return g
+        const sorted = sortRectsGeometrically(rects, options.writingMode)
+        const last = sorted[sorted.length - 1]
+        if (!last) return g
+        const isVertical = options.writingMode === 'vertical-rl' || options.writingMode === 'vertical-lr'
+        const badgeSize = 14
+        const x = isVertical
+            ? Math.max(2, last.left - badgeSize - 2)
+            : Math.max(2, last.right + 2)
+        const y = isVertical
+            ? Math.max(2, last.bottom - badgeSize * 0.5)
+            : Math.max(2, last.top - 4)
+
+        options.badgeBox = { left: x, top: y, right: x + badgeSize, bottom: y + badgeSize }
+
+        const badge = createSVGElement('g')
+        badge.setAttribute('class', 'linden-note-badge')
+        if (options.annotationKey) badge.dataset.annotationKey = String(options.annotationKey)
+        badge.style.pointerEvents = 'auto'
+        badge.style.cursor = 'pointer'
+        badge.style.mixBlendMode = 'normal'
+
+        if (options.notePreview) {
+            const title = createSVGElement('title')
+            title.textContent = String(options.notePreview)
+            badge.append(title)
+        }
+
+        const pill = createSVGElement('rect')
+        pill.setAttribute('x', x)
+        pill.setAttribute('y', y)
+        pill.setAttribute('width', badgeSize)
+        pill.setAttribute('height', badgeSize)
+        pill.setAttribute('rx', '4')
+        pill.setAttribute('fill', options.isDark ? '#2a2824' : '#fdfbf7')
+        pill.setAttribute('stroke', options.noteColor || '#c8921e')
+        pill.setAttribute('stroke-width', '1.25')
+
+        const line1 = createSVGElement('line')
+        line1.setAttribute('x1', x + 3.5)
+        line1.setAttribute('y1', y + 5.2)
+        line1.setAttribute('x2', x + badgeSize - 3.5)
+        line1.setAttribute('y2', y + 5.2)
+        line1.setAttribute('stroke', options.noteColor || '#c8921e')
+        line1.setAttribute('stroke-width', '1.3')
+        line1.setAttribute('stroke-linecap', 'round')
+
+        const line2 = createSVGElement('line')
+        line2.setAttribute('x1', x + 3.5)
+        line2.setAttribute('y1', y + 8.8)
+        line2.setAttribute('x2', x + badgeSize - 5)
+        line2.setAttribute('y2', y + 8.8)
+        line2.setAttribute('stroke', options.noteColor || '#c8921e')
+        line2.setAttribute('stroke-width', '1.3')
+        line2.setAttribute('stroke-linecap', 'round')
+
+        badge.append(pill, line1, line2)
+        g.append(badge)
         return g
     }
     static dashed(rects, options = {}) {
@@ -396,7 +467,7 @@ static underline(rects, options = {}) {
                 g.append(el)
             }
         }
-        return g
+        return Overlayer.appendNoteBadgeIfNeeded(g, rects, options)
     }
     static strikethrough(rects, options = {}) {
         const { color = '#ef4444', width: strokeWidth = 2.5, writingMode } = options
@@ -421,7 +492,7 @@ static underline(rects, options = {}) {
                 g.append(el)
             }
         }
-        return g
+        return Overlayer.appendNoteBadgeIfNeeded(g, rects, options)
     }
     static squiggly(rects, options = {}) {
         const { color = '#f97316', width: strokeWidth = 2.2, writingMode } = options
@@ -451,7 +522,7 @@ static underline(rects, options = {}) {
                 g.append(el)
             }
         }
-        return g
+        return Overlayer.appendNoteBadgeIfNeeded(g, rects, options)
     }
     static highlight(rects, options = {}) {
         const { color = '#f43f5e', realisticPen = true } = options
@@ -537,7 +608,7 @@ static underline(rects, options = {}) {
                     g.append(el)
                 }
             }
-            return g
+            return Overlayer.appendNoteBadgeIfNeeded(g, sortedRects, options)
         }
 
         const total = sortedRects.length
@@ -758,7 +829,7 @@ static underline(rects, options = {}) {
                 g.append(el)
             }
         }
-        return g
+        return Overlayer.appendNoteBadgeIfNeeded(g, sortedRects, options)
     }
     static outline(rects, options = {}) {
         return Overlayer.searchMatch(rects, options)

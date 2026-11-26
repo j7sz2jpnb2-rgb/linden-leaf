@@ -26,6 +26,9 @@ export const DEFAULT_DESKTOP_READER_SETTINGS = Object.freeze({
     paraMarginTop: 0.0,
     paraMarginBottom: 0.65,
     paraIndentSize: '2em',
+    shelfLandingMode: 'hero',
+    readerTopBarAutoHide: false,
+    readerToolbarVisibility: null,
 })
 
 export const DEFAULT_MOBILE_READER_SETTINGS = Object.freeze({

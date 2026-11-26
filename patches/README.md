@@ -13,6 +13,9 @@ Primary references:
 - https://github.com/ArtifexSoftware/mupdf/commit/a08c5ee1637580658184ab8b1860779ed2e9f73e
 - https://github.com/ArtifexSoftware/mupdf/commit/d4743b6092d513321c23c6f7fe5cff87cde043c1
 
-The stride checks are a narrow backport for the int-based 1.25 implementation, not a verbatim cherry-pick of newer size_t/checked-arithmetic APIs. Other advisories still need applicability review before public release (HTML layout and mutool CLI are separate paths; our EPUB uses Foliate).
+The stride checks are a narrow backport for the int-based 1.25 implementation, not a verbatim cherry-pick of newer size_t/checked-arithmetic APIs. Applicability review:
+- CVE-2025-46206 (`mutool clean` cyclic `/Next` infinite recursion): not affected (`mutool` CLI is not invoked and clean-up paths are not exposed).
+- CVE-2025-55780 (MuPDF HTML/EPUB `break_word_for_overflow_wrap()`): not reachable (`ll_mupdf.c` restricts native loading strictly via `pdf_open_document`, while EPUB/TXT/HTML rendering uses Foliate).
+- Local `mupdf-1.25.4-source` already has `patches/mupdf-1.25.4-security.patch` applied (`draw-unpack.c`, `util.c`, `pdf-image.c`, `subset-cff.c`).
 
 CFF upstream fix: https://github.com/ArtifexSoftware/mupdf/commit/611f75f0c8657b92460554009196c5ac4b68d909

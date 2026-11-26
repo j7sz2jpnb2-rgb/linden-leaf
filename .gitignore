@@ -63,8 +63,8 @@ samples/
 scripts/build-android-apk.ps1
 scripts/setup-android-toolchain.ps1
 scripts/finish-toolchain-and-init.ps1
-scripts/build-pc-2.0.17.ps1
-scripts/install-pc-2.0.17.ps1
+scripts/build-pc-*.ps1
+scripts/install-pc-*.ps1
 scripts/build-windows-release.ps1
 scripts/setup-env.ps1
 scripts/install-rust-standalone.ps1

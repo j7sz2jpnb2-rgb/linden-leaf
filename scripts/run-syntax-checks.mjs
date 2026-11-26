@@ -9,7 +9,15 @@ if (!vm.SourceTextModule) {
   const result = spawnSync(process.execPath, ['--experimental-vm-modules', fileURLToPath(import.meta.url)], {
     stdio: 'inherit'
   });
-  process.exit(result.status ?? 0);
+  if (result.error) {
+    console.error('[syntax-check] Failed to spawn child process:', result.error);
+    process.exit(1);
+  }
+  if (result.signal) {
+    console.error(`[syntax-check] Child process terminated by signal: ${result.signal}`);
+    process.exit(1);
+  }
+  process.exit(result.status ?? 1);
 }
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

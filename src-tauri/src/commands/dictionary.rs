@@ -1301,7 +1301,7 @@ pub async fn dict_download_and_install(
                 continue;
             }
         };
-        if let Err(e) = crate::commands::sync::is_allowed_server_url(&parsed_url) {
+        if let Err(e) = crate::commands::security::is_allowed_server_url(&parsed_url) {
             last_err = e;
             continue;
         }

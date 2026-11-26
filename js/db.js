@@ -4,12 +4,12 @@ import { normalizeTimestampMs, mergeSessionIntervals, calculateIntervalUnionSeco
 export { normalizeTimestampMs, mergeSessionIntervals, calculateIntervalUnionSeconds, buildPdfDrawingKey, remapPdfDrawingId, getSessionDur, computeActiveSessionSeconds } from './reading-data.js'
 // db.js - IndexedDB storage wrapper for Universal E-Book Reader
 import { buildTranslationRevisionArchive, checkTranslationCompatibility } from './translation-job-core.js'
-import { resolveReadingState } from './tags-manager.js'
+import { resolveReadingState } from './book-metadata.js'
 import { withReadableBookTitle } from './book-title.js'
 import { getLocale, isEnglish, t } from './i18n.js'
 
 const DB_NAME = 'UniversalReaderDB'
-const DB_VERSION = 11
+const DB_VERSION = 12
 
 let dbInstance = null
 let _openPromise = null
@@ -128,6 +128,14 @@ export const openDB = () => {
                 transStore.createIndex('chapterKey', 'chapterKey', { unique: false })
                 transStore.createIndex('bookChapter', ['bookId', 'chapterKey'], { unique: false })
                 transStore.createIndex('updatedAt', 'updatedAt', { unique: false })
+            }
+
+            // Store for Persistent Bidirectional Reader Portals (v12)
+            if (!db.objectStoreNames.contains('portals')) {
+                const portalStore = db.createObjectStore('portals', { keyPath: 'id' })
+                portalStore.createIndex('sourceBookId', 'sourceBookId', { unique: false })
+                portalStore.createIndex('targetBookId', 'targetBookId', { unique: false })
+                portalStore.createIndex('createdAt', 'createdAt', { unique: false })
             }
 
             // Move v4's embedded files and v7's local paths in one pass. A
@@ -565,7 +573,6 @@ export const getBookFileBlob = async id => {
     }
     return bookRecord?.blob || null
 }
-export const getBookBlob = getBookFileBlob
 export const getBookFile = getBookFileBlob
 
 export const getBookNativePath = async id => {
@@ -596,23 +603,6 @@ export const saveBookRating = async (id, rating) => {
         ratingUpdatedAt: Date.now()
     })
     return true
-}
-
-export const saveBookNativePath = async (id, nativePath) => {
-    if (!id || !nativePath) return false
-    const db = await openDB()
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction('book_files', 'readwrite')
-        const store = tx.objectStore('book_files')
-        const req = store.get(id)
-        req.onsuccess = () => {
-            const local = req.result || { id }
-            local.nativePath = nativePath
-            store.put(local)
-        }
-        tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error || new Error('Failed saving native book path'))
-    })
 }
 
 // Bind a native cache to the exact version read by the caller. This changes only
@@ -1176,27 +1166,6 @@ export const recoverPendingProgressBackup = () => {
     return _progressRecoveryPromise
 }
 
-export const updateBookReadingTime = async (id, addedSeconds) => {
-    if (!id || !addedSeconds || addedSeconds <= 0) return
-    const db = await openDB()
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction('books', 'readwrite')
-        const store = tx.objectStore('books')
-        const getReq = store.get(id)
-        getReq.onsuccess = () => {
-            const book = getReq.result
-            if (!book) return resolve(null)
-            book.totalReadingSeconds = (book.totalReadingSeconds || 0) + addedSeconds
-            book.lastReadAt = Date.now()
-            book.updatedAt = Date.now()
-            store.put(book)
-        }
-        tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error || new Error('Failed to update reading time'))
-        tx.onabort = () => reject(tx.error || new Error('Transaction aborted updating reading time'))
-    })
-}
-
 export const updateBookMetadata = async (id, { title, author }) => {
     if (!id) return null
     const db = await openDB()
@@ -1357,8 +1326,137 @@ export const relinkBookFile = async (bookId, fileData = {}) => {
     })
 }
 
-export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Date.now()) => {
+export const getBookKnowledgeSummary = async (id) => {
+    if (!id) return { highlights: 0, bookmarks: 0, pdfDrawings: 0, total: 0 }
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        try {
+            const candidateStores = ['highlights', 'bookmarks', 'pdf_drawings']
+            const storeNames = candidateStores.filter(name => db.objectStoreNames.contains(name))
+            if (storeNames.length === 0) {
+                resolve({ highlights: 0, bookmarks: 0, pdfDrawings: 0, total: 0 })
+                return
+            }
+            const tx = db.transaction(storeNames, 'readonly')
+            const counts = { highlights: 0, bookmarks: 0, pdfDrawings: 0 }
+            const countIndex = (storeName, key) => {
+                if (!storeNames.includes(storeName)) return
+                try {
+                    const store = tx.objectStore(storeName)
+                    const req = store.index('bookId').count(id)
+                    req.onsuccess = () => { counts[key] = Number(req.result) || 0 }
+                } catch (_) {
+                    counts[key] = 0
+                }
+            }
+            countIndex('highlights', 'highlights')
+            countIndex('bookmarks', 'bookmarks')
+            countIndex('pdf_drawings', 'pdfDrawings')
+            tx.oncomplete = () => resolve({
+                ...counts,
+                total: counts.highlights + counts.bookmarks + counts.pdfDrawings
+            })
+            tx.onerror = () => reject(tx.error || new Error(`Failed to summarize knowledge for book ${id}`))
+            tx.onabort = () => reject(tx.error || new Error(`Transaction aborted summarizing knowledge for book ${id}`))
+        } catch (err) {
+            reject(err)
+        }
+    })
+}
+
+export const removeBookLocalFile = async (id, nowMs = Date.now()) => {
     if (!id) return false
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        try {
+            const candidateStores = ['books', 'book_files', 'fulltext_index']
+            const storeNames = candidateStores.filter(name => db.objectStoreNames.contains(name))
+            if (!storeNames.includes('books')) {
+                resolve(false)
+                return
+            }
+            const tx = db.transaction(storeNames, 'readwrite')
+            let oldSnapshotPath = null
+            let updated = false
+
+            const bookStore = tx.objectStore('books')
+            const bookReq = bookStore.get(id)
+            bookReq.onsuccess = () => {
+                const book = bookReq.result
+                if (!book) return
+                updated = true
+                bookStore.put({
+                    ...book,
+                    hasLocalFile: false,
+                    nativePath: null,
+                    fileRemovedAt: nowMs,
+                    updatedAt: nowMs
+                })
+            }
+
+            if (storeNames.includes('book_files')) {
+                const fileStore = tx.objectStore('book_files')
+                const fileReq = fileStore.get(id)
+                fileReq.onsuccess = () => {
+                    oldSnapshotPath = fileReq.result?.nativeSnapshotPath || null
+                    fileStore.delete(id)
+                }
+            }
+
+            if (storeNames.includes('fulltext_index')) {
+                tx.objectStore('fulltext_index').delete(id)
+            }
+
+            tx.oncomplete = () => {
+                void reclaimUnusedBookSnapshot(db, oldSnapshotPath)
+                resolve(updated)
+            }
+            tx.onerror = () => reject(tx.error || new Error(`Failed to remove local file for book ${id}`))
+            tx.onabort = () => reject(tx.error || new Error(`Transaction aborted removing local file for book ${id}`))
+        } catch (err) {
+            reject(err)
+        }
+    })
+}
+
+export const archiveBook = async (id, archived = true, nowMs = Date.now()) => {
+    if (!id) return false
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        try {
+            if (!db.objectStoreNames.contains('books')) {
+                resolve(false)
+                return
+            }
+            const tx = db.transaction(['books'], 'readwrite')
+            const bookStore = tx.objectStore('books')
+            let updated = false
+            const bookReq = bookStore.get(id)
+            bookReq.onsuccess = () => {
+                const book = bookReq.result
+                if (!book) return
+                updated = true
+                const isArchived = !!archived
+                bookStore.put({
+                    ...book,
+                    isArchived,
+                    archivedAt: isArchived ? nowMs : null,
+                    archivedUpdatedAt: nowMs,
+                    updatedAt: nowMs
+                })
+            }
+            tx.oncomplete = () => resolve(updated)
+            tx.onerror = () => reject(tx.error || new Error(`Failed to archive book ${id}`))
+            tx.onabort = () => reject(tx.error || new Error(`Transaction aborted archiving book ${id}`))
+        } catch (err) {
+            reject(err)
+        }
+    })
+}
+
+export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Date.now(), options = {}) => {
+    if (!id) return false
+    const preserveAnnotations = Boolean(options?.preserveAnnotations)
     const db = await openDB()
     return new Promise((resolve, reject) => {
         try {
@@ -1402,7 +1500,7 @@ export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Dat
                 tx.objectStore('fulltext_index').delete(id)
             }
             
-            // Safely clean up associated bookmarks, highlights, and pdf_drawings
+            // Safely clean up associated bookmarks, highlights, and pdf_drawings unless caller preserves knowledge
             // Note: reading_sessions are PERMANENT user statistics logs and are NEVER purged on book removal!
             const cleanStoreByIndex = (storeName, indexName) => {
                 try {
@@ -1426,9 +1524,11 @@ export const deleteBook = async (id, recordTombstone = true, tombstoneTime = Dat
                 }
             }
 
-            cleanStoreByIndex('bookmarks', 'bookId')
-            cleanStoreByIndex('highlights', 'bookId')
-            cleanStoreByIndex('pdf_drawings', 'bookId')
+            if (!preserveAnnotations) {
+                cleanStoreByIndex('bookmarks', 'bookId')
+                cleanStoreByIndex('highlights', 'bookId')
+                cleanStoreByIndex('pdf_drawings', 'bookId')
+            }
 
             tx.oncomplete = () => {
                 void reclaimUnusedBookSnapshot(db, oldSnapshotPath)
@@ -1461,6 +1561,29 @@ export const saveHighlight = async highlight => {
         }
         tx.onerror = () => reject(tx.error || new Error('Failed to save highlight'))
         tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving highlight'))
+    })
+}
+
+export const saveHighlightsBatch = async (highlights = []) => {
+    const valid = (highlights || []).filter(h => h && h.id)
+    if (valid.length === 0) return []
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const hasDeleted = db.objectStoreNames.contains('deleted_records')
+        const storeNames = hasDeleted ? ['highlights', 'deleted_records'] : ['highlights']
+        const tx = db.transaction(storeNames, 'readwrite')
+        const store = tx.objectStore('highlights')
+        const delStore = hasDeleted ? tx.objectStore('deleted_records') : null
+        for (const hl of valid) {
+            store.put(hl)
+            if (delStore) delStore.delete(hl.id)
+        }
+        tx.oncomplete = () => {
+            invalidateReadingStatsCache()
+            resolve(valid.map(h => h.id))
+        }
+        tx.onerror = () => reject(tx.error || new Error('Failed to save highlights batch'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving highlights batch'))
     })
 }
 
@@ -1725,18 +1848,6 @@ export const applySyncedBookmarksBatch = async (bookmarks = []) => {
         tx.oncomplete = () => resolve(applied)
         tx.onerror = () => reject(tx.error || new Error('Batch transaction error saving synced bookmarks'))
         tx.onabort = () => reject(tx.error || new Error('Batch transaction aborted saving synced bookmarks'))
-    })
-}
-
-export const getBookmarksByBook = async bookId => {
-    if (!bookId) return []
-    const db = await openDB()
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction('bookmarks', 'readonly')
-        const index = tx.objectStore('bookmarks').index('bookId')
-        const req = index.getAll(bookId)
-        req.onsuccess = () => resolve(req.result || [])
-        req.onerror = () => reject(req.error || new Error('Failed to get bookmarks'))
     })
 }
 
@@ -2619,23 +2730,6 @@ export const deleteCustomList = async (id, recordTombstone = true, tombstoneTime
     })
 }
 
-export const updateCustomList = async (id, updateData) => {
-    const db = await openDB()
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction('custom_lists', 'readwrite')
-        const store = tx.objectStore('custom_lists')
-        const getReq = store.get(id)
-        getReq.onsuccess = () => {
-            const item = getReq.result
-            if (!item) return resolve(null)
-            Object.assign(item, updateData, { updatedAt: Date.now() })
-            store.put(item)
-        }
-        tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error || new Error('Failed to update custom list'))
-    })
-}
-
 // ==========================================================
 // Tombstone & Cloud Deletion Records
 // ==========================================================
@@ -2655,61 +2749,10 @@ export const getAllDeletedRecords = async () => {
     })
 }
 
-export const recordDeletedItem = async (id, type) => {
-    if (!id) return false
-    const db = await openDB()
-    return new Promise((resolve) => {
-        try {
-            if (!db.objectStoreNames.contains('deleted_records')) return resolve(false)
-            const tx = db.transaction('deleted_records', 'readwrite')
-            tx.objectStore('deleted_records').put({ id, type, deletedAt: Date.now() })
-            tx.oncomplete = () => resolve(true)
-            tx.onerror = () => resolve(false)
-        } catch (e) {
-            resolve(false)
-        }
-    })
-}
-
-export const removeDeletedRecord = async (id) => {
-    if (!id) return false
-    const db = await openDB()
-    return new Promise((resolve) => {
-        try {
-            if (!db.objectStoreNames.contains('deleted_records')) return resolve(true)
-            const tx = db.transaction('deleted_records', 'readwrite')
-            tx.objectStore('deleted_records').delete(id)
-            tx.oncomplete = () => resolve(true)
-            tx.onerror = () => resolve(false)
-        } catch (e) {
-            resolve(false)
-        }
-    })
-}
-
 export const setBookLists = async (bookId, listIds) => {
     const book = await getBook(bookId)
     if (!book) return false
     book.customListIds = Array.isArray(listIds) ? listIds : []
-    await saveBook(book)
-    return true
-}
-
-export const addBookToList = async (bookId, listId) => {
-    const book = await getBook(bookId)
-    if (!book) return false
-    if (!book.customListIds) book.customListIds = []
-    if (!book.customListIds.includes(listId)) {
-        book.customListIds.push(listId)
-        await saveBook(book)
-    }
-    return true
-}
-
-export const removeBookFromList = async (bookId, listId) => {
-    const book = await getBook(bookId)
-    if (!book || !book.customListIds) return false
-    book.customListIds = book.customListIds.filter(id => id !== listId)
     await saveBook(book)
     return true
 }
@@ -3624,7 +3667,7 @@ export const applyRestorePlan = async (plan, customDb = null) => {
     const targetStores = [
         'books', 'book_files', 'highlights', 'bookmarks',
         'reading_sessions', 'chapter_translations', 'pdf_drawings',
-        'custom_lists', 'settings', 'deleted_records'
+        'custom_lists', 'portals', 'settings', 'deleted_records'
     ].filter(s => db.objectStoreNames.contains(s))
 
     const operationId = plan.operationId || `restore_op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -3649,6 +3692,7 @@ export const applyRestorePlan = async (plan, customDb = null) => {
                 translations: 0,
                 drawings: 0,
                 lists: 0,
+                portals: 0,
                 settings: 0,
                 deletedRecords: 0
             }
@@ -4016,6 +4060,18 @@ export const applyRestorePlan = async (plan, customDb = null) => {
                     }
                 }
 
+                // 7b. Portals
+                if (Array.isArray(plan.portalsToPut) && tx.objectStoreNames.contains('portals')) {
+                    const portalStore = tx.objectStore('portals')
+                    for (const p of plan.portalsToPut) {
+                        if (p) {
+                            if (!isValidIdbKey(p.id)) return abortWithDataError()
+                            const tombDelAt = getItemTombstoneDeletedAt('portal', p)
+                            putWithLWW(portalStore, p, p.id, 'portals', null, tombDelAt)
+                        }
+                    }
+                }
+
                 // 8. Settings
                 if (Array.isArray(plan.settingsToPut) && tx.objectStoreNames.contains('settings')) {
                     const setStore = tx.objectStore('settings')
@@ -4069,7 +4125,9 @@ export const applyRestorePlan = async (plan, customDb = null) => {
                     drawing: 'pdf_drawings',
                     drawings: 'pdf_drawings',
                     list: 'custom_lists',
-                    lists: 'custom_lists'
+                    lists: 'custom_lists',
+                    portal: 'portals',
+                    portals: 'portals'
                 }
                 if (Array.isArray(deletedList) && tx.objectStoreNames.contains('deleted_records')) {
                     const delStore = tx.objectStore('deleted_records')
@@ -4250,7 +4308,7 @@ export const rollbackRestoreOperation = async (operationId, fallbackJournal = nu
         const targetStores = [
             'books', 'book_files', 'highlights', 'bookmarks',
             'reading_sessions', 'chapter_translations', 'pdf_drawings',
-            'custom_lists', 'settings', 'deleted_records'
+            'custom_lists', 'portals', 'settings', 'deleted_records'
         ].filter(s => db.objectStoreNames && db.objectStoreNames.contains(s))
 
         let journal = fallbackJournal
@@ -4406,5 +4464,92 @@ export const recoverPendingRestoreOperations = async (customDb = null) => {
             if (recovered) count++
         }
         return count
+    })
+}
+
+// Persistent Bidirectional Reader Portals (v12)
+export const savePortal = async (portal) => {
+    if (!portal || !portal.id) return null
+    const db = await openDB()
+    if (!db.objectStoreNames?.contains('portals')) return null
+    return new Promise((resolve, reject) => {
+        const hasDeleted = db.objectStoreNames.contains('deleted_records')
+        const storeNames = hasDeleted ? ['portals', 'deleted_records'] : ['portals']
+        const tx = db.transaction(storeNames, 'readwrite')
+        const record = { ...portal, updatedAt: portal.updatedAt || Date.now() }
+        tx.objectStore('portals').put(record)
+        if (hasDeleted) tx.objectStore('deleted_records').delete(portal.id)
+        tx.oncomplete = () => resolve(record.id)
+        tx.onerror = () => reject(tx.error || new Error('Failed to save portal'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving portal'))
+    })
+}
+
+export const savePortalsBatch = async (portals = []) => {
+    const valid = (portals || []).filter(p => p && p.id)
+    if (valid.length === 0) return 0
+    const db = await openDB()
+    if (!db.objectStoreNames?.contains('portals')) return 0
+    return new Promise((resolve, reject) => {
+        const hasDeleted = db.objectStoreNames.contains('deleted_records')
+        const storeNames = hasDeleted ? ['portals', 'deleted_records'] : ['portals']
+        const tx = db.transaction(storeNames, 'readwrite')
+        const store = tx.objectStore('portals')
+        const delStore = hasDeleted ? tx.objectStore('deleted_records') : null
+        for (const portal of valid) {
+            store.put(portal)
+            if (delStore) delStore.delete(portal.id)
+        }
+        tx.oncomplete = () => resolve(valid.length)
+        tx.onerror = () => reject(tx.error || new Error('Failed to save portals batch'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted saving portals batch'))
+    })
+}
+
+export const getPortalsByBook = async (bookId) => {
+    if (!bookId) return []
+    const db = await openDB()
+    if (!db.objectStoreNames?.contains('portals')) return []
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('portals', 'readonly')
+        const req = tx.objectStore('portals').getAll()
+        req.onsuccess = () => {
+            const targetId = String(bookId)
+            const list = (req.result || []).filter(p =>
+                p && (String(p.sourceBookId) === targetId || String(p.targetBookId) === targetId)
+            )
+            list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+            resolve(list)
+        }
+        req.onerror = () => reject(req.error || new Error('Failed to get portals for book'))
+    })
+}
+
+export const getAllPortals = async () => {
+    const db = await openDB()
+    if (!db.objectStoreNames?.contains('portals')) return []
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('portals', 'readonly')
+        const req = tx.objectStore('portals').getAll()
+        req.onsuccess = () => resolve(req.result || [])
+        req.onerror = () => reject(req.error || new Error('Failed to get all portals'))
+    })
+}
+
+export const deletePortal = async (id, recordTombstone = true, tombstoneTime = Date.now()) => {
+    if (!id) return false
+    const db = await openDB()
+    if (!db.objectStoreNames?.contains('portals')) return false
+    return new Promise((resolve, reject) => {
+        const hasDeleted = db.objectStoreNames.contains('deleted_records')
+        const storeNames = hasDeleted ? ['portals', 'deleted_records'] : ['portals']
+        const tx = db.transaction(storeNames, 'readwrite')
+        tx.objectStore('portals').delete(id)
+        if (recordTombstone && hasDeleted) {
+            tx.objectStore('deleted_records').put({ id, type: 'portal', deletedAt: tombstoneTime })
+        }
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error || new Error('Failed to delete portal'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted deleting portal'))
     })
 }

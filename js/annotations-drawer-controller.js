@@ -5,6 +5,19 @@ import { platformBridge } from './platformBridge.js'
 import { performWebSearch } from './search-config.js'
 import { resolveExcerptSource } from './excerpt-source-resolver.js'
 import { uiSymbol, escapeHTML, mapHighlightDisplayColor } from './ui-format.js'
+import { NoteComposer } from './note-composer.js'
+import {
+    DEFAULT_HIGHLIGHT_COLOR,
+    normalizeHighlightColor,
+    getHighlightUiHex,
+    matchesHighlightColorFilter
+} from './highlight-palette.js'
+import { EpubRangeEditor } from './epub-range-editor.js'
+
+const PEN_STYLE_STORAGE_KEY = 'linden_active_pen_style_v1'
+const PEN_COLOR_STORAGE_KEY = 'linden_active_pen_color_v1'
+const VALID_PEN_STYLES = new Set(['highlight', 'underline', 'dashed', 'squiggly'])
+const MAX_UNDO_STACK = 30
 
 /** Owns annotations UI state, DOM queries and bindings. App supplies shared reading/session coordination. */
 export class AnnotationsDrawerController {
@@ -18,6 +31,61 @@ export class AnnotationsDrawerController {
         this.clickedHighlightInfo = null
         this.shelfNotesFilter = { bookId: 'all', color: 'all', query: '' }
         this._shelfNotesInitialized = false
+        this.noteComposer = new NoteComposer(app)
+        this.activePenStyle = this._loadPref(PEN_STYLE_STORAGE_KEY, 'highlight', v => VALID_PEN_STYLES.has(v))
+        this.activePenColor = normalizeHighlightColor(this._loadPref(PEN_COLOR_STORAGE_KEY, DEFAULT_HIGHLIGHT_COLOR))
+        this._crossPageAnchor = null
+        this._portalAnchor = null
+        this._undoStack = []
+        this.rangeEditor = new EpubRangeEditor({
+            getWritingMode: () => this.app.settings?.writingMode || 'horizontal',
+            onCommit: payload => {
+                this.updateHighlightRange(payload).catch(err => {
+                    console.warn('[Annotations] Range edit commit failed:', err)
+                })
+            },
+            onCancel: () => {
+                this.hideHighlightActionPopup()
+            }
+        })
+    }
+
+    _loadPref(key, fallback, validator = null) {
+        try {
+            if (typeof localStorage === 'undefined') return fallback
+            const raw = localStorage.getItem(key)
+            if (!raw) return fallback
+            if (validator && !validator(raw)) return fallback
+            return raw
+        } catch {
+            return fallback
+        }
+    }
+
+    _savePref(key, value) {
+        try {
+            if (typeof localStorage !== 'undefined') localStorage.setItem(key, value)
+        } catch {}
+    }
+
+    _buildFoliateAnnotation(hl) {
+        const trimmedNote = (hl?.note || '').trim()
+        return {
+            value: `${hl.cfi}::${hl.style || 'highlight'}`,
+            id: hl.id,
+            color: normalizeHighlightColor(hl.color),
+            style: hl.style || 'highlight',
+            hasNote: Boolean(trimmedNote),
+            notePreview: trimmedNote.slice(0, 120),
+        }
+    }
+
+    _pushUndoEntry(entry) {
+        if (!entry) return
+        this._undoStack.push(entry)
+        if (this._undoStack.length > MAX_UNDO_STACK) {
+            this._undoStack.shift()
+        }
     }
 
     initDOM() {
@@ -48,26 +116,65 @@ export class AnnotationsDrawerController {
                 settings: document.getElementById('panel-settings')
             },
             tocContainer: document.getElementById('toc-tree-container'),
+            portalsHost: document.getElementById('reader-portals-host'),
             notesContainer: document.getElementById('notes-list-container'),
             btnExportNotes: document.getElementById('btn-export-notes'),
             selectionPopup: document.getElementById('selection-popup'),
             popupMultiBadge: document.getElementById('popup-multi-badge'),
+            popupStyleButtons: document.querySelectorAll('#selection-popup .popup-pen-style-btn'),
             btnPopupUnderline: document.getElementById('popup-underline'),
             btnPopupDashed: document.getElementById('popup-dashed'),
+            btnPopupAnchorStart: document.getElementById('popup-anchor-start'),
             btnPopupCopy: document.getElementById('popup-copy'),
             btnPopupSearch: document.getElementById('popup-search'),
             btnPopupNote: document.getElementById('popup-note'),
             btnPopupShare: document.getElementById('popup-share'),
             popupColorDots: document.querySelectorAll('#selection-popup .color-dot'),
             highlightActionPopup: document.getElementById('highlight-action-popup'),
+            hlActionStyleButtons: document.querySelectorAll('#highlight-action-popup .hl-action-style-btn'),
+            hlActionSnap: document.getElementById('hl-action-snap'),
             hlActionNote: document.getElementById('hl-action-note'),
+            hlActionPortal: document.getElementById('hl-action-portal'),
             hlActionCopy: document.getElementById('hl-action-copy'),
             hlActionShare: document.getElementById('hl-action-share'),
             hlActionDel: document.getElementById('hl-action-del'),
             hlActionColorDots: document.querySelectorAll('#highlight-action-popup .color-dot'),
+            epubAnchorBanner: document.getElementById('epub-anchor-banner'),
+            epubAnchorText: document.getElementById('epub-anchor-text'),
+            btnCancelEpubAnchor: document.getElementById('btn-cancel-epub-anchor'),
+            portalBanner: document.getElementById('reader-portal-banner'),
+            portalBannerText: document.getElementById('portal-banner-text'),
+            btnCancelPortalArm: document.getElementById('btn-cancel-portal-arm'),
             popupAi: document.getElementById('popup-ai'),
             popupDict: document.getElementById('popup-dict'),
             popupTranslatePara: document.getElementById('popup-translate-para')
+        }
+    }
+
+    _syncPenSelectorUi() {
+        this.dom.popupStyleButtons?.forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.style === this.activePenStyle)
+        })
+        this.dom.popupColorDots?.forEach(dot => {
+            dot.classList.toggle('active', normalizeHighlightColor(dot.dataset.color) === normalizeHighlightColor(this.activePenColor))
+        })
+    }
+
+    _syncHighlightActionUi(hl) {
+        const curStyle = hl?.style || 'highlight'
+        const curColor = normalizeHighlightColor(hl?.color || DEFAULT_HIGHLIGHT_COLOR)
+        this.dom.hlActionStyleButtons?.forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.style === curStyle)
+        })
+        this.dom.hlActionColorDots?.forEach(dot => {
+            dot.classList.toggle('active', normalizeHighlightColor(dot.dataset.color) === curColor)
+        })
+        if (this.dom.hlActionSnap) {
+            const isEpub = Boolean(hl && hl.formatType !== 'pdf' && !hl.pdfTarget && this.app.foliateView)
+            this.dom.hlActionSnap.style.display = isEpub ? 'inline-flex' : 'none'
+        }
+        if (this.dom.hlActionPortal) {
+            this.dom.hlActionPortal.classList.toggle('active', Boolean(this._portalAnchor))
         }
     }
 
@@ -89,28 +196,36 @@ export class AnnotationsDrawerController {
                 this.events.on(p, 'click', e => e.stopPropagation())
             }
         });
-        this.dom.popupColorDots.forEach(dot => {
-            this.events.on(dot, 'click', () => this.createHighlight(dot.dataset.color, 'highlight'))
-        });
-        this.events.on(this.dom.btnPopupUnderline, 'click', () => {
-            this.createHighlight('#2563eb', 'underline')
-        });
-        this.events.on(this.dom.btnPopupDashed, 'click', () => {
-            this.createHighlight('#64748b', 'dashed')
-        });
-        this.events.on(this.dom.btnPopupNote, 'click', async () => {
-            this.hideSelectionPopup(true)
-            const noteText = await this.app.dialogs.showInputDialog({
-                title: t('annotations.addNoteTitle'),
-                placeholder: t('annotations.addNotePlaceholder'),
-                isMultiline: true
+        this.dom.popupStyleButtons?.forEach(btn => {
+            this.events.on(btn, 'click', () => {
+                const nextStyle = btn.dataset.style || 'highlight'
+                this.activePenStyle = VALID_PEN_STYLES.has(nextStyle) ? nextStyle : 'highlight'
+                this._savePref(PEN_STYLE_STORAGE_KEY, this.activePenStyle)
+                this._syncPenSelectorUi()
+                if (this.selectedTextInfo || this._frozenSelectionSnapshot || (this.multiSelectedRanges && this.multiSelectedRanges.length > 0)) {
+                    this.createHighlight(this.activePenColor, this.activePenStyle)
+                }
             })
-            if (noteText !== null) {
-                await this.createHighlight('#facc15', 'highlight', noteText)
-            } else {
-                this.clearActiveTextSelection()
-                this.hideSelectionPopup()
-            }
+        });
+        this.dom.popupColorDots.forEach(dot => {
+            this.events.on(dot, 'click', () => {
+                this.activePenColor = normalizeHighlightColor(dot.dataset.color)
+                this._savePref(PEN_COLOR_STORAGE_KEY, this.activePenColor)
+                this._syncPenSelectorUi()
+                this.createHighlight(this.activePenColor, this.activePenStyle || 'highlight')
+            })
+        });
+        this.events.on(this.dom.btnPopupAnchorStart, 'click', () => {
+            this.armCrossPageAnchor()
+        });
+        this.events.on(this.dom.btnCancelEpubAnchor, 'click', () => {
+            this.clearCrossPageAnchor()
+        });
+        this.events.on(this.dom.btnCancelPortalArm, 'click', () => {
+            this.clearPortalAnchor()
+        });
+        this.events.on(this.dom.btnPopupNote, 'click', () => {
+            this.openNoteComposerForSelection({ title: t('annotations.addNoteTitle') })
         });
         this.events.on(this.dom.btnPopupCopy, 'click', async () => {
             await this.app.copyMultiSelectionOrSingle()
@@ -154,28 +269,48 @@ export class AnnotationsDrawerController {
                 this.app.cards.openAiAssistantModal(selInfo)
             }
         });
+        this.dom.hlActionStyleButtons?.forEach(btn => {
+            this.events.on(btn, 'click', async () => {
+                if (this.clickedHighlightInfo) {
+                    await this.restyleHighlight(this.clickedHighlightInfo.value, { style: btn.dataset.style })
+                }
+            })
+        });
         this.dom.hlActionColorDots.forEach(dot => {
             this.events.on(dot, 'click', async () => {
                 if (this.clickedHighlightInfo) {
-                    await this.updateHighlightColor(this.clickedHighlightInfo.value, dot.dataset.color)
+                    await this.restyleHighlight(this.clickedHighlightInfo.value, { color: dot.dataset.color })
                 }
             })
+        });
+        this.events.on(this.dom.hlActionSnap, 'click', () => {
+            this.rangeEditor?.snapToSentence?.()
+        });
+        this.events.on(this.dom.hlActionPortal, 'click', async () => {
+            if (!this.clickedHighlightInfo) return
+            const hl = await this.findHighlightByCFI(this.clickedHighlightInfo.value)
+            if (hl) {
+                await this.handlePortalActionForHighlight(hl)
+            }
         });
         this.events.on(this.dom.hlActionNote, 'click', async () => {
             if (this.clickedHighlightInfo) {
                 const targetValue = this.clickedHighlightInfo.value
+                const anchorRect = this.clickedHighlightInfo.rect || null
                 const hl = await this.findHighlightByCFI(targetValue)
                 const currentNote = hl?.note || ''
                 this.hideHighlightActionPopup()
-                const noteText = await this.app.dialogs.showInputDialog({
+                this.noteComposer.open({
                     title: t('annotations.editNoteTitle'),
-                    value: currentNote,
-                    placeholder: t('annotations.editNotePlaceholder'),
-                    isMultiline: true
+                    quoteText: hl?.text || '',
+                    initialNote: currentNote,
+                    initialColor: hl?.color || '#facc15',
+                    showColorPicker: true,
+                    anchorRect,
+                    onSave: async ({ note, color }) => {
+                        await this.updateHighlightNote(targetValue, note, color)
+                    }
                 })
-                if (noteText !== null) {
-                    await this.updateHighlightNote(targetValue, noteText)
-                }
             }
         });
         this.events.on(this.dom.hlActionCopy, 'click', async () => {
@@ -196,8 +331,11 @@ export class AnnotationsDrawerController {
         this.events.on(this.dom.btnPopupShare, 'click', () => {
             const format = this.app.currentBookData?.format || (this.app.pdfViewport ? 'pdf' : 'epub')
             const sourceToc = this.app.currentPdfTOC || this.app.toc || this.app._activeSession?.toc || []
+            const primaryRange = this.selectedTextInfo?.range || this.multiSelectedRanges?.[0]?.range || null
+            const primaryPdfTarget = this.selectedTextInfo?.pdfTarget || this.multiSelectedRanges?.[0]?.pdfTarget || null
             const resolved = resolveExcerptSource({
-                range: this.selectedTextInfo?.range,
+                range: primaryRange,
+                pdfTarget: primaryPdfTarget,
                 currentLocation: this.app.currentLocation,
                 reader: this.app.foliateView || this.app.pdfViewport,
                 format,
@@ -237,12 +375,88 @@ export class AnnotationsDrawerController {
         });
     }
 
+    openNoteComposerForSelection({ title = null, initialColor = '#facc15', preferSidebar = false } = {}) {
+        const sel = this.selectedTextInfo || this._frozenSelectionSnapshot
+        const multi = Array.isArray(this.multiSelectedRanges) && this.multiSelectedRanges.length > 1
+            ? this.multiSelectedRanges.map(item => ({ ...item }))
+            : null
+        if (!sel && !multi) return
+
+        const frozenTarget = sel ? { ...sel } : null
+        const quoteText = multi
+            ? multi.map(r => r.text).filter(Boolean).join('\n……\n')
+            : (frozenTarget?.text || '')
+        const anchorRect = frozenTarget?.clientRect || frozenTarget?.rect || null
+        const resolvedChapterTitle = this._resolveChapterTitleForSelection({
+            range: frozenTarget?.range || multi?.[0]?.range || null,
+            pdfTarget: frozenTarget?.pdfTarget || multi?.[0]?.pdfTarget || null,
+        })
+        if (frozenTarget && resolvedChapterTitle) {
+            frozenTarget.chapterTitle = resolvedChapterTitle
+        }
+
+        this.hideSelectionPopup(true)
+        this.noteComposer.open({
+            title: title || t('annotations.addNoteTitle'),
+            quoteText,
+            initialNote: '',
+            initialColor,
+            showColorPicker: true,
+            anchorRect,
+            preferSidebar,
+            onSave: async ({ note, color }) => {
+                if (multi && multi.length > 1) {
+                    this.multiSelectedRanges = multi
+                    await this.createHighlight(color || '#facc15', 'highlight', note || '')
+                } else if (frozenTarget) {
+                    await this.createHighlight(color || '#facc15', 'highlight', note || '', frozenTarget)
+                    this.clearActiveTextSelection()
+                    this.hideSelectionPopup()
+                }
+            },
+            onCancel: () => {
+                this.clearActiveTextSelection()
+                this.hideSelectionPopup()
+            }
+        })
+    }
+
+    _resolveChapterTitleForSelection({ range = null, pdfTarget = null } = {}) {
+        try {
+            const format = this.app.currentBookData?.format || (this.app.pdfViewport ? 'pdf' : 'epub')
+            const sourceToc = this.app.currentPdfTOC || this.app.toc || this.app._activeSession?.toc || []
+            const resolved = resolveExcerptSource({
+                range,
+                pdfTarget,
+                currentLocation: this.app.currentLocation,
+                reader: this.app.foliateView || this.app.pdfViewport,
+                format,
+                pdfViewport: this.app.pdfViewport,
+            }, sourceToc)
+            if (resolved?.chapterTitle) return resolved.chapterTitle
+        } catch (_) {}
+        return this.app.currentLocation?.tocItem?.label || t('annotations.bodyFallback')
+    }
+
+    _triggerEpubLocatePulse(cfi, color = '#facc15') {
+        if (!cfi || !this.app.foliateView?.pulseHighlight) return
+        const theme = document.documentElement?.getAttribute?.('data-theme')
+        const isDark = theme === 'dark' || theme === 'black'
+        const writingMode = this.app.settings?.writingMode || 'horizontal-tb'
+        this.app.foliateView.pulseHighlight(cfi, { color, isDark, writingMode })
+    }
+
     resetSessionState() {
+        this.noteComposer?.close?.(false)
+        this.rangeEditor?.hide?.({ commitPending: false })
+        this.clearCrossPageAnchor()
         this.clearActiveTextSelection()
         this.hideSelectionPopup()
         this.hideHighlightActionPopup()
         this.multiSelectedRanges = []
         this.clickedHighlightInfo = null
+        this._undoStack = []
+        this._syncPenSelectorUi()
     }
 
     dispose() { this.resetSessionState(); this.events.dispose(); this._bound = false }
@@ -298,6 +512,7 @@ export class AnnotationsDrawerController {
         const popup = this.dom.selectionPopup
         if (!popup) return
         this.app.cancelPendingReaderUIToggle()
+        this._syncPenSelectorUi()
         popup.style.display = 'flex'
         popup.scrollLeft = 0 // Ensure primary tools (highlight colors, underline, note) are scrolled into view
         const popupWidth = popup.offsetWidth || 280
@@ -388,6 +603,7 @@ export class AnnotationsDrawerController {
     }
 
     hideHighlightActionPopup() {
+        this.rangeEditor?.hide?.({ commitPending: true })
         if (this.dom.highlightActionPopup) {
             this.dom.highlightActionPopup.classList.remove('active')
             this.dom.highlightActionPopup.style.display = 'none'
@@ -395,7 +611,32 @@ export class AnnotationsDrawerController {
         this.clickedHighlightInfo = null
     }
 
-    async onHighlightClicked(value, range) {
+    _computeRangeAbsRect(range) {
+        const rect = range.getBoundingClientRect()
+        const doc = range.startContainer?.ownerDocument
+        const contentsIframe = doc?.defaultView?.frameElement
+        let iframe = contentsIframe
+        if (!iframe) {
+            const iframes = this.app.dom?.readerContentArea?.querySelectorAll?.('iframe') || []
+            for (const el of iframes) {
+                if (el?.contentDocument === doc) {
+                    iframe = el
+                    break
+                }
+            }
+        }
+        const iframeRect = (iframe || this.app.foliateView).getBoundingClientRect()
+        const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
+        const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
+        return {
+            top: iframeRect.top + ((rect.top || 0) * scaleY),
+            left: iframeRect.left + ((rect.left || 0) * scaleX),
+            width: (rect.width || 80) * scaleX,
+            height: (rect.height || 24) * scaleY
+        }
+    }
+
+    async onHighlightClicked(value, range, meta = {}) {
         this.app.cancelPendingReaderUIToggle()
         this.hideSelectionPopup()
         this.app.cards?.hideDictionaryCard?.()
@@ -403,86 +644,137 @@ export class AnnotationsDrawerController {
         this.app.cards?.hideFootnotePopup?.()
         if (!range) return
         try {
-            const rect = range.getBoundingClientRect()
-            const doc = range.startContainer?.ownerDocument
-            const contentsIframe = doc?.defaultView?.frameElement
-            let iframe = contentsIframe
-            if (!iframe) {
-                const iframes = this.app.dom?.readerContentArea?.querySelectorAll?.('iframe') || []
-                for (const el of iframes) {
-                    if (el?.contentDocument === doc) {
-                        iframe = el
-                        break
+            const absRect = this._computeRangeAbsRect(range)
+            const hl = await this.findHighlightByCFI(value)
+            if (meta?.hitBadge && hl) {
+                this.hideHighlightActionPopup()
+                this.noteComposer.open({
+                    title: t('annotations.editNoteTitle'),
+                    quoteText: hl.text || '',
+                    initialNote: hl.note || '',
+                    initialColor: hl.color || DEFAULT_HIGHLIGHT_COLOR,
+                    showColorPicker: true,
+                    anchorRect: absRect,
+                    onSave: async ({ note, color }) => {
+                        await this.updateHighlightNote(hl.id, note, color)
                     }
-                }
+                })
+                return
             }
-            const iframeRect = (iframe || this.app.foliateView).getBoundingClientRect()
-            const scaleX = iframe?.offsetWidth ? (iframeRect.width / iframe.offsetWidth) : 1
-            const scaleY = iframe?.offsetHeight ? (iframeRect.height / iframe.offsetHeight) : 1
-            const absRect = {
-                top: iframeRect.top + ((rect.top || 0) * scaleY),
-                left: iframeRect.left + ((rect.left || 0) * scaleX),
-                width: (rect.width || 80) * scaleX,
-                height: (rect.height || 24) * scaleY
-            }
-            this.clickedHighlightInfo = { value, range, rect: absRect }
+
+            this.clickedHighlightInfo = { value, range, rect: absRect, index: meta?.index }
+            this._syncHighlightActionUi(hl)
             this.showHighlightActionPopup(absRect)
+
+            if (hl && hl.formatType !== 'pdf' && !hl.pdfTarget && this.app.foliateView) {
+                const sectionIdx = Number.isInteger(meta?.index) ? meta.index : (this.app.foliateView.resolveCFI?.(hl.cfi)?.index ?? 0)
+                const isDark = ['dark', 'black'].includes(document.documentElement?.getAttribute?.('data-theme'))
+                this.rangeEditor.attach({
+                    highlight: hl,
+                    range,
+                    sectionIndex: sectionIdx,
+                    foliateView: this.app.foliateView,
+                    color: getHighlightUiHex(hl.color || DEFAULT_HIGHLIGHT_COLOR, isDark),
+                })
+            }
         } catch (e) {
             console.warn('onHighlightClicked error:', e)
         }
     }
 
-    async createHighlight(color, style = 'highlight', note = '', targetRef = null) {
+    async createHighlight(color, style = null, note = '', targetRef = null) {
         const activeSession = this.app._activeSession
         const snapshot = this.app._currentSnapshot || {}
         const bookId = targetRef?.bookId || activeSession?.bookId || this.app.currentBookId
         if (!bookId || (activeSession && !activeSession.isCurrent())) return
         const target = targetRef || this.selectedTextInfo || this._frozenSelectionSnapshot
         if (!target && (!this.multiSelectedRanges || this.multiSelectedRanges.length === 0)) return
-        
-        const colorVal = color || '#facc15'
+
+        const effectiveStyle = (style && VALID_PEN_STYLES.has(style)) ? style : (this.activePenStyle || 'highlight')
+        const colorVal = normalizeHighlightColor(color || this.activePenColor || DEFAULT_HIGHLIGHT_COLOR)
         const targetBlobRevision = targetRef ? (targetRef.blobRevision || (targetRef.bookId === this.app.currentBookId ? snapshot.blobRevision : null)) : snapshot.blobRevision
         const targetRevisionOrigin = targetRef ? (targetRef.revisionOrigin || (targetRef.bookId === this.app.currentBookId ? snapshot.revisionOrigin : null)) : snapshot.revisionOrigin
         const targetDocHash = targetRef ? (targetRef.documentHash || (targetRef.bookId === this.app.currentBookId ? snapshot.documentHash : null)) : snapshot.documentHash
 
-        // Multi-range batch creation
+        // Multi-range batch creation (supports both EPUB and PDF multi-select)
         if (!targetRef && this.multiSelectedRanges && this.multiSelectedRanges.length > 1) {
             const rangesToProcess = [...this.multiSelectedRanges]
             this.clearVirtualMultiSelections()
+            const resolvedStyle = style || this.activePenStyle || 'highlight'
+            const resolvedColor = normalizeHighlightColor(colorVal)
+            const batchRecords = []
+            let hasPdfItems = false
             for (const item of rangesToProcess) {
                 if (activeSession && !activeSession.isCurrent()) return
+                const text = (item.text || '').trim()
+                if (!text) continue
+
+                if (this.app.pdfViewport && (item.formatType === 'pdf' || item.pdfTarget)) {
+                    const chapterTitle = item.chapterTitle || this._resolveChapterTitleForSelection({ pdfTarget: item.pdfTarget })
+                    batchRecords.push({
+                        id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                        bookId: bookId,
+                        formatType: 'pdf',
+                        text: text,
+                        color: resolvedColor,
+                        style: resolvedStyle,
+                        note: batchRecords.length === 0 ? note : '',
+                        chapterTitle,
+                        createdAt: Date.now(),
+                        blobRevision: targetBlobRevision,
+                        revisionOrigin: targetRevisionOrigin,
+                        documentHash: targetDocHash,
+                        pdfTarget: item.pdfTarget
+                    })
+                    hasPdfItems = true
+                    continue
+                }
+
                 const cfi = item.cfi
-                const text = item.text.trim()
-                if (!text || !cfi) continue
-                const hl = {
+                if (!cfi) continue
+                const chapterTitle = item.chapterTitle || this._resolveChapterTitleForSelection({ range: item.range })
+                batchRecords.push({
                     id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                     bookId: bookId,
                     cfi: cfi,
                     text: text,
-                    color: colorVal,
-                    style: style,
-                    note: note,
-                    chapterTitle: this.app.currentLocation?.tocItem?.label || t('annotations.bodyFallback'),
+                    color: resolvedColor,
+                    style: resolvedStyle,
+                    note: batchRecords.length === 0 ? note : '',
+                    chapterTitle,
                     createdAt: Date.now(),
                     blobRevision: targetBlobRevision,
                     revisionOrigin: targetRevisionOrigin,
                     documentHash: targetDocHash
+                })
+            }
+
+            const createdCount = batchRecords.length
+            if (createdCount > 0) {
+                if (typeof db.saveHighlightsBatch === 'function') {
+                    await db.saveHighlightsBatch(batchRecords)
+                } else {
+                    for (const hl of batchRecords) await db.saveHighlight(hl)
                 }
-                await db.saveHighlight(hl)
                 if (activeSession && !activeSession.isCurrent()) return
-                if (this.app.foliateView && cfi) {
-                    try {
-                        await this.app.foliateView.addAnnotation({
-                            value: `${cfi}::${style}`,
-                            id: hl.id,
-                            color: hl.color,
-                            style: hl.style
-                        })
-                    } catch (e) {}
+                if (this.app.foliateView) {
+                    for (const hl of batchRecords) {
+                        if (hl.cfi) {
+                            try { await this.app.foliateView.addAnnotation(this._buildFoliateAnnotation(hl)) } catch {}
+                        }
+                    }
                 }
+                this._pushUndoEntry({ type: 'create', items: batchRecords.map(x => ({ ...x })) })
             }
             if (activeSession && !activeSession.isCurrent()) return
-            this.app.dialogs.showToast(t('annotations.addedMulti', { count: rangesToProcess.length }), 'success')
+            if (hasPdfItems && this.app.pdfViewport) {
+                const allHls = await db.getHighlightsByBook(bookId)
+                if (activeSession && !activeSession.isCurrent()) return
+                this.app.pdfViewport.setHighlights(allHls, snapshot)
+            }
+            if (createdCount > 0) {
+                this.app.dialogs.showToast(t('annotations.addedMulti', { count: createdCount }), 'success')
+            }
             this.updateSidebarNotesCount()
             this.clearActiveTextSelection()
             this.hideSelectionPopup()
@@ -493,15 +785,16 @@ export class AnnotationsDrawerController {
         const text = (target.text || target.selectedText || targetRef?.selectedText || targetRef?.text || '').trim()
 
         if (this.app.pdfViewport && (target?.formatType === 'pdf' || target?.pdfTarget)) {
+            const chapterTitle = targetRef?.chapterTitle || this._resolveChapterTitleForSelection({ pdfTarget: target.pdfTarget })
             const hl = {
                 id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 bookId: bookId,
                 formatType: 'pdf',
                 text: text,
                 color: colorVal,
-                style: style,
+                style: effectiveStyle,
                 note: note,
-                chapterTitle: targetRef?.chapterTitle || this.app.currentLocation?.tocItem?.label || t('annotations.bodyFallback'),
+                chapterTitle,
                 createdAt: Date.now(),
                 blobRevision: targetBlobRevision,
                 revisionOrigin: targetRevisionOrigin,
@@ -510,6 +803,7 @@ export class AnnotationsDrawerController {
             }
             await db.saveHighlight(hl)
             if (activeSession && !activeSession.isCurrent()) return
+            this._pushUndoEntry({ type: 'create', items: [{ ...hl }] })
             const allHls = await db.getHighlightsByBook(bookId)
             if (activeSession && !activeSession.isCurrent()) return
             this.app.pdfViewport.setHighlights(allHls, snapshot)
@@ -517,6 +811,7 @@ export class AnnotationsDrawerController {
                 this.clearActiveTextSelection()
                 this.hideSelectionPopup()
             }
+            this.updateSidebarNotesCount()
             this.loadNotesList()
             this.app.dialogs.showToast(t('annotations.addedHighlight'), 'success')
             return
@@ -527,39 +822,30 @@ export class AnnotationsDrawerController {
         // 1. Check if an annotation of the EXACT SAME style already exists on this CFI for current content identity
         const existingNotes = await db.getHighlightsByBook(bookId)
         if (activeSession && !activeSession.isCurrent()) return
-        const matched = existingNotes.find(n => n.cfi === cfi && (n.style || 'highlight') === style && db.isContentIdentityMatching(n, snapshot).matches)
+        const matched = existingNotes.find(n => n.cfi === cfi && (n.style || 'highlight') === effectiveStyle && db.isContentIdentityMatching(n, snapshot).matches)
 
         if (matched) {
-            // If user clicked the same color/style with no new note -> TOGGLE OFF / CANCEL THIS STYLE!
-            if (!note && matched.color === colorVal) {
-                await db.deleteHighlight(matched.id)
-                if (activeSession && !activeSession.isCurrent()) return
-                if (this.app.foliateView && matched.cfi) {
-                    await this.app.foliateView.deleteAnnotation({ value: `${matched.cfi}::${style}`, id: matched.id })
-                }
+            if (!note && normalizeHighlightColor(matched.color) === colorVal) {
                 this.clearActiveTextSelection()
                 this.hideSelectionPopup()
-                this.loadNotesList()
                 return
             }
 
             // Update color or note of existing annotation of this style
+            const before = { ...matched }
             matched.color = colorVal
             if (note) matched.note = note
             if (cfi) matched.cfi = cfi
+            matched.updatedAt = Date.now()
             await db.saveHighlight(matched)
             if (activeSession && !activeSession.isCurrent()) return
 
             if (this.app.foliateView && matched.cfi) {
                 try {
-                    await this.app.foliateView.addAnnotation({
-                        value: `${matched.cfi}::${style}`,
-                        id: matched.id,
-                        color: matched.color,
-                        style: matched.style
-                    })
+                    await this.app.foliateView.addAnnotation(this._buildFoliateAnnotation(matched))
                 } catch (err) {}
             }
+            this._pushUndoEntry({ type: 'restyle', before, after: { ...matched } })
 
             if (!targetRef) {
                 this.clearActiveTextSelection()
@@ -570,15 +856,16 @@ export class AnnotationsDrawerController {
         }
 
         // 2. New Highlight Record (coexists with other styles like highlight + underline!)
+        const chapterTitle = targetRef?.chapterTitle || this._resolveChapterTitleForSelection({ range: target.range })
         const hl = {
             id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             bookId: bookId,
             cfi: cfi,
             text: text,
             color: colorVal,
-            style: style,
+            style: effectiveStyle,
             note: note,
-            chapterTitle: targetRef?.chapterTitle || this.app.currentLocation?.tocItem?.label || t('annotations.bodyFallback'),
+            chapterTitle,
             createdAt: Date.now(),
             blobRevision: targetBlobRevision,
             revisionOrigin: targetRevisionOrigin,
@@ -591,74 +878,144 @@ export class AnnotationsDrawerController {
         // Draw annotation immediately onto foliate-view
         if (this.app.foliateView && cfi) {
             try {
-                await this.app.foliateView.addAnnotation({
-                    value: `${cfi}::${style}`,
-                    id: hl.id,
-                    color: hl.color,
-                    style: hl.style
-                })
+                await this.app.foliateView.addAnnotation(this._buildFoliateAnnotation(hl))
             } catch (err) {
                 console.warn('Failed to draw annotation:', err)
             }
         }
+        this._pushUndoEntry({ type: 'create', items: [{ ...hl }] })
 
         if (!targetRef) {
             this.clearActiveTextSelection()
             this.hideSelectionPopup()
         }
 
+        this.updateSidebarNotesCount()
         this.loadNotesList()
         this.app.dialogs.showToast(t('annotations.addedHighlight'), 'success')
     }
 
+    async restyleHighlight(value, { color = null, style = null } = {}, { skipUndo = false } = {}) {
+        const hl = await this.findHighlightByCFI(value)
+        if (!hl) return false
+        const prevColor = normalizeHighlightColor(hl.color || DEFAULT_HIGHLIGHT_COLOR)
+        const prevStyle = hl.style || 'highlight'
+        const nextColor = color != null ? normalizeHighlightColor(color) : prevColor
+        const nextStyle = (style && VALID_PEN_STYLES.has(style)) ? style : prevStyle
+
+        // Re-clicking the exact same color and style is a safe no-op (use Del to delete).
+        if (nextColor === prevColor && nextStyle === prevStyle) {
+            return true
+        }
+
+        const before = { ...hl }
+        hl.color = nextColor
+        hl.style = nextStyle
+        hl.updatedAt = Date.now()
+        await db.saveHighlight(hl)
+
+        if (this.app.foliateView && hl.cfi) {
+            if (prevStyle !== nextStyle) {
+                try {
+                    await this.app.foliateView.deleteAnnotation({ value: `${hl.cfi}::${prevStyle}`, id: hl.id })
+                } catch {}
+            }
+            try {
+                await this.app.foliateView.addAnnotation(this._buildFoliateAnnotation(hl))
+            } catch {}
+        }
+        if (this.app.pdfViewport) {
+            const allHls = await db.getHighlightsByBook(this.app.currentBookId)
+            this.app.pdfViewport.setHighlights(allHls, this.app._currentSnapshot)
+        }
+        if (!skipUndo) {
+            this._pushUndoEntry({ type: 'restyle', before, after: { ...hl } })
+        }
+        if (this.clickedHighlightInfo) {
+            this.clickedHighlightInfo.value = `${hl.cfi}::${nextStyle}`
+            this._syncHighlightActionUi(hl)
+        }
+        this.loadNotesList()
+        return true
+    }
+
     async updateHighlightColor(value, newColor) {
-        const hl = await this.findHighlightByCFI(value)
-        if (hl) {
-            // If user clicked the SAME color again -> TOGGLE OFF / CANCEL HIGHLIGHT!
-            if (hl.color === newColor) {
-                await this.deleteHighlightByCFI(value)
-                this.clearActiveTextSelection()
-                this.hideHighlightActionPopup()
-                return
-            }
-
-            hl.color = newColor
-            await db.saveHighlight(hl)
-            // Re-add to redraw color
-            if (this.app.foliateView) {
-                await this.app.foliateView.addAnnotation({
-                    value: `${hl.cfi}::${hl.style || 'highlight'}`,
-                    id: hl.id,
-                    color: newColor,
-                    style: hl.style || 'highlight'
-                })
-            }
-            if (this.app.pdfViewport) {
-                const allHls = await db.getHighlightsByBook(this.app.currentBookId)
-                this.app.pdfViewport.setHighlights(allHls, this.app._currentSnapshot)
-            }
-            this.loadNotesList()
-            this.clearActiveTextSelection()
-            this.hideHighlightActionPopup()
-        }
+        return this.restyleHighlight(value, { color: newColor })
     }
 
-    async updateHighlightNote(value, newNote) {
+    async updateHighlightRange({ oldHighlight, newCfi, newText, newRange } = {}, { skipUndo = false } = {}) {
+        if (!oldHighlight || !newCfi || !newText) return false
+        const current = await this.findHighlightByCFI(oldHighlight.id)
+        if (!current) return false
+        const before = { ...current }
+        current.cfi = newCfi
+        current.text = newText
+        current.updatedAt = Date.now()
+        await db.saveHighlight(current)
+
+        const style = current.style || 'highlight'
+        if (this.app.foliateView) {
+            if (before.cfi) {
+                try {
+                    await this.app.foliateView.deleteAnnotation({ value: `${before.cfi}::${style}`, id: current.id })
+                } catch {}
+            }
+            try {
+                await this.app.foliateView.addAnnotation(this._buildFoliateAnnotation(current))
+            } catch {}
+        }
+        if (!skipUndo) {
+            this._pushUndoEntry({ type: 'range-edit', before, after: { ...current } })
+        }
+        if (this.clickedHighlightInfo) {
+            const absRect = newRange ? this._computeRangeAbsRect(newRange) : this.clickedHighlightInfo.rect
+            this.clickedHighlightInfo = {
+                ...this.clickedHighlightInfo,
+                value: `${newCfi}::${style}`,
+                range: newRange || this.clickedHighlightInfo.range,
+                rect: absRect,
+            }
+            if (absRect) this.showHighlightActionPopup(absRect)
+            this._syncHighlightActionUi(current)
+        }
+        this.loadNotesList()
+        return true
+    }
+
+    async updateHighlightNote(value, newNote, newColor = null) {
         const hl = await this.findHighlightByCFI(value)
         if (hl) {
+            const hadNote = Boolean((hl.note || '').trim())
+            const willHaveNote = Boolean((newNote || '').trim())
             hl.note = newNote
+            const normNew = newColor ? normalizeHighlightColor(newColor) : null
+            const colorChanged = Boolean(normNew && normNew !== normalizeHighlightColor(hl.color))
+            if (colorChanged) hl.color = normNew
+            hl.updatedAt = Date.now()
             await db.saveHighlight(hl)
+            if (colorChanged || hadNote !== willHaveNote || willHaveNote) {
+                if (this.app.foliateView && hl.cfi) {
+                    try {
+                        await this.app.foliateView.addAnnotation(this._buildFoliateAnnotation(hl))
+                    } catch (_) {}
+                }
+                if (this.app.pdfViewport && colorChanged) {
+                    const allHls = await db.getHighlightsByBook(this.app.currentBookId)
+                    this.app.pdfViewport.setHighlights(allHls, this.app._currentSnapshot)
+                }
+            }
             this.loadNotesList()
             this.clearActiveTextSelection()
             this.hideHighlightActionPopup()
         }
     }
 
-    async deleteHighlightByCFI(value) {
+    async deleteHighlightByCFI(value, { skipUndo = false } = {}) {
         const hl = await this.findHighlightByCFI(value)
         if (hl) {
+            const before = { ...hl }
             await db.deleteHighlight(hl.id)
-        this.updateSidebarNotesCount()
+            this.updateSidebarNotesCount()
             if (this.app.foliateView) {
                 await this.app.foliateView.deleteAnnotation({ value: `${hl.cfi}::${hl.style || 'highlight'}`, id: hl.id })
             }
@@ -666,8 +1023,223 @@ export class AnnotationsDrawerController {
                 const allHls = await db.getHighlightsByBook(this.app.currentBookId)
                 this.app.pdfViewport.setHighlights(allHls, this.app._currentSnapshot)
             }
+            if (!skipUndo) {
+                this._pushUndoEntry({ type: 'delete', items: [before] })
+            }
             this.loadNotesList()
         }
+    }
+
+    async undoLastAnnotationAction() {
+        const entry = this._undoStack.pop()
+        if (!entry) return false
+        this.rangeEditor?.hide?.({ commitPending: false })
+        this.hideHighlightActionPopup()
+        const bookId = this.app.currentBookId
+        const snapshot = this.app._currentSnapshot
+
+        if (entry.type === 'create') {
+            for (const hl of entry.items || []) {
+                await db.deleteHighlight(hl.id)
+                if (this.app.foliateView && hl.cfi) {
+                    try { await this.app.foliateView.deleteAnnotation({ value: `${hl.cfi}::${hl.style || 'highlight'}`, id: hl.id }) } catch {}
+                }
+            }
+        } else if (entry.type === 'delete') {
+            const items = entry.items || []
+            if (typeof db.saveHighlightsBatch === 'function') await db.saveHighlightsBatch(items)
+            else for (const hl of items) await db.saveHighlight(hl)
+            if (this.app.foliateView) {
+                for (const hl of items) {
+                    if (hl.cfi) {
+                        try { await this.app.foliateView.addAnnotation(this._buildFoliateAnnotation(hl)) } catch {}
+                    }
+                }
+            }
+        } else if (entry.type === 'restyle' || entry.type === 'range-edit') {
+            const { before, after } = entry
+            if (before) {
+                await db.saveHighlight(before)
+                if (this.app.foliateView) {
+                    if (after?.cfi) {
+                        try { await this.app.foliateView.deleteAnnotation({ value: `${after.cfi}::${after.style || 'highlight'}`, id: before.id }) } catch {}
+                    }
+                    if (before.cfi) {
+                        try { await this.app.foliateView.addAnnotation(this._buildFoliateAnnotation(before)) } catch {}
+                    }
+                }
+            }
+        }
+
+        if (this.app.pdfViewport && bookId) {
+            const allHls = await db.getHighlightsByBook(bookId)
+            this.app.pdfViewport.setHighlights(allHls, snapshot)
+        }
+        this.updateSidebarNotesCount()
+        this.loadNotesList()
+        this.app.dialogs?.showToast?.(t('annotations.undoToast'), 'info')
+        return true
+    }
+
+    armCrossPageAnchor() {
+        const sel = this.selectedTextInfo || this._frozenSelectionSnapshot
+        if (!sel || !sel.cfi || !this.app.foliateView) return false
+        this._crossPageAnchor = {
+            bookId: this.app.currentBookId,
+            index: sel.index,
+            cfi: sel.cfi,
+            text: (sel.text || '').trim().slice(0, 32),
+        }
+        if (this.dom.epubAnchorText) {
+            this.dom.epubAnchorText.textContent = t('reader.anchorArmedSnippet', { snippet: this._crossPageAnchor.text })
+        }
+        if (this.dom.epubAnchorBanner) this.dom.epubAnchorBanner.hidden = false
+        this.clearActiveTextSelection()
+        this.hideSelectionPopup()
+        return true
+    }
+
+    clearCrossPageAnchor() {
+        this._crossPageAnchor = null
+        if (this.dom.epubAnchorBanner) this.dom.epubAnchorBanner.hidden = true
+    }
+
+    tryCompleteCrossPageAnchor(endSelection) {
+        const anchor = this._crossPageAnchor
+        if (!anchor || anchor.bookId !== this.app.currentBookId || !this.app.foliateView) return null
+        if (endSelection.index !== anchor.index) {
+            this.app.dialogs?.showToast?.(t('reader.anchorCrossChapterNotice'), 'info')
+            this.clearCrossPageAnchor()
+            return null
+        }
+        try {
+            const doc = endSelection.range?.startContainer?.ownerDocument
+            const resolved = this.app.foliateView.resolveCFI?.(anchor.cfi)
+            const startRange = resolved?.anchor && doc ? resolved.anchor(doc) : null
+            if (!startRange || !doc) return null
+
+            const cmp = startRange.compareBoundaryPoints(Range.START_TO_START, endSelection.range)
+            const merged = doc.createRange()
+            if (cmp <= 0) {
+                merged.setStart(startRange.startContainer, startRange.startOffset)
+                merged.setEnd(endSelection.range.endContainer, endSelection.range.endOffset)
+            } else {
+                merged.setStart(endSelection.range.startContainer, endSelection.range.startOffset)
+                merged.setEnd(startRange.endContainer, startRange.endOffset)
+            }
+            const mergedText = merged.toString().trim()
+            const mergedCfi = this.app.foliateView.getCFI(endSelection.index, merged)
+            this.clearCrossPageAnchor()
+            if (!mergedText || !mergedCfi) return null
+            return {
+                ...endSelection,
+                text: mergedText,
+                cfi: mergedCfi,
+                range: merged,
+                rect: this._computeRangeAbsRect(merged),
+            }
+        } catch (err) {
+            console.warn('[Annotations] Cross-page anchor merge failed:', err)
+            this.clearCrossPageAnchor()
+            return null
+        }
+    }
+
+    clearPortalAnchor() {
+        this._portalAnchor = null
+        if (this.dom.portalBanner) this.dom.portalBanner.hidden = true
+        this.dom.hlActionPortal?.classList?.remove('active')
+    }
+
+    async handlePortalActionForHighlight(hl) {
+        if (!hl || !this.app.currentBookId) return
+        const currentLocation = hl.cfi || hl.pdfTarget || null
+        if (!currentLocation) return
+
+        const currentEndpoint = {
+            bookId: this.app.currentBookId,
+            bookTitle: this.app.currentBookData?.title || t('book.untitled'),
+            highlightId: hl.id,
+            cfi: hl.cfi || null,
+            pdfTarget: hl.pdfTarget || null,
+            formatType: hl.formatType || this.app.currentBookData?.format || 'epub',
+            label: (hl.text || '').trim().slice(0, 60) || t('annotations.portalUntitledSpot'),
+        }
+
+        if (!this._portalAnchor) {
+            this._portalAnchor = currentEndpoint
+            if (this.dom.portalBannerText) {
+                this.dom.portalBannerText.textContent = t('reader.portalArmedLabel', { label: currentEndpoint.label.slice(0, 20) })
+            }
+            if (this.dom.portalBanner) this.dom.portalBanner.hidden = false
+            this.dom.hlActionPortal?.classList?.add('active')
+            this.hideHighlightActionPopup()
+            this.app.dialogs?.showToast?.(t('annotations.portalArmedToast'), 'info')
+            return
+        }
+
+        if (this._portalAnchor.highlightId === currentEndpoint.highlightId && String(this._portalAnchor.bookId) === String(currentEndpoint.bookId)) {
+            this.app.dialogs?.showToast?.(t('annotations.portalSameTargetToast'), 'warning')
+            return
+        }
+
+        const now = Date.now()
+        const portal = {
+            id: `ptl_${now}_${Math.random().toString(36).slice(2, 6)}`,
+            sourceBookId: this._portalAnchor.bookId,
+            sourceBookTitle: this._portalAnchor.bookTitle,
+            sourceHighlightId: this._portalAnchor.highlightId,
+            sourceCfi: this._portalAnchor.cfi,
+            sourcePdfTarget: this._portalAnchor.pdfTarget,
+            sourceFormat: this._portalAnchor.formatType,
+            sourceLabel: this._portalAnchor.label,
+            targetBookId: currentEndpoint.bookId,
+            targetBookTitle: currentEndpoint.bookTitle,
+            targetHighlightId: currentEndpoint.highlightId,
+            targetCfi: currentEndpoint.cfi,
+            targetPdfTarget: currentEndpoint.pdfTarget,
+            targetFormat: currentEndpoint.formatType,
+            targetLabel: currentEndpoint.label,
+            createdAt: now,
+            updatedAt: now,
+        }
+        await db.savePortal(portal)
+        this.clearPortalAnchor()
+        this.hideHighlightActionPopup()
+        await this.loadNotesList()
+        this.app.dialogs?.showToast?.(t('annotations.portalCreatedToast'), 'success')
+    }
+
+    async navigateToPortal(portal, currentBookId) {
+        if (!portal) return
+        const isSourceCurrent = String(portal.sourceBookId) === String(currentBookId)
+        const destBookId = isSourceCurrent ? portal.targetBookId : portal.sourceBookId
+        const destCfi = isSourceCurrent ? portal.targetCfi : portal.sourceCfi
+        const destPdfTarget = isSourceCurrent ? portal.targetPdfTarget : portal.sourcePdfTarget
+        const destHighlightId = isSourceCurrent ? portal.targetHighlightId : portal.sourceHighlightId
+
+        if (String(destBookId) === String(currentBookId)) {
+            this.app.navHistory?.pushLocation()
+            this.closeDrawer()
+            if (this.app.pdfViewport && destPdfTarget) {
+                const seg = Array.isArray(destPdfTarget.segments) ? destPdfTarget.segments[0] : destPdfTarget
+                const page = seg?.page ?? 0
+                const rects = seg?.rects || []
+                this.app.pdfViewport.goToPage(page, rects[0]?.[1] || 0)
+                if (destHighlightId) this.app.pdfViewport.pulseHighlight?.(page, destHighlightId, rects)
+            } else if (destCfi && this.app.foliateView) {
+                await this.app.foliateView.goTo(destCfi)
+                this._triggerEpubLocatePulse(destCfi)
+            }
+            return
+        }
+
+        const seg = Array.isArray(destPdfTarget?.segments) ? destPdfTarget.segments[0] : destPdfTarget
+        const loc = destCfi
+            ? { cfi: destCfi, highlightId: destHighlightId, isHighlightJump: true }
+            : (seg ? { page: (seg.page ?? 0) + 1, yRatio: seg.rects?.[0]?.[1] || 0, highlightId: destHighlightId, isHighlightJump: true } : null)
+        this.closeDrawer()
+        await this.app.openBook(destBookId, loc, { peek: true })
     }
 
     async findHighlightByCFI(value) {
@@ -1020,7 +1592,9 @@ export class AnnotationsDrawerController {
         const snapshot = this.app._currentSnapshot
         const bookId = this.app.currentBookId
         const allNotes = await db.getHighlightsByBook(bookId)
+        const portals = typeof db.getPortalsByBook === 'function' ? await db.getPortalsByBook(bookId) : []
         if (activeSession && !activeSession.isCurrent()) return
+        this._renderPortalsHost(portals, bookId)
         const container = this.dom.notesContainer
         container.innerHTML = ''
 
@@ -1043,25 +1617,32 @@ export class AnnotationsDrawerController {
         notes.forEach(note => {
             const match = snapshot ? db.isContentIdentityMatching(note, snapshot) : { matches: true }
             const isUnconfirmed = !match.matches
+            const displayAccent = mapHighlightDisplayColor(note.color || '#facc15')
 
             const card = document.createElement('div')
-            card.className = 'highlight-card'
-            card.style.borderLeftColor = mapHighlightDisplayColor(note.color || '#facc15')
+            card.className = `highlight-card${note.note ? ' has-user-note' : ''}`
+            card.style.setProperty('--hl-accent', displayAccent)
 
             card.innerHTML = `
                 <div class="highlight-text">“${escapeHTML(note.text)}”</div>
-                ${note.note ? `<div class="highlight-note">${escapeHTML(note.note)}</div>` : ''}
+                ${note.note ? `
+                    <div class="highlight-note">
+                        <span class="highlight-note-label">${escapeHTML(t('annotations.thoughtBadge'))}</span>
+                        <div class="highlight-note-body">${escapeHTML(note.note)}</div>
+                    </div>
+                ` : ''}
                 <div class="highlight-meta">
                     <span class="highlight-meta-info">${escapeHTML(note.chapterTitle || t('annotations.bodyFallback'))} • ${new Date(note.createdAt).toLocaleDateString(getLocale())}</span>
                     <div class="highlight-meta-actions">
+                        <button class="btn-note-edit" title="${escapeHTML(t('annotations.notes.editTitle'))}">${escapeHTML(t('annotations.notes.editBtn'))}</button>
                         <button class="btn-note-share" title="${escapeHTML(t('annotations.notes.shareTitle'))}">${escapeHTML(t('annotations.notes.shareBtn'))}</button>
                         <button class="btn-note-del" title="${escapeHTML(t('annotations.notes.deleteTitle'))}">${escapeHTML(t('common.delete'))}</button>
                     </div>
                 </div>
             `
 
-            card.addEventListener('click', e => {
-                if (e.target.classList.contains('btn-note-del') || e.target.classList.contains('btn-note-share')) return
+            card.addEventListener('click', async e => {
+                if (e.target.closest('.btn-note-del, .btn-note-share, .btn-note-edit')) return
                 if (isUnconfirmed) {
                     this.app.dialogs.showToast(t('annotations.notes.versionMismatch'), 'warning')
                     return
@@ -1074,12 +1655,28 @@ export class AnnotationsDrawerController {
                     const firstRect = rects?.[0]
                     const yRatio = firstRect ? firstRect[1] : 0
                     this.app.pdfViewport.goToPage(page, yRatio)
-                    this.app.pdfViewport.pulseHighlight(page, note.id, rects)
+                    this.app.pdfViewport.pulseHighlight(page, note.id, rects, note.color)
                     this.closeDrawer()
                 } else if (note.cfi && this.app.foliateView) {
-                    this.app.foliateView.goTo(note.cfi)
                     this.closeDrawer()
+                    await this.app.foliateView.goTo(note.cfi)
+                    this._triggerEpubLocatePulse(note.cfi, note.color || '#facc15')
                 }
+            })
+
+            card.querySelector('.btn-note-edit')?.addEventListener('click', e => {
+                e.stopPropagation()
+                this.noteComposer.open({
+                    title: t('annotations.editNoteTitle'),
+                    quoteText: note.text || '',
+                    initialNote: note.note || '',
+                    initialColor: note.color || '#facc15',
+                    showColorPicker: true,
+                    preferSidebar: true,
+                    onSave: async ({ note: nextNote, color: nextColor }) => {
+                        await this.updateHighlightNote(note.id, nextNote, nextColor)
+                    }
+                })
             })
 
             card.querySelector('.btn-note-share')?.addEventListener('click', async e => {
@@ -1121,13 +1718,62 @@ export class AnnotationsDrawerController {
                     this.app.pdfViewport.setHighlights(allHls, snapshot)
                 }
                 if (this.app.foliateView && note.cfi) {
-                    await this.app.foliateView.deleteAnnotation({ value: note.cfi, id: note.id })
+                    await this.app.foliateView.deleteAnnotation({ value: `${note.cfi}::${note.style || 'highlight'}`, id: note.id })
+                    await this.app.foliateView.deleteAnnotation({ value: note.cfi, id: note.id }).catch(() => {})
                 }
                 this.loadNotesList()
             })
 
             container.appendChild(card)
         })
+    }
+
+    _renderPortalsHost(portals, currentBookId) {
+        const host = this.dom.portalsHost || (typeof document !== 'undefined' ? document.getElementById('reader-portals-host') : null)
+        if (!host) return
+        if (!Array.isArray(portals) || portals.length === 0) {
+            host.hidden = true
+            host.replaceChildren()
+            return
+        }
+        host.hidden = false
+        host.replaceChildren()
+        const heading = document.createElement('div')
+        heading.className = 'reader-portals-heading'
+        heading.textContent = t('annotations.portalsHeading', { count: portals.length })
+        host.appendChild(heading)
+
+        for (const ptl of portals) {
+            const isSourceCurrent = String(ptl.sourceBookId) === String(currentBookId)
+            const destBookTitle = isSourceCurrent ? ptl.targetBookTitle : ptl.sourceBookTitle
+            const destLabel = isSourceCurrent ? ptl.targetLabel : ptl.sourceLabel
+            const isCrossBook = String(ptl.sourceBookId) !== String(ptl.targetBookId)
+            const chipText = isCrossBook
+                ? `↗ ${destBookTitle}: ${destLabel}`
+                : `⇄ ${destLabel}`
+
+            const row = document.createElement('div')
+            row.className = 'reader-portal-chip-row'
+            const chip = document.createElement('button')
+            chip.type = 'button'
+            chip.className = 'reader-portal-chip'
+            chip.textContent = chipText
+            chip.title = chipText
+            chip.addEventListener('click', () => this.navigateToPortal(ptl, currentBookId))
+
+            const del = document.createElement('button')
+            del.type = 'button'
+            del.className = 'reader-portal-del-btn'
+            del.textContent = '×'
+            del.title = t('common.delete')
+            del.addEventListener('click', async e => {
+                e.stopPropagation()
+                await db.deletePortal(ptl.id)
+                await this.loadNotesList()
+            })
+            row.append(chip, del)
+            host.appendChild(row)
+        }
     }
 
     async exportNotesToMarkdown() {
@@ -1402,7 +2048,7 @@ export class AnnotationsDrawerController {
             if (selectedColor === 'has-note') {
                 if (!hl.note || !hl.note.trim()) return false
             } else if (selectedColor !== 'all') {
-                if (hl.color !== selectedColor) return false
+                if (!matchesHighlightColorFilter(hl.color, selectedColor)) return false
             }
             if (q) {
                 const book = bookMap.get(hl.bookId)
@@ -1499,9 +2145,9 @@ export class AnnotationsDrawerController {
                 const firstRect = rects?.[0]
                 const yRatio = firstRect ? firstRect[1] : 0
                 const loc = note.cfi
-                    ? { cfi: note.cfi }
+                    ? { cfi: note.cfi, highlightId: note.id, highlightColor: note.color || '#facc15', isHighlightJump: true }
                     : ((note.pdfTarget || note.formatType === 'pdf')
-                        ? { page: page + 1, yRatio, highlightId: note.id, rects }
+                        ? { page: page + 1, yRatio, highlightId: note.id, rects, highlightColor: note.color || '#facc15', isHighlightJump: true }
                         : null)
 
                 if (this.app.currentBookId && String(this.app.currentBookId) === String(note.bookId)) {
@@ -1513,9 +2159,10 @@ export class AnnotationsDrawerController {
                     if (this.app.dom.bookshelfView) this.app.dom.bookshelfView.style.display = 'none'
                     if (this.app.pdfViewport && (note.pdfTarget || note.formatType === 'pdf')) {
                         this.app.pdfViewport.goToPage(page, yRatio)
-                        this.app.pdfViewport.pulseHighlight?.(page, note.id, rects)
+                        this.app.pdfViewport.pulseHighlight?.(page, note.id, rects, note.color)
                     } else if (note.cfi && this.app.foliateView) {
-                        this.app.foliateView.goTo(note.cfi)
+                        await this.app.foliateView.goTo(note.cfi)
+                        this._triggerEpubLocatePulse(note.cfi, note.color || '#facc15')
                     }
                 } else {
                     await this.app.openBook(note.bookId, loc)
@@ -1661,7 +2308,7 @@ export class AnnotationsDrawerController {
             for (const hl of highlights) {
                 if (!isCurrent()) return
                 try {
-                    await view.addAnnotation({ value: `${hl.cfi}::${hl.style || 'highlight'}`, id: hl.id, color: hl.color, style: hl.style || 'highlight' })
+                    await view.addAnnotation(this._buildFoliateAnnotation(hl))
                 } catch (error) { console.warn('Failed to reload annotation:', hl.id, error) }
             }
         } catch (error) {

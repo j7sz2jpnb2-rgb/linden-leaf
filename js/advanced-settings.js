@@ -108,6 +108,8 @@ export class AdvancedSettingsManager {
     }
 
     save() {
+        let saved = true
+        let saveError = null
         try {
             localStorage.setItem(STORAGE_KEY_UNLOCKED, String(this.isUnlocked))
             // Strict sanitization: ensure no credentials ever enter localStorage
@@ -118,10 +120,25 @@ export class AdvancedSettingsManager {
             delete safeConfig.password
             delete safeConfig.token
             localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(safeConfig))
-        } catch (e) {}
+            this.lastSaveError = null
+        } catch (e) {
+            saved = false
+            saveError = e
+            this.lastSaveError = e
+            console.warn('[AdvancedSettings] Failed to persist settings to localStorage:', e)
+            const now = Date.now()
+            if (!this._lastSaveErrorToastAt || now - this._lastSaveErrorToastAt > 5000) {
+                this._lastSaveErrorToastAt = now
+                const toastFn = this.app?.dialogs?.showToast || this.app?.showToast
+                if (typeof toastFn === 'function') {
+                    toastFn.call(this.app?.dialogs || this.app, t('advancedSettings.saveFailedToast'), 'warning')
+                }
+            }
+        }
 
         this.applyRuntimeConfig()
         this.syncNativeBackendLimits()
+        return { saved, error: saveError }
     }
 
     applyRuntimeConfig() {

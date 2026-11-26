@@ -671,6 +671,34 @@ function splitTextIntoSentences(text, maxLen = 800) {
     return chunks.length > 0 ? chunks : [text]
 }
 
+/**
+ * Decide whether a <sup> element is a footnote marker (should strip from TTS speech)
+ * vs. mathematical/scientific notation or units (x², 10⁶, m², cm³ — must preserve!).
+ */
+export function shouldStripTtsSuperscript(supEl) {
+    if (!supEl) return false
+    if (supEl.matches?.('a[role="doc-noteref"], .footnote-ref, .footnote')) return true
+    if (supEl.querySelector?.('a[href], [role="doc-noteref"], .footnote-ref') || supEl.closest?.('a[href]')) return true
+
+    const txt = (supEl.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
+    if (!txt) return true
+
+    // Circled numbers, daggers, stars, section marks, explicit [1] / (1) / 注1
+    if (/^[\[（(【]/.test(txt) || /[\]）)】]$/.test(txt)) {
+        return /^[\[（(【]\s*(?:\d{1,4}|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021§¶]|注\s*\d*|[a-zA-Z])\s*[\]）)】]$/.test(txt)
+    }
+    if (/^(?:[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021§¶]|注\s*\d*)$/.test(txt)) return true
+
+    // Preserve numeric/variable exponents immediately following math/unit bases (x^2, 10^6, m^2, kg^-1)
+    const prevText = supEl.previousSibling?.textContent || ''
+    const prevChar = prevText.slice(-1)
+    if (prevChar && /[a-zA-Z0-9)\]°℃℉%μ]/.test(prevChar) && /^[+-]?\d{1,3}$|^[a-zA-Z]$/.test(txt)) {
+        return false
+    }
+
+    return /^\d{1,4}$/.test(txt)
+}
+
 export class TtsPlayer {
     constructor() {
         this.state = 'idle' // 'idle' | 'preparing' | 'playing' | 'paused' | 'stopped'
@@ -962,9 +990,12 @@ export class TtsPlayer {
                     }
                     if (el.offsetParent === null && !el.getClientRects().length) continue
 
-                    // Clean out footnote tags and markers before reading
+                    // Clean out footnote tags and markers before reading while preserving math/unit superscripts
                     const clone = el.cloneNode(true)
-                    clone.querySelectorAll('sup, a[role="doc-noteref"], .footnote-ref, .footnote').forEach(n => n.remove())
+                    clone.querySelectorAll('a[role="doc-noteref"], .footnote-ref, .footnote').forEach(n => n.remove())
+                    clone.querySelectorAll('sup').forEach(sup => {
+                        if (shouldStripTtsSuperscript(sup)) sup.remove()
+                    })
                     const raw = clone.innerText || clone.textContent || ''
                     const cleaned = raw.replace(/\s+/g, ' ').trim()
                     if (cleaned.length >= 1 && hasSpeakableText(cleaned)) {

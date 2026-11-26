@@ -154,6 +154,8 @@ export class BookDetailsModal {
         // Respect explicit user reading status; never force finished solely on progress >= 99%
         const currentStatus = resolveReadingState(b)
         const tags = Array.isArray(b.tags) ? b.tags : []
+        const isArchived = !!b.isArchived
+        const hasLocalFile = !b.isCloudOnly && b.hasLocalFile !== false
 
         this._revokeCoverUrl()
         if (b.coverBlob) {
@@ -253,9 +255,12 @@ export class BookDetailsModal {
                     <div class="book-details-more-wrap">
                         <button type="button" class="btn-secondary-action btn-details-more" id="btn-details-more-actions" aria-haspopup="menu" aria-expanded="false" title="${escapeHTML(t('bookDetails.moreActionsAria'))}" aria-label="${escapeHTML(t('bookDetails.moreActionsAria'))}">···</button>
                         <div class="overview-popover-panel book-details-more-menu" id="book-details-more-menu" role="menu" hidden>
+                            <button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-peek" title="${escapeHTML(t('bookshelf.actionPeekTitle'))}">${escapeHTML(t('bookshelf.actionPeek'))}</button>
                             <button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-manage-lists" title="${escapeHTML(t('bookDetails.manageListsTitle'))}">${escapeHTML(t('bookDetails.manageListsBtn'))}</button>
                             <button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-change-cover" title="${escapeHTML(t('bookDetails.changeCoverTitle'))}">${escapeHTML(t('bookDetails.changeCoverBtn'))}</button>
                             <button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-reset-cover" title="${escapeHTML(t('bookDetails.resetCoverTitle'))}">${escapeHTML(t('bookDetails.resetCoverBtn'))}</button>
+                            <button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-toggle-archive" title="${escapeHTML(isArchived ? t('bookDetails.unarchiveTitle') : t('bookDetails.archiveTitle'))}">${escapeHTML(isArchived ? t('bookDetails.unarchiveBtn') : t('bookDetails.archiveBtn'))}</button>
+                            ${hasLocalFile ? `<button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-remove-local-file" title="${escapeHTML(t('bookDetails.removeLocalFileTitle'))}">${escapeHTML(t('bookDetails.removeLocalFileBtn'))}</button>` : ''}
                             <div class="book-details-menu-sep" aria-hidden="true"></div>
                             <button type="button" class="book-details-menu-item is-danger" role="menuitem" id="btn-details-delete" title="${escapeHTML(t('bookDetails.deleteTitle'))}">${escapeHTML(t('bookDetails.deleteBtn'))}</button>
                         </div>
@@ -454,6 +459,10 @@ export class BookDetailsModal {
         container.querySelector('#btn-details-read')?.addEventListener('click', () => {
             callbacks.onOpenBook?.(bookId)
         })
+        container.querySelector('#btn-details-peek')?.addEventListener('click', () => {
+            closeMoreMenu()
+            callbacks.onPeekBook?.(bookId)
+        })
         container.querySelector('#btn-details-read-new-window')?.addEventListener('click', () => {
             callbacks.onOpenBookNewWindow?.(bookId)
         })
@@ -461,6 +470,22 @@ export class BookDetailsModal {
         container.querySelector('#btn-details-manage-lists')?.addEventListener('click', () => {
             closeMoreMenu()
             callbacks.onManageLists?.(bookId)
+        })
+
+        container.querySelector('#btn-details-toggle-archive')?.addEventListener('click', async () => {
+            closeMoreMenu()
+            await callbacks.onToggleArchive?.(bookId)
+            if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                await this.render(container, bookId, callbacks)
+            }
+        })
+
+        container.querySelector('#btn-details-remove-local-file')?.addEventListener('click', async () => {
+            closeMoreMenu()
+            await callbacks.onRemoveLocalFile?.(bookId)
+            if (this._renderGeneration === gen && this.currentBookId === bookId && this.currentContainer === container) {
+                await this.render(container, bookId, callbacks)
+            }
         })
 
         container.querySelector('#btn-details-delete')?.addEventListener('click', () => {

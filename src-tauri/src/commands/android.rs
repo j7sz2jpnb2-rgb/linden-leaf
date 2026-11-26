@@ -263,7 +263,7 @@ pub fn android_keystore_store(
 
     #[cfg(not(target_os = "android"))]
     {
-        crate::commands::sync::secure_store_credential(app_handle, key, secret)
+        crate::commands::security::secure_store_credential(app_handle, key, secret)
     }
 }
 
@@ -290,7 +290,7 @@ pub fn android_keystore_load(
 
     #[cfg(not(target_os = "android"))]
     {
-        crate::commands::sync::secure_load_credential(app_handle, key)
+        crate::commands::security::secure_load_credential(app_handle, key)
     }
 }
 
@@ -317,7 +317,7 @@ pub fn android_keystore_delete(
 
     #[cfg(not(target_os = "android"))]
     {
-        crate::commands::sync::secure_delete_credential(app_handle, key)
+        crate::commands::security::secure_delete_credential(app_handle, key)
     }
 }
 

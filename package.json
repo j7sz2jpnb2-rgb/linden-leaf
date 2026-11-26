@@ -13,11 +13,19 @@
     "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-current.ps1",
     "check:syntax": "node scripts/run-syntax-checks.mjs",
     "check:structure": "node --expose-internals scripts/check-structure.cjs",
+    "test:i18n": "node scripts/test-i18n.mjs",
+    "test:i18n-interactions": "node scripts/test-i18n-interactions.mjs",
+    "test:safety": "node scripts/test-ui-output-safety.mjs",
     "test:contracts": "node scripts/test-data-contracts.mjs",
     "test:composition": "node scripts/test-app-composition.mjs",
     "test:reader-search": "node scripts/test-reader-search.mjs",
+    "test:reader-ux": "node scripts/test-reader-ux-fixes.mjs",
     "test:android-tts": "node scripts/test-android-tts.mjs",
-    "test:prebeta": "node scripts/test-prebeta-hardening.mjs"
+    "test:pdf-tts-rust": "node scripts/test-pdf-tts-rust-fixes.mjs",
+    "test:prebeta": "node scripts/test-prebeta-hardening.mjs",
+    "test:regression": "node scripts/test-regression-suite.mjs",
+    "test:audit": "node --test scripts/test-audit-hardening.mjs",
+    "verify": "node scripts/run-verify.mjs"
   },
   "devDependencies": {
     "@fontsource/lora": "^5.3.0",

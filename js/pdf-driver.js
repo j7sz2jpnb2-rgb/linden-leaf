@@ -290,6 +290,16 @@ export class PdfJsDriver {
 
     getOutline() { return this._loadOutline() }
 
+    async getPageLabels() {
+        if (!this.pdfDoc || this._destroyed || typeof this.pdfDoc.getPageLabels !== 'function') return null
+        try {
+            const labels = await this.pdfDoc.getPageLabels()
+            return Array.isArray(labels) ? labels : null
+        } catch {
+            return null
+        }
+    }
+
     async getLinks(pageIndex) {
         if (!this.pdfDoc || this._destroyed) return []
         let page = null
@@ -984,6 +994,7 @@ export class AdaptivePdfDriver {
     getTextGeometry(...args) { return this.backend.getTextGeometry?.(...args) }
     select(...args) { return this.backend.select?.(...args) }
     getOutline(...args) { return this.backend.getOutline?.(...args) }
+    getPageLabels(...args) { return this.backend?.getPageLabels?.(...args) || Promise.resolve(null) }
     getLinks(...args) { return this.backend?.getLinks?.(...args) || Promise.resolve([]) }
     destroy() {
         this._destroyed = true
@@ -1049,6 +1060,10 @@ export class AdaptivePdfDriverLease {
     getOutline(...args) {
         if (this._destroyed) return Promise.resolve([])
         return this.realDriver?.getOutline?.(...args) || Promise.resolve([])
+    }
+    getPageLabels(...args) {
+        if (this._destroyed) return Promise.resolve(null)
+        return this.realDriver?.getPageLabels?.(...args) || Promise.resolve(null)
     }
     getLinks(...args) {
         if (this._destroyed) return Promise.resolve([])

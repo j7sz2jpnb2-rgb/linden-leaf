@@ -9,6 +9,65 @@ import { resolveExcerptSource } from './excerpt-source-resolver.js'
 import { DEFAULT_READER_NAME, escapeHTML } from './ui-format.js'
 
 /** Owns cards UI state, DOM queries and bindings. App supplies shared reading/session coordination. */
+const FOOTNOTE_ALLOWED_TAGS = new Set([
+    'p', 'br', 'em', 'i', 'strong', 'b', 'sup', 'sub', 'code', 'span', 'blockquote', 'ul', 'ol', 'li', 'a'
+])
+
+/**
+ * Sanitize an untrusted book footnote DOM subtree into safe rich HTML + plain text.
+ * Strips script/iframe/style/event attributes and unsafe javascript:/data: hrefs.
+ */
+export function sanitizeFootnoteHtml(rootEl) {
+    if (!rootEl) return ''
+    const doc = rootEl.ownerDocument || (typeof document !== 'undefined' ? document : null)
+    if (!doc) return ''
+    const sanitizeNode = (node) => {
+        if (!node) return null
+        if (node.nodeType === 3) {
+            return doc.createTextNode(node.nodeValue || '')
+        }
+        if (node.nodeType !== 1) return null
+        const tag = String(node.tagName || '').toLowerCase()
+        if (tag === 'script' || tag === 'style' || tag === 'iframe' || tag === 'object' || tag === 'embed' || tag === 'svg') {
+            return null
+        }
+        if (!FOOTNOTE_ALLOWED_TAGS.has(tag)) {
+            const frag = doc.createDocumentFragment()
+            for (const child of Array.from(node.childNodes || [])) {
+                const clean = sanitizeNode(child)
+                if (clean) frag.appendChild(clean)
+            }
+            return frag
+        }
+        if (tag === 'br') return doc.createElement('br')
+        const out = doc.createElement(tag)
+        if (tag === 'a') {
+            const rawHref = (node.getAttribute('href') || '').trim()
+            if (/^https?:\/\//i.test(rawHref)) {
+                out.setAttribute('href', rawHref)
+                out.setAttribute('target', '_blank')
+                out.setAttribute('rel', 'noopener noreferrer')
+            } else if (rawHref.startsWith('#')) {
+                out.setAttribute('href', rawHref)
+            }
+        }
+        for (const child of Array.from(node.childNodes || [])) {
+            const clean = sanitizeNode(child)
+            if (clean) out.appendChild(clean)
+        }
+        if (tag === 'p' || tag === 'li' || tag === 'blockquote') {
+            if (!out.textContent.trim() && !out.querySelector('br')) return null
+        }
+        return out
+    }
+    const wrapper = doc.createElement('div')
+    for (const child of Array.from(rootEl.childNodes || [])) {
+        const clean = sanitizeNode(child)
+        if (clean) wrapper.appendChild(clean)
+    }
+    return wrapper.innerHTML.trim()
+}
+
 export class ReaderCardsController {
     constructor(app) {
         this.app = app
@@ -105,24 +164,12 @@ export class ReaderCardsController {
             await this.app.annotations.createHighlight('#2563eb', 'underline')
             this.hideDictionaryCard()
         });
-        this.events.on(this.dom.btnDictNote, 'click', async (e) => {
+        this.events.on(this.dom.btnDictNote, 'click', (e) => {
             e.stopPropagation()
-            if (this.dom.readerDictionaryCard) {
-                this.dom.readerDictionaryCard.style.display = 'none'
-            }
-            this.app.annotations.hideSelectionPopup(true)
-            const noteText = await this.app.dialogs.showInputDialog({
-                title: t('cards.dict.noteTitle'),
-                placeholder: t('cards.dict.notePlaceholder'),
-                isMultiline: true
-            })
-            if (noteText !== null) {
-                await this.app.annotations.createHighlight('#facc15', 'highlight', noteText)
-            } else {
-                this.app.annotations?.clearActiveTextSelection?.()
-                this.app.annotations?.hideSelectionPopup?.()
-            }
             this.hideDictionaryCard()
+            this.app.annotations?.openNoteComposerForSelection?.({
+                title: t('cards.dict.noteTitle')
+            })
         });
         this.events.on(this.dom.btnDictCopyWord, 'click', async (e) => {
             e.stopPropagation()
@@ -302,8 +349,18 @@ export class ReaderCardsController {
             }
         });
         this.events.on(this.dom.btnQuoteDownload, 'click', async () => {
-            try { await quoteCard.downloadImage() }
-            catch (error) { this.app.dialogs.showToast(t('cards.quote.exportFailed', { error: error.message || t('cards.quote.retryLater') }), 'warning') }
+            try {
+                const res = await quoteCard.downloadImage()
+                if (res?.cancelled) return
+                if (res?.saved) {
+                    const toastKey = res.method === 'android-gallery'
+                        ? 'cards.quote.savedGalleryToast'
+                        : 'cards.quote.savedToast'
+                    this.app.dialogs.showToast(t(toastKey), 'success')
+                }
+            } catch (error) {
+                this.app.dialogs.showToast(t('cards.quote.exportFailed', { error: error.message || t('cards.quote.retryLater') }), 'warning')
+            }
         });
         this.events.on(this.dom.btnCloseFootnote, 'click', () => this.hideFootnotePopup());
         this.events.on(document, 'click', e => {
@@ -760,12 +817,13 @@ export class ReaderCardsController {
         }
     }
 
-    extractFootnoteFromTarget(targetEl, anchorEl = null) {
-        if (!targetEl) return ''
+    extractFootnoteRichFromTarget(targetEl, anchorEl = null) {
+        const empty = { text: '', html: '' }
+        if (!targetEl) return empty
 
         // Never treat chapter headings or TOC navigation containers as footnotes
         if (targetEl.matches?.('h1, h2, h3, h4, h5, h6') || targetEl.closest?.('h1, h2, h3, h4, h5, h6, nav, .toc, #toc')) {
-            return ''
+            return empty
         }
 
         // 1. If target element is an empty anchor/span or inline tag with text <= 4, climb up to enclosing block
@@ -791,13 +849,16 @@ export class ReaderCardsController {
         // 2. Clone to safely manipulate DOM without mutating reader document
         const clone = containerEl.cloneNode(true)
 
-        // 3. Strip backlink anchors, return arrows, and tiny nav markers
-        // CRITICAL: Only remove tiny backlink return markers (e.g. ↩, ^, [1], return icon).
-        // NEVER remove anchor tags that wrap substantial footnote text (e.g. Duokan EPUBs where the entire footnote paragraph is inside <a href="#fnref...">).
+        // 3. Strip ONLY real backlink return anchors (preserve short valid citations like DOI or external links)
         clone.querySelectorAll('a[href]').forEach(bl => {
+            const href = (bl.getAttribute('href') || '').trim()
+            const role = (bl.getAttribute('role') || '').toLowerCase()
+            const epubType = (bl.getAttribute('epub:type') || '').toLowerCase()
             const txt = (bl.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-            const isTinyNav = txt.length <= 4 || /^[\[（(【]?\s*(?:[\u21a9\u2190\u23ce\^↩←↑]|返回|back)\s*[\]）)】]?$/i.test(txt)
-            if (isTinyNav) {
+            const isExplicitBacklink = role.includes('doc-backlink') || epubType.includes('backlink')
+            const isReturnSymbol = /^[\[（(【]?\s*(?:[\u21a9\u2190\u23ce\^↩←↑]|返回|back)\s*[\]）)】]?$/i.test(txt)
+            const isInternalMarkerLink = (href.startsWith('#') || !/^https?:\/\//i.test(href)) && /^[\[（(【]?\s*(?:\d{1,4}|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021])\s*[\]）)】]?$/.test(txt)
+            if (isExplicitBacklink || isReturnSymbol || isInternalMarkerLink) {
                 bl.remove()
             }
         })
@@ -812,7 +873,8 @@ export class ReaderCardsController {
         }
 
         // 5. Clean leading bracketed/circled numbers (e.g. [1], 1., ㉗, 45., [注1])
-        raw = raw.replace(/^[\[（(【]?(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)[\]）)】]?\s*[.、:：\-]?\s*/, '').trim()
+        const leadingNumRe = /^[\[（(【]?(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)[\]）)】]?\s*[.、:：\-]?\s*/
+        raw = raw.replace(leadingNumRe, '').trim()
 
         const isTrivialMarker = s => !s || /^[\[（(【]?\s*(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)\s*[\]）)】]?\s*[.、:：\-]?$/.test(s)
         const anchorLabel = anchorEl ? (anchorEl.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^[\[（(]|[\]）)]$/g, '') : ''
@@ -820,23 +882,36 @@ export class ReaderCardsController {
             const candidateP = containerEl.querySelector?.('p, dd, div')
             const candidateText = candidateP ? (candidateP.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim() : ''
             if (candidateText && candidateText !== anchorLabel && !isTrivialMarker(candidateText)) {
-                raw = candidateText.replace(/^[\[（(【]?(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)[\]）)】]?\s*[.、:：\-]?\s*/, '').trim()
-            } else {
-                return ''
+                raw = candidateText.replace(leadingNumRe, '').trim()
+                return { text: raw, html: sanitizeFootnoteHtml(candidateP) }
             }
+            return empty
         }
 
+        // Strip leading trivial marker text node if present inside sanitized HTML clone
+        const sanitizedHtml = sanitizeFootnoteHtml(clone).replace(/^(\s*<p>)?\s*[\[（(【]?(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)[\]）)】]?\s*[.、:：\-]?\s*/, (_, pOpen) => pOpen || '').trim()
+
         const fallback = (containerEl.textContent || containerEl.innerText || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-        const cleanFallback = fallback.replace(/^[\[（(【]?(?:\d+|[\u2460-\u2473\u3251-\u325f]|[\*\u2020\u2021]|注\s*\d*)[\]）)】]?\s*[.、:：\-]?\s*/, '').trim()
-        if (!isTrivialMarker(raw)) return raw
-        if (!isTrivialMarker(cleanFallback) && cleanFallback !== anchorLabel) return cleanFallback
-        return ''
+        const cleanFallback = fallback.replace(leadingNumRe, '').trim()
+        if (!isTrivialMarker(raw)) return { text: raw, html: sanitizedHtml }
+        if (!isTrivialMarker(cleanFallback) && cleanFallback !== anchorLabel) return { text: cleanFallback, html: '' }
+        return empty
     }
 
-    showFootnotePopup({ title, text, rect }) {
+    extractFootnoteFromTarget(targetEl, anchorEl = null) {
+        return this.extractFootnoteRichFromTarget(targetEl, anchorEl).text
+    }
+
+    showFootnotePopup({ title, text, html = '', rect }) {
         if (!this.dom.footnotePopup) return
         if (this.dom.footnotePopupTitle) this.dom.footnotePopupTitle.innerText = title || t('cards.footnote.defaultTitle')
-        if (this.dom.footnotePopupContent) this.dom.footnotePopupContent.innerText = text
+        if (this.dom.footnotePopupContent) {
+            if (html && String(html).trim()) {
+                this.dom.footnotePopupContent.innerHTML = html
+            } else {
+                this.dom.footnotePopupContent.innerText = text || ''
+            }
+        }
 
         this.dom.footnotePopup.style.display = 'block'
         this.dom.footnotePopup.style.opacity = '1'
@@ -943,6 +1018,14 @@ export class ReaderCardsController {
 
         // Render Theme Pickers
         this.renderQuoteThemePicker()
+
+        // Platform-accurate save button label: Gallery on Android vs Save As on Desktop
+        const downloadLabel = this.dom.btnQuoteDownload?.querySelector?.('span')
+        if (downloadLabel) {
+            const labelKey = window.platformBridge?.isAndroid ? 'modal.quoteSaveGalleryBtn' : 'modal.quoteSaveBtn'
+            downloadLabel.setAttribute('data-i18n', labelKey)
+            downloadLabel.textContent = t(labelKey)
+        }
 
         clearTimeout(this._quoteCardCloseTimer)
         // Show Modal

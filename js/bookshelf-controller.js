@@ -5,7 +5,7 @@ import { tracker } from './tracker.js'
 import { normalizeCoverBlob } from './pdf-cover.js'
 import { fullTextSearchEngine } from './fulltext-search.js'
 import { batchAddTag, batchRemoveTag, normalizeTag, resolveReadingState, getAllTagsWithCounts, renameTagGlobally, deleteTagGlobally } from './tags-manager.js'
-import { resolveBookTitle } from './book-title.js'
+import { resolveBookTitle, splitDisplayTitleAndSubtitle } from './book-title.js'
 import { coverUrlPool } from './cover-url-pool.js'
 import { uiSymbol, escapeHTML, formatFileSize, DEFAULT_READER_NAME, getGreetingPeriodKey, renderEditorialCoverHTML } from './ui-format.js'
 import { getIntlLocale, getLocale, t, tList } from './i18n.js'
@@ -764,6 +764,7 @@ export class BookshelfController {
             all: t('nav.allBooks'),
             recent: t('nav.recentOpened'),
             favorite: t('nav.favorites'),
+            archived: t('nav.archivedBooks'),
             overview: t('nav.readingOverview'),
             stats: t('nav.readingStats'),
             'ai-history': t('nav.aiHistory'),
@@ -1599,9 +1600,13 @@ export class BookshelfController {
         if (this.dom.bookCountFooter) this.dom.bookCountFooter.style.display = 'block'
         this._commitCategoryChrome()
         
+        const archivedCount = books.filter(book => !!book.isArchived).length
+        const navArchived = document.getElementById('nav-cat-archived')
+        if (navArchived) navArchived.hidden = archivedCount === 0 && this.shelfCategory !== 'archived'
+
         const mobileShell = window.mobileShell?.isMobileViewport() ? window.mobileShell : null
         const isMobileShelf = mobileShell && this.shelfCategory === 'all'
-        if (this.shelfCategory === 'all') books = books.filter(book => !book.isRecentOnly)
+        if (this.shelfCategory === 'all') books = books.filter(book => !book.isRecentOnly && !book.isArchived)
 
         // Update reading status counts across all library books
         const statusCounts = {
@@ -1665,6 +1670,8 @@ export class BookshelfController {
             books = books.filter(b => resolveReadingState(b) === 'unread')
         } else if (this.shelfCategory === 'finished') {
             books = books.filter(b => resolveReadingState(b) === 'finished')
+        } else if (this.shelfCategory === 'archived') {
+            books = books.filter(b => !!b.isArchived)
         } else if (this.shelfCategory.startsWith('list_')) {
             const listId = this.shelfCategory
             books = books.filter(b => b.customListIds && b.customListIds.includes(listId))
@@ -1744,14 +1751,16 @@ export class BookshelfController {
             : t(books.length === 1 ? 'bookshelf.footerBookCountOne' : 'bookshelf.footerBookCount', { count: books.length })
 
         // 5. Render active view
-        const isHeroEligibleMode = (!this.shelfCategory || this.shelfCategory === 'all') && shelfViewMode === 'grid' && (!this.searchQuery || !this.searchQuery.trim())
+        const directShelfLanding = this.isDirectShelfLanding()
+        this.dom.bookshelfView?.classList.toggle('is-direct-shelf-landing', directShelfLanding)
+        const isHeroEligibleMode = !directShelfLanding && (!this.shelfCategory || this.shelfCategory === 'all') && shelfViewMode === 'grid' && (!this.searchQuery || !this.searchQuery.trim())
         if (!isHeroEligibleMode) {
             this.dom.bookshelfView?.classList.remove('is-hero-at-top')
         }
         if (this.dom.shelfSubbarCount && shelfViewMode !== 'grid') {
             this.dom.shelfSubbarCount.innerText = t('bookshelf.dividerAllCount', { count: books.length })
         }
-        if (this.dom.btnBackToHero && shelfViewMode !== 'grid') {
+        if (this.dom.btnBackToHero && (shelfViewMode !== 'grid' || directShelfLanding)) {
             this.dom.btnBackToHero.style.display = 'none'
         }
         if (shelfViewMode === 'grid') {
@@ -1764,6 +1773,10 @@ export class BookshelfController {
             if (this.dom.booksTableContainer) this.dom.booksTableContainer.style.display = 'none'
             if (this.dom.footerStatus) this.dom.footerStatus.style.display = 'none'
             this.renderModernThreshold(books)
+            if (directShelfLanding && this.dom.currentCategoryTitle && (!this.shelfCategory || this.shelfCategory === 'all')) {
+                this.dom.currentCategoryTitle.textContent = this._resolveCategoryTitle('all')
+                this.dom.currentCategoryTitle.style.display = 'block'
+            }
             if (landOnShelf && !mobileShell && isHeroEligibleMode && this.dom.booksWorkspace) {
                 this.dom.booksWorkspace.scrollTop = this._getShelfScreenTop()
             } else if (resetScroll && this.dom.booksWorkspace) {
@@ -2341,9 +2354,9 @@ export class BookshelfController {
             if (this.dom.shelfSubbarCount) this.dom.shelfSubbarCount.innerText = countText
         }
 
-        // If searching or in filtered category (e.g. favorites or custom list), hide threshold hero to maximize library grid
+        // If searching, in filtered category, or user opted for direct shelf landing, skip Hero threshold
         const isDefaultView = (!this.shelfCategory || this.shelfCategory === 'all') && (!this.searchQuery || !this.searchQuery.trim())
-        if (!isDefaultView) {
+        if (!isDefaultView || this.isDirectShelfLanding()) {
             this.dom.modernHeroThreshold.style.display = 'none'
             if (this.dom.modernShelfScreen) this.dom.modernShelfScreen.style.paddingTop = '0.5rem'
             if (this.dom.btnBackToHero) this.dom.btnBackToHero.style.display = 'none'
@@ -2407,6 +2420,7 @@ export class BookshelfController {
                 }
 
                 const heroAuthor = String(heroBook.author || '').trim()
+                const heroTitleParts = splitDisplayTitleAndSubtitle(heroBook.title || '')
                 const heroSig = `${heroBook.id}|${heroBook.title}|${heroAuthor}|${fillWidth}|${progressPct}|${readDurationStr}|${coverUrl}|${getLocale()}`
                 if (this.dom.heroBookShowcase._heroSig === heroSig && this.dom.heroBookShowcase.querySelector('.hero-book-card')) {
                     return
@@ -2424,7 +2438,8 @@ export class BookshelfController {
                         <div class="hero-book-info">
                             <div class="hero-book-head">
                                 <span class="hero-book-badge"><span class="hero-badge-dot"></span>${escapeHTML(t('bookshelf.heroRecentBadge'))}</span>
-                                <div class="hero-book-title" title="${escapeHTML(heroBook.title)}">${escapeHTML(heroBook.title)}</div>
+                                <div class="hero-book-title" title="${escapeHTML(heroBook.title)}">${escapeHTML(heroTitleParts.mainTitle)}</div>
+                                ${heroTitleParts.subtitle ? `<div class="hero-book-subtitle" title="${escapeHTML(heroTitleParts.subtitle)}">${escapeHTML(heroTitleParts.subtitle)}</div>` : ''}
                                 ${heroAuthor ? `<div class="hero-book-author">${escapeHTML(heroAuthor)}</div>` : ''}
                             </div>
                             <div class="hero-book-foot">
@@ -2516,7 +2531,8 @@ export class BookshelfController {
             ws.classList.toggle('scrolled-into-shelf', showScrollbar)
         }
 
-        const showHero = this.shelfCategory === 'all' && this.shelfViewMode === 'grid' &&
+        const directShelfLanding = this.isDirectShelfLanding()
+        const showHero = !directShelfLanding && this.shelfCategory === 'all' && this.shelfViewMode === 'grid' &&
             !this.searchQuery?.trim() && this.dom.modernHeroThreshold && this.dom.modernHeroThreshold.style.display !== 'none'
         const mode = showHero ? (scrollTop < this.cachedShelfHeight * 0.45 ? 'hero'
             : (!this.isGliding && scrollTop >= this.cachedShelfHeight * 0.6 ? 'shelf' : 'transition')) : 'other'
@@ -2526,6 +2542,9 @@ export class BookshelfController {
             if (showHero && this.dom.currentCategoryTitle) {
                 this.dom.currentCategoryTitle.textContent = mode === 'shelf' ? this._resolveCategoryTitle('all') : ''
                 this.dom.currentCategoryTitle.style.display = mode === 'shelf' ? 'block' : 'none'
+            } else if (directShelfLanding && this.dom.currentCategoryTitle && (!this.shelfCategory || this.shelfCategory === 'all')) {
+                this.dom.currentCategoryTitle.textContent = this._resolveCategoryTitle('all')
+                this.dom.currentCategoryTitle.style.display = 'block'
             }
             if (this._isGridVirtualized) this._measureVirtualViewport()
         }
@@ -2596,8 +2615,41 @@ export class BookshelfController {
         this.dom.booksWorkspace.scrollTo({ top: shelfTop, behavior: 'smooth' })
     }
 
+    isDirectShelfLanding() {
+        if (window.platformBridge?.isAndroid || document.documentElement?.classList?.contains('is-mobile-viewport')) {
+            return false
+        }
+        return this.app?.settings?.shelfLandingMode === 'shelf'
+    }
+
+    applyShelfLandingMode(mode = null, { silent = false } = {}) {
+        const isMobile = Boolean(window.platformBridge?.isAndroid || document.documentElement?.classList?.contains('is-mobile-viewport'))
+        const direct = !isMobile && (mode != null ? mode === 'shelf' : this.isDirectShelfLanding())
+        const view = this.dom.bookshelfView
+        const prev = Boolean(view?.classList?.contains('is-direct-shelf-landing'))
+        view?.classList?.toggle('is-direct-shelf-landing', direct)
+        if (direct) {
+            view?.classList?.remove('is-hero-at-top')
+            if (this.dom.modernHeroThreshold) this.dom.modernHeroThreshold.style.display = 'none'
+            if (this.dom.btnBackToHero) this.dom.btnBackToHero.style.display = 'none'
+            if (this.dom.modernShelfScreen) this.dom.modernShelfScreen.style.paddingTop = '0.5rem'
+            if (this.dom.currentCategoryTitle && (!this.shelfCategory || this.shelfCategory === 'all')) {
+                this.dom.currentCategoryTitle.textContent = this._resolveCategoryTitle('all')
+                this.dom.currentCategoryTitle.style.display = 'block'
+            }
+        }
+        if (silent && prev === direct) return
+        if (this.dom.booksWorkspace) this.dom.booksWorkspace.scrollTop = 0
+        this._heroScrollState = null
+        if (!direct) {
+            this.renderModernThreshold(this.currentBooksList || [])
+        }
+        this.onBooksWorkspaceScroll()
+        if (this._isGridVirtualized) this._measureVirtualViewport()
+    }
+
     glideToHero() {
-        if (!this.dom.booksWorkspace) return
+        if (!this.dom.booksWorkspace || this.isDirectShelfLanding()) return
         if (this.dom.currentCategoryTitle) {
             this.dom.currentCategoryTitle.innerText = ''
             this.dom.currentCategoryTitle.style.display = 'none'
@@ -2622,12 +2674,15 @@ export class BookshelfController {
             this.dom.booksGrid.style.alignItems = 'center'
             this.dom.booksGrid.style.width = '100%'
             const isFavView = this.shelfCategory === 'favorite'
+            const isArchivedView = this.shelfCategory === 'archived'
             const isCustomList = this.shelfCategory && this.shelfCategory.startsWith('list_')
             const isFinishedView = this.shelfCategory === 'finished'
             const isOverview = this.shelfCategory === 'overview'
             let svgIcon = ''
             if (isFavView) {
                 svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-primary, #da7756);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`
+            } else if (isArchivedView) {
+                svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-primary, #da7756);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>`
             } else if (isCustomList) {
                 svgIcon = `<svg style="width: 42px; height: 42px; stroke-width: 1.5; color: var(--accent-primary, #da7756);" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`
             } else if (isFinishedView) {
@@ -2654,17 +2709,19 @@ export class BookshelfController {
             let emptyTitle = activeShelfSearch
                 ? t('bookshelf.emptySearchTitle', { query: activeShelfSearch })
                 : (isFavView ? t('bookshelf.emptyShelf.favTitle')
+                : (isArchivedView ? t('bookshelf.emptyArchivedTitle')
                 : (isCustomList ? t('bookshelf.emptyShelf.listTitle')
                 : (isFinishedView ? t('bookshelf.emptyShelf.finishedTitle')
                 : (hasActiveOverviewFilters ? t('bookshelf.emptyGrid.filteredTitle')
-                : (isOverview ? t('bookshelf.emptyGrid.overviewTitle') : t('bookshelf.emptyShelf.allTitle'))))))
+                : (isOverview ? t('bookshelf.emptyGrid.overviewTitle') : t('bookshelf.emptyShelf.allTitle')))))))
             let emptySub = activeShelfSearch
                 ? t('bookshelf.emptySearchSub')
                 : (isFavView ? t('bookshelf.emptyGrid.favSub')
+                : (isArchivedView ? t('bookshelf.emptyArchivedSub')
                 : (isCustomList ? t('bookshelf.emptyGrid.listSub')
                 : (isFinishedView ? t('bookshelf.emptyShelf.finishedSub')
                 : (hasActiveOverviewFilters ? t('bookshelf.emptyGrid.filteredSub')
-                : (isOverview ? t('bookshelf.emptyGrid.overviewSub') : t('bookshelf.emptyGrid.allSub'))))))
+                : (isOverview ? t('bookshelf.emptyGrid.overviewSub') : t('bookshelf.emptyGrid.allSub')))))))
 
             let clearBtnHtml = ''
             if (activeShelfSearch) {
@@ -2674,11 +2731,11 @@ export class BookshelfController {
             }
 
             this.dom.booksGrid.innerHTML = `
-                <div class="leaf-empty-state" style="grid-column: 1 / -1; width: 100%; max-width: 520px; margin: 0 auto; padding: 4rem 1.5rem; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center;">
-                    <div style="display: flex; justify-content: center; margin-bottom: 0.85rem; opacity: 0.85;">${svgIcon}</div>
-                    <h3 style="font-family: var(--font-serif); font-size: 1.15rem; font-weight: 600; color: var(--text-main); margin-bottom: 0.4rem;">${escapeHTML(emptyFilterKeys[mobileFilter] ? t(emptyFilterKeys[mobileFilter]) : emptyTitle)}</h3>
-                    <p style="font-size: 0.82rem; color: var(--text-muted);">${escapeHTML(emptySub)}</p>
-                    ${clearBtnHtml}
+                <div class="leaf-empty-state">
+                    <div class="leaf-empty-state-icon">${svgIcon}</div>
+                    <h3 class="leaf-empty-state-title">${escapeHTML(emptyFilterKeys[mobileFilter] ? t(emptyFilterKeys[mobileFilter]) : emptyTitle)}</h3>
+                    <p class="leaf-empty-state-sub">${escapeHTML(emptySub)}</p>
+                    ${clearBtnHtml ? `<div class="leaf-empty-state-actions">${clearBtnHtml}</div>` : ''}
                 </div>
             `
             if (activeShelfSearch) {
@@ -2985,17 +3042,27 @@ export class BookshelfController {
         if (books.length === 0) {
             const activeShelfSearch = (this.searchQuery && this.searchQuery.trim()) ? this.searchQuery.trim() : ''
             const isFavView = this.shelfCategory === 'favorite'
+            const isArchivedView = this.shelfCategory === 'archived'
             const isCustomList = this.shelfCategory && this.shelfCategory.startsWith('list_')
             const isFinishedView = this.shelfCategory === 'finished'
             const isOverview = this.shelfCategory === 'overview'
             let emptyMsg = activeShelfSearch
                 ? t('bookshelf.emptySearchTitle', { query: activeShelfSearch })
                 : (isFavView ? t('bookshelf.emptyTable.fav')
+                : (isArchivedView ? t('bookshelf.emptyTable.archived')
                 : (isCustomList ? t('bookshelf.emptyTable.list')
                 : (isFinishedView ? t('bookshelf.emptyTable.finished')
                 : (isOverview ? t('bookshelf.emptyTable.overview')
-                : t('bookshelf.emptyTable.all')))))
-            this.dom.booksTableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-tertiary);">${escapeHTML(emptyMsg)}</td></tr>`
+                : t('bookshelf.emptyTable.all'))))))
+            const actionBtnHtml = activeShelfSearch
+                ? `<div class="leaf-empty-state-actions"><button type="button" id="btn-empty-table-search-fulltext" class="btn-secondary-action">${escapeHTML(t('bookshelf.emptySearchFullTextBtn', { query: activeShelfSearch }))}</button></div>`
+                : ''
+            this.dom.booksTableBody.innerHTML = `<tr><td colspan="7" class="leaf-table-empty-cell"><div class="leaf-empty-state leaf-empty-state--compact"><div class="leaf-empty-state-title">${escapeHTML(emptyMsg)}</div>${activeShelfSearch ? `<p class="leaf-empty-state-sub">${escapeHTML(t('bookshelf.emptySearchSub'))}</p>` : ''}${actionBtnHtml}</div></td></tr>`
+            if (activeShelfSearch) {
+                document.getElementById('btn-empty-table-search-fulltext')?.addEventListener('click', () => {
+                    this.app?.search?.openCrossSearchModal?.(activeShelfSearch)
+                })
+            }
             return
         }
 
@@ -3057,6 +3124,15 @@ export class BookshelfController {
         const hasCloudBackup = !!(book.cloudBackup?.hasBackup)
         const displayTitle = book.title || t('book.untitled')
 
+        const knowledge = await db.getBookKnowledgeSummary?.(book.id).catch(() => null)
+        const knowledgeWarning = knowledge && knowledge.total > 0
+            ? `\n\n${t('bookshelf.deleteBookKnowledgeWarning', {
+                highlights: knowledge.highlights,
+                bookmarks: knowledge.bookmarks,
+                drawings: knowledge.pdfDrawings
+            })}`
+            : ''
+
         let shouldDeleteCloudFile = false
         let shouldRecordTombstone = true
 
@@ -3064,7 +3140,7 @@ export class BookshelfController {
             // Book is cloud placeholder only (not downloaded locally)
             const confirmed = await this.app.dialogs.showConfirmDialog(
                 t('bookshelf.deleteCloudPlaceholderTitle', { title: displayTitle }),
-                t('bookshelf.deleteCloudPlaceholderMsg')
+                `${t('bookshelf.deleteCloudPlaceholderMsg')}${knowledgeWarning}`
             )
             if (!confirmed) return
             // For a cloud-only placeholder, removing it locally should NOT broadcast deletion to other devices!
@@ -3073,7 +3149,7 @@ export class BookshelfController {
             // Book has cloud backup
             const confirmed = await this.app.dialogs.showConfirmDialog(
                 t('bookshelf.deleteBookTitle', { title: displayTitle }),
-                t('bookshelf.deleteBookWithCloudMsg')
+                `${t('bookshelf.deleteBookWithCloudMsg')}${knowledgeWarning}`
             )
             if (!confirmed) return
 
@@ -3087,7 +3163,7 @@ export class BookshelfController {
         } else {
             const confirmed = await this.app.dialogs.showConfirmDialog(
                 t('bookshelf.deleteBookTitle', { title: displayTitle }),
-                t('bookshelf.deleteBookMsg')
+                `${t('bookshelf.deleteBookMsg')}${knowledgeWarning}`
             )
             if (!confirmed) return
         }
@@ -3129,6 +3205,48 @@ export class BookshelfController {
             console.error('Delete book error:', err)
             this.app.dialogs.showToast(t('bookshelf.deleteBookFailedToast', { detail: err.message }), 'warning')
             await this.refreshBookshelf()
+        }
+    }
+
+    async handleRemoveLocalBookFile(book) {
+        if (!book || !book.id) return
+        const displayTitle = book.title || t('book.untitled')
+        const confirmed = await this.app.dialogs.showConfirmDialog(
+            t('bookshelf.removeLocalFileTitle', { title: displayTitle }),
+            t('bookshelf.removeLocalFileMsg')
+        )
+        if (!confirmed) return
+
+        try {
+            await db.removeBookLocalFile(book.id)
+            fullTextSearchEngine.removeBookIndex(book.id)
+            this.app.dialogs.showToast(t('bookshelf.removeLocalFileSuccessToast', { title: displayTitle }), 'info')
+            await this.refreshBookshelf()
+        } catch (err) {
+            console.error('Remove local book file error:', err)
+            this.app.dialogs.showToast(t('bookshelf.removeLocalFileFailedToast', { detail: err.message }), 'warning')
+        }
+    }
+
+    async handleToggleArchiveBook(book) {
+        if (!book || !book.id) return
+        const displayTitle = book.title || t('book.untitled')
+        const nextArchived = !book.isArchived
+        try {
+            await db.archiveBook(book.id, nextArchived)
+            this.app.dialogs.showToast(
+                nextArchived
+                    ? t('bookshelf.archiveBookSuccessToast', { title: displayTitle })
+                    : t('bookshelf.unarchiveBookSuccessToast', { title: displayTitle }),
+                'info'
+            )
+            await this.refreshBookshelf()
+            if (this.app.sync.syncConfig?.enabled) {
+                this.app.sync.triggerSilentBackgroundSync()
+            }
+        } catch (err) {
+            console.error('Archive book error:', err)
+            this.app.dialogs.showToast(t('bookshelf.archiveBookFailedToast', { detail: err.message }), 'warning')
         }
     }
 

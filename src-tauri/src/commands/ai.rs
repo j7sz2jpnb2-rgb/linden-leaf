@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
 use crate::commands::{is_en_locale, l10n};
-use crate::commands::sync::{is_allowed_server_url, secure_load_credential};
+use crate::commands::security::{is_allowed_server_url, secure_load_credential};
 
 use std::collections::HashMap;
 
@@ -486,25 +486,25 @@ struct RequestLockGuard<'a> {
 
 impl<'a> Drop for RequestLockGuard<'a> {
     fn drop(&mut self) {
-        let mut active = self.state.active_request_id.lock().unwrap();
+        let mut active = self.state.active_request_id.lock().unwrap_or_else(|e| e.into_inner());
         if active.as_deref() == Some(&self.request_id) {
             *active = None;
         }
-        let mut tx_guard = self.state.abort_tx.lock().unwrap();
+        let mut tx_guard = self.state.abort_tx.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((ref req, _)) = *tx_guard {
             if req == &self.request_id {
                 *tx_guard = None;
             }
         }
 
-        let status = self.final_status.lock().unwrap().clone();
-        let mut seen = self.state.seen_requests.lock().unwrap();
+        let status = self.final_status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut seen = self.state.seen_requests.lock().unwrap_or_else(|e| e.into_inner());
         seen.insert(self.request_id.clone(), (Instant::now(), status));
         if seen.len() > 300 {
             let cutoff = Instant::now() - std::time::Duration::from_secs(3600);
             seen.retain(|_, (time, _)| *time > cutoff);
         }
-        let mut hashes = self.state.recent_payload_hashes.lock().unwrap();
+        let mut hashes = self.state.recent_payload_hashes.lock().unwrap_or_else(|e| e.into_inner());
         if hashes.len() > 100 {
             let cutoff = Instant::now() - std::time::Duration::from_secs(120);
             hashes.retain(|_, (_, time)| *time > cutoff);
@@ -514,14 +514,14 @@ impl<'a> Drop for RequestLockGuard<'a> {
 
 #[tauri::command]
 pub fn ai_get_status(state: tauri::State<'_, AiState>, purpose: Option<AiRequestPurpose>) -> AiStatusResponse {
-    let active_id = state.active_request_id.lock().unwrap().clone();
+    let active_id = state.active_request_id.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let is_busy = active_id.is_some();
     let cooldown_secs = purpose.unwrap_or_default().cooldown_seconds(state.cooldown_seconds.load(Ordering::Relaxed));
     let daily_limit = state.daily_limit.load(Ordering::Relaxed);
     let today_count = get_today_count();
 
     let remaining_ms = {
-        let last_disp = state.last_chat_dispatched_at.lock().unwrap();
+        let last_disp = state.last_chat_dispatched_at.lock().unwrap_or_else(|e| e.into_inner());
         last_disp.map(|prev| remaining_cooldown_ms(cooldown_secs, prev.elapsed())).unwrap_or(0)
     };
 
@@ -537,7 +537,7 @@ pub fn ai_get_status(state: tauri::State<'_, AiState>, purpose: Option<AiRequest
 }
 
 pub(crate) fn abort_request_inner(state: &AiState, request_id: Option<&str>) -> bool {
-    let active = state.active_request_id.lock().unwrap();
+    let active = state.active_request_id.lock().unwrap_or_else(|e| e.into_inner());
     let should_abort = match (active.as_deref(), request_id) {
         (Some(cur), Some(req)) => cur == req,
         (Some(_), None) => true,
@@ -545,7 +545,7 @@ pub(crate) fn abort_request_inner(state: &AiState, request_id: Option<&str>) -> 
     };
 
     if should_abort {
-        let mut tx_guard = state.abort_tx.lock().unwrap();
+        let mut tx_guard = state.abort_tx.lock().unwrap_or_else(|e| e.into_inner());
         let matches_req = match (tx_guard.as_ref(), request_id) {
             (Some((cur_req, _)), Some(req)) => cur_req == req,
             (Some(_), None) => true,
@@ -619,14 +619,14 @@ pub fn ai_bind_credential(
 
     let clean_key = api_key.trim();
     if clean_key.is_empty() {
-        crate::commands::sync::secure_store_credential_internal(app_handle.clone(), "reading_ai_api_key".to_string(), String::new())?;
-        crate::commands::sync::secure_store_credential_internal(app_handle, "reading_ai_credential_origin".to_string(), String::new())?;
+        crate::commands::security::secure_store_credential_internal(app_handle.clone(), "reading_ai_api_key".to_string(), String::new())?;
+        crate::commands::security::secure_store_credential_internal(app_handle, "reading_ai_credential_origin".to_string(), String::new())?;
         return Ok(true);
     }
 
     let origin = parsed.origin().ascii_serialization();
-    crate::commands::sync::secure_store_credential_internal(app_handle.clone(), "reading_ai_api_key".to_string(), clean_key.to_string())?;
-    crate::commands::sync::secure_store_credential_internal(app_handle, "reading_ai_credential_origin".to_string(), origin)?;
+    crate::commands::security::secure_store_credential_internal(app_handle.clone(), "reading_ai_api_key".to_string(), clean_key.to_string())?;
+    crate::commands::security::secure_store_credential_internal(app_handle, "reading_ai_credential_origin".to_string(), origin)?;
     Ok(true)
 }
 
@@ -702,7 +702,7 @@ pub async fn ai_request_chat_completion(
 
     // 1. Check Request ID Deduplication (Prevent IPC replay, double send, re-attempt collisions)
     {
-        let seen = state.seen_requests.lock().unwrap();
+        let seen = state.seen_requests.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, status)) = seen.get(&req_id) {
             return Err(ai_duplicate_request_id_msg(en, &req_id, status));
         }
@@ -710,7 +710,7 @@ pub async fn ai_request_chat_completion(
 
     // 2. Concurrency Check (Max 1 in-flight request per application)
     {
-        let active = state.active_request_id.lock().unwrap();
+        let active = state.active_request_id.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref cur) = *active {
             return Err(audit_local_rejection(
                 &payload,
@@ -783,7 +783,7 @@ pub async fn ai_request_chat_completion(
 
     // Atomically claim lock, register abort channel, update dispatch time, and increment daily count
     {
-        let mut active = state.active_request_id.lock().unwrap();
+        let mut active = state.active_request_id.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref cur) = *active {
             return Err(audit_local_rejection(
                 &payload,
@@ -793,8 +793,8 @@ pub async fn ai_request_chat_completion(
                 ai_concurrency_blocked_msg(en, cur),
             ));
         }
-        let mut tx_guard = state.abort_tx.lock().unwrap();
-        let mut last_disp = state.last_chat_dispatched_at.lock().unwrap();
+        let mut tx_guard = state.abort_tx.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last_disp = state.last_chat_dispatched_at.lock().unwrap_or_else(|e| e.into_inner());
         // Credential loading can yield; recheck under the dispatch lock before claiming the slot.
         let remaining_ms = last_disp.map(|prev| remaining_cooldown_ms(
             payload.purpose.cooldown_seconds(state.cooldown_seconds.load(Ordering::Relaxed)), prev.elapsed()
@@ -813,9 +813,9 @@ pub async fn ai_request_chat_completion(
         if payload.purpose == AiRequestPurpose::Chat {
             *last_disp = Some(Instant::now());
         }
-        let mut seen = state.seen_requests.lock().unwrap();
+        let mut seen = state.seen_requests.lock().unwrap_or_else(|e| e.into_inner());
         seen.insert(req_id.clone(), (Instant::now(), "in_flight".to_string()));
-        let mut hashes = state.recent_payload_hashes.lock().unwrap();
+        let mut hashes = state.recent_payload_hashes.lock().unwrap_or_else(|e| e.into_inner());
         if payload.purpose == AiRequestPurpose::Chat {
             hashes.insert(payload_hash, (req_id.clone(), Instant::now()));
         }
@@ -861,7 +861,7 @@ pub async fn ai_request_chat_completion(
     let mut response = tokio::select! {
         _ = &mut abort_rx => {
             {
-                let mut status_guard = _guard.final_status.lock().unwrap();
+                let mut status_guard = _guard.final_status.lock().unwrap_or_else(|e| e.into_inner());
                 *status_guard = "cancelled".to_string();
             }
             append_audit_entry(AiAuditEntry {
@@ -1054,7 +1054,7 @@ pub async fn ai_request_chat_completion(
         "partial"
     };
     {
-        let mut status_guard = _guard.final_status.lock().unwrap();
+        let mut status_guard = _guard.final_status.lock().unwrap_or_else(|e| e.into_inner());
         *status_guard = final_status.to_string();
     }
     let p_tok = usage_val.as_ref().and_then(|u| u.get("prompt_tokens")).and_then(|v| v.as_u64());

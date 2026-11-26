@@ -4,11 +4,10 @@
 // and safe LWW sync reconciliation.
 
 import * as db from './db.js'
+import { VALID_READING_STATUSES, ALL_READING_STATUSES, resolveReadingState } from './book-metadata.js'
 import { getLocale, t } from './i18n.js'
 
-export const VALID_READING_STATUSES = ['unread', 'want_to_read', 'reading', 'on_hold', 'finished']
-
-export const ALL_READING_STATUSES = ['unread', 'want_to_read', 'reading', 'on_hold', 'finished']
+export { VALID_READING_STATUSES, ALL_READING_STATUSES, resolveReadingState }
 
 export const STATUS_LABELS = {
     get unread() { return t('status.unread') },
@@ -20,44 +19,6 @@ export const STATUS_LABELS = {
 
 export function getStatusLabel(status) {
     return STATUS_LABELS[status] || t('status.unread')
-}
-
-/**
- * Resolves reading state for a book deterministically.
- * Priority:
- * 1) Explicit valid readingStatus ('unread', 'want_to_read', 'reading', 'on_hold', 'finished')
- * 2) Reliable completedAt timestamp (> 0) -> 'finished'
- * 3) Active reading behavior (progress.fraction > 0 or lastReadAt > 0 or totalReadingSeconds > 0) -> 'reading'
- * 4) Default 'unread'
- * *CRITICAL*: NEVER infer 'finished' solely because fraction >= 0.99.
- * @param {object} book
- * @returns {'unread' | 'want_to_read' | 'reading' | 'on_hold' | 'finished'}
- */
-export function resolveReadingState(book) {
-    if (!book || typeof book !== 'object') return 'unread'
-
-    // 1. Explicit valid readingStatus
-    if (book.readingStatus && VALID_READING_STATUSES.includes(book.readingStatus)) {
-        return book.readingStatus
-    }
-
-    // 2. Reliable completedAt timestamp
-    if (typeof book.completedAt === 'number' && book.completedAt > 0) {
-        return 'finished'
-    }
-
-    // 3. Active reading behavior
-    const frac = (book.progress && typeof book.progress.fraction === 'number') ? book.progress.fraction : 0
-    const lastRead = typeof book.lastReadAt === 'number' ? book.lastReadAt : 0
-    const totalSecs = typeof book.totalReadingSeconds === 'number' ? book.totalReadingSeconds
-        : (typeof book.readingTimeSeconds === 'number' ? book.readingTimeSeconds : 0)
-
-    if (frac > 0 || lastRead > 0 || totalSecs > 0) {
-        return 'reading'
-    }
-
-    // 4. Default unread
-    return 'unread'
 }
 
 /**

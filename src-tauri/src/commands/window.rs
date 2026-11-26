@@ -484,6 +484,120 @@ pub fn window_is_always_on_top(window: Window) -> bool {
     window.is_always_on_top().unwrap_or(false)
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_hex_to_colorref(hex: &str) -> Option<u32> {
+    let clean = hex.trim().trim_start_matches('#');
+    if !clean.is_ascii() {
+        return None;
+    }
+    let expanded = if clean.len() == 3 {
+        let mut s = String::with_capacity(6);
+        for ch in clean.chars() {
+            s.push(ch);
+            s.push(ch);
+        }
+        s
+    } else if clean.len() == 6 {
+        clean.to_string()
+    } else {
+        return None;
+    };
+    let r = u32::from_str_radix(&expanded[0..2], 16).ok()?;
+    let g = u32::from_str_radix(&expanded[2..4], 16).ok()?;
+    let b = u32::from_str_radix(&expanded[4..6], 16).ok()?;
+    // Win32 COLORREF layout is 0x00BBGGRR
+    Some((b << 16) | (g << 8) | r)
+}
+
+#[tauri::command]
+pub fn window_set_titlebar_theme(
+    window: Window,
+    bg_hex: String,
+    text_hex: Option<String>,
+    is_dark: bool,
+) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        // Cross-platform light/dark window chrome (Windows 10/11, macOS, Linux).
+        let target_theme = if is_dark {
+            tauri::Theme::Dark
+        } else {
+            tauri::Theme::Light
+        };
+        let _ = window.set_theme(Some(target_theme));
+
+        #[cfg(target_os = "windows")]
+        {
+            #[link(name = "dwmapi")]
+            extern "system" {
+                fn DwmSetWindowAttribute(
+                    hwnd: *mut std::ffi::c_void,
+                    dw_attribute: u32,
+                    pv_attribute: *const std::ffi::c_void,
+                    cb_attribute: u32,
+                ) -> i32;
+            }
+
+            // Windows 10 1809–1909 uses attribute 19; Windows 10 20H1+ & Windows 11 use attribute 20.
+            // Custom caption/text RGB colors (35/36) apply on Windows 11 (22000+) and are safely
+            // ignored with an HRESULT error on Windows 10, where immersive dark/light mode still works.
+            const DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1: u32 = 19;
+            const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+            const DWMWA_CAPTION_COLOR: u32 = 35;
+            const DWMWA_TEXT_COLOR: u32 = 36;
+
+            if let Ok(hwnd) = window.hwnd() {
+                let hwnd_ptr = hwnd.0 as *mut std::ffi::c_void;
+                let dark_val: i32 = if is_dark { 1 } else { 0 };
+                unsafe {
+                    let hr = DwmSetWindowAttribute(
+                        hwnd_ptr,
+                        DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &dark_val as *const i32 as *const std::ffi::c_void,
+                        std::mem::size_of::<i32>() as u32,
+                    );
+                    if hr != 0 {
+                        let _ = DwmSetWindowAttribute(
+                            hwnd_ptr,
+                            DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1,
+                            &dark_val as *const i32 as *const std::ffi::c_void,
+                            std::mem::size_of::<i32>() as u32,
+                        );
+                    }
+                    if let Some(bg_colorref) = parse_hex_to_colorref(&bg_hex) {
+                        let _ = DwmSetWindowAttribute(
+                            hwnd_ptr,
+                            DWMWA_CAPTION_COLOR,
+                            &bg_colorref as *const u32 as *const std::ffi::c_void,
+                            std::mem::size_of::<u32>() as u32,
+                        );
+                    }
+                    if let Some(ref txt) = text_hex {
+                        if let Some(txt_colorref) = parse_hex_to_colorref(txt) {
+                            let _ = DwmSetWindowAttribute(
+                                hwnd_ptr,
+                                DWMWA_TEXT_COLOR,
+                                &txt_colorref as *const u32 as *const std::ffi::c_void,
+                                std::mem::size_of::<u32>() as u32,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (&bg_hex, &text_hex);
+        }
+        Ok(())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (window, bg_hex, text_hex, is_dark);
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub async fn shell_open_external(
     #[allow(unused)] app: tauri::AppHandle,
@@ -601,11 +715,11 @@ pub fn app_get_boot_context(
     let start_ms = init_process_start_epoch_ms();
     let win_label = window.label().to_string();
     let initial_for_window: Vec<String> = {
-        let mut initial = state.initial_boot_files.lock().unwrap();
+        let mut initial = state.initial_boot_files.lock().unwrap_or_else(|e| e.into_inner());
         take_initial_boot_files_for_window(&mut initial, &win_label)
     };
     let pending_for_window: Vec<String> = {
-        let queue = state.pending_files.lock().unwrap();
+        let queue = state.pending_files.lock().unwrap_or_else(|e| e.into_inner());
         queue
             .iter()
             .filter_map(|(target_lbl, path)| match target_lbl {
@@ -650,16 +764,16 @@ pub fn app_renderer_ready(
     let win_label = window.label().to_string();
 
     {
-        let mut ready = state.is_renderer_ready.lock().unwrap();
+        let mut ready = state.is_renderer_ready.lock().unwrap_or_else(|e| e.into_inner());
         *ready = true;
     }
     {
-        let mut ready_map = state.ready_windows.lock().unwrap();
+        let mut ready_map = state.ready_windows.lock().unwrap_or_else(|e| e.into_inner());
         ready_map.insert(win_label.clone(), true);
     }
 
     let files_to_emit: Vec<String> = {
-        let mut queue = state.pending_files.lock().unwrap();
+        let mut queue = state.pending_files.lock().unwrap_or_else(|e| e.into_inner());
         let mut matched = Vec::new();
         let mut remaining = Vec::new();
         for (target_lbl, path) in queue.drain(..) {
@@ -696,7 +810,7 @@ pub fn app_flush_complete(
 ) -> bool {
     let win_label = window.label().to_string();
     let should_close = {
-        let mut close_map = state.close_state.lock().unwrap();
+        let mut close_map = state.close_state.lock().unwrap_or_else(|e| e.into_inner());
         let entry = close_map.entry(win_label.clone()).or_default();
         match (&entry.pending_request_id, &request_id) {
             (Some(pending), Some(req)) if !req.is_empty() && pending == req => {
@@ -913,6 +1027,20 @@ mod tests {
             vec!["C:\\books\\second.epub".to_string()]
         );
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hex_to_colorref() {
+        // Win32 COLORREF is 0x00BBGGRR
+        assert_eq!(parse_hex_to_colorref("#faf8f5"), Some(0x00F5F8FA));
+        assert_eq!(parse_hex_to_colorref("#1f1d1a"), Some(0x001A1D1F));
+        assert_eq!(parse_hex_to_colorref("#fff"), Some(0x00FFFFFF));
+        assert_eq!(parse_hex_to_colorref("123456"), Some(0x00563412));
+        assert_eq!(parse_hex_to_colorref(""), None);
+        assert_eq!(parse_hex_to_colorref("#12345"), None);
+        assert_eq!(parse_hex_to_colorref("#zzzzzz"), None);
+        assert_eq!(parse_hex_to_colorref("#中文"), None);
+        assert_eq!(parse_hex_to_colorref("#你好啊"), None);
     }
 }
 

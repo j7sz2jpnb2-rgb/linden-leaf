@@ -4,6 +4,16 @@
 
 import { isContentIdentityMatching } from './db.js'
 import { t } from './i18n.js'
+import {
+    computePulseDeepenedColor,
+    HIGHLIGHT_LOCATE_PULSE_CSS,
+    HIGHLIGHT_LOCATE_PULSE_CLEANUP_MS
+} from './highlight-pulse.js'
+import {
+    getHighlightInkColor,
+    getHighlightStrokeHex,
+} from './highlight-palette.js'
+import { resolvePdfPageFilter } from './pdf-color-filter.js'
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
 const sleepFrame = () => new Promise(requestAnimationFrame)
@@ -140,6 +150,12 @@ export class PdfViewport {
         this._nativeGeometryLimit = 16
         this._nativeDrag = null
         this._nativePreview = null
+        this._multiSelections = []
+        this._lastSingleSelection = null
+        this._ctrlSelectHeld = false
+        this._domSelectionDragId = 0
+        this._locatePulseTimer = null
+        this._locatePulseEls = []
         this._suppressSelectionClick = false
         this._nativeClickOnText = false
         this._isClearingSelection = false
@@ -215,11 +231,19 @@ export class PdfViewport {
         style.textContent = `
         .pdf-viewport-container{position:relative;width:100%;height:100%;overflow:hidden;background:var(--bg-app,#525659);user-select:none}
         .pdf-viewport-scroll-area{position:absolute;inset:0;overflow:auto;scroll-behavior:auto;-webkit-overflow-scrolling:touch}
-        .pdf-viewport-spacer{position:relative;margin:0 auto;box-sizing:border-box;padding:16px 0;min-width:100%}
-        .pdf-page-slot{position:absolute;left:50%;transform:translateX(-50%);background:var(--book-bg,#fff);box-shadow:0 4px 18px #00000047;border-radius:2px;overflow:hidden;box-sizing:border-box;touch-action: pan-x pan-y}
+        .pdf-viewport-spacer{position:relative;margin:0 auto;box-sizing:border-box;padding:0;min-width:100%}
+        .pdf-page-slot{position:absolute;left:50%;transform:translateX(-50%);background:var(--book-bg,#fff);box-shadow:0 4px 16px rgba(20,18,15,0.16),0 1px 4px rgba(20,18,15,0.08);border-radius:3px;overflow:hidden;box-sizing:border-box;touch-action:pan-x pan-y}
+        .pdf-page-slot[data-spread-role="left"]{border-radius:3px 0 0 3px;box-shadow:-6px 5px 18px -2px rgba(20,18,15,0.16),0 2px 6px rgba(20,18,15,0.07)}
+        .pdf-page-slot[data-spread-role="right"]{border-radius:0 3px 3px 0;box-shadow:6px 5px 18px -2px rgba(20,18,15,0.16),0 2px 6px rgba(20,18,15,0.07)}
+        .pdf-page-slot[data-spread-role="left"]::after{content:"";position:absolute;top:0;right:0;bottom:0;width:clamp(6px,2.4%,18px);background:linear-gradient(to left,rgba(0,0,0,0.11) 0%,rgba(0,0,0,0.035) 38%,transparent 100%);pointer-events:none;z-index:3}
+        .pdf-page-slot[data-spread-role="right"]::before{content:"";position:absolute;top:0;left:0;bottom:0;width:clamp(4px,1.5%,12px);background:linear-gradient(to right,rgba(0,0,0,0.07) 0%,rgba(0,0,0,0.02) 42%,transparent 100%);pointer-events:none;z-index:3}
+        [data-theme="dark"] .pdf-page-slot[data-spread-role="left"],[data-theme="black"] .pdf-page-slot[data-spread-role="left"]{box-shadow:-6px 5px 18px -2px rgba(0,0,0,0.52),0 2px 6px rgba(0,0,0,0.32)}
+        [data-theme="dark"] .pdf-page-slot[data-spread-role="right"],[data-theme="black"] .pdf-page-slot[data-spread-role="right"]{box-shadow:6px 5px 18px -2px rgba(0,0,0,0.52),0 2px 6px rgba(0,0,0,0.32)}
+        [data-theme="dark"] .pdf-page-slot[data-spread-role="left"]::after,[data-theme="black"] .pdf-page-slot[data-spread-role="left"]::after{background:linear-gradient(to left,rgba(0,0,0,0.28) 0%,rgba(0,0,0,0.09) 42%,transparent 100%)}
+        [data-theme="dark"] .pdf-page-slot[data-spread-role="right"]::before,[data-theme="black"] .pdf-page-slot[data-spread-role="right"]::before{background:linear-gradient(to right,rgba(255,255,255,0.06) 0%,rgba(255,255,255,0.015) 42%,transparent 100%)}
         .pdf-img-wrapper{position:absolute;inset:0;overflow:hidden;pointer-events:none}
         .pdf-page-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#888;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
-        .pdf-page-canvas{position:absolute;inset:0;width:100%;height:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none}
+        .pdf-page-canvas,.pdf-page-img{position:absolute;inset:0;width:100%;height:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none}
         .pdf-page-preview{position:absolute;inset:0;width:100%;height:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none;z-index:1}
         .pdf-clip-canvas{position:absolute;left:0;width:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none;z-index:2}
         .pdf-text-layer{position:absolute;inset:0;overflow:clip;z-index:4;opacity:1;line-height:1;text-size-adjust:none;transform-origin:0 0;user-select:text;-webkit-user-select:text;pointer-events:auto}
@@ -231,10 +255,16 @@ export class PdfViewport {
         .pdf-text-layer .textLayer>:not(.markedContent),.pdf-text-layer .markedContent span:not(.markedContent){z-index:1;--font-height:0;font-size:calc(var(--text-scale-factor)*var(--font-height));--scale-x:1;--rotate:0deg;transform:rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv))}
         .pdf-text-layer .markedContent{display:contents}.pdf-text-layer span[role=img]{user-select:none;cursor:default}
         .pdf-text-layer ::selection{background:rgba(37,99,235,.32)!important;color:transparent!important}.pdf-text-layer br::selection{background:transparent}
-        .pdf-highlight-layer,.pdf-native-selection-layer{position:absolute;inset:0;pointer-events:none}
-        .pdf-highlight-layer{z-index:3}.pdf-native-selection-layer{z-index:5}
-        .pdf-native-selection-layer svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
+        .pdf-highlight-layer,.pdf-native-selection-layer,.pdf-multi-select-layer,.pdf-locate-pulse-layer{position:absolute;inset:0;pointer-events:none}
+        .pdf-highlight-layer{z-index:3}.pdf-multi-select-layer{z-index:4}.pdf-native-selection-layer{z-index:5}.pdf-locate-pulse-layer{z-index:9}
+        .pdf-native-selection-layer svg,.pdf-multi-select-layer svg,.pdf-locate-pulse-layer svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
         .pdf-native-selection-layer polygon{fill:rgba(37,99,235,.28)}
+        .pdf-multi-select-layer polygon{fill:rgba(37,99,235,.26)}
+        .pdf-multi-select-rect{position:absolute;background:rgba(37,99,235,.26);border-radius:2px;pointer-events:none}
+        .pdf-locate-pulse-item{position:absolute;border-radius:2px;pointer-events:none;mix-blend-mode:multiply}
+        .pdf-locate-pulse-layer svg polygon{mix-blend-mode:multiply}
+        [data-theme="dark"] .pdf-locate-pulse-item,[data-theme="black"] .pdf-locate-pulse-item,
+        [data-theme="dark"] .pdf-locate-pulse-layer svg polygon,[data-theme="black"] .pdf-locate-pulse-layer svg polygon{mix-blend-mode:screen}
         .pdf-highlight-rect{position:absolute;mix-blend-mode:multiply;border-radius:2px;pointer-events:auto;cursor:pointer;box-sizing:border-box;transition:filter .1s ease}
         .pdf-highlight-rect:hover{filter:brightness(.92)}
         .pdf-highlight-rect.pdf-style-underline,.pdf-highlight-rect.pdf-style-dashed,.pdf-highlight-rect.pdf-style-strikethrough,.pdf-highlight-rect.pdf-style-squiggly{mix-blend-mode:normal!important;background-color:transparent!important}
@@ -246,8 +276,7 @@ export class PdfViewport {
         .pdf-render-error{position:absolute;inset:0;display:grid;place-items:center;padding:24px;text-align:center;color:#64748b;font:13px/1.5 system-ui;z-index:2}
         @keyframes pdfSearchPulse{0%{box-shadow:0 0 0 0 #f97316cc;background:#f97316d9;transform:scale(1)}40%{box-shadow:0 0 0 9px #f9731644;background:#facc15d9;transform:scale(1.03)}100%{box-shadow:none;background:#facc1566;transform:scale(1)}}
         .pdf-search-pulse{position:absolute;pointer-events:none;z-index:10;border-radius:2px;animation:pdfSearchPulse 2.2s cubic-bezier(.25,1,.5,1) forwards}
-        @keyframes pdfHighlightPulse{0%{box-shadow:0 0 0 0 #3b82f6cc;filter:brightness(1.4)}40%{box-shadow:0 0 0 8px #3b82f659;filter:brightness(1.6)}100%{box-shadow:none;filter:none}}
-        .pdf-highlight-pulse{animation:pdfHighlightPulse 2s cubic-bezier(.25,1,.5,1) forwards!important}
+        ${HIGHLIGHT_LOCATE_PULSE_CSS}
         `
         document.head.append(style)
     }
@@ -288,22 +317,27 @@ export class PdfViewport {
 
         this.scrollArea.addEventListener('mouseup', e => {
             if (this.interactionMode === 'draw') return
+            const isAdditive = Boolean(e.ctrlKey || e.metaKey || this._ctrlSelectHeld)
             if (this.driver?.kind !== 'mupdf' && !this._onPdfDomSelectionChange) {
-                if (this._handleDomSelection()) this._hasPdfDomSelection = true
+                if (this._handleDomSelection(isAdditive)) this._hasPdfDomSelection = true
             }
         })
-        const captureDismissalState = () => {
+        const captureDismissalState = (e) => {
             if (this.interactionMode === 'draw') return
+            if (e && (e.ctrlKey || e.metaKey)) this._ctrlSelectHeld = true
             const now = performance.now()
             const sel = window.getSelection?.()
             const hasLocal = Boolean(
                 this._hasPdfDomSelection ||
                 this._nativePreview?.length ||
+                this._multiSelections.length ||
                 (sel && !sel.isCollapsed && sel.toString().trim())
             )
             if (now - (this._lastGestureCaptureAt || 0) >= 80) {
                 this._lastGestureCaptureAt = now
-                globalThis.app?.captureSelectionAndPopupStateOnGestureStart?.()
+                if (!(e?.ctrlKey || e?.metaKey || this._ctrlSelectHeld)) {
+                    globalThis.app?.captureSelectionAndPopupStateOnGestureStart?.()
+                }
                 this._gestureHadPdfSelection = hasLocal
             } else {
                 this._gestureHadPdfSelection = Boolean(this._gestureHadPdfSelection || hasLocal)
@@ -311,11 +345,26 @@ export class PdfViewport {
         }
         this.scrollArea.addEventListener('pointerdown', captureDismissalState, { capture: true, passive: true })
         this.scrollArea.addEventListener('touchstart', captureDismissalState, { capture: true, passive: true })
+        this._modifierKeyDown = e => {
+            if (e.key === 'Control' || e.key === 'Meta' || e.ctrlKey || e.metaKey) {
+                this._ctrlSelectHeld = true
+            }
+        }
         this._navigationKeyUp = e => {
+            if (e.key === 'Control' || e.key === 'Meta') {
+                this._ctrlSelectHeld = Boolean(e.ctrlKey || e.metaKey)
+            }
             if (['ArrowDown','ArrowUp','ArrowLeft','ArrowRight','PageDown','PageUp',' ','Enter','j','k','h','l','J','K','H','L'].includes(e.key)) this._flushNavigationRender()
         }
+        this._modifierBlur = () => { this._ctrlSelectHeld = false }
+        window.addEventListener('keydown', this._modifierKeyDown)
         window.addEventListener('keyup', this._navigationKeyUp)
+        window.addEventListener('blur', this._modifierBlur)
         this.scrollArea.addEventListener('pointerdown', e => {
+            if (this.driver?.kind !== 'mupdf') {
+                this._domSelectionDragId = (this._domSelectionDragId || 0) + 1
+                if (e.ctrlKey || e.metaKey) this._ctrlSelectHeld = true
+            }
             this._nativePointerDown(e)
             if (this.options.deferPdfTextLayer && e.pointerType !== 'touch' && e.isPrimary && this.interactionMode !== 'draw') {
                 const page = e.target.closest?.('.pdf-page-slot')?.dataset.page
@@ -331,11 +380,13 @@ export class PdfViewport {
         if (this.options.deferPdfTextLayer) {
             this._onPdfDomSelectionChange = () => {
                 if (this.driver?.kind !== 'pdfjs') return
-                if (this._handleDomSelection()) {
+                if (this._handleDomSelection(this._ctrlSelectHeld)) {
                     this._hasPdfDomSelection = true
                 } else if (this._hasPdfDomSelection) {
                     this._hasPdfDomSelection = false
-                    this.options.onSelectionClear?.()
+                    if (!this._ctrlSelectHeld && this._multiSelections.length === 0) {
+                        this.options.onSelectionClear?.()
+                    }
                 }
             }
             document.addEventListener('selectionchange', this._onPdfDomSelectionChange)
@@ -354,6 +405,9 @@ export class PdfViewport {
                 this._gestureHadPdfSelection = false
                 return
             }
+            if (e.ctrlKey || e.metaKey) {
+                return
+            }
             const pendingDrag = this._nativeDrag
             if (this.interactionMode === 'draw' || this.shouldIgnoreContentClick() ||
                 (pendingDrag && (!pendingDrag.released || pendingDrag.hasMoved))) {
@@ -369,9 +423,10 @@ export class PdfViewport {
                 this._consumeDismissalLock()
                 try { sel.removeAllRanges?.() } catch {}
                 this._hasPdfDomSelection = false
+                if (this._multiSelections.length) this.clearSelection()
                 return
             }
-            if (this._nativePreview?.length) {
+            if (this._nativePreview?.length || this._multiSelections.length) {
                 this._consumeDismissalLock()
                 this.clearSelection()
                 return
@@ -512,6 +567,7 @@ export class PdfViewport {
         }
 
         this._renderVisibleSlots(true)
+        this._loadPageLabelsAsync(currentGen)
         this._geometryAbort = new AbortController()
         if (!info.allPageSizesKnown && !this.driver?.allPageSizesKnown) {
             this._enqueueGeometry(targetPage)
@@ -604,10 +660,48 @@ export class PdfViewport {
         }
 
         this._renderVisibleSlots(true)
+        this._loadPageLabelsAsync(generation)
         if (!engineDriver.allPageSizesKnown) {
             this._enqueueGeometry(targetPage)
         }
         return { numPages: this.numPages }
+    }
+
+    async _loadPageLabelsAsync(generation) {
+        this.pageLabels = null
+        if (typeof this.driver?.getPageLabels !== 'function') return
+        try {
+            const labels = await this.driver.getPageLabels()
+            if (this._destroyed || generation !== this._loadGeneration) return
+            this.pageLabels = Array.isArray(labels) ? labels : null
+            this.options.onPageLabelsReady?.(this.pageLabels)
+        } catch {
+            // Keep null pageLabels when document defines none
+        }
+    }
+
+    getPageLabel(pageIndex) {
+        if (!Array.isArray(this.pageLabels)) return null
+        const raw = this.pageLabels[pageIndex]
+        const trimmed = typeof raw === 'string' ? raw.trim() : ''
+        return trimmed || null
+    }
+
+    findPageByLabel(input) {
+        const query = String(input || '').trim()
+        if (!query) return null
+        if (Array.isArray(this.pageLabels)) {
+            const exactIdx = this.pageLabels.findIndex(lbl => typeof lbl === 'string' && lbl.trim() === query)
+            if (exactIdx >= 0) return exactIdx
+            const ciIdx = this.pageLabels.findIndex(lbl => typeof lbl === 'string' && lbl.trim().toLowerCase() === query.toLowerCase())
+            if (ciIdx >= 0) return ciIdx
+        }
+        if (/^\d+$/.test(query)) {
+            const pageNum = parseInt(query, 10)
+            const total = this.pageOffsets?.length || this.pageSizes?.length || this.numPages || 0
+            if (pageNum >= 1 && pageNum <= total) return pageNum - 1
+        }
+        return null
     }
 
     _enqueueGeometry(page) {
@@ -698,23 +792,28 @@ export class PdfViewport {
         }
         this.pageOffsets = []
         const rows = []
-        const gap = 16
-        let y = 16
+        const safeScale = Number.isFinite(Number(this.scale)) && Number(this.scale) > 0 ? Number(this.scale) : 1
+        // Row gap scales smoothly with zoom while spread pages touch at a zero-gap spine.
+        const rowGap = Math.round(clamp(20 * safeScale, 8, 28))
+        let y = rowGap
         let maxWidth = 0
 
         if (this.spreadMode === 'dual') {
-            // Page 0 (Page 1 in 1-based indexing, cover) occupies its own row centered horizontally
+            // Page 0 (cover) sits centered on its own row
             if (this.pageSizes.length > 0) {
                 const m0 = this._getPageBoxMetrics(0, { ignoreOffsets: true })
                 const w0 = m0.slotWidth
                 const h0 = m0.slotHeight
-                this.pageOffsets.push({ top: y, width: w0, height: h0, left: null })
+                this.pageOffsets.push({
+                    top: y, width: w0, height: h0, left: null,
+                    spreadRole: 'single', rowTop: y, rowBottom: y + h0,
+                })
                 rows.push({ top: y, bottom: y + h0, startPage: 0, endPage: 0 })
                 maxWidth = Math.max(maxWidth, w0)
-                y += h0 + gap
+                y += h0 + rowGap
             }
 
-            // Subsequent pages (2 & 3, 4 & 5, ...) are placed side-by-side on the same row
+            // Subsequent spreads join seamlessly at 0px gap with unequal heights vertically centered
             for (let i = 1; i < this.pageSizes.length; i += 2) {
                 const mL = this._getPageBoxMetrics(i, { ignoreOffsets: true })
                 const wL = mL.slotWidth
@@ -725,18 +824,29 @@ export class PdfViewport {
                     const wR = mR.slotWidth
                     const hR = mR.slotHeight
                     const rowH = Math.max(hL, hR)
+                    const topL = y + Math.round((rowH - hL) / 2)
+                    const topR = y + Math.round((rowH - hR) / 2)
 
-                    this.pageOffsets.push({ top: y, width: wL, height: hL, left: null, _pairRight: i + 1, _wR: wR })
-                    this.pageOffsets.push({ top: y, width: wR, height: hR, left: null })
+                    this.pageOffsets.push({
+                        top: topL, width: wL, height: hL, left: null,
+                        spreadRole: 'left', rowTop: y, rowBottom: y + rowH,
+                        _pairRight: i + 1, _wR: wR,
+                    })
+                    this.pageOffsets.push({
+                        top: topR, width: wR, height: hR, left: null,
+                        spreadRole: 'right', rowTop: y, rowBottom: y + rowH,
+                    })
                     rows.push({ top: y, bottom: y + rowH, startPage: i, endPage: i + 1 })
-                    maxWidth = Math.max(maxWidth, wL + gap + wR)
-                    y += rowH + gap
+                    maxWidth = Math.max(maxWidth, wL + wR)
+                    y += rowH + rowGap
                 } else {
-                    // Trailing single page
-                    this.pageOffsets.push({ top: y, width: wL, height: hL, left: null })
+                    this.pageOffsets.push({
+                        top: y, width: wL, height: hL, left: null,
+                        spreadRole: 'single', rowTop: y, rowBottom: y + hL,
+                    })
                     rows.push({ top: y, bottom: y + hL, startPage: i, endPage: i })
                     maxWidth = Math.max(maxWidth, wL)
-                    y += hL + gap
+                    y += hL + rowGap
                 }
             }
         } else {
@@ -744,9 +854,12 @@ export class PdfViewport {
                 const m = this._getPageBoxMetrics(i, { ignoreOffsets: true })
                 const width = m.slotWidth
                 const height = m.slotHeight
-                this.pageOffsets.push({ top: y, width, height, left: null })
+                this.pageOffsets.push({
+                    top: y, width, height, left: null,
+                    spreadRole: 'single', rowTop: y, rowBottom: y + height,
+                })
                 rows.push({ top: y, bottom: y + height, startPage: i, endPage: i })
-                y += height + gap
+                y += height + rowGap
                 maxWidth = Math.max(maxWidth, width)
             }
         }
@@ -758,26 +871,31 @@ export class PdfViewport {
         this.totalHeight = this.zoomMode && lastPage ? Math.max(y, lastPage.top + viewportHeight) : y
         this._layoutWidth = Math.max(maxWidth + 32, this.scrollArea.clientWidth || this.container.clientWidth || 0)
 
-        // Assign horizontal left offsets
+        const dpr = (typeof window !== 'undefined' && Number(window.devicePixelRatio) > 0)
+            ? Number(window.devicePixelRatio)
+            : 1
+        const snapPx = v => Math.round(v * dpr) / dpr
+
+        // Assign device-pixel-snapped horizontal left offsets
         if (this.spreadMode === 'dual') {
             if (this.pageOffsets.length > 0) {
-                this.pageOffsets[0].left = Math.round((this._layoutWidth - this.pageOffsets[0].width) / 2)
+                this.pageOffsets[0].left = snapPx((this._layoutWidth - this.pageOffsets[0].width) / 2)
             }
             for (let i = 1; i < this.pageOffsets.length; i++) {
                 const p = this.pageOffsets[i]
                 if (p._pairRight) {
-                    const pairW = p.width + gap + p._wR
-                    const startX = Math.max(16, Math.round((this._layoutWidth - pairW) / 2))
+                    const pairW = p.width + p._wR
+                    const startX = snapPx(Math.max(16, (this._layoutWidth - pairW) / 2))
                     p.left = startX
                     const pR = this.pageOffsets[i + 1]
                     if (pR) {
-                        pR.left = startX + p.width + gap
+                        pR.left = snapPx(startX + p.width)
                     }
                     delete p._pairRight
                     delete p._wR
                     i++
                 } else if (p.left == null) {
-                    p.left = Math.round((this._layoutWidth - p.width) / 2)
+                    p.left = snapPx((this._layoutWidth - p.width) / 2)
                 }
             }
         } else {
@@ -798,6 +916,7 @@ export class PdfViewport {
         for (const [page, slot] of this.activeSlots) {
             const p = this.pageOffsets[page]
             if (!p) continue
+            slot.dataset.spreadRole = p.spreadRole || 'single'
             slot.style.top = `${p.top}px`
             if (this.spreadMode === 'dual' && p.left != null) {
                 slot.style.left = `${p.left}px`
@@ -829,13 +948,14 @@ export class PdfViewport {
         const rows = []
         for (let i = 0; i < this.pageOffsets.length; i++) {
             const p = this.pageOffsets[i]
-            const pBottom = p.top + p.height
+            const pTop = p.rowTop != null ? p.rowTop : p.top
+            const pBottom = p.rowBottom != null ? p.rowBottom : (p.top + p.height)
             const prevRow = rows[rows.length - 1]
-            if (prevRow && prevRow.top === p.top) {
+            if (prevRow && prevRow.top === pTop) {
                 prevRow.endPage = i
                 if (pBottom > prevRow.bottom) prevRow.bottom = pBottom
             } else {
-                rows.push({ top: p.top, bottom: pBottom, startPage: i, endPage: i })
+                rows.push({ top: pTop, bottom: pBottom, startPage: i, endPage: i })
             }
         }
         this._layoutRows = rows
@@ -1206,6 +1326,7 @@ export class PdfViewport {
         const slot = document.createElement('div')
         slot.className = 'pdf-page-slot'
         slot.dataset.page = String(page)
+        slot.dataset.spreadRole = layout.spreadRole || 'single'
         slot._renderToken = 1
         slot.renderAbort = new AbortController()
         const slotStyle = {
@@ -1229,13 +1350,14 @@ export class PdfViewport {
         loading.setAttribute('role', 'status')
         pixels.append(loading)
         const highlights = document.createElement('div'); highlights.className = 'pdf-highlight-layer'
+        const multiSel = document.createElement('div'); multiSel.className = 'pdf-multi-select-layer'
         const selection = document.createElement('div'); selection.className = 'pdf-native-selection-layer'
         const text = document.createElement('div'); text.className = 'pdf-text-layer'
         if (this.driver?.kind === 'mupdf') {
             text.style.display = 'none'
             text.style.pointerEvents = 'none'
         }
-        slot.append(pixels, highlights, selection, text)
+        slot.append(pixels, highlights, multiSel, selection, text)
         this._applyCropToSlot(page, slot)
         if (this._pageOcrSpans?.get(page)?.length) {
             this._renderOcrLayerForPage(page, text)
@@ -1250,6 +1372,7 @@ export class PdfViewport {
         else this.spacer.append(slot)
         this.activeSlots.set(page, slot)
         this._renderHighlightsForPage(page, highlights)
+        this._renderMultiSelectionsForPage(page, multiSel)
         this._renderNativePreviewForPage(page, selection)
 
         if (this._pendingPulse?.pageIdx === page) {
@@ -1258,7 +1381,7 @@ export class PdfViewport {
         }
         if (this._pendingHighlightPulse?.pageIdx === page) {
             const p = this._pendingHighlightPulse; this._pendingHighlightPulse = null
-            queueMicrotask(() => this.pulseHighlight(p.pageIdx, p.highlightId, p.fallbackRects))
+            queueMicrotask(() => this.pulseHighlight(p.pageIdx, p.highlightId, p.fallbackRects, p.color))
         }
 
         this.options.onSlotMount?.(page, slot)
@@ -1930,11 +2053,16 @@ export class PdfViewport {
             return svg
         }
 
+        const theme = typeof document !== 'undefined' ? (document.documentElement?.getAttribute?.('data-theme') || '') : ''
+        const isDark = theme === 'dark' || theme === 'black'
+
         for (const hl of highlights) {
             const segment = this._highlightSegment(hl, page)
             if (!segment) continue
-            const color = hl.color || '#facc15'
+            const rawColor = hl.color || '#facc15'
             const style = hl.style || 'highlight'
+            const strokeColor = getHighlightStrokeHex(rawColor, isDark)
+            const inkFill = getHighlightInkColor(rawColor, isDark, 0.38)
 
             // Prefer accurate page-space quads when present
             if (segment.quads && segment.quads.length > 0) {
@@ -1952,7 +2080,7 @@ export class PdfViewport {
                         const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
                         line.setAttribute('x1', q[4]); line.setAttribute('y1', q[5])
                         line.setAttribute('x2', q[6]); line.setAttribute('y2', q[7])
-                        line.setAttribute('stroke', color)
+                        line.setAttribute('stroke', strokeColor)
                         line.setAttribute('stroke-width', '2.5')
                         line.setAttribute('stroke-linecap', 'round')
                         line.setAttribute('vector-effect', 'non-scaling-stroke')
@@ -1963,7 +2091,7 @@ export class PdfViewport {
                         const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
                         line.setAttribute('x1', q[4]); line.setAttribute('y1', q[5])
                         line.setAttribute('x2', q[6]); line.setAttribute('y2', q[7])
-                        line.setAttribute('stroke', color === '#facc15' ? '#64748b' : color)
+                        line.setAttribute('stroke', strokeColor)
                         line.setAttribute('stroke-width', '2')
                         line.setAttribute('stroke-dasharray', '4,3')
                         line.setAttribute('vector-effect', 'non-scaling-stroke')
@@ -1976,7 +2104,7 @@ export class PdfViewport {
                         const mx2 = (q[2] + q[6]) / 2, my2 = (q[3] + q[7]) / 2
                         line.setAttribute('x1', mx1); line.setAttribute('y1', my1)
                         line.setAttribute('x2', mx2); line.setAttribute('y2', my2)
-                        line.setAttribute('stroke', color)
+                        line.setAttribute('stroke', strokeColor)
                         line.setAttribute('stroke-width', '2')
                         line.setAttribute('vector-effect', 'non-scaling-stroke')
                         line.style.pointerEvents = 'none'
@@ -1986,14 +2114,14 @@ export class PdfViewport {
                         const line = document.createElementNS('http://www.w3.org/2000/svg', 'line')
                         line.setAttribute('x1', q[4]); line.setAttribute('y1', q[5])
                         line.setAttribute('x2', q[6]); line.setAttribute('y2', q[7])
-                        line.setAttribute('stroke', color)
+                        line.setAttribute('stroke', strokeColor)
                         line.setAttribute('stroke-width', '2')
                         line.setAttribute('stroke-dasharray', '2,2')
                         line.setAttribute('vector-effect', 'non-scaling-stroke')
                         line.style.pointerEvents = 'none'
                         s.append(line)
                     } else {
-                        poly.setAttribute('fill', this._toRgba(color, 0.38))
+                        poly.setAttribute('fill', inkFill)
                     }
 
                     poly.addEventListener('click', e => {
@@ -2013,11 +2141,11 @@ export class PdfViewport {
                         left: `${x1 * 100}%`, top: `${y1 * 100}%`,
                         width: `${Math.max(0, x2 - x1) * 100}%`, height: `${Math.max(0, y2 - y1) * 100}%`,
                     })
-                    if (style === 'underline') el.style.borderBottom = `2.5px solid ${color}`
-                    else if (style === 'dashed') el.style.borderBottom = `2px dashed ${color === '#facc15' ? '#64748b' : color}`
-                    else if (style === 'strikethrough') { el.style.borderBottom = `2px solid ${color}`; el.style.height = `${Math.max(0, y2 - y1) * 50}%` }
-                    else if (style === 'squiggly') { el.style.borderBottom = `2px dotted ${color}` }
-                    else el.style.backgroundColor = this._toRgba(color, .38)
+                    if (style === 'underline') el.style.borderBottom = `2.5px solid ${strokeColor}`
+                    else if (style === 'dashed') el.style.borderBottom = `2px dashed ${strokeColor}`
+                    else if (style === 'strikethrough') { el.style.borderBottom = `2px solid ${strokeColor}`; el.style.height = `${Math.max(0, y2 - y1) * 50}%` }
+                    else if (style === 'squiggly') { el.style.borderBottom = `2px dotted ${strokeColor}` }
+                    else el.style.backgroundColor = inkFill
                     el.addEventListener('click', e => { e.stopPropagation(); this.options.onHighlightClick?.(hl, e, el.getBoundingClientRect()) })
                     layer.append(el)
                 }
@@ -2038,7 +2166,7 @@ export class PdfViewport {
         return color
     }
 
-    _handleDomSelection() {
+    _handleDomSelection(isAdditive = false) {
         if (this.interactionMode === 'draw') return
         const selection = window.getSelection()
         if (!selection || selection.isCollapsed || !selection.rangeCount) return
@@ -2082,11 +2210,104 @@ export class PdfViewport {
         if (!segments.length) return false
         const [first] = segments
         this._hasPdfDomSelection = true
-        this.options.onSelection?.({
+        const payload = {
             page: first.page, text: selectedText, rects: first.rects,
             segments: segments.length > 1 ? segments : null, clientRect,
-        })
+        }
+        this._commitPdfSelection(payload, { isAdditive, dragId: this._domSelectionDragId, isDom: true })
         return true
+    }
+
+    _commitPdfSelection(payload, { isAdditive = false, dragId = null, isDom = false } = {}) {
+        if (!payload?.text?.trim()) return
+        if (!isAdditive) {
+            this._multiSelections = []
+            this._lastSingleSelection = { ...payload, _dragId: dragId }
+            this._redrawMultiSelections()
+            this.options.onSelection?.(payload)
+            return
+        }
+
+        if (this._multiSelections.length === 0 && this._lastSingleSelection) {
+            this._multiSelections.push(this._lastSingleSelection)
+        }
+        const nextEntry = { ...payload, _dragId: dragId }
+        const last = this._multiSelections[this._multiSelections.length - 1]
+        const isSameDragUpdate = dragId != null && last?._dragId === dragId
+        const isExactDuplicate = last &&
+            last.page === nextEntry.page &&
+            last.text === nextEntry.text &&
+            JSON.stringify(last.rects?.[0] || null) === JSON.stringify(nextEntry.rects?.[0] || null)
+        if (isSameDragUpdate || isExactDuplicate) {
+            this._multiSelections[this._multiSelections.length - 1] = nextEntry
+        } else {
+            this._multiSelections.push(nextEntry)
+        }
+        this._lastSingleSelection = nextEntry
+        this._redrawMultiSelections({ excludeLast: isDom })
+
+        const cleanList = this._multiSelections.map(({ _dragId, ...rest }) => rest)
+        const combinedText = cleanList.map(item => item.text).filter(Boolean).join('\n')
+        this.options.onSelection?.({
+            ...payload,
+            text: cleanList.length > 1 ? combinedText : payload.text,
+            multiSelections: cleanList.length > 1 ? cleanList : null,
+        })
+    }
+
+    _redrawMultiSelections({ excludeLast = false } = {}) {
+        if (typeof document === 'undefined') return
+        this._multiSelectExcludeLast = excludeLast
+        for (const [page, slot] of this.activeSlots) {
+            this._renderMultiSelectionsForPage(page, slot.querySelector('.pdf-multi-select-layer'))
+        }
+    }
+
+    _renderMultiSelectionsForPage(page, layer) {
+        if (!layer) return
+        layer.replaceChildren()
+        if (!this._multiSelections?.length) return
+        const items = this._multiSelectExcludeLast
+            ? this._multiSelections.slice(0, Math.max(0, this._multiSelections.length - 1))
+            : this._multiSelections
+        if (!items.length) return
+
+        const size = this.pageSizes[page] || { width: 595, height: 842, x0: 0, y0: 0 }
+        const x0 = size.x0 || 0, y0 = size.y0 || 0
+        let svg = null
+
+        for (const item of items) {
+            const segs = Array.isArray(item.segments) && item.segments.length
+                ? item.segments
+                : [{ page: item.page, quads: item.quads, rects: item.rects }]
+            for (const seg of segs) {
+                if (seg.page !== page) continue
+                if (seg.quads?.length) {
+                    if (!svg) {
+                        svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+                        svg.setAttribute('viewBox', `${x0} ${y0} ${size.width} ${size.height}`)
+                    }
+                    for (const q of seg.quads) {
+                        const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon')
+                        poly.setAttribute('points', `${q[0]},${q[1]} ${q[2]},${q[3]} ${q[6]},${q[7]} ${q[4]},${q[5]}`)
+                        svg.append(poly)
+                    }
+                } else if (seg.rects?.length) {
+                    for (const [rx1, ry1, rx2, ry2] of seg.rects) {
+                        const el = document.createElement('div')
+                        el.className = 'pdf-multi-select-rect'
+                        Object.assign(el.style, {
+                            left: `${rx1 * 100}%`,
+                            top: `${ry1 * 100}%`,
+                            width: `${Math.max(0, rx2 - rx1) * 100}%`,
+                            height: `${Math.max(0, ry2 - ry1) * 100}%`,
+                        })
+                        layer.append(el)
+                    }
+                }
+            }
+        }
+        if (svg) layer.append(svg)
     }
 
     _touchNativeGeometry(page) {
@@ -2317,6 +2538,7 @@ export class PdfViewport {
             appliedMoveSeq: 0,
             pendingHitPromise: null,
             hasMoved: false,
+            isAdditive: Boolean(e.ctrlKey || e.metaKey || this._ctrlSelectHeld),
             anchor: null,
             focus: null,
             released: false
@@ -2353,7 +2575,20 @@ export class PdfViewport {
         if (!drag.hasMoved) {
             if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 3) {
                 drag.hasMoved = true
-                this._clearNativePreview()
+                if (drag.isAdditive || e.ctrlKey || e.metaKey || this._ctrlSelectHeld) {
+                    drag.isAdditive = true
+                    if (this._multiSelections.length === 0 && this._lastSingleSelection) {
+                        this._multiSelections.push(this._lastSingleSelection)
+                        this._redrawMultiSelections({ excludeLast: false })
+                    }
+                    this._nativePreview = null
+                    this._redrawNativePreview()
+                } else {
+                    this._multiSelections = []
+                    this._lastSingleSelection = null
+                    this._redrawMultiSelections()
+                    this._clearNativePreview()
+                }
                 try { this.scrollArea.setPointerCapture?.(e.pointerId) } catch (_) {}
             } else {
                 return
@@ -2432,7 +2667,8 @@ export class PdfViewport {
             console.warn('[PDF] native selection failed:', err); return null
         })
         if (selection && !this._destroyed && this.interactionMode !== 'draw' && postReleaseEpoch === this._nativeGestureEpoch) {
-            this._emitNativeSelection(selection)
+            const isAdditive = Boolean(e.ctrlKey || e.metaKey || drag.isAdditive || this._ctrlSelectHeld)
+            this._emitNativeSelection(selection, 'char', isAdditive)
         }
     }
 
@@ -2440,6 +2676,9 @@ export class PdfViewport {
         if (this._isClearingSelection) return
         this._nativeGestureEpoch++
         this._hasPdfDomSelection = false
+        this._multiSelections = []
+        this._lastSingleSelection = null
+        this._redrawMultiSelections()
         const drag = this._nativeDrag
         this._nativeDrag = null
         if (drag?.pointerId != null) {
@@ -2463,6 +2702,7 @@ export class PdfViewport {
 
     async _nativeDoubleClick(e) {
         if (this.interactionMode === 'draw' || this.driver?.kind !== 'mupdf') return
+        const isAdditive = Boolean(e.ctrlKey || e.metaKey || this._ctrlSelectHeld)
         const epoch = ++this._nativeGestureEpoch
         const hit = this._slotForPoint(e.clientX, e.clientY)
         if (!hit) return
@@ -2473,7 +2713,7 @@ export class PdfViewport {
         const selection = await this._finalizeNativeSelection(
             { page: hit.page, index: ch.index, point }, { page: hit.page, index: ch.index, point }, 'word')
         if (selection && epoch === this._nativeGestureEpoch && this.interactionMode !== 'draw') {
-            this._emitNativeSelection(selection, 'word')
+            this._emitNativeSelection(selection, 'word', isAdditive)
         }
     }
 
@@ -2911,7 +3151,7 @@ export class PdfViewport {
         return [clamp((b[0]-x0)/w,0,1),clamp((b[1]-y0)/h,0,1),clamp((b[2]-x0)/w,0,1),clamp((b[3]-y0)/h,0,1)]
     }
 
-    _emitNativeSelection(selection, selectionMode = 'char') {
+    _emitNativeSelection(selection, selectionMode = 'char', isAdditive = false) {
         if (!selection?.text?.trim() || !selection.segments?.length) return
         this._nativePreview = selection.segments.map(s => ({ page:s.page, quads:s.quads }))
         this._redrawNativePreview()
@@ -2923,11 +3163,12 @@ export class PdfViewport {
             left:r.left+firstRect[0]*r.width, top:r.top+firstRect[1]*r.height,
             width:(firstRect[2]-firstRect[0])*r.width, height:(firstRect[3]-firstRect[1])*r.height,
         } : { left:innerWidth/2,top:innerHeight/2,width:1,height:1 }
-        this.options.onSelection?.({
+        const payload = {
             page:first.page, text:selection.text, rects:first.rects, quads:first.quads,
             pageBounds:first.pageBounds, segments:selection.segments, coordinateVersion:'mupdf-page-v1', clientRect,
             selectionMode,
-        })
+        }
+        this._commitPdfSelection(payload, { isAdditive, isDom: false })
     }
 
     _updateRenderConcurrency() {
@@ -3018,7 +3259,7 @@ export class PdfViewport {
         const height = this.scrollArea.clientHeight || this.container.clientHeight
         const isMobile = window.innerWidth < 768 || window.mobileShell?.isMobileViewport?.() || window.platformBridge?.isAndroid
         const margin = isMobile ? 24 : 48
-        const spreadFactor = (this.spreadMode === 'dual' && page > 0) ? 2.05 : 1
+        const spreadFactor = (this.spreadMode === 'dual' && page > 0) ? 2.0 : 1
         const fitWidth = Math.max(1, width - margin) / (cropW * spreadFactor)
         const fitHeight = Math.max(1, height - 32) / cropH
         return clamp(mode === 'fit-page' ? Math.min(fitWidth, fitHeight) : fitWidth, this.options.minScale, this.options.maxScale)
@@ -3077,10 +3318,25 @@ export class PdfViewport {
         this.scrollArea.scrollTop = clamp(p.top + anchor.normY * p.height - anchor.viewY, 0, Math.max(0, this.totalHeight - height))
     }
 
-    setPageAppearance(mode) {
-        this.pageAppearance = mode === 'night' ? 'night' : 'original'
-        if (this.pageAppearance === 'night') this.container.style.setProperty('--pdf-page-filter', 'invert(0.9) hue-rotate(180deg)')
-        else this.container.style.removeProperty('--pdf-page-filter')
+    setPageAppearance(appearanceOrOpts = 'original', themeInfo = null) {
+        const opts = (typeof appearanceOrOpts === 'object' && appearanceOrOpts !== null)
+            ? appearanceOrOpts
+            : {
+                appearance: appearanceOrOpts === 'night' ? 'night' : (appearanceOrOpts === 'auto' ? 'auto' : 'original'),
+                ...(themeInfo || {}),
+            }
+        this.pageAppearance = opts.appearance === 'night' ? 'night' : (opts.appearance === 'auto' ? 'auto' : 'original')
+        const activeTheme = opts.theme || (typeof document !== 'undefined' ? document.documentElement?.getAttribute?.('data-theme') : 'light') || 'light'
+        const filterVal = resolvePdfPageFilter({
+            appearance: this.pageAppearance,
+            theme: activeTheme,
+            customBackground: opts.customBackground,
+            customForeground: opts.customForeground,
+        })
+        if (this.container?.style) {
+            if (filterVal) this.container.style.setProperty('--pdf-page-filter', filterVal)
+            else this.container.style.removeProperty('--pdf-page-filter')
+        }
         this.visualVersion = (this.visualVersion || 0) + 1
     }
 
@@ -3114,6 +3370,7 @@ export class PdfViewport {
         }
         if (render) this._renderVisibleSlots(scaleChanged)
         this._redrawNativePreview()
+        this._redrawMultiSelections({ excludeLast: Boolean(this._multiSelectExcludeLast) })
     }
 
     setInteractionMode(mode) {
@@ -3825,16 +4082,26 @@ export class PdfViewport {
         return { page: page + 1, yRatio }
     }
 
-    goToPage(page, yRatio = 0) {
+    goToPage(page, yRatio = 0, { preserveHorizontal = true } = {}) {
         if (page < 0 || page >= this.pageOffsets.length) return
+        this.clearLocatePulse()
         if (page !== this.currentPage) {
             this._lastNavigationDirection = page > this.currentPage ? 1 : -1
         }
         this._noteNavigationRequest()
+        const viewWidth = this.scrollArea.clientWidth || this.container?.clientWidth || 0
+        const prevScrollLeft = this.scrollArea.scrollLeft || 0
         this.currentPage = page
         if (this.zoomMode) this.setZoom(this.zoomMode, { render: false })
         const p = this.pageOffsets[page]
-        this.scrollArea.scrollTop = Math.max(0, p.top + p.height * clamp(yRatio,0,1) - (yRatio ? this.scrollArea.clientHeight/3 : 8))
+        const targetTop = Math.max(0, p.top + p.height * clamp(yRatio, 0, 1) - (yRatio ? this.scrollArea.clientHeight / 3 : 8))
+        this.scrollArea.scrollTop = targetTop
+        const maxScrollLeft = Math.max(0, (this._layoutWidth || 0) - viewWidth)
+        if (!this.zoomMode && preserveHorizontal && maxScrollLeft > 0) {
+            this.scrollArea.scrollLeft = clamp(prevScrollLeft, 0, maxScrollLeft)
+        } else if (preserveHorizontal === false) {
+            this.scrollArea.scrollLeft = maxScrollLeft > 0 ? Math.round(maxScrollLeft / 2) : 0
+        }
         this._renderVisibleSlots()
         this.options.onPageChange?.(page, this.numPages)
     }
@@ -3852,19 +4119,94 @@ export class PdfViewport {
         }
     }
 
-    pulseHighlight(page, id, fallbackRects) {
+    clearLocatePulse() {
+        if (this._locatePulseTimer) {
+            clearTimeout(this._locatePulseTimer)
+            this._locatePulseTimer = null
+        }
+        this._pendingHighlightPulse = null
+        for (const el of this._locatePulseEls || []) {
+            try { el.remove() } catch (_) {}
+        }
+        this._locatePulseEls = []
+        for (const slot of this.activeSlots?.values() || []) {
+            slot.querySelectorAll('.pdf-locate-pulse-layer').forEach(el => el.remove())
+        }
+    }
+
+    pulseHighlight(page, id, fallbackRects, color = null) {
+        this.clearLocatePulse()
         const slot = this.activeSlots.get(page)
-        if (!slot) { this._pendingHighlightPulse={pageIdx:page,highlightId:id,fallbackRects}; return }
-        const escapedId = CSS.escape(String(id))
-        const els = slot.querySelectorAll(`.pdf-highlight-rect[data-id="${escapedId}"], .pdf-highlight-poly[data-id="${escapedId}"]`)
-        if (!els.length) return this.pulseRects(page, fallbackRects)
-        els.forEach(el=>{ el.classList.remove('pdf-highlight-pulse'); void el.offsetWidth; el.classList.add('pdf-highlight-pulse'); setTimeout(()=>el.classList.remove('pdf-highlight-pulse'),2100) })
+        if (!slot) {
+            this._pendingHighlightPulse = { pageIdx: page, highlightId: id, fallbackRects, color }
+            return
+        }
+
+        const hl = this.highlights?.find(h => String(h.id) === String(id)) || null
+        const resolvedColor = color || hl?.color || '#facc15'
+        const theme = typeof document !== 'undefined' ? document.documentElement?.getAttribute?.('data-theme') : ''
+        const isDark = theme === 'dark' || theme === 'black'
+        const pulsePalette = computePulseDeepenedColor(resolvedColor, isDark)
+
+        // Collect target quads or normalized rects for this page
+        let quads = null
+        let rects = null
+        if (hl?.pdfTarget) {
+            const segs = Array.isArray(hl.pdfTarget.segments) && hl.pdfTarget.segments.length
+                ? hl.pdfTarget.segments
+                : [{ page: hl.pdfTarget.page, quads: hl.pdfTarget.quads, rects: hl.pdfTarget.rects }]
+            const seg = segs.find(s => s.page === page)
+            if (seg?.quads?.length) quads = seg.quads
+            if (seg?.rects?.length) rects = seg.rects
+        }
+        if (!quads?.length && !rects?.length && fallbackRects?.length) {
+            rects = fallbackRects
+        }
+        if (!quads?.length && !rects?.length) return
+
+        const pulseLayer = document.createElement('div')
+        pulseLayer.className = 'pdf-locate-pulse-layer ll-highlight-locate-pulse'
+
+        if (quads?.length) {
+            const size = this.pageSizes[page] || { width: 595, height: 842, x0: 0, y0: 0 }
+            const x0 = size.x0 || 0, y0 = size.y0 || 0
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+            svg.setAttribute('viewBox', `${x0} ${y0} ${size.width} ${size.height}`)
+            for (const q of quads) {
+                const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon')
+                poly.setAttribute('points', `${q[0]},${q[1]} ${q[2]},${q[3]} ${q[6]},${q[7]} ${q[4]},${q[5]}`)
+                poly.setAttribute('fill', pulsePalette.solidHex)
+                poly.setAttribute('fill-opacity', String(pulsePalette.opacity))
+                svg.append(poly)
+            }
+            pulseLayer.append(svg)
+        } else if (rects?.length) {
+            for (const [x1, y1, x2, y2] of rects) {
+                const item = document.createElement('div')
+                item.className = 'pdf-locate-pulse-item'
+                Object.assign(item.style, {
+                    left: `${x1 * 100}%`,
+                    top: `${y1 * 100}%`,
+                    width: `${Math.max((x2 - x1) * 100, 1.5)}%`,
+                    height: `${Math.max((y2 - y1) * 100, 1.2)}%`,
+                    backgroundColor: pulsePalette.fill,
+                })
+                pulseLayer.append(item)
+            }
+        }
+
+        slot.append(pulseLayer)
+        this._locatePulseEls.push(pulseLayer)
+        this._locatePulseTimer = setTimeout(() => {
+            this.clearLocatePulse()
+        }, HIGHLIGHT_LOCATE_PULSE_CLEANUP_MS)
     }
 
     _detectCurrentPage() {
         if (!this.pageOffsets.length) return
         const best = this.getPageAtViewportCenter()
         if (best !== this.currentPage) {
+            this.clearLocatePulse()
             this.currentPage = best
             if (this.zoomMode && Math.abs(this.getFitScale(this.zoomMode) - this.scale) > .01) {
                 const rect = this.scrollArea.getBoundingClientRect?.() || { left: 0, top: 0 }
@@ -4178,7 +4520,10 @@ export class PdfViewport {
         this._navigationBurstCount = 0
         this._cancelAllPageReadyWaiters(false)
         this._notifyNavIdle(false)
+        this.clearLocatePulse()
+        if (this._modifierKeyDown) window.removeEventListener('keydown', this._modifierKeyDown)
         if (this._navigationKeyUp) window.removeEventListener('keyup', this._navigationKeyUp)
+        if (this._modifierBlur) window.removeEventListener('blur', this._modifierBlur)
         this.stopAutoScroll?.()
         this._resizeObserver?.disconnect()
         clearTimeout(this._singleTapTimer)
@@ -4207,6 +4552,9 @@ export class PdfViewport {
         this._pageOcrSpans?.clear()
         this._hasPdfDomSelection = false
         this._gestureHadPdfSelection = false
+        this._multiSelections = []
+        this._lastSingleSelection = null
+        this._ctrlSelectHeld = false
         this._nativeDrag = null
         this._nativePreview = null
         if (this._previewRaf) cancelAnimationFrame(this._previewRaf)

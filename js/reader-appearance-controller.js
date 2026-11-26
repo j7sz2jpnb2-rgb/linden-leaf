@@ -12,6 +12,13 @@ import {
     getDefaultReaderSettings,
     resolveEffectiveReaderLayout,
 } from './reader-style-builder.js'
+import { applyChineseQuotesToDocument } from './chinese-quotes.js'
+import {
+    READER_TOOLBAR_ITEMS,
+    getDefaultReaderToolbarVisibility,
+    normalizeReaderToolbarVisibility,
+    resolveReaderToolbarLayout,
+} from './reader-toolbar-config.js'
 import { t } from './i18n.js'
 
 /** Owns appearance UI state, DOM queries and bindings. App supplies shared reading/session coordination. */
@@ -110,7 +117,13 @@ export class ReaderAppearanceController {
             settingAiMaxTokens: document.getElementById('setting-ai-max-tokens'),
             settingAiCooldown: document.getElementById('setting-ai-cooldown'),
             settingAiDailyLimit: document.getElementById('setting-ai-daily-limit'),
-            settingDictSaveHistory: document.getElementById('setting-dict-save-history')
+            settingDictSaveHistory: document.getElementById('setting-dict-save-history'),
+            settingDirectShelfLanding: document.getElementById('setting-direct-shelf-landing'),
+            settingReaderTopBarAutoHide: document.getElementById('setting-reader-topbar-autohide'),
+            readerToolbarCustomizeList: document.getElementById('reader-toolbar-customize-list'),
+            btnResetReaderToolbar: document.getElementById('btn-reset-reader-toolbar'),
+            btnReaderToolbarOverflow: document.getElementById('btn-reader-toolbar-overflow'),
+            readerToolbarOverflowMenu: document.getElementById('reader-toolbar-overflow-menu'),
         }
     }
 
@@ -303,14 +316,55 @@ export class ReaderAppearanceController {
             })
         };
         this.events.on(this.dom.chineseQuotesSwitch, 'change', async e => {
-            this.app.setSetting('chineseQuotes', e.target.checked)
+            const enabled = Boolean(e.target.checked)
+            this.app.setSetting('chineseQuotes', enabled)
             await this.app.saveSettings()
-            if (this.app.foliateView && this.app.currentBookId) {
-                try {
-                    const loc = this.app.currentLocation?.cfi || this.app.currentLocation?.fraction || 0
-                    await this.app.foliateView.goTo(loc)
-                } catch (_) {}
+            this.applyChineseQuotesLive(enabled)
+        });
+        this.events.on(this.dom.settingDirectShelfLanding, 'change', async e => {
+            const mode = e.target.checked ? 'shelf' : 'hero'
+            this.app.setSetting('shelfLandingMode', mode)
+            await this.app.saveSettings()
+            this.app.bookshelf?.applyShelfLandingMode?.(mode)
+            this.app.dialogs?.showToast?.(
+                t(mode === 'shelf' ? 'settings.directShelfLandingToastOn' : 'settings.directShelfLandingToastOff'),
+                'info'
+            )
+        });
+        this.events.on(this.dom.settingReaderTopBarAutoHide, 'change', async e => {
+            const enabled = Boolean(e.target.checked)
+            this.app.setSetting('readerTopBarAutoHide', enabled)
+            await this.app.saveSettings()
+            this.applyReaderTopBarAutoHide(enabled)
+        });
+        this.events.on(this.dom.btnResetReaderToolbar, 'click', async () => {
+            this.app.setSetting('readerToolbarVisibility', getDefaultReaderToolbarVisibility())
+            await this.app.saveSettings()
+            this.renderReaderToolbarSettingsUI()
+            this.applyReaderToolbarCustomization()
+            this.app.dialogs?.showToast?.(t('settings.readerToolbarResetToast'), 'info')
+        });
+        this.events.on(this.dom.btnReaderToolbarOverflow, 'click', e => {
+            e.stopPropagation()
+            const menu = this.dom.readerToolbarOverflowMenu
+            if (!menu) return
+            const opening = menu.hidden
+            if (opening) {
+                this.renderReaderToolbarOverflowMenu()
+                menu.hidden = false
+                this.dom.btnReaderToolbarOverflow?.setAttribute('aria-expanded', 'true')
+                document.getElementById('reader-top-bar')?.classList.add('is-overflow-open')
+            } else {
+                this.closeReaderToolbarOverflowMenu()
             }
+        });
+        this.events.on(document, 'click', e => {
+            if (!e.target?.closest?.('#reader-toolbar-overflow-wrap')) {
+                this.closeReaderToolbarOverflowMenu()
+            }
+        });
+        this.events.on(document, 'keydown', e => {
+            if (e.key === 'Escape') this.closeReaderToolbarOverflowMenu()
         });
         this.events.on(this.dom.comicModeSwitch, 'change', async e => {
             this.app.setSetting('comicMode', e.target.checked)
@@ -411,6 +465,10 @@ export class ReaderAppearanceController {
         this.updateSettingsUI()
         this.renderReadingPresetsUI()
         this.renderCustomFontsUI()
+        this.renderReaderToolbarSettingsUI()
+        if (this.dom.readerToolbarOverflowMenu && !this.dom.readerToolbarOverflowMenu.hidden) {
+            this.renderReaderToolbarOverflowMenu()
+        }
         const btnTogglePalette = this.dom?.btnToggleCustomPalette || document.getElementById('btn-toggle-custom-palette')
         const paletteEditor = this.dom?.customPaletteEditor || document.getElementById('custom-palette-editor')
         if (btnTogglePalette && paletteEditor) {
@@ -424,6 +482,172 @@ export class ReaderAppearanceController {
             hint.textContent = container.style.display === 'none'
                 ? t('settings.presetExpand')
                 : t('appearance.preset.collapse')
+        }
+    }
+
+    /**
+     * Instantly toggle Chinese corner quotes (`“”` ↔ `「」`, `‘’` ↔ `『』`) across all loaded
+     * Foliate section documents in-place without closing or reopening the book.
+     */
+    applyChineseQuotesLive(enabled) {
+        const view = this.app.foliateView
+        if (!view || !this.app.currentBookId) return
+        const contents = view.renderer?.getContents?.() || []
+        const rawLang = view.book?.metadata?.language
+        const bookLang = Array.isArray(rawLang) ? rawLang[0] : (rawLang || '')
+        let touched = 0
+        for (const item of contents) {
+            if (!item?.doc) continue
+            try {
+                const changed = applyChineseQuotesToDocument(item.doc, Boolean(enabled), { bookLang })
+                if (changed) touched++
+            } catch (err) {
+                console.warn('applyChineseQuotesLive error:', err)
+            }
+        }
+        // Fallback: if no live documents were mounted yet, gently re-anchor current view
+        if (touched === 0 && contents.length === 0) {
+            const loc = this.app.currentLocation?.cfi || this.app.currentLocation?.fraction || 0
+            try { view.goTo(loc) } catch (_) {}
+        }
+    }
+
+    applyReaderTopBarAutoHide(enabled = Boolean(this.app.settings?.readerTopBarAutoHide)) {
+        const readerView = this.app.dom?.readerView || document.getElementById('reader-view')
+        if (!readerView) return
+        const isMobile = this._getViewportEnv().isMobile || Boolean(window.platformBridge?.isAndroid)
+        readerView.classList.toggle('reader-topbar-autohide', !isMobile && Boolean(enabled))
+    }
+
+    closeReaderToolbarOverflowMenu() {
+        const menu = this.dom.readerToolbarOverflowMenu
+        if (menu) menu.hidden = true
+        this.dom.btnReaderToolbarOverflow?.setAttribute('aria-expanded', 'false')
+        document.getElementById('reader-top-bar')?.classList.remove('is-overflow-open')
+    }
+
+    _getToolbarContext() {
+        const formatStr = String(this.app.currentBookData?.format || this.app.currentBookFormat || '').toLowerCase()
+        const isPdfModeClass = Boolean(this.app.dom?.readerView?.classList?.contains?.('is-pdf-mode'))
+        const isPdf = Boolean(isPdfModeClass || this.app.pdfViewport || formatStr.includes('pdf'))
+        const isMobile = this._getViewportEnv().isMobile || Boolean(window.platformBridge?.isAndroid)
+        return { isPdf, isDesktop: !isMobile }
+    }
+
+    applyReaderToolbarCustomization() {
+        const ctx = this._getToolbarContext()
+        if (!ctx.isDesktop) {
+            for (const item of READER_TOOLBAR_ITEMS) {
+                for (const id of item.ids) {
+                    const el = document.getElementById(id)
+                    if (el) el.classList.remove('ll-toolbar-hidden')
+                }
+            }
+            const overflowWrap = document.getElementById('reader-toolbar-overflow-wrap')
+            if (overflowWrap) overflowWrap.hidden = true
+            this.closeReaderToolbarOverflowMenu()
+            return
+        }
+        const visibility = normalizeReaderToolbarVisibility(this.app.settings?.readerToolbarVisibility)
+        const layout = resolveReaderToolbarLayout(visibility, ctx)
+
+        for (const item of READER_TOOLBAR_ITEMS) {
+            const isHidden = item.ids.some(id => layout.hiddenIds.has(id))
+            for (const id of item.ids) {
+                const el = document.getElementById(id)
+                if (el) el.classList.toggle('ll-toolbar-hidden', isHidden)
+            }
+        }
+
+        const overflowWrap = document.getElementById('reader-toolbar-overflow-wrap')
+        if (overflowWrap) {
+            overflowWrap.hidden = layout.overflowKeys.length === 0
+        }
+        if (layout.overflowKeys.length === 0) {
+            this.closeReaderToolbarOverflowMenu()
+        } else if (this.dom.readerToolbarOverflowMenu && !this.dom.readerToolbarOverflowMenu.hidden) {
+            this.renderReaderToolbarOverflowMenu()
+        }
+    }
+
+    renderReaderToolbarOverflowMenu() {
+        const menu = this.dom.readerToolbarOverflowMenu
+        if (!menu) return
+        const visibility = normalizeReaderToolbarVisibility(this.app.settings?.readerToolbarVisibility)
+        const layout = resolveReaderToolbarLayout(visibility, this._getToolbarContext())
+        menu.innerHTML = ''
+
+        for (const key of layout.overflowKeys) {
+            const item = READER_TOOLBAR_ITEMS.find(x => x.key === key)
+            if (!item) continue
+            if (item.key === 'history') {
+                const backEl = document.getElementById('btn-nav-history-back')
+                const fwdEl = document.getElementById('btn-nav-history-forward')
+                const pairs = [
+                    { el: backEl, label: t('reader.navBackTitle') || '后退到上一位置' },
+                    { el: fwdEl, label: t('reader.navForwardTitle') || '前进到下一位置' },
+                ]
+                for (const p of pairs) {
+                    if (!p.el) continue
+                    const btn = document.createElement('button')
+                    btn.type = 'button'
+                    btn.className = 'reader-toolbar-overflow-item'
+                    btn.disabled = Boolean(p.el.disabled)
+                    btn.textContent = p.label
+                    btn.addEventListener('click', () => {
+                        this.closeReaderToolbarOverflowMenu()
+                        p.el.click()
+                    })
+                    menu.appendChild(btn)
+                }
+                continue
+            }
+
+            const targetEl = document.getElementById(item.ids[0])
+            if (!targetEl) continue
+            // Respect format-specific inline hiding when an element isn't active for current book
+            if (targetEl.style.display === 'none') continue
+            const btn = document.createElement('button')
+            btn.type = 'button'
+            btn.className = 'reader-toolbar-overflow-item'
+            if (targetEl.classList.contains('active')) btn.classList.add('active')
+            btn.disabled = Boolean(targetEl.disabled)
+            btn.textContent = t(item.i18nKey) || item.fallbackLabel
+            btn.addEventListener('click', () => {
+                this.closeReaderToolbarOverflowMenu()
+                targetEl.click()
+            })
+            menu.appendChild(btn)
+        }
+    }
+
+    renderReaderToolbarSettingsUI() {
+        const container = this.dom.readerToolbarCustomizeList
+        if (!container) return
+        const visibility = normalizeReaderToolbarVisibility(this.app.settings?.readerToolbarVisibility)
+        container.innerHTML = ''
+
+        for (const item of READER_TOOLBAR_ITEMS) {
+            const row = document.createElement('label')
+            row.className = 'reader-toolbar-custom-item'
+
+            const input = document.createElement('input')
+            input.type = 'checkbox'
+            input.checked = visibility[item.key] !== false
+            input.dataset.toolbarKey = item.key
+            input.addEventListener('change', async () => {
+                const nextVis = normalizeReaderToolbarVisibility(this.app.settings?.readerToolbarVisibility)
+                nextVis[item.key] = input.checked
+                this.app.setSetting('readerToolbarVisibility', nextVis)
+                await this.app.saveSettings()
+                this.applyReaderToolbarCustomization()
+            })
+
+            const text = document.createElement('span')
+            text.textContent = t(item.i18nKey) || item.fallbackLabel
+
+            row.append(input, text)
+            container.appendChild(row)
         }
     }
 
@@ -606,6 +830,16 @@ export class ReaderAppearanceController {
         if (this.dom.settingFullscreenAutohide) {
             this.dom.settingFullscreenAutohide.checked = !!this.app.settings.fullscreenAutohide
         }
+        if (this.dom.settingDirectShelfLanding) {
+            this.dom.settingDirectShelfLanding.checked = this.app.settings.shelfLandingMode === 'shelf'
+        }
+        if (this.dom.settingReaderTopBarAutoHide) {
+            this.dom.settingReaderTopBarAutoHide.checked = !!this.app.settings.readerTopBarAutoHide
+        }
+        this.applyReaderTopBarAutoHide(!!this.app.settings.readerTopBarAutoHide)
+        this.applyReaderToolbarCustomization()
+        this.renderReaderToolbarSettingsUI()
+        this.app.bookshelf?.applyShelfLandingMode?.(this.app.settings.shelfLandingMode || 'hero', { silent: true })
         if (this.dom.settingEnableReadingGoals) {
             this.dom.settingEnableReadingGoals.checked = !!this.app.settings.enableReadingGoals
         }
@@ -1142,6 +1376,14 @@ export class ReaderAppearanceController {
             }
         })
         if (typeof window !== 'undefined') window.mobileShell?.syncThemeLabel?.()
+        // Scheme A: Sync native OS window titlebar color (Windows 11 DWM) to match current theme
+        try {
+            platformBridge.setWindowTitlebarTheme?.({
+                bgHex: palette.shellBg,
+                textHex: palette.readerText,
+                isDark: palette.colorScheme === 'dark'
+            })
+        } catch (_) {}
         this.applySettingsToReader()
 
         // Diagnostics export

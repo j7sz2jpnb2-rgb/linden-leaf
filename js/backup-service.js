@@ -4,13 +4,15 @@ import * as db from './db.js'
 import { sanitizeAdvancedSettings, STORAGE_KEY_CONFIG } from './advanced-settings-schema.js'
 import { buildBookSyncMeta } from './book-metadata.js'
 import { collectPdfPreferences, restoredPdfPreferenceEntries } from './pdf-preferences.js'
+import { SYNC_STORAGE_KEYS, stripSensitiveConfigFields } from './sync-config-contract.js'
 import { t } from './i18n.js'
 
 export async function assembleFullBackupData(activeDb = db, config = {}) {
-    const [sessions, highlights, books, bookmarks, drawings, customLists, chapterTranslations, deletedRecords] = await Promise.all([
+    const [sessions, highlights, books, bookmarks, drawings, customLists, chapterTranslations, deletedRecords, portals] = await Promise.all([
         activeDb.getAllReadingSessions(), activeDb.getAllHighlights(), activeDb.getAllBooks(),
         activeDb.getAllBookmarks(), activeDb.getAllPdfDrawings(), activeDb.getAllCustomLists(),
-        activeDb.getAllChapterTranslations(), activeDb.getAllDeletedRecords()
+        activeDb.getAllChapterTranslations(), activeDb.getAllDeletedRecords(),
+        activeDb.getAllPortals ? activeDb.getAllPortals() : Promise.resolve([])
     ])
     const manualTocs = {}
     for (const book of books) {
@@ -22,41 +24,47 @@ export async function assembleFullBackupData(activeDb = db, config = {}) {
 
     let readingPresets = []
     try {
-        const rawPresets = typeof localStorage !== 'undefined' ? localStorage.getItem('linden_reading_presets_v1') : null
+        const rawPresets = typeof localStorage !== 'undefined' ? localStorage.getItem(SYNC_STORAGE_KEYS.readingPresets) : null
         if (rawPresets) readingPresets = JSON.parse(rawPresets) || []
-    } catch (_) {}
+    } catch (err) {
+        console.warn('[backup-service] readingPresets export parse failed:', err)
+    }
 
     let customPalette = null
     try {
-        const rawPalette = typeof localStorage !== 'undefined' ? localStorage.getItem('linden_custom_semantic_palette_v1') : null
+        const rawPalette = typeof localStorage !== 'undefined' ? localStorage.getItem(SYNC_STORAGE_KEYS.customPalette) : null
         if (rawPalette) customPalette = JSON.parse(rawPalette)
-    } catch (_) {}
+    } catch (err) {
+        console.warn('[backup-service] customPalette export parse failed:', err)
+    }
 
     let userName = ''
     try {
-        userName = (typeof localStorage !== 'undefined' ? (localStorage.getItem('linden_user_name') || '') : '').trim()
-    } catch (_) {}
+        userName = (typeof localStorage !== 'undefined' ? (localStorage.getItem(SYNC_STORAGE_KEYS.userName) || '') : '').trim()
+    } catch (err) {
+        console.warn('[backup-service] userName export read failed:', err)
+    }
 
     const bookSettingsOverrides = {}
     try {
         if (typeof localStorage !== 'undefined') {
             for (let i = 0; i < localStorage.length; i++) {
                 const k = localStorage.key(i)
-                if (k && k.startsWith('linden_book_settings_')) {
-                    const bId = k.replace('linden_book_settings_', '')
+                if (k && k.startsWith(SYNC_STORAGE_KEYS.bookSettingsPrefix)) {
+                    const bId = k.replace(SYNC_STORAGE_KEYS.bookSettingsPrefix, '')
                     try {
                         bookSettingsOverrides[bId] = JSON.parse(localStorage.getItem(k))
-                    } catch (_) {}
+                    } catch (err) {
+                        console.warn(`[backup-service] book settings override parse failed (${bId}):`, err)
+                    }
                 }
             }
         }
-    } catch (_) {}
-
-    const safeConfig = { ...(config || {}) }
-    const sensitiveKeys = ['ttsApiKey', 'apiKey', 'secret', 'password', 'token', 'auth', 'privateKey', 'dictStoragePath', 'customDirectory']
-    for (const k of sensitiveKeys) {
-        delete safeConfig[k]
+    } catch (err) {
+        console.warn('[backup-service] book settings overrides scan failed:', err)
     }
+
+    const safeConfig = stripSensitiveConfigFields(config)
 
     const bookMapById = new Map(books.map(b => [b.id, b]))
     const enrichedSessions = sessions.map(s => {
@@ -85,6 +93,7 @@ export async function assembleFullBackupData(activeDb = db, config = {}) {
         drawings,
         customLists,
         readingLists: customLists,
+        portals,
         chapterTranslations,
         deletedRecords,
         manualTocs,
@@ -160,11 +169,18 @@ export async function restoreFullDataBackup(backupData, activeDb = db, applyConf
 }
 
 async function _restoreFullDataBackupLocked(backupData, activeDb, operationId, applyConfig) {
-    if (!backupData || typeof backupData !== 'object') {
+    if (!backupData || typeof backupData !== 'object' || Array.isArray(backupData)) {
         throw new Error(t('backupError.invalidData'))
     }
-    if (backupData.format !== 'linden-leaf-full-backup' || ![1, 2, 3, 4].includes(backupData.schemaVersion)) {
+    if (backupData.format !== 'linden-leaf-full-backup' || !Number.isInteger(backupData.schemaVersion) || ![1, 2, 3, 4].includes(backupData.schemaVersion)) {
         throw new Error(t('backupError.unsupportedFormat'))
+    }
+    const backupArrayFields = ['books', 'highlights', 'bookmarks', 'sessions', 'drawings', 'customLists', 'readingLists', 'chapterTranslations', 'deletedRecords', 'portals']
+    for (const field of backupArrayFields) {
+        if (backupData[field] === undefined || backupData[field] === null) continue
+        if (!Array.isArray(backupData[field]) || backupData[field].some(item => !item || typeof item !== 'object' || Array.isArray(item))) {
+            throw new Error(t('backupError.invalidData'))
+        }
     }
 
     // 1. Snapshot existing records to verify conflicts & support rollback
@@ -176,7 +192,8 @@ async function _restoreFullDataBackupLocked(backupData, activeDb, operationId, a
         existingTranslations,
         existingDrawings,
         existingLists,
-        existingDeleted
+        existingDeleted,
+        existingPortals
     ] = await Promise.all([
         activeDb.getAllBooks ? activeDb.getAllBooks() : Promise.resolve([]),
         activeDb.getAllHighlights ? activeDb.getAllHighlights() : Promise.resolve([]),
@@ -185,7 +202,8 @@ async function _restoreFullDataBackupLocked(backupData, activeDb, operationId, a
         activeDb.getAllChapterTranslations ? activeDb.getAllChapterTranslations() : Promise.resolve([]),
         activeDb.getAllPdfDrawings ? activeDb.getAllPdfDrawings() : (activeDb.getAllPdfPageDrawings ? activeDb.getAllPdfPageDrawings() : Promise.resolve([])),
         activeDb.getAllCustomLists ? activeDb.getAllCustomLists() : Promise.resolve([]),
-        activeDb.getAllDeletedRecords ? activeDb.getAllDeletedRecords() : Promise.resolve([])
+        activeDb.getAllDeletedRecords ? activeDb.getAllDeletedRecords() : Promise.resolve([]),
+        activeDb.getAllPortals ? activeDb.getAllPortals() : Promise.resolve([])
     ])
 
     const snapshot = {
@@ -294,6 +312,7 @@ async function _restoreFullDataBackupLocked(backupData, activeDb, operationId, a
     const translationsToPut = []
     const drawingsToPut = []
     const listsToPut = []
+    const portalsToPut = []
     const settingsToPut = []
 
     // 4a. Chapter Translations
@@ -412,6 +431,26 @@ async function _restoreFullDataBackupLocked(backupData, activeDb, operationId, a
                 ? l.bookIds.map(bId => bookIdRemap.get(bId) || bId)
                 : l.bookIds
             listsToPut.push({ ...l, bookIds: remappedBookIds })
+        }
+    }
+
+    // 4f-2. Reader Portals
+    if (Array.isArray(backupData.portals)) {
+        const existingPortalMap = new Map((existingPortals || []).map(p => [p.id, p]))
+        for (const p of backupData.portals) {
+            if (!p || !p.id) continue
+            if (isItemTombstoned(p)) continue
+            const mappedSourceBookId = (p.sourceBookId && bookIdRemap.has(p.sourceBookId)) ? bookIdRemap.get(p.sourceBookId) : p.sourceBookId
+            const mappedTargetBookId = (p.targetBookId && bookIdRemap.has(p.targetBookId)) ? bookIdRemap.get(p.targetBookId) : p.targetBookId
+            const existing = existingPortalMap.get(p.id)
+            if (existing && (existing.updatedAt || existing.createdAt || 0) > (p.updatedAt || p.createdAt || 0)) {
+                continue
+            }
+            portalsToPut.push({
+                ...p,
+                sourceBookId: mappedSourceBookId,
+                targetBookId: mappedTargetBookId
+            })
         }
     }
 
@@ -538,6 +577,7 @@ async function _restoreFullDataBackupLocked(backupData, activeDb, operationId, a
         translationsToPut,
         drawingsToPut,
         listsToPut,
+        portalsToPut,
         settingsToPut,
         deletedRecordsToPut
     }
@@ -650,7 +690,9 @@ async function _restoreFullDataBackupLocked(backupData, activeDb, operationId, a
             if (applyRes && rollbackFn) {
                 await rollbackFn(applyRes.operationId || operationId, applyRes.journal || null, null, { retainLock: true })
             }
-        } catch (_) {}
+        } catch (rbErr) {
+            console.warn('[backup-service] rollback error:', rbErr)
+        }
 
         // Revert localStorage changes from log ONLY if current value still matches afterValue
         if (typeof localStorage !== 'undefined') {
@@ -668,7 +710,9 @@ async function _restoreFullDataBackupLocked(backupData, activeDb, operationId, a
                     } else {
                         localStorage.setItem(k, prevVal)
                     }
-                } catch (_) {}
+                } catch (lsErr) {
+                    console.warn('[backup-service] localStorage rollback error:', k, lsErr)
+                }
             }
         }
         throw restoreErr
@@ -680,6 +724,7 @@ async function _restoreFullDataBackupLocked(backupData, activeDb, operationId, a
     const restoredBookmarks = bookmarksToPut.length
     const restoredDrawings = drawingsToPut.length
     const restoredLists = listsToPut.length
+    const restoredPortals = portalsToPut.length
 
-    return { restoredBooks, restoredSessions, restoredHighlights, restoredBookmarks, restoredDrawings, restoredLists }
+    return { restoredBooks, restoredSessions, restoredHighlights, restoredBookmarks, restoredDrawings, restoredLists, restoredPortals }
 }

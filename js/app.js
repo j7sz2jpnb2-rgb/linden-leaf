@@ -14,9 +14,8 @@ import { ReaderAppearanceController } from './reader-appearance-controller.js'
 import { FoliateSectionBinder } from './foliate-section-binder.js'
 import '../foliate-js-main/view.js'
 export { ReaderLocationHistory, normalizeNavigationTarget, decodePdfProgress } from './reader-navigation.js'
-export { FEATURE_CHAPTER_TRANSLATION_ENABLED, FEATURE_ANNUAL_REPORT_ENABLED, APP_BUILD_VER } from './app-features.js'
+export { FEATURE_CHAPTER_TRANSLATION_ENABLED, APP_BUILD_VER } from './app-features.js'
 import { openLocalEpubSource, openLocalPdfSource } from './book-source.js'
-import { pdfPreferenceKey } from './pdf-preferences.js'
 import { Overlayer } from '../foliate-js-main/overlayer.js'
 import * as db from './db.js'
 import { tracker } from './tracker.js'
@@ -28,7 +27,6 @@ import { platformBridge } from './platformBridge.js'
 import { importQueue } from './import-queue.js'
 import { bookDetailsModal } from './book-details.js'
 import { fullTextSearchEngine } from './fulltext-search.js'
-import { saveAiConfig } from './reading-ai-assistant.js'
 import { PageTurnController, FoliatePageTurnAdapter, PdfPageTurnAdapter, FEATURE_CURL_PAGE_TURN_ENABLED } from './page-turn-controller.js'
 import { dictionaryService } from './dictionary-service.js'
 import { customFontManager } from './custom-font-manager.js'
@@ -41,6 +39,8 @@ import { coverUrlPool } from './cover-url-pool.js'
 import { FEATURE_CHAPTER_TRANSLATION_ENABLED } from './app-features.js'
 import { ensureAdvancedSettingsLoaded, ensureAiSidebarLoaded, ensureChapterTranslationLoaded } from './app-modules.js'
 import { DEFAULT_READER_NAME } from './ui-format.js'
+import { smartCleanPdfCopyText } from './text-copy-utils.js'
+import { getHighlightInkSolidHex, getHighlightStrokeHex, normalizeHighlightColor } from './highlight-palette.js'
 import {
     initLocale,
     getLocale,
@@ -97,6 +97,7 @@ class UniversalReaderApp {
                     const params = new URLSearchParams(searchStr)
                     const wMode = params.get('windowMode')
                     const bId = params.get('bookId')
+                    this.initialSatellitePeek = params.get('peek') === '1'
                     if (wMode === 'reader' && bId) {
                         this.isSatelliteReaderWindow = true
                         this.initialSatelliteBookId = bId
@@ -355,6 +356,7 @@ class UniversalReaderApp {
                     } catch (e) {}
                 }, 0)
                 let pendingLoc = null
+                let pendingPeek = false
                 try {
                     const pendingKey = `linden_pending_nav_${this.initialSatelliteBookId}`
                     const rawPending = localStorage.getItem(pendingKey)
@@ -363,10 +365,12 @@ class UniversalReaderApp {
                         const parsed = JSON.parse(rawPending)
                         if (parsed && (!parsed.ts || Date.now() - parsed.ts < 60000)) {
                             pendingLoc = (parsed.location != null) ? parsed.location : null
+                            pendingPeek = Boolean(parsed.peek)
                         }
                     }
                 } catch (_) {}
-                await this.openBook(this.initialSatelliteBookId, pendingLoc, { forceInPlace: true })
+                this.initialSatellitePeek = this.initialSatellitePeek || pendingPeek
+                await this.openBook(this.initialSatelliteBookId, pendingLoc, { forceInPlace: true, peek: this.initialSatellitePeek })
             } else {
                 await this.bookshelf.renderCustomListsSidebar()
                 // R9: Render bookshelf immediately without waiting for font binaries
@@ -1021,7 +1025,6 @@ class UniversalReaderApp {
 
     handleLocaleChanged(newLocale) {
         this._updateWindowTitle(newLocale)
-        try { window.electronAPI?.setLocale?.(newLocale) } catch (_) {}
         try { this.updateUserProfileDisplay?.() } catch (_) {}
         try { this._populateStoragePaths?.() } catch (_) {}
         try { this.refreshTtsVoiceOptions?.() } catch (_) {}
@@ -1046,7 +1049,11 @@ class UniversalReaderApp {
         this._lastPageLabelState = state
         if (!this.dom?.readerPageNumber || !state) return
         if (state.kind === 'pdf') {
-            this.dom.readerPageNumber.innerText = t('app.pageOfTotal', { page: state.page, total: state.total })
+            const baseText = t('app.pageOfTotal', { page: state.page, total: state.total })
+            const label = state.label ? String(state.label).trim() : ''
+            this.dom.readerPageNumber.innerText = (label && label !== String(state.page))
+                ? `${label} · ${baseText}`
+                : baseText
             this.dom.readerPageNumber.title = t('app.pageJumpTooltip', { total: state.total })
         } else if (state.kind === 'bookTotal') {
             this.dom.readerPageNumber.innerText = t('app.bookPageOfTotal', { cur: state.cur, tot: state.tot })
@@ -1119,8 +1126,8 @@ class UniversalReaderApp {
 
     checkFirstTimeUser() {
         const isInit = localStorage.getItem('linden_user_initialized')
-        if (window.electronAPI?.syncGetConfig && !this.sync.syncConfig) {
-            window.electronAPI.syncGetConfig().then(cfg => {
+        if (platformBridge?.getSyncConfig && !this.sync.syncConfig) {
+            platformBridge.getSyncConfig().then(cfg => {
                 if (cfg) {
                     this.sync.syncConfig = cfg
                     this.updateUserProfileDisplay()
@@ -1828,6 +1835,13 @@ class UniversalReaderApp {
             })
             if (targetStr != null && targetStr.trim() !== '') {
                 const trimmed = targetStr.trim()
+                if (this.pdfViewport && typeof this.pdfViewport.findPageByLabel === 'function') {
+                    const matchedLabelPage = this.pdfViewport.findPageByLabel(trimmed)
+                    if (matchedLabelPage != null && String(matchedLabelPage + 1) !== trimmed) {
+                        this.pdfViewport.goToPage(matchedLabelPage)
+                        return
+                    }
+                }
                 if (trimmed.endsWith('%')) {
                     const pctVal = parseFloat(trimmed)
                     if (!isNaN(pctVal) && pctVal >= 0 && pctVal <= 100) {
@@ -2012,8 +2026,8 @@ class UniversalReaderApp {
             const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement)
             updateFullscreenUI(isFs)
         });
-        if (window.electronAPI?.onFullscreenChange) {
-            window.electronAPI.onFullscreenChange(isFs => {
+        if (platformBridge?.onFullscreenChange) {
+            platformBridge.onFullscreenChange(isFs => {
                 updateFullscreenUI(isFs)
             })
         };
@@ -2260,6 +2274,10 @@ class UniversalReaderApp {
                 this.closeBookDetailsModal()
                 this.openBook(id)
             },
+            onPeekBook: (id) => {
+                this.closeBookDetailsModal()
+                this.openBook(id, null, { peek: true })
+            },
             onOpenBookNewWindow: (id) => {
                 this.closeBookDetailsModal()
                 this.openBookInNewWindow(id)
@@ -2270,6 +2288,20 @@ class UniversalReaderApp {
             },
             onManageLists: (id) => {
                 this.bookshelf.openManageBookListsModal(id)
+            },
+            onToggleArchive: async (id) => {
+                let book = (this.bookshelf.currentBooksList || []).find(b => b.id === id)
+                if (!book) book = await db.getBook(id)
+                if (book) {
+                    await this.bookshelf.handleToggleArchiveBook(book)
+                }
+            },
+            onRemoveLocalFile: async (id) => {
+                let book = (this.bookshelf.currentBooksList || []).find(b => b.id === id)
+                if (!book) book = await db.getBook(id)
+                if (book) {
+                    await this.bookshelf.handleRemoveLocalBookFile(book)
+                }
             },
             onDeleteBook: async (id) => {
                 let book = (this.bookshelf.currentBooksList || []).find(b => b.id === id)
@@ -2353,7 +2385,7 @@ class UniversalReaderApp {
         }
     }
 
-    async openBookInNewWindow(bookId, initialLocation = null) {
+    async openBookInNewWindow(bookId, initialLocation = null, options = {}) {
         if (!bookId) return { success: false }
         if (!this._pendingWindowSpawns) {
             this._pendingWindowSpawns = new Set()
@@ -2373,11 +2405,12 @@ class UniversalReaderApp {
                 this.sync.handleCloudBookClick(book)
                 return { success: true, cloudHandled: true }
             }
-            if (initialLocation != null) {
+            const isPeek = Boolean(options?.peek)
+            if (initialLocation != null || isPeek) {
                 try {
                     localStorage.setItem(
                         `linden_pending_nav_${book.id}`,
-                        JSON.stringify({ location: initialLocation, ts: Date.now() })
+                        JSON.stringify({ location: initialLocation, peek: isPeek, ts: Date.now() })
                     )
                 } catch (_) {}
             }
@@ -2443,16 +2476,26 @@ class UniversalReaderApp {
 
     toggleBookSelection(...args) { return this.bookshelf.toggleBookSelection(...args) }
 
-    async copyMultiSelectionOrSingle() {
+    async copyMultiSelectionOrSingle({ clearAfter = true } = {}) {
         const selection = this.annotations.selectedTextInfo || this.annotations._frozenSelectionSnapshot
-        if (selection?.formatType !== 'pdf' && this.annotations.multiSelectedRanges && this.annotations.multiSelectedRanges.length > 1) {
-            const mergedText = this.annotations.multiSelectedRanges.map(r => r.text).filter(Boolean).join('\n\n')
+        const isPdfActive = Boolean(this.pdfViewport || selection?.formatType === 'pdf')
+        const matchingMultiRanges = Array.isArray(this.annotations.multiSelectedRanges)
+            ? this.annotations.multiSelectedRanges.filter(r =>
+                isPdfActive ? r?.formatType === 'pdf' : r?.formatType !== 'pdf'
+            )
+            : []
+
+        if (matchingMultiRanges.length > 1) {
+            const rawMergedText = matchingMultiRanges.map(r => r.text).filter(Boolean).join('\n\n')
+            const mergedText = isPdfActive ? smartCleanPdfCopyText(rawMergedText) : rawMergedText
             if (!mergedText) return false
             try {
                 await navigator.clipboard.writeText(mergedText)
-                this.dialogs.showToast(t('app.copiedMultiToast', { count: this.annotations.multiSelectedRanges.length }), 'success')
-                this.annotations.clearActiveTextSelection?.()
-                this.annotations.hideSelectionPopup?.()
+                this.dialogs.showToast(t('app.copiedMultiToast', { count: matchingMultiRanges.length }), 'success')
+                if (clearAfter) {
+                    this.annotations.clearActiveTextSelection?.()
+                    this.annotations.hideSelectionPopup?.()
+                }
                 return true
             } catch (err) {
                 console.error('[Copy] Clipboard writeText failed:', err)
@@ -2461,10 +2504,13 @@ class UniversalReaderApp {
             }
         } else if (selection?.text) {
             try {
-                await navigator.clipboard.writeText(selection.text)
+                const textToCopy = isPdfActive ? smartCleanPdfCopyText(selection.text) : selection.text
+                await navigator.clipboard.writeText(textToCopy)
                 this.dialogs.showToast(t('app.copiedSelectionToast'), 'success')
-                this.annotations.clearActiveTextSelection?.()
-                this.annotations.hideSelectionPopup?.()
+                if (clearAfter) {
+                    this.annotations.clearActiveTextSelection?.()
+                    this.annotations.hideSelectionPopup?.()
+                }
                 return true
             } catch (err) {
                 console.error('[Copy] Clipboard writeText failed:', err)
@@ -2478,6 +2524,8 @@ class UniversalReaderApp {
     turnPageNext() {
         this.cancelPendingReaderUIToggle()
         this.cards.hideFootnotePopup()
+        this.annotations?.rangeEditor?.hide?.({ commitPending: false })
+        this.annotations?.hideHighlightActionPopup?.()
         if (this.pageTurnController) {
             this.pageTurnController.turnNext()
             return
@@ -2498,6 +2546,8 @@ class UniversalReaderApp {
     turnPagePrev() {
         this.cancelPendingReaderUIToggle()
         this.cards.hideFootnotePopup()
+        this.annotations?.rangeEditor?.hide?.({ commitPending: false })
+        this.annotations?.hideHighlightActionPopup?.()
         if (this.pageTurnController) {
             this.pageTurnController.turnPrev()
             return
@@ -2599,6 +2649,11 @@ class UniversalReaderApp {
                 ocrModal.style.display = 'none'
                 return
             }
+            if (this.annotations?.noteComposer?.isOpen) {
+                e.preventDefault()
+                this.annotations.noteComposer.cancel()
+                return
+            }
             if (this.pdfViewport?.getAutoScrollState().active) {
                 e.preventDefault()
                 this.pdfTools.stopAutoScroll()
@@ -2658,10 +2713,23 @@ class UniversalReaderApp {
                 return
             }
 
+            // Ctrl+Z / Cmd+Z: Undo last annotation change when not typing in an input
+            if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z' && !editing) {
+                const handledUndo = this.annotations?.undoLastAnnotationAction?.()
+                if (handledUndo) {
+                    e.preventDefault()
+                    return
+                }
+            }
+
             // MuPDF paints its selection without a DOM range, so WebView cannot copy it itself.
-            if (copyNativePdf || (copyKey && this.annotations.multiSelectedRanges?.length > 1)) {
+            const hasMultiForCurrentFormat = Array.isArray(this.annotations.multiSelectedRanges) &&
+                this.annotations.multiSelectedRanges.filter(r =>
+                    this.pdfViewport ? r?.formatType === 'pdf' : r?.formatType !== 'pdf'
+                ).length > 1
+            if (copyNativePdf || (copyKey && hasMultiForCurrentFormat)) {
                 e.preventDefault()
-                this.copyMultiSelectionOrSingle()
+                this.copyMultiSelectionOrSingle({ clearAfter: false })
                 return
             }
 
@@ -2779,8 +2847,8 @@ class UniversalReaderApp {
     }
 
     toggleFullscreen() {
-        if (window.electronAPI?.toggleFullscreen) {
-            window.electronAPI.toggleFullscreen()
+        if (platformBridge?.toggleFullscreen) {
+            platformBridge.toggleFullscreen()
             return
         }
         if (!document.fullscreenElement && !document.webkitFullscreenElement) {
@@ -2824,7 +2892,7 @@ class UniversalReaderApp {
      * Ensures consistent structure across debounce, closeReader, and flushReaderStateOnExit
      */
     makeProgressSnapshot(session) {
-        if (!session || !session.location || !session.snapshot) return null
+        if (!session || session.isPeek || !session.location || !session.snapshot) return null
         const loc = session.location
         let fraction = Number.isFinite(loc.fraction) ? Math.min(1, Math.max(0, loc.fraction)) : 0
         let page = typeof loc.page === 'number' && loc.page >= 1 ? Math.round(loc.page) : null
@@ -2889,6 +2957,38 @@ class UniversalReaderApp {
         await this.openBook(session.bookId, location, { forceInPlace: true, password: session.pdfPassword })
     }
 
+    _syncPeekBanner(session) {
+        const banner = document.getElementById('reader-peek-banner')
+        if (!banner) return
+        const isPeek = Boolean(session?.isPeek)
+        banner.hidden = !isPeek
+        if (!isPeek) return
+        const promoteBtn = document.getElementById('btn-promote-peek')
+        if (promoteBtn && !promoteBtn.dataset.peekBound) {
+            promoteBtn.dataset.peekBound = '1'
+            promoteBtn.addEventListener('click', () => {
+                const active = this._activeSession
+                if (!active || !active.isCurrent()) return
+                active.isPeek = false
+                banner.hidden = true
+                const bId = active.bookId
+                const title = active.bookData?.title || ''
+                const author = active.bookData?.author || ''
+                const frac = Number.isFinite(active.location?.fraction) ? active.location.fraction : 0
+                if (bId) {
+                    db.recordBookOpened(bId).catch(err => console.warn('[Peek] recordBookOpened error:', err))
+                    if (!tracker.isTracking) {
+                        tracker.startSession(bId, title, frac, author)
+                    }
+                    const snap = this.makeProgressSnapshot(active)
+                    if (snap) {
+                        db.updateBookProgress(bId, snap).catch(err => console.warn('[Peek] updateBookProgress error:', err))
+                    }
+                }
+            })
+        }
+    }
+
     async openBook(bookOrId, initialLocation = null, options = {}) {
         const bookId = (typeof bookOrId === 'object' && bookOrId !== null) ? bookOrId.id : bookOrId
         if (!bookId) return this.dialogs.showToast(t('app.bookNotFound'), 'warning')
@@ -2903,7 +3003,7 @@ class UniversalReaderApp {
             !platformBridge.isAndroid
         ) {
             try {
-                const winRes = await this.openBookInNewWindow(bookId, initialLocation)
+                const winRes = await this.openBookInNewWindow(bookId, initialLocation, options)
                 if (winRes?.success) {
                     return
                 }
@@ -2951,6 +3051,7 @@ class UniversalReaderApp {
             bookId,
             abortController,
             isCurrent: () => this._currentBookEpoch === currentEpoch && !abortController.signal.aborted,
+            isPeek: Boolean(options?.peek),
             view: null,
             driver: null,
             viewport: null,
@@ -3118,6 +3219,7 @@ class UniversalReaderApp {
             this.dom.bookshelfView.style.display = 'none'
             this.dom.readerView.style.display = 'block'
             this.dom.readerView.classList.add('active')
+            this._syncPeekBanner(readerSession)
             document.documentElement.dataset.startupView = 'ready'
             this.imports.minimizeImportPanel()
             const resolvedBookTitle = bookData.title || snapshot.title || t('app.readingFallbackTitle')
@@ -3187,6 +3289,7 @@ class UniversalReaderApp {
     async _openPdfSession({ initialLocation, options, bookId, readerSession, snapshot, bookData, fileObj }) {
                 this.dom.readerView?.classList.add('is-pdf-mode')
                 this.dom.readerView?.removeAttribute?.('data-reader-flow')
+                this.appearance?.applyReaderToolbarCustomization?.()
 
                 // Independent PDF Viewport (no iframe sandbox)
                 const nativePath = snapshot.nativePath || await db.getBookNativePath(bookId)
@@ -3247,6 +3350,14 @@ class UniversalReaderApp {
                         if (active?.href) this.annotations.highlightActiveTOCItem(active.href)
                         if (active && readerSession.location) readerSession.location.tocItem = active
                     },
+                    onPageLabelsReady: () => {
+                        if (!readerSession.isCurrent() || this._activeSession !== readerSession) return
+                        const idx = sessionViewport.currentPage ?? 0
+                        const label = sessionViewport.getPageLabel?.(idx) || null
+                        if (label) {
+                            this._setReaderPageLabel({ kind: 'pdf', page: idx + 1, total: sessionViewport.numPages || 1, label })
+                        }
+                    },
                     onPageChange: (pageIdx, total) => {
                         if (!readerSession.isCurrent()) return
                         window.mobileShell?.syncPdfControls()
@@ -3256,11 +3367,12 @@ class UniversalReaderApp {
                         const frac = total > 0 ? (pageIdx + 1) / total : 0
                         const liveYRatio = sessionViewport.getReadingLocation?.()?.yRatio
                         const normalizedYRatio = Number.isFinite(liveYRatio) ? Math.min(1, Math.max(0, liveYRatio)) : 0
-                        const loc = { fraction: frac, page: pageIdx + 1, totalPages: total, yRatio: normalizedYRatio }
+                        const pageLabel = sessionViewport.getPageLabel?.(pageIdx) || null
+                        const loc = { fraction: frac, page: pageIdx + 1, totalPages: total, yRatio: normalizedYRatio, pageLabel }
                         readerSession.location = loc
                         if (this._activeSession === readerSession) {
                             this.currentLocation = loc
-                            this._setReaderPageLabel({ kind: 'pdf', page: pageIdx + 1, total })
+                            this._setReaderPageLabel({ kind: 'pdf', page: pageIdx + 1, total, label: pageLabel })
                             if (this.dom.progressSlider) {
                                 this.dom.progressSlider.value = (frac * 100).toFixed(1)
                             }
@@ -3324,24 +3436,41 @@ class UniversalReaderApp {
                     },
                     onSelection: (selInfo) => {
                         if (!readerSession.isCurrent() || this.drawing.pdfDrawTool) return
-                        this.annotations.selectedTextInfo = {
-                            text: selInfo.text,
+                        const makePdfItem = (item) => ({
+                            text: item.text,
                             formatType: 'pdf',
                             pdfTarget: {
-                                page: selInfo.page,
-                                rects: selInfo.rects,
-                                quads: selInfo.quads || [],
-                                pageBounds: selInfo.pageBounds || null,
-                                segments: selInfo.segments || null,
-                                coordinateVersion: selInfo.coordinateVersion || 'pdf-page-v1',
+                                page: item.page,
+                                rects: item.rects,
+                                quads: item.quads || [],
+                                pageBounds: item.pageBounds || null,
+                                segments: item.segments || null,
+                                coordinateVersion: item.coordinateVersion || 'pdf-page-v1',
                             },
-                            rect: selInfo.clientRect
+                            rect: item.clientRect || selInfo.clientRect
+                        })
+                        const currentItem = makePdfItem(selInfo)
+                        this.annotations.selectedTextInfo = currentItem
+                        this.annotations._frozenSelectionSnapshot = { ...currentItem }
+
+                        if (Array.isArray(selInfo.multiSelections) && selInfo.multiSelections.length > 1) {
+                            this.annotations.multiSelectedRanges = selInfo.multiSelections.map(makePdfItem)
+                            if (this.annotations.dom.popupMultiBadge) {
+                                this.annotations.dom.popupMultiBadge.innerText = t('reader.multiSelected', { count: this.annotations.multiSelectedRanges.length })
+                                this.annotations.dom.popupMultiBadge.style.display = 'inline-block'
+                            }
+                        } else {
+                            this.annotations.multiSelectedRanges = [currentItem]
+                            if (this.annotations.dom.popupMultiBadge) {
+                                this.annotations.dom.popupMultiBadge.style.display = 'none'
+                            }
                         }
-                        this.annotations._frozenSelectionSnapshot = { ...this.annotations.selectedTextInfo }
+
                         this.annotations.hideHighlightActionPopup()
                         const trimmed = (selInfo.text || '').trim()
+                        const isMulti = this.annotations.multiSelectedRanges.length > 1
                         const dictEnabled = typeof this.dictionaryService?.isEnabled === 'function' ? this.dictionaryService.isEnabled() : (this.dictionaryService?.isEnabled !== false)
-                        const isSingleWord = /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && dictEnabled
+                        const isSingleWord = !isMulti && /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && dictEnabled
                         const shouldLookUp = isSingleWord && (!selInfo.selectionMode || selInfo.selectionMode === 'word')
                         if (shouldLookUp) {
                             const wordSnapshot = { ...this.annotations.selectedTextInfo }
@@ -3355,6 +3484,10 @@ class UniversalReaderApp {
                         }
                     },
                     onSelectionClear: () => {
+                        this.annotations.multiSelectedRanges = []
+                        if (this.annotations.dom.popupMultiBadge) {
+                            this.annotations.dom.popupMultiBadge.style.display = 'none'
+                        }
                         this.annotations.hideSelectionPopup()
                         this.cards.hideDictionaryCard()
                     },
@@ -3506,7 +3639,12 @@ this.pdfTools.applyPdfPageAppearance()
                 sessionViewport.setHighlights(existingHls, snapshot)
 
                 if (initialLocation?.page != null && initialLocation?.highlightId) {
-                    sessionViewport.pulseHighlight?.(initialLocation.page - 1, initialLocation.highlightId, initialLocation.rects)
+                    sessionViewport.pulseHighlight?.(
+                        initialLocation.page - 1,
+                        initialLocation.highlightId,
+                        initialLocation.rects,
+                        initialLocation.highlightColor
+                    )
                 }
 
                 const updateVisibilityBudget = () => {
@@ -3525,7 +3663,8 @@ this.pdfTools.applyPdfPageAppearance()
 
                 this.pdfTools.updatePdfZoomControls(sessionViewport.scale, sessionViewport.zoomMode)
                 if (this.pdfTools.dom.pdfZoomBar) this.pdfTools.dom.pdfZoomBar.style.display = 'flex'
-                this._setReaderPageLabel({ kind: 'pdf', page: displayPage, total: docInfo.numPages })
+                const initLabel = sessionViewport.getPageLabel?.(Math.max(0, displayPage - 1)) || null
+                this._setReaderPageLabel({ kind: 'pdf', page: displayPage, total: docInfo.numPages, label: initLabel })
                 if (this.dom.progressSlider) {
                     this.dom.progressSlider.value = (initialFrac * 100).toFixed(1)
                 }
@@ -3550,10 +3689,12 @@ this.pdfTools.applyPdfPageAppearance()
                         this._setReaderLiveTimer(activeSecs, isIdle)
                     }
                 }
-                tracker.startSession(bookId, bookData.title, initialFrac, bookData.author || '')
-                db.recordBookOpened(bookId).catch(err => {
-                    console.warn('Failed to record book opened for PDF:', err)
-                })
+                if (!readerSession.isPeek) {
+                    tracker.startSession(bookId, bookData.title, initialFrac, bookData.author || '')
+                    db.recordBookOpened(bookId).catch(err => {
+                        console.warn('Failed to record book opened for PDF:', err)
+                    })
+                }
 
                 setTimeout(() => {
                     this.pdfTools.restoreBookSessionState(readerSession).catch(error => console.warn('[PDF] Restore reading tools:', error))
@@ -3566,6 +3707,7 @@ this.pdfTools.applyPdfPageAppearance()
     // Runs inside the owning App session; errors propagate to openBook's existing cleanup.
     async _openFoliateSession({ initialLocation, bookId, readerSession, snapshot, bookData, fileObj, takePreparedEpub }) {
             this.dom.readerView?.classList.remove('is-pdf-mode')
+            this.appearance?.applyReaderToolbarCustomization?.()
             const sessionView = document.createElement('foliate-view')
             readerSession.view = sessionView
             this.foliateView = sessionView
@@ -3651,8 +3793,13 @@ this.pdfTools.applyPdfPageAppearance()
                     }
 
                     let footnoteText = (a?.getAttribute('data-wr-footernote') || a?.getAttribute('zy-footnote') || a?.getAttribute('data-note') || '').trim()
+                    let footnoteHtml = ''
                     if (!footnoteText && targetEl) {
-                        footnoteText = this.cards.extractFootnoteFromTarget(targetEl, a)
+                        const rich = this.cards.extractFootnoteRichFromTarget
+                            ? this.cards.extractFootnoteRichFromTarget(targetEl, a)
+                            : { text: this.cards.extractFootnoteFromTarget(targetEl, a), html: '' }
+                        footnoteText = rich.text
+                        footnoteHtml = rich.html
                     }
 
                     if (!footnoteText && sessionView?.book) {
@@ -3669,7 +3816,11 @@ this.pdfTools.applyPdfPageAppearance()
                                             this.cards.hideFootnotePopup()
                                             return
                                         }
-                                        footnoteText = this.cards.extractFootnoteFromTarget(extEl, a)
+                                        const rich = this.cards.extractFootnoteRichFromTarget
+                                            ? this.cards.extractFootnoteRichFromTarget(extEl, a)
+                                            : { text: this.cards.extractFootnoteFromTarget(extEl, a), html: '' }
+                                        footnoteText = rich.text
+                                        footnoteHtml = rich.html
                                     }
                                 }
                             }
@@ -3709,6 +3860,7 @@ this.pdfTools.applyPdfPageAppearance()
                         this.cards.showFootnotePopup({
                             title: popupTitle,
                             text: footnoteText,
+                            html: footnoteHtml,
                             rect: {
                                 top: iframeRect.top + ((rect.top || 0) * scaleY),
                                 left: iframeRect.left + ((rect.left || 0) * scaleX),
@@ -3724,28 +3876,34 @@ this.pdfTools.applyPdfPageAppearance()
             sessionView.addEventListener('draw-annotation', e => {
                 if (!readerSession.isCurrent()) return
                 const { draw, annotation } = e.detail
-                const { color = '#facc15', style = 'highlight' } = annotation
+                const { color = '#facc15', style = 'highlight', hasNote = false, notePreview = '' } = annotation
                 const writingMode = this.settings.writingMode || 'horizontal'
+                const activeTheme = document.documentElement?.getAttribute?.('data-theme') || ''
+                const isDark = activeTheme === 'dark' || activeTheme === 'black'
+                const strokeColor = getHighlightStrokeHex(normalizeHighlightColor(color), isDark)
+                const inkSolidColor = getHighlightInkSolidHex(normalizeHighlightColor(color), isDark)
                 const rawUnderlineWidth = Number(this.advancedSettings?.config?.underlineWidth)
                 const underlineWidth = Number.isFinite(rawUnderlineWidth) ? rawUnderlineWidth : 1.5
                 const rawHlOpacity = Number(this.advancedSettings?.config?.highlighterOpacity)
                 const highlighterOpacity = Number.isFinite(rawHlOpacity) ? rawHlOpacity : 0.35
+                const noteOpts = { hasNote, notePreview, noteColor: strokeColor, isDark }
                 if (style === 'underline') {
-                    draw(Overlayer.underline, { color, width: underlineWidth, writingMode })
+                    draw(Overlayer.underline, { color: strokeColor, width: underlineWidth, writingMode, ...noteOpts })
                 } else if (style === 'dashed') {
-                    draw(Overlayer.dashed, { color: color === '#facc15' ? '#64748b' : color, width: Math.max(1, underlineWidth * 0.7), writingMode })
+                    draw(Overlayer.dashed, { color: strokeColor, width: Math.max(1.2, underlineWidth * 0.85), writingMode, ...noteOpts })
                 } else if (style === 'squiggly') {
-                    draw(Overlayer.squiggly, { color, width: Math.max(1.5, underlineWidth * 1.2), writingMode })
+                    draw(Overlayer.squiggly, { color: strokeColor, width: Math.max(1.5, underlineWidth * 1.2), writingMode, ...noteOpts })
                 } else if (style === 'strikethrough') {
-                    draw(Overlayer.strikethrough, { color, width: underlineWidth, writingMode })
+                    draw(Overlayer.strikethrough, { color: strokeColor, width: underlineWidth, writingMode, ...noteOpts })
                 } else {
                     draw(Overlayer.highlight, {
-                        color,
+                        color: inkSolidColor,
                         opacity: highlighterOpacity,
                         realisticPen: this.settings.realisticPen !== false,
                         writingMode,
                         annotationId: annotation.id,
-                        id: annotation.id
+                        id: annotation.id,
+                        ...noteOpts
                     })
                 }
             })
@@ -3762,11 +3920,14 @@ this.pdfTools.applyPdfPageAppearance()
                         continue
                     }
                     try {
+                        const trimmedNote = (hl.note || '').trim()
                         await sessionView.addAnnotation({
                             value: `${hl.cfi}::${hl.style || 'highlight'}`,
                             id: hl.id,
                             color: hl.color,
-                            style: hl.style || 'highlight'
+                            style: hl.style || 'highlight',
+                            hasNote: Boolean(trimmedNote),
+                            notePreview: trimmedNote.slice(0, 120)
                         })
                     } catch (err) {
                         // Section index mismatch handled internally by foliate-js
@@ -3777,8 +3938,8 @@ this.pdfTools.applyPdfPageAppearance()
             // Clicked an existing highlight on the page!
             sessionView.addEventListener('show-annotation', e => {
                 if (!readerSession.isCurrent()) return
-                const { value, range } = e.detail
-                this.annotations.onHighlightClicked(value, range)
+                const { value, range, index, hitBadge } = e.detail
+                this.annotations.onHighlightClicked(value, range, { index, hitBadge })
             })
 
             await sessionView.open(takePreparedEpub?.(snapshot) || fileObj, {
@@ -3869,11 +4030,22 @@ this.pdfTools.applyPdfPageAppearance()
                 return
             }
 
-            const targetHighlightCfi = resolvedSearchCfi || (initialLocation?.cfi ? initialLocation.cfi : null)
-            if (targetHighlightCfi && typeof sessionView.setActiveSearchMatch === 'function') {
-                sessionView.setActiveSearchMatch(targetHighlightCfi)
-            } else if (initialLocation?.query && !resolvedSearchCfi) {
-                this.dialogs.showToast(t('app.searchAnchorExpiredToast'), 'warning')
+            const isHighlightJump = Boolean(initialLocation?.isHighlightJump || initialLocation?.highlightId)
+            if (isHighlightJump && initialLocation?.cfi && typeof sessionView.pulseHighlight === 'function') {
+                const activeTheme = document.documentElement.getAttribute('data-theme') || this.settings?.theme || 'light'
+                const isDark = activeTheme === 'dark' || activeTheme === 'black'
+                sessionView.pulseHighlight(initialLocation.cfi, {
+                    color: initialLocation.highlightColor || '#facc15',
+                    isDark,
+                    writingMode: this.settings?.writingMode || 'horizontal',
+                })
+            } else {
+                const targetSearchCfi = resolvedSearchCfi || (initialLocation?.isSearchMatch && initialLocation?.cfi ? initialLocation.cfi : null)
+                if (targetSearchCfi && typeof sessionView.setActiveSearchMatch === 'function') {
+                    sessionView.setActiveSearchMatch(targetSearchCfi)
+                } else if (initialLocation?.query && !resolvedSearchCfi) {
+                    this.dialogs.showToast(t('app.searchAnchorExpiredToast'), 'warning')
+                }
             }
 
             // Ensure any already-loaded content doc is initialized
@@ -3887,10 +4059,12 @@ this.pdfTools.applyPdfPageAppearance()
 
             // Start Reading Session & Timer
             const startFrac = (isProgressIdentityMatching && bookData.progress?.fraction) || 0
-            tracker.startSession(bookId, bookData.title, startFrac, bookData.author || '')
-            db.recordBookOpened(bookId).catch(err => {
-                console.warn('Failed to record book opened for EPUB:', err)
-            })
+            if (!readerSession.isPeek) {
+                tracker.startSession(bookId, bookData.title, startFrac, bookData.author || '')
+                db.recordBookOpened(bookId).catch(err => {
+                    console.warn('Failed to record book opened for EPUB:', err)
+                })
+            }
             tracker.onTickCallback = ({ seconds, sessionSeconds, todaySeconds, isIdle }) => {
                 if (readerSession.isCurrent()) {
                     const activeSecs = sessionSeconds != null ? sessionSeconds : seconds
@@ -4143,6 +4317,7 @@ this.pdfTools.applyPdfPageAppearance()
         // 1. Immediately and synchronously abort closing session so its callbacks become no-op
         this.dom.readerView?.classList.remove('is-pdf-mode')
         this.dom.readerView?.removeAttribute('data-reader-flow')
+        this.appearance?.applyReaderToolbarCustomization?.()
         this.pageTurnController?.cancelCurrent()
         this.pageTurnController?.setAdapter(null)
         closingSession.abortController?.abort()
@@ -4206,6 +4381,7 @@ this.pdfTools.applyPdfPageAppearance()
         this.annotations.switchTab('settings')
         this.annotations.hideSelectionPopup()
         this.annotations.hideHighlightActionPopup()
+        this._syncPeekBanner(null)
         this.toggleReaderUI(true)
         // 8. Trigger UI transition only if no new session has started
         if (!this._activeSession) {

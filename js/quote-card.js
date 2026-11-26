@@ -640,19 +640,52 @@ export class QuoteCardGenerator {
     }
 
     /**
-     * Trigger file download
+     * Save generated quote card image:
+     * - Desktop Tauri: invokes OS native Save As dialog + authorized binary write
+     * - Android Tauri: saves directly to system photo gallery
+     * - Web fallback: triggers browser <a download>
+     * @param {string} [filename]
+     * @returns {Promise<{ saved: boolean, cancelled?: boolean, path?: string, method: string }>}
      */
     async downloadImage(filename) {
+        const cleanTitle = (this.bookTitle || 'LindenLeaf').replace(/[\\/:*?"<>|\uFF1A\uFF1F]/g, '_').trim() || 'LindenLeaf'
+        const defaultName = filename || `${t('quoteCard.downloadPrefix')}_${cleanTitle}_${Date.now()}.png`
+
+        const bridge = typeof window !== 'undefined' ? window.platformBridge : null
+
+        if (bridge?.isTauri && bridge.isAndroid && typeof bridge.saveImageToGallery === 'function') {
+            const dataUrl = await this.getDataURL()
+            const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
+            const res = await bridge.saveImageToGallery(base64, defaultName)
+            return { saved: Boolean(res !== false), method: 'android-gallery', path: typeof res === 'string' ? res : defaultName }
+        }
+
+        if (bridge?.isTauri && !bridge.isAndroid && typeof bridge.dialogPickSavePath === 'function' && typeof bridge.writeBinaryFile === 'function') {
+            const targetPath = await bridge.dialogPickSavePath({
+                defaultName,
+                title: t('cards.quote.saveAsTitle'),
+                filterName: t('cards.quote.pngFilter'),
+                filterExt: 'png'
+            })
+            if (!targetPath) {
+                return { saved: false, cancelled: true, method: 'tauri-dialog' }
+            }
+            const dataUrl = await this.getDataURL()
+            const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
+            await bridge.writeBinaryFile(targetPath, base64)
+            return { saved: true, cancelled: false, path: targetPath, method: 'tauri-dialog' }
+        }
+
         const blob = await this.getBlob()
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        const cleanTitle = (this.bookTitle || 'LindenLeaf').replace(/[\\/:*?"<>|\uFF1A\uFF1F]/g, '_').trim()
-        a.download = filename || `${t('quoteCard.downloadPrefix')}_${cleanTitle}_${Date.now()}.png`
+        a.download = defaultName
         document.body.appendChild(a)
         a.click()
         document.body.removeChild(a)
         setTimeout(() => URL.revokeObjectURL(url), 2000)
+        return { saved: true, cancelled: false, path: defaultName, method: 'browser-download' }
     }
 }
 

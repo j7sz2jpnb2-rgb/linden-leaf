@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(any(test, not(any(target_os = "android", target_os = "ios"))))]
 use std::path::PathBuf;
 
 use crate::commands::{is_en_locale, l10n};
@@ -199,6 +199,9 @@ pub async fn dialog_pick_folder(
         .await
         .map_err(|e| format!("Dialog task failed: {}", e))?;
 
+        if let Some(ref p) = folder {
+            crate::commands::fs::register_authorized_write_dir(p);
+        }
         Ok(folder.map(|p| p.to_string_lossy().to_string()))
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -271,6 +274,23 @@ pub async fn dialog_save_text_file(
 }
 
 
+#[cfg(any(test, not(any(target_os = "android", target_os = "ios"))))]
+fn append_fallback_extension(p: PathBuf, fallback_ext: Option<&str>) -> PathBuf {
+    if let Some(ext) = fallback_ext {
+        let already_matches = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext));
+        if !already_matches {
+            let mut os = p.into_os_string();
+            os.push(".");
+            os.push(ext);
+            return PathBuf::from(os);
+        }
+    }
+    p
+}
+
 #[tauri::command]
 pub async fn dialog_pick_save_path(
     default_name: String,
@@ -281,6 +301,10 @@ pub async fn dialog_pick_save_path(
 ) -> Result<Option<String>, String> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        let fallback_ext = filter_ext
+            .as_deref()
+            .map(|s| s.trim().trim_start_matches('.').to_string())
+            .filter(|s| !s.is_empty() && s != "*");
         let selected_path: Option<PathBuf> = tokio::task::spawn_blocking(move || {
             let mut dialog = rfd::FileDialog::new();
             let (dialog_title, all_files) = save_dialog_defaults(title, locale.as_deref());
@@ -294,7 +318,12 @@ pub async fn dialog_pick_save_path(
         .await
         .map_err(|e| format!("Dialog save task failed: {}", e))?;
 
-        Ok(selected_path.map(|p| p.to_string_lossy().to_string()))
+        let finalized_path = selected_path.map(|p| append_fallback_extension(p, fallback_ext.as_deref()));
+
+        if let Some(ref p) = finalized_path {
+            crate::commands::fs::register_authorized_save_path(p);
+        }
+        Ok(finalized_path.map(|p| p.to_string_lossy().to_string()))
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -352,5 +381,18 @@ mod tests {
             "JSON 备份文件 (*.json)"
         );
         assert!(save_text_extension_filter("archive.bin", Some("en")).is_none());
+
+        assert_eq!(
+            append_fallback_extension(PathBuf::from("Vol.1"), Some("png")),
+            PathBuf::from("Vol.1.png")
+        );
+        assert_eq!(
+            append_fallback_extension(PathBuf::from("Vol.1.png"), Some("png")),
+            PathBuf::from("Vol.1.png")
+        );
+        assert_eq!(
+            append_fallback_extension(PathBuf::from("notes"), Some("md")),
+            PathBuf::from("notes.md")
+        );
     }
 }

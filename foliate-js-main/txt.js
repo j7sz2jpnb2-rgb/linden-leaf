@@ -115,21 +115,23 @@ export const isTXT = file => {
     return type === 'text/plain' || type === 'text/markdown' || name.endsWith('.txt') || name.endsWith('.md')
 }
 
-// Chapter Heading Detector
+// Chapter Heading Detector (supports Simplified, Traditional, and Formal/Financial Chinese numerals)
+const ZH_NUM = '0-9一二三四五六七八九十百千万亿零两〇兩萬億壹贰叁肆伍陆柒捌玖拾佰仟貳參陸'
+const ZH_UNIT = '首章节回卷集部篇幕话诗歌曲折出段讲场辑案節話詩輯講場'
 const CHAPTER_PATTERNS = [
-    // 第X首/章/回/节/卷/集/部/篇/幕/话/诗/曲/折/出/段/讲/场/辑/案 (e.g. 第一首哀歌, 第一章, 第二回, 第一卷)
-    /^(?:第\s*[0-9一二三四五六七八九十百千万零两]+\s*[首章节回卷集部篇幕话诗歌曲折出段讲场辑案])(?:[：:\s\-—_]+.*)?$/i,
-    /^(?:第\s*[0-9一二三四五六七八九十百千万零两]+\s*[首章节回卷集部篇幕话诗歌曲折出段讲场辑案][\u4e00-\u9fa5a-zA-Z0-9\s（）()《》·]{0,30})$/i,
+    // 第X首/章/回/节/卷/集/部/篇/幕/话/诗/曲/折/出/段/讲/场/辑/案 (incl. Traditional/Formal numerals)
+    new RegExp(`^(?:第\\s*[${ZH_NUM}]+\\s*[${ZH_UNIT}])(?:[：:\\s\\-—_]+.*)?$`, 'i'),
+    new RegExp(`^(?:第\\s*[${ZH_NUM}]+\\s*[${ZH_UNIT}][\\u4e00-\\u9fa5a-zA-Z0-9\\s（）()《》·]{0,30})$`, 'i'),
     // Chapter 1, Section 1, Act I, Book 1, Canto 1, Sonnet 1, Elegie 1, Elegy 1
     /^(?:Chapter|Section|Book|Part|Act|Scene|Canto|Sonnet|Elegie|Elegy)\s+[0-9IVXLCDMivxlcdm]+(?:[：:\s\-—_]+.*)?$/i,
-    // 序言/前言/引子/楔子/尾声/后记/跋/附录/自序/译者序/导言
-    /^(?:引子|序言|前言|序|后记|尾声|番外(?:篇)?|楔子|跋|附录|正文|终章|上篇|中篇|下篇|总序|自序|译者序|译者后记|导言|题记|写在前面|写在最后)(?:[：:\s\-—_].*)?$/i,
+    // 序言/前言/引子/楔子/尾声/后记/跋/附录/自序/译者序/导言 (Simplified & Traditional)
+    /^(?:引子|序言|前言|序|后记|後記|尾声|尾聲|番外(?:篇)?|楔子|跋|附录|附錄|正文|终章|終章|上篇|中篇|下篇|总序|總序|自序|译者序|譯者序|译者后记|譯者後記|导言|導言|题记|題記|写在前面|寫在前面|写在最后|寫在最後)(?:[：:\s\-—_].*)?$/i,
     // 卷一, 卷1, 卷上, 卷下, 部一, 篇一
-    /^(?:卷|部|篇)\s*[0-9一二三四五六七八九十上下IVXLCDMivxlcdm]+(?:[：:\s\-—_].*)?$/i,
-    // 中文数字章节：一、标题, （一）标题, 1. 标题 (必须有明确点/顿号且标题较短 <= 20字)
-    /^(?:[一二三四五六七八九十]{1,3}|[0-9]{1,3})[、.．]\s*[\u4e00-\u9fa5a-zA-Z0-9（）()《》·\s]{1,20}$/,
-    // 括号章节：【第一章】, （第一首）, [Chapter 1]
-    /^[【\[（(](?:第\s*[0-9一二三四五六七八九十百千万零两]+\s*[首章节回卷集部篇幕话]|[0-9一二三四五六七八九十]{1,3}|(?:Chapter|Book|Canto)\s+[0-9IVXLCDMivxlcdm]+)[】\]）)](?:[\u4e00-\u9fa5a-zA-Z0-9\s]{0,25})?$/i
+    new RegExp(`^(?:卷|部|篇)\\s*[${ZH_NUM}上下IVXLCDMivxlcdm]+(?:[：:\\s\\-—_].*)?$`, 'i'),
+    // 中文数字章节：一、标题, 壹、标题, 1. 标题 (必须有明确点/顿号且标题较短 <= 20字)
+    new RegExp(`^(?:[${ZH_NUM}]{1,3})[、.．]\\s*[\\u4e00-\\u9fa5a-zA-Z0-9（）()《》·\\s]{1,20}$`),
+    // 括号章节：【第一章】, （第一首）, 【第壹章】, [Chapter 1]
+    new RegExp(`^[【\\[（(](?:第\\s*[${ZH_NUM}]+\\s*[${ZH_UNIT}]|[${ZH_NUM}]{1,3}|(?:Chapter|Book|Canto)\\s+[0-9IVXLCDMivxlcdm]+)[】\\]）)](?:[\\u4e00-\\u9fa5a-zA-Z0-9\\s]{0,25})?$`, 'i')
 ]
 
 let customTxtPatterns = null

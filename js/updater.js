@@ -3,6 +3,7 @@
  */
 
 import { t, getIntlLocale } from './i18n.js'
+import { platformBridge } from './platformBridge.js'
 
 export class AppUpdater {
     constructor() {
@@ -18,13 +19,6 @@ export class AppUpdater {
                 this.currentVersion = await platformBridge.getAppVersion() || '1.0.0'
                 return
             } catch (e) {}
-        }
-        if (window.electronAPI?.getVersion) {
-            try {
-                this.currentVersion = await window.electronAPI.getVersion() || '1.0.0'
-            } catch (e) {
-                console.warn('Failed to get app version from electron:', e)
-            }
         }
     }
 
@@ -48,12 +42,6 @@ export class AppUpdater {
     compareVersions(v1, v2) {
         const [maj1, min1, pat1] = this.parseVersion(v1)
         const [maj2, min2, pat2] = this.parseVersion(v2)
-
-        // Historical dev builds: 2.0.0..2.0.18 were pre-release dev builds before resetting to 1.0.0.
-        // They should be treated as older than 1.0.0. Future 2.0.19+ or 2.1+ are genuine future versions.
-        const isPredecessorDev = (maj, min, pat) => maj === 2 && min === 0 && pat <= 18
-        if (maj1 === 1 && isPredecessorDev(maj2, min2, pat2)) return 1
-        if (isPredecessorDev(maj1, min1, pat1) && maj2 === 1) return -1
 
         if (maj1 !== maj2) return maj1 > maj2 ? 1 : -1
         if (min1 !== min2) return min1 > min2 ? 1 : -1
@@ -85,15 +73,6 @@ export class AppUpdater {
                     }
                 }
                 data = ipcRes.data || ipcRes
-            } else if (window.electronAPI?.checkGitHubRelease) {
-                const ipcRes = await window.electronAPI.checkGitHubRelease(repo)
-                if (!ipcRes.success) {
-                    return {
-                        success: false,
-                        error: ipcRes.error || t('updater.checkFailed')
-                    }
-                }
-                data = ipcRes.data || ipcRes
             } else {
                 const url = `https://api.github.com/repos/${repo}/releases/latest`
                 const res = await fetch(url, {
@@ -109,8 +88,8 @@ export class AppUpdater {
                             if (rawRes.ok) {
                                 const pkg = await rawRes.json()
                                 data = {
-                                    tag_name: `v${pkg.version || '0.1.0'}`,
-                                    name: `Linden Leaf v${pkg.version || '0.1.0'}`,
+                                    tag_name: `v${pkg.version || '1.0.0'}`,
+                                    name: `Linden Leaf v${pkg.version || '1.0.0'}`,
                                     html_url: `https://github.com/${repo}/releases`,
                                     body: t('updater.viewOnGithub')
                                 }

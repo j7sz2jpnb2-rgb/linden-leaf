@@ -37,6 +37,7 @@ if (typeof globalThis.customElements === 'undefined') {
 
 import { tokenizeText } from '../js/fulltext-search.js'
 import { mergeSyncData, sanitizeSyncFormat } from '../js/syncEngine.js'
+import { getSafeCloudFileName } from '../js/book-metadata.js'
 
 const testQueue = []
 let totalPassed = 0
@@ -206,131 +207,111 @@ await runAsyncTest('S05: createLazySnapshotBlob slices maintain sub-ranges and b
     assert.strictEqual(endSlice.byteLength, 50)
 })
 
-// 5. Defect N04: Reading session duration monotonicity & stale replay protection
-test('N04: Reading session duration rollback prevention (100 -> 150 -> old 100 -> 160 = 160)', () => {
-    // Simulate DB session & book accumulator state
-    let dbSession = { id: 'sess_1', bookId: 'book_1', durationSeconds: 100 }
-    let bookTotalReadingSeconds = 100
+// 5. Defect N04: Reading session duration monotonicity & stale replay protection via real mergeSyncData
+test('N04: Reading session duration rollback prevention via mergeSyncData (100 -> 150 -> old 100 -> 160 = 160)', () => {
+    const baseBook = (totalReadingSeconds) => ({
+        id: 'book_1',
+        stableKey: 'key_n04',
+        title: 'N04 Test Book',
+        format: 'epub',
+        size: 1024,
+        totalReadingSeconds,
+        updatedAt: 1000,
+    })
 
-    // Step 1: User continues reading locally, advances to 150s
-    {
-        const prevDuration = dbSession.durationSeconds || 0
-        const incomingDuration = 150
-        const effectiveDuration = Math.max(prevDuration, incomingDuration)
-        const delta = Math.max(0, effectiveDuration - prevDuration)
-        dbSession.durationSeconds = effectiveDuration
-        bookTotalReadingSeconds += delta
-    }
-    assert.strictEqual(dbSession.durationSeconds, 150)
-    assert.strictEqual(bookTotalReadingSeconds, 150)
+    // Step 1: Local session reaches 150s vs earlier 100s remote snapshot -> stays 150s
+    const step1 = mergeSyncData(
+        {
+            clientId: 'dev_local',
+            booksMeta: [baseBook(150)],
+            readingSessions: [{ id: 'sess_1', bookId: 'book_1', durationSeconds: 150, startTime: 1000 }],
+        },
+        {
+            clientId: 'dev_remote',
+            booksMeta: [baseBook(100)],
+            readingSessions: [{ id: 'sess_1', bookId: 'book_1', durationSeconds: 100, startTime: 1000 }],
+        }
+    )
+    assert.strictEqual(step1.merged.readingSessions[0].durationSeconds, 150)
+    assert.strictEqual(step1.merged.booksMeta[0].totalReadingSeconds, 150)
 
-    // Step 2: Stale batch sync snapshot arrives with old 100s
-    {
-        const prevDuration = dbSession.durationSeconds || 0
-        const incomingDuration = 100 // Stale replay!
-        const effectiveDuration = Math.max(prevDuration, incomingDuration)
-        const delta = Math.max(0, effectiveDuration - prevDuration)
-        dbSession.durationSeconds = effectiveDuration
-        bookTotalReadingSeconds += delta
-    }
-    assert.strictEqual(dbSession.durationSeconds, 150, 'Duration must NOT be rolled back by stale 100s replay')
-    assert.strictEqual(bookTotalReadingSeconds, 150, 'Book total must NOT change on stale replay')
+    // Step 2: Stale 100s replay arrives against merged 150s -> never rolls back
+    const step2 = mergeSyncData(
+        step1.merged,
+        {
+            clientId: 'dev_stale',
+            booksMeta: [baseBook(100)],
+            readingSessions: [{ id: 'sess_1', bookId: 'book_1', durationSeconds: 100, startTime: 1000 }],
+        }
+    )
+    assert.strictEqual(step2.merged.readingSessions[0].durationSeconds, 150, 'Duration must NOT roll back on stale 100s replay')
+    assert.strictEqual(step2.merged.booksMeta[0].totalReadingSeconds, 150)
 
-    // Step 3: Later local reading session reports 160s
-    {
-        const prevDuration = dbSession.durationSeconds || 0
-        const incomingDuration = 160
-        const effectiveDuration = Math.max(prevDuration, incomingDuration)
-        const delta = Math.max(0, effectiveDuration - prevDuration)
-        dbSession.durationSeconds = effectiveDuration
-        bookTotalReadingSeconds += delta
-    }
-    assert.strictEqual(dbSession.durationSeconds, 160)
-    assert.strictEqual(bookTotalReadingSeconds, 160, 'Book total reading seconds must reach 160, NEVER inflated to 210')
+    // Step 3: Subsequent update reaches 160s -> advances cleanly to 160s
+    const step3 = mergeSyncData(
+        step2.merged,
+        {
+            clientId: 'dev_local',
+            booksMeta: [baseBook(160)],
+            readingSessions: [{ id: 'sess_1', bookId: 'book_1', durationSeconds: 160, startTime: 1000 }],
+        }
+    )
+    assert.strictEqual(step3.merged.readingSessions[0].durationSeconds, 160)
+    assert.strictEqual(step3.merged.booksMeta[0].totalReadingSeconds, 160, 'Book total must advance to 160 cleanly')
 })
 
-// 6. Defect N11: Safe Cloud File Name generation
+// 6. Defect N11: Safe Cloud File Name generation via real book-metadata.js helper
 test('N11: Safe cloud file name respects saved cloudBackup.fileName and prevents collision', () => {
-    const helper = {
-        getSafeCloudFileName(book) {
-            if (!book) return 'book.epub'
-            if (book.cloudBackup?.fileName) {
-                const savedName = String(book.cloudBackup.fileName).trim()
-                if (savedName && !/[\\/%?#\0:*"><|]/.test(savedName) && !savedName.startsWith('.')) {
-                    return savedName
-                }
-            }
-            const fmt = (book.format || 'epub').toLowerCase().replace(/[^a-z0-9]/g, '') || 'epub'
-            const safeId = (book.id || 'book').replace(/[^a-zA-Z0-9_-]/g, '_')
-            let rawKey = (book.stableKey || '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5.-]/g, '_').trim()
-            if (rawKey.startsWith('.')) rawKey = rawKey.replace(/^\.+/, '')
-            if (rawKey.length > 50) rawKey = rawKey.slice(0, 50)
-            const baseName = (rawKey && rawKey !== safeId) ? `${rawKey}_${safeId}` : safeId
-            return `${baseName}.${fmt}`
-        }
-    }
-
-    // 1. Existing backup filename respected
     const bookWithBackup = {
         id: 'book_1',
         format: 'epub',
         cloudBackup: { fileName: 'my_custom_backup.epub' }
     }
-    assert.strictEqual(helper.getSafeCloudFileName(bookWithBackup), 'my_custom_backup.epub')
+    assert.strictEqual(getSafeCloudFileName(bookWithBackup), 'my_custom_backup.epub')
 
-    // 2. Colon in urn:uuid identifier sanitized
     const bookWithUrn = {
         id: 'book_abc123',
         stableKey: 'urn:uuid:6ba7b810-9dad-11d1-80b4-00c04fd430c8',
         format: 'epub'
     }
-    const safeUrnName = helper.getSafeCloudFileName(bookWithUrn)
+    const safeUrnName = getSafeCloudFileName(bookWithUrn)
     assert.strictEqual(safeUrnName.includes(':'), false, 'Must not contain colon')
     assert.ok(safeUrnName.endsWith('.epub'))
     assert.ok(safeUrnName.includes('book_abc123'), 'Must contain safeId to prevent collision')
 
-    // 3. Two different books with identical sanitized stableKey do NOT collide
     const bookA = { id: 'book_111', stableKey: 'same:title/one', format: 'pdf' }
     const bookB = { id: 'book_222', stableKey: 'same:title/one', format: 'pdf' }
-    assert.notStrictEqual(helper.getSafeCloudFileName(bookA), helper.getSafeCloudFileName(bookB))
+    assert.notStrictEqual(getSafeCloudFileName(bookA), getSafeCloudFileName(bookB))
 })
 
-// 7. Defect N12: AI Generation lock finally isolation
-test('N12: Old AI request finally block does not clear activeRequestId of subsequent request', () => {
-    let controller = {
+// 7. Defect N12: AI Generation lock finally isolation via real releaseAiRequestLockIfOwned
+await runAsyncTest('N12: Old AI request finally block does not clear activeRequestId of subsequent request', async () => {
+    const { releaseAiRequestLockIfOwned } = await import('../js/ai-sidebar-controller.js')
+    const stopClasses = new Set(['active'])
+    const controller = {
         isGenerating: true,
-        activeRequestId: 'req_1_initial',
-        dispatchedAt: Date.now()
+        activeRequestId: 'req_2_second',
+        dom: {
+            btnAiStopGeneration: { disabled: false, classList: { remove: (c) => stopClasses.delete(c) } },
+            btnAiSendMessage: { disabled: true },
+        },
     }
 
-    const currentReq1 = controller.activeRequestId
+    // Stale task 1 exits after task 2 claimed activeRequestId
+    const releasedStale = releaseAiRequestLockIfOwned(controller, 'req_1_initial')
+    assert.strictEqual(releasedStale, false, 'Stale request must NOT release newer lock')
+    assert.strictEqual(controller.activeRequestId, 'req_2_second')
+    assert.strictEqual(controller.isGenerating, true)
+    assert.strictEqual(controller.dom.btnAiSendMessage.disabled, true)
 
-    // User cancels or starts a second request before task 1 exits
-    controller.activeRequestId = 'req_2_second'
-    controller.isGenerating = true
-
-    // Task 1 finally block runs:
-    const finallyTask1 = () => {
-        if (controller.activeRequestId === currentReq1) {
-            controller.isGenerating = false
-            controller.activeRequestId = null
-        }
-    }
-    finallyTask1()
-
-    assert.strictEqual(controller.activeRequestId, 'req_2_second', 'Task 1 finally must NOT nullify task 2 requestId')
-    assert.strictEqual(controller.isGenerating, true, 'Task 1 finally must NOT cancel task 2 isGenerating')
-
-    // Task 2 finally block runs:
-    const finallyTask2 = () => {
-        if (controller.activeRequestId === 'req_2_second') {
-            controller.isGenerating = false
-            controller.activeRequestId = null
-        }
-    }
-    finallyTask2()
+    // Owning task 2 exits
+    const releasedOwner = releaseAiRequestLockIfOwned(controller, 'req_2_second')
+    assert.strictEqual(releasedOwner, true)
     assert.strictEqual(controller.activeRequestId, null)
     assert.strictEqual(controller.isGenerating, false)
+    assert.strictEqual(controller.dom.btnAiStopGeneration.disabled, true)
+    assert.strictEqual(controller.dom.btnAiSendMessage.disabled, false)
+    assert.strictEqual(stopClasses.has('active'), false)
 })
 
 // 8. Defect M01: Adaptive Geometry outline coverage & zero-ink OCR fallback
@@ -1161,22 +1142,15 @@ await runAsyncTest('R09: normalizeNavigationTarget handles bare numbers, string 
     assert.deepStrictEqual(tObj, { type: 'pdf', page: 7, pageIndex: 6, yRatio: 0.35 })
 })
 
-// 31. Updater: 1.0.0 migration comparison with predecessor dev versions
-await runAsyncTest('Updater: compareVersions recognizes predecessor dev builds 2.0.0..2.0.18 as older than 1.0.0', async () => {
+// 31. Updater: standard SemVer version comparisons
+await runAsyncTest('Updater: compareVersions follows standard SemVer ordering', async () => {
     const { AppUpdater } = await import('../js/updater.js')
     const updater = new AppUpdater()
-    
-    // 1.0.0 is newer than predecessor dev builds (2.0.0 to 2.0.18)
-    assert.strictEqual(updater.compareVersions('1.0.0', '2.0.18'), 1, '1.0.0 must be newer than legacy 2.0.18 dev')
-    assert.strictEqual(updater.compareVersions('1.0.0', '2.0.0'), 1, '1.0.0 must be newer than legacy 2.0.0 dev')
-    assert.strictEqual(updater.compareVersions('2.0.17', '1.0.0'), -1, 'Legacy 2.0.17 dev must be older than 1.0.0')
-    
-    // Future 2.0.19+ and 2.1.0 are genuine future releases
-    assert.strictEqual(updater.compareVersions('1.0.0', '2.0.19'), -1, '1.0.0 must be older than future 2.0.19')
-    assert.strictEqual(updater.compareVersions('1.0.0', '2.1.0'), -1, '1.0.0 must be older than future 2.1.0')
-    
-    // Normal 1.0.x increments
+
     assert.strictEqual(updater.compareVersions('1.0.1', '1.0.0'), 1, '1.0.1 must be newer than 1.0.0')
+    assert.strictEqual(updater.compareVersions('1.1.0', '1.0.0'), 1, '1.1.0 must be newer than 1.0.0')
+    assert.strictEqual(updater.compareVersions('2.0.0', '1.0.0'), 1, '2.0.0 must be newer than 1.0.0')
+    assert.strictEqual(updater.compareVersions('0.9.9', '1.0.0'), -1, '0.9.9 must be older than 1.0.0')
     assert.strictEqual(updater.compareVersions('1.0.0', '1.0.0'), 0, 'Same version equals 0')
 })
 
@@ -1459,15 +1433,13 @@ test('R06: searchBookFull invalidates cache when snapshot blobRevision or docume
     assert.strictEqual(invalidatedBookId, 'book_stale', 'searchBookFull must invalidate cache when snapshot blobRevision differs')
 })
 
-// 42. Updater: compareVersions dev build migration
-test('Updater: compareVersions recognizes any 1.x release as newer than predecessor dev builds (2.0.0..2.0.18)', async () => {
+// 42. Updater: compareVersions handles prefixes and SemVer ordering
+test('Updater: compareVersions handles v-prefixes and SemVer ordering', async () => {
     const { updater } = await import('../js/updater.js')
-    assert.strictEqual(updater.compareVersions('1.0.0', '2.0.18'), 1)
-    assert.strictEqual(updater.compareVersions('1.0.0', '2.0.0'), 1)
-    assert.strictEqual(updater.compareVersions('2.0.18', '1.0.0'), -1)
-    assert.strictEqual(updater.compareVersions('1.1.0', '2.0.18'), 1)
-    assert.strictEqual(updater.compareVersions('2.0.19', '1.0.0'), 1)
-    assert.strictEqual(updater.compareVersions('2.1.0', '1.0.0'), 1)
+    assert.strictEqual(updater.compareVersions('v1.0.1', '1.0.0'), 1)
+    assert.strictEqual(updater.compareVersions('v2.0.0', '1.0.0'), 1)
+    assert.strictEqual(updater.compareVersions('1.0.0', '1.1.0'), -1)
+    assert.strictEqual(updater.compareVersions('1.0.0', 'v1.0.0'), 0)
 })
 
 // 43. Q05: FullTextSearchEngine searchBookFull returns full hits beyond 300
@@ -1918,12 +1890,12 @@ await runAsyncTest('S01: Manual TOC manages hierarchy, detects cycles, and parse
     // Cycle detection: setting c1's parent to c1_1_1 must throw
     assert.throws(() => {
         updateManualTocItem(items, 'c1', { parentId: 'c1_1_1' })
-    }, /循环嵌套/, 'Must reject cyclic nesting')
+    }, /循环嵌套|circular|cycle/i, 'Must reject cyclic nesting')
 
     // Page index out-of-bounds check
     assert.throws(() => {
         addManualTocItem(items, { title: 'Invalid Page', pageIndex: 200 }, { maxPages: 100 })
-    }, /超出文档总页数/, 'Must reject out-of-range page index')
+    }, /超出文档总页数|exceeds|out of range|total pages/i, 'Must reject out-of-range page index')
 
     // OCR candidate parsing with Roman and Arabic numbers and page offset
     const ocrLines = [
@@ -2120,7 +2092,7 @@ await runAsyncTest('Item 2: restoreFullDataBackup does not resurrect orphaned/de
 
 // 65. Item 2: applyRestorePlan persists bookFilesToPut into book_files store
 await runAsyncTest('Item 2: applyRestorePlan persists bookFilesToPut into book_files store', async () => {
-    const { applyRestorePlan } = await import('../js/db.js')
+    const { applyRestorePlan, releaseRestoreOperationLock } = await import('../js/db.js')
     const putFiles = []
     const fakeTx = {
         objectStoreNames: { contains: (s) => ['books', 'book_files'].includes(s) },
@@ -2147,9 +2119,13 @@ await runAsyncTest('Item 2: applyRestorePlan persists bookFilesToPut into book_f
         bookFilesToPut: [{ id: 'b_test', nativeSnapshotPath: 'C:/test.pdf' }]
     }
     const res = await applyRestorePlan(plan, fakeCustomDb)
-    assert.strictEqual(res.success, true)
-    assert.strictEqual(putFiles.length, 1)
-    assert.strictEqual(putFiles[0].nativeSnapshotPath, 'C:/test.pdf')
+    try {
+        assert.strictEqual(res.success, true)
+        assert.strictEqual(putFiles.length, 1)
+        assert.strictEqual(putFiles[0].nativeSnapshotPath, 'C:/test.pdf')
+    } finally {
+        await releaseRestoreOperationLock(res?.operationId)
+    }
 })
 
 // 66. Item 3 & 6: triggerSilentBackgroundSync credentials pass for local_folder without requiring webdav creds
@@ -3957,7 +3933,7 @@ await runAsyncTest('UI-04 (#2/#4/#5/#11): Stats recent covers, KPI grid CSS, zh-
     assert.doesNotMatch(chartBlock, /span 2/)
 
     // #4: session-micro-cover img rule & renderRecentSessions uses real cover + resolveBookTitle
-    assert.match(mainCss, /\.session-micro-cover img\s*\{[^}]*object-fit:\s*cover/)
+    assert.match(mainCss, /\.session-micro-cover img\s*\{[^}]*object-fit:\s*contain/)
     const prevDoc = globalThis.document
     const prevGetForBook = coverUrlPool.getForBook
     const createdNodes = []
@@ -4623,6 +4599,355 @@ await runAsyncTest('FOCUS-04: Create-list modal provides live preview, inline er
         if (prevDoc === undefined) delete globalThis.document
         else globalThis.document = prevDoc
     }
+})
+
+await runAsyncTest('U01: highlight-palette Warm Morandi 5-color normalization, legacy aliases, and dashed stroke preservation', async () => {
+    const pal = await import('../js/highlight-palette.js')
+    assert.strictEqual(pal.HIGHLIGHT_PALETTE.length, 5)
+    assert.strictEqual(pal.normalizeHighlightColor('yellow'), '#facc15')
+    assert.strictEqual(pal.normalizeHighlightColor('#f87171'), '#f472b6')
+    assert.strictEqual(pal.normalizeHighlightColor('red'), '#f472b6')
+    assert.strictEqual(pal.normalizeHighlightColor('#c084fc'), '#a855f7')
+    assert.strictEqual(pal.normalizeHighlightColor('purple'), '#a855f7')
+    assert.strictEqual(pal.getHighlightStrokeHex('#facc15', false), '#c8921e')
+    assert.strictEqual(pal.getHighlightStrokeHex('#facc15', true), '#e5b84b')
+    assert.strictEqual(pal.matchesHighlightColorFilter('#f87171', '#f472b6'), true)
+    assert.strictEqual(pal.matchesHighlightColorFilter('#c084fc', '#a855f7'), true)
+    assert.strictEqual(pal.matchesHighlightColorFilter('#60a5fa', 'all'), true)
+    assert.strictEqual(pal.matchesHighlightColorFilter('#60a5fa', '#4ade80'), false)
+})
+
+await runAsyncTest('U02: pdf-color-filter Rec.709 damped chroma matrix and theme target resolution', async () => {
+    const cf = await import('../js/pdf-color-filter.js')
+    assert.strictEqual(cf.resolvePdfThemeTargets({ appearance: 'original', theme: 'dark' }), null)
+    assert.strictEqual(cf.resolvePdfThemeTargets({ appearance: 'auto', theme: 'sepia' }).background, '#f5eedc')
+    assert.strictEqual(cf.resolvePdfThemeTargets({ appearance: 'night', theme: 'black' }).background, '#0e0e0e')
+
+    const darkTarget = cf.resolvePdfThemeTargets({ appearance: 'auto', theme: 'dark' })
+    const matrix = cf.computePdfThemeColorMatrix(darkTarget)
+    assert.ok(Array.isArray(matrix) && matrix.length === 20, 'Matrix must have 20 feColorMatrix entries')
+    const applyRgb = (r, g, b) => [
+        matrix[0] * r + matrix[1] * g + matrix[2] * b + matrix[4],
+        matrix[5] * r + matrix[6] * g + matrix[7] * b + matrix[9],
+        matrix[10] * r + matrix[11] * g + matrix[12] * b + matrix[14],
+    ]
+    const outWhite = applyRgb(1, 1, 1)
+    assert.ok(outWhite.every(v => v < 0.2), 'White paper must map near dark background')
+    const outBlack = applyRgb(0, 0, 0)
+    assert.ok(outBlack.every(v => v > 0.8), 'Black text must map near dark foreground')
+    const outBlue = applyRgb(0, 0, 1)
+    assert.ok(outBlue[2] > outBlue[0], 'Damped chroma preserves blue hue dominance for links')
+    const nodeFilter = cf.resolvePdfPageFilter({ appearance: 'night', theme: 'dark' })
+    assert.ok(typeof nodeFilter === 'string' && nodeFilter.length > 0)
+})
+
+await runAsyncTest('U03: PdfViewport dual-page zero spine gap, zoom-scaled rowGap, centering, getFitScale 2.0, goToPage horizontal preserve, and PageLabels', async () => {
+    const { PdfViewport } = await import('../js/pdf-viewport.js')
+    const prevWin = globalThis.window
+    globalThis.window = { innerWidth: 1280, devicePixelRatio: 1.25 }
+    try {
+        const scrollArea = { clientWidth: 1280, clientHeight: 800, scrollTop: 0, scrollLeft: 180 }
+        const vp = Object.assign(Object.create(PdfViewport.prototype), {
+            spreadMode: 'dual',
+            scale: 1.0,
+            zoomMode: null,
+            currentPage: 2,
+            numPages: 3,
+            activeSlots: new Map(),
+            pageSizes: [
+                { width: 500, height: 700 },
+                { width: 500, height: 900 },
+                { width: 500, height: 500 },
+            ],
+            pageOffsets: [],
+            pageLabels: ['i', '1', '2'],
+            options: { minScale: 0.1, maxScale: 4.0, bufferPages: 0 },
+            scrollArea,
+            container: scrollArea,
+            spacer: { style: {} },
+            _getCropMarginsForPage: () => ({ left: 0, right: 0, top: 0, bottom: 0 }),
+        })
+
+        vp.scale = 0.4
+        vp._recomputeLayout()
+        assert.strictEqual(vp.pageOffsets[0].top, 8, 'rowGap clamps to min 8px at 0.4x zoom')
+
+        vp.scale = 2.0
+        vp._recomputeLayout()
+        assert.strictEqual(vp.pageOffsets[0].top, 28, 'rowGap clamps to max 28px at 2.0x zoom')
+
+        vp.scale = 1.0
+        vp._recomputeLayout()
+        assert.strictEqual(vp.pageOffsets[0].top, 20, 'rowGap scales linearly to 20px at 1.0x zoom')
+        assert.strictEqual(vp.pageOffsets[0].spreadRole, 'single')
+        assert.strictEqual(vp.pageOffsets[1].spreadRole, 'left')
+        assert.strictEqual(vp.pageOffsets[2].spreadRole, 'right')
+        assert.ok(
+            Math.abs(vp.pageOffsets[2].left - (vp.pageOffsets[1].left + vp.pageOffsets[1].width)) < 1e-6,
+            'Left and right spread pages must meet at 0px spine seam'
+        )
+        assert.strictEqual(vp.pageOffsets[2].top - vp.pageOffsets[1].top, 200, 'Unequal-height spread pages center vertically')
+
+        const fitDual = vp.getFitScale('fit-width', 2)
+        const fitSingle = vp.getFitScale('fit-width', 0)
+        assert.ok(Math.abs(fitDual - (1280 - 48) / 1000) < 1e-6, 'Dual spread getFitScale uses exact 2.0 spread factor')
+        assert.ok(Math.abs(fitSingle - (1280 - 48) / 500) < 1e-6)
+
+        vp._layoutWidth = 1600
+        vp._noteNavigationRequest = () => {}
+        vp._renderVisibleSlots = () => {}
+        vp.clearLocatePulse = () => {}
+        scrollArea.scrollLeft = 180
+        vp.goToPage(2, 0.2, { preserveHorizontal: true })
+        assert.strictEqual(scrollArea.scrollLeft, 180, 'Zoomed goToPage preserves horizontal pan position')
+
+        assert.strictEqual(vp.getPageLabel(0), 'i')
+        assert.strictEqual(vp.findPageByLabel('I'), 0)
+        assert.strictEqual(vp.findPageByLabel('1'), 1)
+        vp.pageLabels = null
+        assert.strictEqual(vp.findPageByLabel('2'), 1, 'Numeric fallback maps 1-based page number')
+    } finally {
+        if (prevWin === undefined) delete globalThis.window
+        else globalThis.window = prevWin
+    }
+})
+
+await runAsyncTest('U04: epub-range-editor sentence boundary snap handles CJK quotes and English punctuation', async () => {
+    const { expandTextRangeOffsetsToSentence } = await import('../js/epub-range-editor.js')
+    const zh = '前文回顾。“核心论点应当简洁。” 后文继续。'
+    const resZh = expandTextRangeOffsetsToSentence(zh, 8, 11)
+    assert.strictEqual(zh.slice(resZh.start, resZh.end), '“核心论点应当简洁。”')
+
+    const en = 'First sentence. Second key idea! Third sentence.'
+    const resEn = expandTextRangeOffsetsToSentence(en, 23, 26)
+    assert.strictEqual(en.slice(resEn.start, resEn.end), 'Second key idea!')
+})
+
+await runAsyncTest('U05: tts-player shouldStripTtsSuperscript strips footnotes and preserves math/unit exponents', async () => {
+    const { shouldStripTtsSuperscript } = await import('../js/tts-player.js')
+    const mkSup = (text, prevText, { matchSel = '', hasLink = false } = {}) => ({
+        textContent: text,
+        previousSibling: prevText !== undefined ? { textContent: prevText } : null,
+        matches: (sel) => Boolean(matchSel) && sel.split(',').map(s => s.trim()).includes(matchSel),
+        querySelector: () => (hasLink ? {} : null),
+        closest: () => null,
+    })
+
+    assert.strictEqual(shouldStripTtsSuperscript(mkSup('1', 'foo', { matchSel: '.footnote-ref' })), true)
+    assert.strictEqual(shouldStripTtsSuperscript(mkSup('[2]', 'sentence')), true)
+    assert.strictEqual(shouldStripTtsSuperscript(mkSup('①', 'note')), true)
+    assert.strictEqual(shouldStripTtsSuperscript(mkSup('3', 'word ', {})), true)
+    assert.strictEqual(shouldStripTtsSuperscript(mkSup('2', 'value x', {})), false, 'x^2 exponent preserved')
+    assert.strictEqual(shouldStripTtsSuperscript(mkSup('6', '10', {})), false, '10^6 power preserved')
+    assert.strictEqual(shouldStripTtsSuperscript(mkSup('-1', 'm', {})), false, 'm^-1 unit preserved')
+})
+
+await runAsyncTest('U06: text-copy-utils smartCleanPdfCopyText joins CJK/EN prose wraps while preserving paragraphs and lists', async () => {
+    const { smartCleanPdfCopyText } = await import('../js/text-copy-utils.js')
+    const raw = '第一行尚未结束\n应该直接拼接。\n\nSecond paragraph docu-\nment wraps\nacross lines.'
+    assert.strictEqual(
+        smartCleanPdfCopyText(raw),
+        '第一行尚未结束应该直接拼接。\n\nSecond paragraph document wraps across lines.'
+    )
+    const listText = '- item alpha\n- item beta\n- item gamma'
+    assert.strictEqual(smartCleanPdfCopyText(listText), listText)
+})
+
+await runAsyncTest('U07: reader-cards-controller sanitizeFootnoteHtml strips active scripts/handlers while keeping safe markup', async () => {
+    const { sanitizeFootnoteHtml } = await import('../js/reader-cards-controller.js')
+    const makeFakeNode = (tag, { attrs = {}, children = [], text = '' } = {}) => {
+        const attrMap = new Map(Object.entries(attrs))
+        const node = {
+            nodeType: tag === '#text' ? 3 : 1,
+            tagName: tag.toUpperCase(),
+            nodeValue: text,
+            childNodes: children,
+            get textContent() {
+                if (this.nodeType === 3) return this.nodeValue
+                return this.childNodes.map(c => c.textContent).join('')
+            },
+            setAttribute(k, v) { attrMap.set(k, String(v)) },
+            getAttribute(k) { return attrMap.get(k) ?? null },
+            appendChild(ch) {
+                if (ch.nodeType === 11) this.childNodes.push(...ch.childNodes)
+                else this.childNodes.push(ch)
+                return ch
+            },
+            querySelector(sel) {
+                const t = sel.toUpperCase()
+                return this.childNodes.some(c => c.tagName === t || c.querySelector?.(sel)) ? {} : null
+            },
+            get innerHTML() {
+                return this.childNodes.map(c => {
+                    if (c.nodeType === 3) return c.nodeValue
+                    const tn = c.tagName.toLowerCase()
+                    if (tn === 'br') return '<br>'
+                    const a = Array.from(attrMapRef(c).entries()).map(([k, v]) => ` ${k}="${v}"`).join('')
+                    return `<${tn}${a}>${c.innerHTML}</${tn}>`
+                }).join('')
+            },
+            _attrs: attrMap,
+        }
+        return node
+    }
+    const attrMapRef = (n) => n._attrs
+    const fakeDoc = {
+        createTextNode: (t) => makeFakeNode('#text', { text: t }),
+        createElement: (tag) => makeFakeNode(tag),
+        createDocumentFragment: () => ({ nodeType: 11, childNodes: [], appendChild(c) { this.childNodes.push(c); return c } }),
+    }
+    const root = makeFakeNode('div', {
+        children: [
+            makeFakeNode('script', { children: [makeFakeNode('#text', { text: 'alert(1)' })] }),
+            makeFakeNode('p', {
+                children: [
+                    makeFakeNode('em', { children: [makeFakeNode('#text', { text: 'Safe note ' })] }),
+                    makeFakeNode('a', { attrs: { href: 'https://example.com', onclick: 'evil()' }, children: [makeFakeNode('#text', { text: 'ref' })] }),
+                    makeFakeNode('a', { attrs: { href: 'javascript:evil()' }, children: [makeFakeNode('#text', { text: 'bad' })] }),
+                ],
+            }),
+        ],
+    })
+    root.ownerDocument = fakeDoc
+    const clean = sanitizeFootnoteHtml(root)
+    assert.strictEqual(clean.includes('<script'), false)
+    assert.strictEqual(clean.includes('onclick'), false)
+    assert.strictEqual(clean.includes('javascript:'), false)
+    assert.ok(clean.includes('<em>Safe note </em>'))
+    assert.ok(clean.includes('href="https://example.com"'))
+    assert.ok(clean.includes('rel="noopener noreferrer"'))
+    assert.ok(clean.includes('<a>bad</a>'))
+})
+
+await runAsyncTest('U08: book-title splitDisplayTitleAndSubtitle extracts long subtitles without touching short titles', async () => {
+    const { splitDisplayTitleAndSubtitle } = await import('../js/book-title.js')
+    assert.deepStrictEqual(
+        splitDisplayTitleAndSubtitle('资本论：第一卷政治经济学批判导论'),
+        { mainTitle: '资本论', subtitle: '第一卷政治经济学批判导论' }
+    )
+    assert.deepStrictEqual(
+        splitDisplayTitleAndSubtitle('马拉美：塞壬的政治（雅克·朗西埃 著 完整译本）'),
+        { mainTitle: '马拉美：塞壬的政治', subtitle: '雅克·朗西埃 著 完整译本' }
+    )
+    assert.deepStrictEqual(
+        splitDisplayTitleAndSubtitle('三体'),
+        { mainTitle: '三体', subtitle: '' }
+    )
+})
+
+await runAsyncTest('U09: sync-config-contract stripSensitiveConfigFields strips secret/local-only keys cleanly', async () => {
+    const { stripSensitiveConfigFields } = await import('../js/sync-config-contract.js')
+    const input = {
+        ApiKey: 'sk-123',
+        password: 'pwd',
+        token: 'tok',
+        ttsOfflineEndpoint: 'http://evil',
+        customDirectory: 'C:/secret',
+        aiModel: 'gpt-4o',
+        aiTemperature: 0.3,
+    }
+    const clean = stripSensitiveConfigFields(input)
+    assert.deepStrictEqual(clean, { aiModel: 'gpt-4o', aiTemperature: 0.3 })
+    assert.strictEqual(input.ApiKey, 'sk-123', 'Input object must not be mutated')
+})
+
+await runAsyncTest('U10: portals LWW sync merge, schema validation, and backup/restore roundtrip', async () => {
+    const { validateSyncPayload } = await import('../js/syncEngine.js')
+    const { assembleFullBackupData, restoreFullDataBackup } = await import('../js/backup-service.js')
+    const { applyRestorePlan, acquireRestoreOperationLock, releaseRestoreOperationLock } = await import('../js/db.js')
+
+    const mergeRes = mergeSyncData(
+        {
+            clientId: 'dev_a',
+            booksMeta: [{ id: 'b1', stableKey: 'sk1', format: 'epub', size: 10, addedAt: 100 }],
+            portals: [
+                { id: 'p1', sourceBookId: 'b1', sourceCfi: 'c1', targetBookId: 'b1', targetCfi: 'c2', updatedAt: 200 },
+                { id: 'p_del', sourceBookId: 'b1', sourceCfi: 'c3', targetBookId: 'b1', targetCfi: 'c4', updatedAt: 100 },
+            ],
+            deletedRecords: [],
+        },
+        {
+            clientId: 'dev_b',
+            booksMeta: [{ id: 'b1', stableKey: 'sk1', format: 'epub', size: 10, addedAt: 100 }],
+            portals: [
+                { id: 'p1', sourceBookId: 'b1', sourceCfi: 'c1-newer', targetBookId: 'b1', targetCfi: 'c2', updatedAt: 500 },
+                { id: 'p2', sourceBookId: 'b1', sourceCfi: 'c5', targetBookId: 'b1', targetCfi: 'c6', updatedAt: 300 },
+            ],
+            deletedRecords: [{ id: 'p_del', type: 'portal', deletedAt: 400 }],
+        },
+        { nowMs: 1000 }
+    )
+    assert.strictEqual(mergeRes.merged.portals.find(p => p.id === 'p1')?.sourceCfi, 'c1-newer')
+    assert.ok(mergeRes.merged.portals.some(p => p.id === 'p2'))
+    assert.strictEqual(mergeRes.merged.portals.some(p => p.id === 'p_del'), false, 'Tombstoned portal excluded')
+
+    assert.strictEqual(validateSyncPayload({
+        version: 2,
+        updatedAt: Date.now(),
+        booksMeta: [], highlights: [], bookmarks: [], readingSessions: [], customLists: [], deletedRecords: [], pdfDrawings: [],
+        portals: mergeRes.merged.portals,
+    }), true)
+
+    const portalsStored = []
+    const mockDb = {
+        getAllReadingSessions: async () => [],
+        getAllHighlights: async () => [],
+        getAllBooks: async () => [{ id: 'b1', title: 'Book 1', format: 'epub', size: 10, addedAt: 100 }],
+        getAllBookmarks: async () => [],
+        getAllPdfDrawings: async () => [],
+        getAllCustomLists: async () => [],
+        getAllChapterTranslations: async () => [],
+        getAllDeletedRecords: async () => [],
+        getAllPortals: async () => [{ id: 'p1', sourceBookId: 'b1', sourceCfi: 'c1', targetBookId: 'b1', targetCfi: 'c2', createdAt: 100, updatedAt: 200 }],
+        getSetting: async () => null,
+        acquireRestoreOperationLock,
+        releaseRestoreOperationLock,
+        commitRestoreOperation: async () => true,
+        async applyRestorePlan(plan) {
+            const fakeTx = {
+                objectStoreNames: { contains: (s) => ['books', 'portals'].includes(s) },
+                objectStore(name) {
+                    return { put(v) { if (name === 'portals') portalsStored.push(v) } }
+                },
+                oncomplete: null, onerror: null, onabort: null,
+            }
+            const fakeDb = {
+                objectStoreNames: { contains: (s) => ['books', 'portals'].includes(s) },
+                transaction() { setTimeout(() => fakeTx.oncomplete?.(), 0); return fakeTx },
+            }
+            return await applyRestorePlan(plan, fakeDb)
+        },
+    }
+    const backup = await assembleFullBackupData(mockDb, { apiKey: 'secret-must-strip', theme: 'sepia' })
+    assert.strictEqual(backup.config.apiKey, undefined)
+    assert.strictEqual(backup.portals.length, 1)
+    const restRes = await restoreFullDataBackup(backup, mockDb)
+    assert.strictEqual(restRes.restoredPortals, 1)
+    assert.strictEqual(portalsStored[0].id, 'p1')
+})
+
+await runAsyncTest('U11: Peek mode skips progress snapshots and sidebar delete clears ::style annotation keys', async () => {
+    const { UniversalReaderApp } = await import('../js/app.js')
+    const baseSession = {
+        location: { fraction: 0.45, page: 9, totalPages: 20 },
+        snapshot: { blobRevision: 'rev1', documentHash: 'hash1' },
+    }
+    assert.strictEqual(
+        UniversalReaderApp.prototype.makeProgressSnapshot({ ...baseSession, isPeek: true }),
+        null,
+        'Peek session must NEVER produce a persistent progress snapshot'
+    )
+    const normalSnap = UniversalReaderApp.prototype.makeProgressSnapshot({ ...baseSession, isPeek: false })
+    assert.strictEqual(normalSnap.fraction, 0.45)
+
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+    const drawerSrc = fs.readFileSync(path.join(root, 'js', 'annotations-drawer-controller.js'), 'utf8')
+    assert.ok(
+        drawerSrc.includes('deleteAnnotation({ value: `${note.cfi}::${note.style || \'highlight\'}`, id: note.id })'),
+        'Sidebar card delete must pass compound value::style key matching Overlayer'
+    )
 })
 
 // Sequential async runner (Q09)

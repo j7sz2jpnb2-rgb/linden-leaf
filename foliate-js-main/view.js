@@ -2,9 +2,15 @@ import * as CFI from './epubcfi.js'
 import { TOCProgress, SectionProgress } from './progress.js'
 import { Overlayer } from './overlayer.js'
 import { textWalker } from './text-walker.js'
+import {
+    computePulseDeepenedColor,
+    ensureLocatePulseStyleInRoot,
+    HIGHLIGHT_LOCATE_PULSE_CLEANUP_MS,
+} from '../js/highlight-pulse.js'
 
 const SEARCH_PREFIX = 'foliate-search:'
 const ACTIVE_SEARCH_PREFIX = 'foliate-search-active:'
+const LOCATE_PULSE_PREFIX = 'foliate-locate-pulse:'
 
 const defaultCfiFilter = node => {
     if (node && node.nodeType === 1) {
@@ -12,6 +18,8 @@ const defaultCfiFilter = node => {
             node.classList?.contains('linden-inline-translation') ||
             node.classList?.contains('bilingual-translation-block') ||
             node.classList?.contains('bilingual-derived-view') ||
+            node.classList?.contains('linden-range-editor-overlay') ||
+            node.hasAttribute?.('data-linden-range-editor') ||
             node.hasAttribute?.('data-injected-translation')) {
             return typeof NodeFilter !== 'undefined' ? NodeFilter.FILTER_REJECT : 2
         }
@@ -377,6 +385,7 @@ export class View extends HTMLElement {
     #searchResults = new Map()
     #searchHighlights = new Map()
     #activeSearchMarker = null
+    #activeLocatePulse = null
     #searchDraw
     #searchDrawOptions
     #cursorAutohider = new CursorAutohider(this, () =>
@@ -462,6 +471,7 @@ export class View extends HTMLElement {
         try {
             this.renderer?.settle?.()
         } catch (e) {}
+        this.clearLocatePulse()
         this.clearSearch()
         try {
             this.book?.destroy?.()
@@ -523,6 +533,14 @@ export class View extends HTMLElement {
         }
         if (cfi && (reason === 'snap' || reason === 'page' || reason === 'scroll')) {
             this.history.replaceState(cfi)
+        }
+        if (this.#activeLocatePulse) {
+            const elapsed = performance.now() - (this.#activeLocatePulse.startedAt || 0)
+            const navigatedAway = reason === 'page' || reason === 'scroll'
+                || (elapsed > 260 && (reason === 'snap' || index !== this.#activeLocatePulse.index))
+            if (navigatedAway) {
+                this.clearLocatePulse()
+            }
         }
         this.#emit('relocate', this.lastLocation)
 
@@ -672,9 +690,9 @@ export class View extends HTMLElement {
     #createOverlayer({ doc, index }) {
         const overlayer = new Overlayer()
         doc.addEventListener('click', e => {
-            const [value, range] = overlayer.hitTest(e)
+            const [value, range, hitMeta] = overlayer.hitTest(e)
             if (value && !value.startsWith(SEARCH_PREFIX) && !value.startsWith(ACTIVE_SEARCH_PREFIX)) {
-                this.#emit('show-annotation', { value, index, range })
+                this.#emit('show-annotation', { value, index, range, hitBadge: Boolean(hitMeta?.hitBadge) })
             }
         }, false)
 
@@ -990,6 +1008,69 @@ export class View extends HTMLElement {
             } catch (e) {
                 console.warn('Failed to set active search highlight:', e)
             }
+        }
+    }
+    clearLocatePulse() {
+        this._pendingLocatePulseCfi = null
+        if (this.#activeLocatePulse) {
+            const { value, index, timerId } = this.#activeLocatePulse
+            if (timerId) clearTimeout(timerId)
+            this.#activeLocatePulse = null
+            try { this.#getOverlayer(index)?.overlayer?.remove?.(value) } catch (e) {}
+            const contents = this.renderer?.getContents?.() || []
+            for (const { overlayer } of contents) {
+                try { overlayer?.remove?.(value) } catch (e) {}
+            }
+        }
+    }
+    async pulseHighlight(cfi, options = {}) {
+        if (!cfi) return
+        this.clearLocatePulse()
+        this._pendingLocatePulseCfi = cfi
+        const resolved = await this.resolveNavigation(cfi)
+        if (!resolved || this._pendingLocatePulseCfi !== cfi) return
+        const { index, anchor } = resolved
+        const obj = this.#getOverlayer(index)
+        if (!obj?.doc || !obj?.overlayer) return
+        try {
+            const range = typeof anchor === 'function' ? anchor(obj.doc) : anchor
+            if (!range) return
+            const isDark = Boolean(options.isDark)
+            const palette = computePulseDeepenedColor(options.color || '#facc15', isDark)
+            const writingMode = options.writingMode || 'horizontal'
+
+            // Inject keyframes into both the overlayer's shadow root and document head
+            ensureLocatePulseStyleInRoot(obj.overlayer.element?.getRootNode?.())
+            ensureLocatePulseStyleInRoot(obj.doc)
+
+            const pulseKey = `${LOCATE_PULSE_PREFIX}${cfi}`
+            const drawPulse = (rects, drawOpts) => {
+                const g = Overlayer.highlight(rects, {
+                    ...drawOpts,
+                    color: palette.solidHex,
+                    opacity: palette.opacity,
+                    realisticPen: false,
+                    writingMode,
+                })
+                g.classList.add('ll-highlight-locate-pulse')
+                g.style.pointerEvents = 'none'
+                g.setAttribute('data-highlight-pulse', 'true')
+                return g
+            }
+            obj.overlayer.add(pulseKey, range, drawPulse, { writingMode })
+            const timerId = setTimeout(() => {
+                if (this.#activeLocatePulse?.value === pulseKey) {
+                    this.clearLocatePulse()
+                }
+            }, HIGHLIGHT_LOCATE_PULSE_CLEANUP_MS)
+            this.#activeLocatePulse = {
+                value: pulseKey,
+                index,
+                timerId,
+                startedAt: performance.now(),
+            }
+        } catch (e) {
+            console.warn('Failed to run highlight locate pulse:', e)
         }
     }
     clearSearch() {

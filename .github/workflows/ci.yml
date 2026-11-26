@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  frontend-and-contracts:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        locale: [C.UTF-8, zh_CN.UTF-8]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run unified verification suite (${{ matrix.locale }})
+        env:
+          LC_ALL: ${{ matrix.locale }}
+          LANG: ${{ matrix.locale }}
+        run: npm run verify
+      - name: Verify Tauri frontend dist packaging
+        run: |
+          npm run build:dist
+          test ! -e dist-tauri/foliate-js-main/upstream_paginator_reference.js
+
+  c-cancel-atomics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run atomic cancel-flag verifier
+        run: |
+          gcc -O2 -Wall -Wextra -pthread scripts/verify-cancel-atomics.c -o /tmp/verify-cancel-atomics
+          /tmp/verify-cancel-atomics
+
+  rust-check-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Tauri frontend dist assets
+        run: npm run build:dist
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Rust tests (lib & command security unit tests)
+        working-directory: src-tauri
+        run: cargo test --lib

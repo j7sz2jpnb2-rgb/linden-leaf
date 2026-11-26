@@ -95,6 +95,11 @@ for (const item of requiredWhitelist) {
             // PDF.js: pdf.mjs and pdf.worker.mjs are standard; omit redundant legacy copies
             const rel = path.relative(rootDir, s).replace(/\\/g, '/');
             if (rel.includes('foliate-js-main/vendor/pdfjs/') && (b === 'pdf.js' || b === 'pdf.worker.js')) return false;
+            // Omit upstream reference files and dev-only metadata from production bundle
+            if (rel === 'foliate-js-main/upstream_paginator_reference.js') return false;
+            if (rel === 'foliate-js-main/package.json' || rel === 'foliate-js-main/package-lock.json') return false;
+            if (rel === 'foliate-js-main/.github' || rel.startsWith('foliate-js-main/.github/')) return false;
+            if (rel === 'foliate-js-main/tests' || rel.startsWith('foliate-js-main/tests/')) return false;
             // Tesseract: .wasm.js factories inline WASM via Base64; omit duplicate standalone .wasm binaries
             if (rel === 'vendor/tesseract/tesseract-core-lstm.wasm' ||
                 rel === 'vendor/tesseract/tesseract-core-simd-lstm.wasm') return false;
@@ -159,7 +164,7 @@ if (status !== null && status.length > 0) {
     }
 }
 
-let pkgVersion = '2.0.0';
+let pkgVersion = '1.0.0';
 try {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
     pkgVersion = pkg.version || pkgVersion;

@@ -5,8 +5,259 @@ use tauri::ipc::Response;
 use tauri::Manager;
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "epub", "pdf", "docx", "txt", "md", "mobi", "azw", "azw3", "fb2", "cbz", "djvu",
+    "epub", "pdf", "docx", "txt", "md", "mobi", "azw", "azw3", "fb2", "cbz",
 ];
+
+pub const ALLOWED_TEXT_WRITE_EXTENSIONS: &[&str] = &["json", "md", "markdown", "txt", "csv", "tmp"];
+pub const ALLOWED_BINARY_WRITE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp"];
+const MAX_TEXT_WRITE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BINARY_WRITE_BYTES: usize = 32 * 1024 * 1024;
+
+static AUTHORIZED_WRITE_DIRS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+static AUTHORIZED_SYNC_DIR: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+    std::sync::OnceLock::new();
+static AUTHORIZED_SAVE_PATHS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<Vec<String>>>> =
+    std::sync::OnceLock::new();
+static CACHED_APP_CONFIG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static CACHED_APP_CACHE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_cached_extra_app_dirs(config_dir: Option<PathBuf>, cache_dir: Option<PathBuf>) {
+    if let Some(dir) = config_dir {
+        let _ = CACHED_APP_CONFIG_DIR.set(dir);
+    }
+    if let Some(dir) = cache_dir {
+        let _ = CACHED_APP_CACHE_DIR.set(dir);
+    }
+}
+
+fn to_absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn normalize_for_auth(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| to_absolute_path(path))
+}
+
+fn normalized_path_key(path: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Prefix(prefix) => {
+                let kind = match prefix.kind() {
+                    std::path::Prefix::Disk(d) | std::path::Prefix::VerbatimDisk(d) => {
+                        format!("disk:{}", (d as char).to_ascii_lowercase())
+                    }
+                    std::path::Prefix::UNC(server, share)
+                    | std::path::Prefix::VerbatimUNC(server, share) => {
+                        format!(
+                            "unc:{}\\{}",
+                            server.to_string_lossy().to_lowercase(),
+                            share.to_string_lossy().to_lowercase()
+                        )
+                    }
+                    _ => prefix.as_os_str().to_string_lossy().to_lowercase(),
+                };
+                out.push(kind);
+            }
+            std::path::Component::RootDir => out.push("/".to_string()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => out.push("..".to_string()),
+            std::path::Component::Normal(s) => {
+                #[cfg(target_os = "windows")]
+                out.push(s.to_string_lossy().to_lowercase());
+                #[cfg(not(target_os = "windows"))]
+                out.push(s.to_string_lossy().into_owned());
+            }
+        }
+    }
+    out
+}
+
+fn key_starts_with(path_key: &[String], root_key: &[String]) -> bool {
+    !root_key.is_empty() && path_key.len() >= root_key.len() && &path_key[..root_key.len()] == root_key
+}
+
+pub fn register_authorized_write_dir(dir: &Path) {
+    let norm = normalize_for_auth(dir);
+    let set = AUTHORIZED_WRITE_DIRS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    set.lock().unwrap_or_else(|e| e.into_inner()).insert(norm);
+}
+
+pub fn set_authorized_sync_dir(dir: Option<&Path>) {
+    let next = dir.map(normalize_for_auth);
+    let slot = AUTHORIZED_SYNC_DIR.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = next;
+}
+
+pub fn is_authorized_write_dir(dir: &Path) -> bool {
+    let norm = normalize_for_auth(dir);
+    let dir_key = normalized_path_key(&norm);
+    authorized_root_dirs()
+        .iter()
+        .any(|root| key_starts_with(&dir_key, &normalized_path_key(root)))
+}
+
+pub fn register_authorized_save_path(path: &Path) {
+    let norm = if let Some(parent) = path.parent() {
+        let norm_parent = normalize_for_auth(parent);
+        if let Some(name) = path.file_name() {
+            norm_parent.join(name)
+        } else {
+            normalize_for_auth(path)
+        }
+    } else {
+        normalize_for_auth(path)
+    };
+    let key = normalized_path_key(&norm);
+    let set = AUTHORIZED_SAVE_PATHS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    set.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+}
+
+pub(crate) fn validate_safe_path_syntax(raw: &str) -> Result<PathBuf, String> {
+    let clean = raw.trim().trim_matches('"').trim_matches('\'');
+    if clean.is_empty() {
+        return Err("PATH_INVALID: Empty file path".to_string());
+    }
+    if clean.contains('\0') {
+        return Err("PATH_INVALID: Path contains NUL byte".to_string());
+    }
+    let lower = clean.to_ascii_lowercase();
+    if lower.starts_with(r"\\.\")
+        || lower.starts_with(r"\??\")
+        || lower.starts_with(r"\\?\globalroot")
+    {
+        return Err("PATH_DENIED: Device namespace paths are not allowed".to_string());
+    }
+    let path = Path::new(clean);
+    for comp in path.components() {
+        if matches!(comp, std::path::Component::ParentDir) {
+            return Err("PATH_DENIED: Parent directory traversal ('..') is not allowed".to_string());
+        }
+    }
+    Ok(to_absolute_path(path))
+}
+
+fn check_leaf_not_symlink(path: &Path) -> Result<(), String> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "PATH_DENIED: Symbolic links are not allowed in write path: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_no_symlink_below_root(abs_path: &Path, matched_root: &Path) -> Result<(), String> {
+    let root_key = normalized_path_key(matched_root);
+    let mut cur = Some(abs_path);
+    while let Some(p) = cur {
+        if normalized_path_key(p) == root_key {
+            break;
+        }
+        check_leaf_not_symlink(p)?;
+        if let Ok(canon) = std::fs::canonicalize(p) {
+            if normalized_path_key(&canon) == root_key {
+                break;
+            }
+        }
+        cur = p.parent();
+    }
+    Ok(())
+}
+
+fn canonicalize_nearest_ancestor(path: &Path) -> Result<PathBuf, String> {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path;
+    loop {
+        if cursor.exists() {
+            let mut base = std::fs::canonicalize(cursor)
+                .map_err(|e| format!("PATH_INVALID: Cannot resolve target directory '{}': {}", cursor.display(), e))?;
+            for part in tail.into_iter().rev() {
+                base.push(part);
+            }
+            return Ok(base);
+        }
+        match (cursor.file_name(), cursor.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name.to_os_string());
+                cursor = parent;
+            }
+            _ => {
+                return Err(format!("PATH_INVALID: Target ancestor does not exist for '{}'", path.display()));
+            }
+        }
+    }
+}
+
+fn authorized_root_dirs() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    roots.push(normalize_for_auth(&resolve_app_data_dir()));
+    if let Ok(cfg) = std::env::var("LINDEN_APP_CONFIG_DIR") {
+        if !cfg.is_empty() {
+            roots.push(normalize_for_auth(Path::new(&cfg)));
+        }
+    }
+    if let Some(cfg) = CACHED_APP_CONFIG_DIR.get() {
+        roots.push(normalize_for_auth(cfg));
+    }
+    if let Some(cache) = CACHED_APP_CACHE_DIR.get() {
+        roots.push(normalize_for_auth(cache));
+    }
+    if let Some(slot) = AUTHORIZED_SYNC_DIR.get() {
+        if let Some(sync_dir) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            roots.push(sync_dir.clone());
+        }
+    }
+    if let Some(set) = AUTHORIZED_WRITE_DIRS.get() {
+        for dir in set.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            roots.push(dir.clone());
+        }
+    }
+    roots
+}
+
+pub(crate) fn authorize_write_path(raw: &str, allowed_exts: &[&str]) -> Result<PathBuf, String> {
+    let abs_path = validate_safe_path_syntax(raw)?;
+    let ext = abs_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    if ext.is_empty() || !allowed_exts.contains(&ext.as_str()) {
+        return Err(format!("PATH_DENIED: File extension '.{}' is not allowed for write IPC", ext));
+    }
+    check_leaf_not_symlink(&abs_path)?;
+    let resolved = canonicalize_nearest_ancestor(&abs_path)?;
+    let resolved_key = normalized_path_key(&resolved);
+
+    if let Some(exact_set) = AUTHORIZED_SAVE_PATHS.get() {
+        if exact_set.lock().unwrap_or_else(|e| e.into_inner()).contains(&resolved_key) {
+            return Ok(resolved);
+        }
+    }
+
+    for root in authorized_root_dirs() {
+        let root_key = normalized_path_key(&root);
+        if key_starts_with(&resolved_key, &root_key) {
+            check_no_symlink_below_root(&abs_path, &root)?;
+            return Ok(resolved);
+        }
+    }
+
+    Err(format!(
+        "PATH_DENIED: Target path '{}' is outside authorized app and user-selected directories",
+        raw
+    ))
+}
 
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct FolderBookItem {
@@ -57,12 +308,10 @@ const BOOK_RANGE_BYTES: usize = 2 * 1024 * 1024;
 pub async fn fs_read_buffer(
     file_path: String, offset: Option<u64>, length: Option<usize>,
 ) -> Result<Response, String> {
-    let clean_str = file_path.trim().trim_matches('"').trim_matches('\'');
-    let raw_path = Path::new(clean_str);
-    let abs_path = std::path::absolute(raw_path).unwrap_or_else(|_| raw_path.to_path_buf());
+    let abs_path = validate_safe_path_syntax(&file_path)?;
     let path = abs_path.as_path();
 
-    if !path.exists() {
+    if !path.exists() || !path.is_file() {
         return Err(format!("File does not exist: {}", file_path));
     }
 
@@ -176,18 +425,68 @@ pub(super) fn stage_book_snapshot(
 
 #[tauri::command]
 pub async fn fs_write_file(file_path: String, content: String) -> Result<(), String> {
-    let clean = file_path.trim().trim_matches('"').trim_matches('\'');
-    let path = Path::new(clean);
-    if let Some(parent) = path.parent() {
+    if content.len() > MAX_TEXT_WRITE_BYTES {
+        return Err(format!(
+            "PAYLOAD_TOO_LARGE: Write content ({} bytes) exceeds the 64MiB limit",
+            content.len()
+        ));
+    }
+    let resolved = authorize_write_path(&file_path, ALLOWED_TEXT_WRITE_EXTENSIONS)?;
+    if let Some(parent) = resolved.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("Failed creating parent directories: {e}"))?;
         }
     }
-    fs::write(path, content.as_bytes())
+    fs::write(&resolved, content.as_bytes())
         .await
-        .map_err(|e| format!("Failed writing file '{}': {}", file_path, e))?;
+        .map_err(|e| format!("Failed writing file '{}': {}", resolved.display(), e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn fs_write_binary_file(file_path: String, bytes_base64: String) -> Result<(), String> {
+    use base64::Engine as _;
+
+    // Strip optional data URL prefix (e.g. "data:image/png;base64,...")
+    let b64_payload = bytes_base64
+        .split_once(',')
+        .map(|(_, data)| data)
+        .unwrap_or(bytes_base64.as_str())
+        .trim();
+
+    // Quick upper-bound check before decoding to avoid allocating oversized buffers
+    let estimated_bytes = (b64_payload.len() / 4) * 3;
+    if estimated_bytes > MAX_BINARY_WRITE_BYTES {
+        return Err(format!(
+            "PAYLOAD_TOO_LARGE: Binary write payload (~{} bytes) exceeds the 32MiB limit",
+            estimated_bytes
+        ));
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64_payload)
+        .map_err(|e| format!("INVALID_BASE64: Failed decoding binary payload: {e}"))?;
+
+    if decoded.len() > MAX_BINARY_WRITE_BYTES {
+        return Err(format!(
+            "PAYLOAD_TOO_LARGE: Decoded binary payload ({} bytes) exceeds the 32MiB limit",
+            decoded.len()
+        ));
+    }
+
+    let resolved = authorize_write_path(&file_path, ALLOWED_BINARY_WRITE_EXTENSIONS)?;
+    if let Some(parent) = resolved.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed creating parent directories: {e}"))?;
+        }
+    }
+    fs::write(&resolved, &decoded)
+        .await
+        .map_err(|e| format!("Failed writing binary file '{}': {}", resolved.display(), e))?;
     Ok(())
 }
 
@@ -562,5 +861,74 @@ mod tests {
         let res = scan_folder_sync(base.to_str().unwrap(), Some(10)).unwrap();
         assert_eq!(res.files.len(), 2);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_authorize_write_path_enforces_roots_extensions_and_traversal() {
+        let base = std::env::temp_dir().join(format!("linden_auth_test_{}", std::process::id()));
+        let unauthorized = std::env::temp_dir().join(format!("linden_unauth_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&unauthorized);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&unauthorized).unwrap();
+
+        register_authorized_write_dir(&base);
+
+        // Authorized directory + safe extension succeeds
+        let ok_target = base.join("backup.json");
+        assert!(authorize_write_path(ok_target.to_str().unwrap(), ALLOWED_TEXT_WRITE_EXTENSIONS).is_ok());
+
+        // Disallowed executable extension is blocked even in authorized directory
+        let exe_target = base.join("evil.exe");
+        assert!(authorize_write_path(exe_target.to_str().unwrap(), ALLOWED_TEXT_WRITE_EXTENSIONS).is_err());
+
+        // Parent traversal is blocked
+        let traversal = format!("{}/../escape.json", base.display());
+        assert!(authorize_write_path(&traversal, ALLOWED_TEXT_WRITE_EXTENSIONS).is_err());
+
+        // Unauthorized directory is blocked
+        let bad_target = unauthorized.join("notes.md");
+        assert!(authorize_write_path(bad_target.to_str().unwrap(), ALLOWED_TEXT_WRITE_EXTENSIONS).is_err());
+
+        // Explicitly registered exact save path succeeds
+        register_authorized_save_path(&bad_target);
+        assert!(authorize_write_path(bad_target.to_str().unwrap(), ALLOWED_TEXT_WRITE_EXTENSIONS).is_ok());
+
+        // Device namespace and globalroot paths are blocked
+        assert!(authorize_write_path(r"\\?\GLOBALROOT\Device\HarddiskVolume1\evil.json", ALLOWED_TEXT_WRITE_EXTENSIONS).is_err());
+        assert!(authorize_write_path(r"\\.\PhysicalDrive0\evil.json", ALLOWED_TEXT_WRITE_EXTENSIONS).is_err());
+
+        // Sibling prefix collision directory must remain blocked
+        let sibling_prefix = std::env::temp_dir().join(format!("linden_auth_test_{}_evil", std::process::id()));
+        std::fs::create_dir_all(&sibling_prefix).unwrap();
+        let sibling_target = sibling_prefix.join("leak.json");
+        assert!(authorize_write_path(sibling_target.to_str().unwrap(), ALLOWED_TEXT_WRITE_EXTENSIONS).is_err());
+
+        // Replacing active sync directory clears previously synced root
+        let outside_sync_a = std::env::temp_dir().join(format!("linden_sync_a_{}", std::process::id()));
+        let outside_sync_b = std::env::temp_dir().join(format!("linden_sync_b_{}", std::process::id()));
+        std::fs::create_dir_all(&outside_sync_a).unwrap();
+        std::fs::create_dir_all(&outside_sync_b).unwrap();
+        set_authorized_sync_dir(Some(&outside_sync_a));
+        assert!(authorize_write_path(outside_sync_a.join("linden_sync_data.json").to_str().unwrap(), ALLOWED_TEXT_WRITE_EXTENSIONS).is_ok());
+        set_authorized_sync_dir(Some(&outside_sync_b));
+        assert!(authorize_write_path(outside_sync_a.join("linden_sync_data.json").to_str().unwrap(), ALLOWED_TEXT_WRITE_EXTENSIONS).is_err());
+        assert!(authorize_write_path(outside_sync_b.join("linden_sync_data.json").to_str().unwrap(), ALLOWED_TEXT_WRITE_EXTENSIONS).is_ok());
+        set_authorized_sync_dir(None);
+
+        #[cfg(target_os = "windows")]
+        {
+            // Windows casing mismatch against authorized root and exact save path must succeed
+            let sub_mixed = base.join("SubFolder");
+            std::fs::create_dir_all(&sub_mixed).unwrap();
+            let upper_target = sub_mixed.to_string_lossy().to_uppercase() + "\\MixedCase.JSON";
+            assert!(authorize_write_path(&upper_target, ALLOWED_TEXT_WRITE_EXTENSIONS).is_ok());
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&unauthorized);
+        let _ = std::fs::remove_dir_all(&sibling_prefix);
+        let _ = std::fs::remove_dir_all(&outside_sync_a);
+        let _ = std::fs::remove_dir_all(&outside_sync_b);
     }
 }

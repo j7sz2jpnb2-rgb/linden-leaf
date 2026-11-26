@@ -77,11 +77,11 @@ await test('backup uses shared metadata and includes per-book PDF tool settings 
 });
 await test('restoring requires the actual atomic storage contract before any mutation', async () => {
     let writes = 0;
-    await assert.rejects(restoreFullDataBackup({}, { saveBook() { writes++ } }), /原子事务/);
+    await assert.rejects(restoreFullDataBackup({}, { saveBook() { writes++ } }), /原子事务|transactional storage/i);
     assert.equal(writes, 0);
 });
 await test('unsupported binary storage reports a capability limit without a WebDAV fallback', () => {
-    assert.throws(() => getBookStorage({ providerType: 'local_folder', folderPath: 'test' }), /整本书籍/);
+    assert.throws(() => getBookStorage({ providerType: 'local_folder', folderPath: 'test' }), /整本书籍|full book transfers/i);
 });
 await test('Google binary upload preserves typed-array slice and escapes quoted file names', async () => {
     const provider = new GoogleDriveStorageProvider({ clientId: 'test', accessToken: 'test' });

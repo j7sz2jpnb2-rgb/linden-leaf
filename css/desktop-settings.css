@@ -212,10 +212,22 @@
     background: var(--drawer-well);
   }
   #panel-notes .highlight-card {
-    padding: 12px 10px 12px 14px;
+    position: relative;
+    padding: 12px 10px 12px 15px;
+    border-left: none;
     border-bottom: 1px solid var(--drawer-hairline);
-    border-left-width: 2.5px;
-    border-radius: 0 6px 6px 0;
+    border-radius: 6px;
+    margin-bottom: 4px;
+  }
+  #panel-notes .highlight-card::before {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 12px;
+    bottom: 12px;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--hl-accent, #d97706);
   }
   #panel-notes .highlight-card:hover {
     background: var(--drawer-well);
@@ -223,16 +235,25 @@
   #panel-notes .highlight-text {
     font-size: 13px;
     line-height: 1.7;
+    color: var(--text-secondary, var(--text-muted));
     margin-bottom: 6px;
   }
   #panel-notes .highlight-note {
     border-left: none;
-    padding: 0;
+    padding: 8px 10px;
     margin-top: 6px;
     margin-bottom: 6px;
-    font-size: 12.5px;
+    font-family: var(--font-ui);
+    font-size: 12.8px;
     line-height: 1.6;
-    color: var(--text-muted);
+    color: var(--text-main);
+    background: var(--drawer-well);
+    border: 1px solid var(--drawer-hairline);
+    border-radius: 7px;
+  }
+  #panel-notes .highlight-meta-actions .btn-note-edit {
+    color: var(--text-secondary, var(--text-main));
+    font-weight: 500;
   }
   #panel-notes .highlight-meta-actions .btn-note-share {
     color: var(--brand-terracotta-text, var(--accent-primary, #da7756));

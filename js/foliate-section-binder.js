@@ -3,6 +3,7 @@ import { tracker } from './tracker.js'
 import { platformBridge } from './platformBridge.js'
 import { markReaderPaperBackgrounds } from './reader-paper.js'
 import { FEATURE_CHAPTER_TRANSLATION_ENABLED } from './app-features.js'
+import { applyChineseQuotesToDocument } from './chinese-quotes.js'
 import { t } from './i18n.js'
 
 /** Owns sections UI state, DOM queries and bindings. App supplies shared reading/session coordination. */
@@ -461,43 +462,10 @@ export class FoliateSectionBinder {
             }
         }, { passive: true })
 
-        // Chinese Quotes Transformation (Only applies to Chinese/CJK content; never mutates English text or apostrophes)
+        // Chinese Quotes Transformation (Reversible via WeakMap; only applies to CJK content)
         if (this.app.settings.chineseQuotes && doc.body) {
-            const bookLang = (this.app.book?.metadata?.language || this.app.currentBook?.language || '').toLowerCase()
-            const isEnglishBook = bookLang.startsWith('en')
-            const sampleText = (doc.body.innerText || doc.body.textContent || '').slice(0, 3000)
-            const cjkCount = (sampleText.match(/[\u4e00-\u9fa5\u3040-\u30ff]/g) || []).length
-            const latinCount = (sampleText.match(/[a-zA-Z]/g) || []).length
-            // Only apply if section is genuinely CJK content, and not an English book
-            const isPredominantlyCJK = !isEnglishBook && (
-                (cjkCount > 0 && latinCount === 0) ||
-                (cjkCount >= 10 && cjkCount >= latinCount * 0.2)
-            )
-
-            if (isPredominantlyCJK) {
-                const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
-                let n = walker.nextNode()
-                while (n) {
-                    if (n.nodeValue && /["'“”‘’]/.test(n.nodeValue)) {
-                        let text = n.nodeValue
-                        // 1. Replace Chinese double quotes “ and ” with 「 and 」
-                        text = text.replace(/“/g, '「').replace(/”/g, '」')
-                        // 2. Replace Chinese single opening quote ‘ with 『
-                        text = text.replace(/‘/g, '『')
-                        // 3. Replace ’ with 』 ONLY when it's NOT an English apostrophe!
-                        // Preserve apostrophes inside Latin words and plural possessives.
-                        text = text.replace(/(?<![a-zA-Z0-9])’|’(?![a-zA-Z0-9])/g, (match, offset, fullStr) => {
-                            const before = fullStr.slice(Math.max(0, offset - 10), offset)
-                            if (/[a-zA-Z]+s$/i.test(before)) {
-                                return '’'
-                            }
-                            return '』'
-                        })
-                        n.nodeValue = text
-                    }
-                    n = walker.nextNode()
-                }
-            }
+            const bookLang = this.app.book?.metadata?.language || this.app.currentBook?.language || ''
+            applyChineseQuotesToDocument(doc, true, { bookLang })
         }
 
         let selectionTimeout = null
@@ -625,12 +593,19 @@ export class FoliateSectionBinder {
                     console.warn('getCFI fallback on index:', index, cfiErr)
                 }
 
-                const currentItem = {
+                let currentItem = {
                     text,
                     range,
                     cfi,
                     index,
                     rect: absRect
+                }
+
+                if (this.app.annotations?.tryCompleteCrossPageAnchor) {
+                    const completed = this.app.annotations.tryCompleteCrossPageAnchor(currentItem)
+                    if (completed) {
+                        currentItem = completed
+                    }
                 }
 
                 const isCtrl = evt?.ctrlKey || evt?.metaKey || isCtrlActive || this.isCtrlPressed || this._activeSelectionGestureCtrl || this._pointerDownWithCtrl
@@ -676,7 +651,7 @@ export class FoliateSectionBinder {
                 this.app.annotations._frozenSelectionSnapshot = { ...currentItem, bookId: this.app.currentBookId }
                 this.app.annotations.hideHighlightActionPopup()
 
-                const trimmed = text.trim()
+                const trimmed = (currentItem.text || '').trim()
                 const dictEnabled = typeof this.app.dictionaryService?.isEnabled === 'function' ? this.app.dictionaryService.isEnabled() : (this.app.dictionaryService?.isEnabled !== false)
                 const isSingleWord = !isCtrl && /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && dictEnabled
                 if (isSingleWord) {
@@ -687,7 +662,7 @@ export class FoliateSectionBinder {
                     this.app.cards.showDictionaryCard(wordItem)
                 } else {
                     this.app.cards.hideDictionaryCard()
-                    this.app.annotations.showSelectionPopup(absRect)
+                    this.app.annotations.showSelectionPopup(currentItem.rect || absRect)
                 }
             } catch (err) {
                 console.warn('checkSelection warning:', err)
@@ -994,8 +969,13 @@ export class FoliateSectionBinder {
                     }
 
                     let footnoteText = (a.getAttribute('data-wr-footernote') || a.getAttribute('zy-footnote') || a.getAttribute('data-note') || '').trim()
+                    let footnoteHtml = ''
                     if (!footnoteText && targetEl) {
-                        footnoteText = this.app.cards.extractFootnoteFromTarget(targetEl, a)
+                        const rich = this.app.cards.extractFootnoteRichFromTarget
+                            ? this.app.cards.extractFootnoteRichFromTarget(targetEl, a)
+                            : { text: this.app.cards.extractFootnoteFromTarget(targetEl, a), html: '' }
+                        footnoteText = rich.text
+                        footnoteHtml = rich.html
                     }
 
                     // If still empty and link points to another file in book, resolve external section
@@ -1015,7 +995,11 @@ export class FoliateSectionBinder {
                                             this.app.cards.hideFootnotePopup()
                                             return
                                         }
-                                        footnoteText = this.app.cards.extractFootnoteFromTarget(extEl, a)
+                                        const rich = this.app.cards.extractFootnoteRichFromTarget
+                                            ? this.app.cards.extractFootnoteRichFromTarget(extEl, a)
+                                            : { text: this.app.cards.extractFootnoteFromTarget(extEl, a), html: '' }
+                                        footnoteText = rich.text
+                                        footnoteHtml = rich.html
                                     }
                                 }
                             }
@@ -1061,6 +1045,7 @@ export class FoliateSectionBinder {
                         this.app.cards.showFootnotePopup({
                             title: popupTitle,
                             text: footnoteText,
+                            html: footnoteHtml,
                             rect: {
                                 top: iframeRect.top + ((rect.top || 0) * scaleY),
                                 left: iframeRect.left + ((rect.left || 0) * scaleX),

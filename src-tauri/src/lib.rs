@@ -121,6 +121,10 @@ pub fn run() {
                 app.path().app_data_dir().ok(),
                 app.path().resource_dir().ok(),
             );
+            crate::commands::fs::set_cached_extra_app_dirs(
+                app.path().app_config_dir().ok(),
+                app.path().app_cache_dir().ok(),
+            );
             if let Ok(exe_path) = std::env::current_exe() {
                 eprintln!("[TAURI SETUP] EXE Path: {}", exe_path.display());
             }
@@ -137,10 +141,14 @@ pub fn run() {
             eprintln!("[TAURI SETUP] Extracted book paths from args: {:?}", file_paths);
             if !file_paths.is_empty() {
                 let state = app.state::<AppState>();
-                let mut pending = state.pending_files.lock().unwrap();
+                let mut pending = state.pending_files.lock().unwrap_or_else(|e| e.into_inner());
                 for file_path in file_paths {
                     pending.push((Some("main".to_string()), file_path.clone()));
-                    state.initial_boot_files.lock().unwrap().push((Some("main".to_string()), file_path));
+                    state
+                        .initial_boot_files
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((Some("main".to_string()), file_path));
                 }
             }
 
@@ -163,7 +171,7 @@ pub fn run() {
                     eprintln!("[WINDOW EVENT] {:?} CloseRequested", win_label);
                     let state = window.state::<AppState>();
                     let (should_prevent, req_id) = {
-                        let mut close_map = state.close_state.lock().unwrap();
+                        let mut close_map = state.close_state.lock().unwrap_or_else(|e| e.into_inner());
                         let close_state = close_map.entry(win_label.clone()).or_default();
                         if close_state.close_permitted {
                             eprintln!("[WINDOW EVENT] Close already permitted for {:?}, closing now.", win_label);
@@ -207,7 +215,7 @@ pub fn run() {
                             tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
                             let state = window_clone.state::<AppState>();
                             let should_force_close = {
-                                let mut close_map = state.close_state.lock().unwrap();
+                                let mut close_map = state.close_state.lock().unwrap_or_else(|e| e.into_inner());
                                 if let Some(close_state) = close_map.get_mut(&label_clone) {
                                     if close_state.pending_request_id.as_ref() == Some(&id_clone) {
                                         eprintln!("[WINDOW EVENT] Flush timeout for {:?} on {:?}; forcing close fallback", id_clone, label_clone);
@@ -252,10 +260,12 @@ pub fn run() {
             fs_read_buffer,
             fs_stage_epub_snapshot,
             fs_write_file,
+            fs_write_binary_file,
             fs_compute_file_hash,
             // Window & App
             window_open_new,
             window_set_title,
+            window_set_titlebar_theme,
             window_minimize,
             window_maximize,
             window_close,

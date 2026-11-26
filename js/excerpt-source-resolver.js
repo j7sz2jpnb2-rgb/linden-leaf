@@ -50,7 +50,26 @@ export function flattenToc(toc) {
 }
 
 /**
- * Find the nearest preceding heading in the document tree before a DOM node
+ * Check whether an element looks like a section/poem heading (h1-h6, role="heading",
+ * or common EPUB poetry/chapter title classes).
+ */
+const HEADING_SELECTOR = 'h1, h2, h3, h4, h5, h6, [role="heading"], .poem-title, .chapter-title, .section-title, .entry-title, p.title, div.title'
+
+function isHeadingCandidate(el) {
+    if (!el || el.nodeType !== 1) return false
+    const text = el.textContent?.trim()
+    if (!text || text.length > 160) return false
+    if (/^H[1-6]$/i.test(el.tagName)) return true
+    if (el.getAttribute?.('role') === 'heading') return true
+    const cls = el.classList
+    if (cls && (cls.contains('poem-title') || cls.contains('chapter-title') || cls.contains('section-title') || cls.contains('entry-title') || cls.contains('title'))) {
+        return true
+    }
+    return false
+}
+
+/**
+ * Find the nearest preceding heading in the document tree strictly before (or containing) a DOM node.
  */
 function findNearestHeadingFromNode(node) {
     if (!node || typeof node !== 'object') return null
@@ -59,31 +78,39 @@ function findNearestHeadingFromNode(node) {
         if (!el) return null
 
         // 1. Check if el or direct parent is a heading
-        const directHeading = el.closest?.('h1, h2, h3, h4, h5, h6')
+        const directHeading = el.closest?.('h1, h2, h3, h4, h5, h6, [role="heading"]')
         if (directHeading?.textContent?.trim()) {
             return directHeading.textContent.trim()
         }
 
-        // 2. Query document headings in document order
+        // 2. Query document headings in document order (prefer semantic headings first, then title classes)
         const doc = el.ownerDocument
         if (doc && typeof doc.querySelectorAll === 'function') {
-            const allHeadings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'))
-            let lastPreceding = null
-            for (const h of allHeadings) {
-                if (h === el || h.contains(el)) {
-                    return h.textContent.trim()
+            const pickLastPreceding = (selector) => {
+                const nodes = Array.from(doc.querySelectorAll(selector))
+                let lastPreceding = null
+                for (const h of nodes) {
+                    if (!isHeadingCandidate(h)) continue
+                    if (h === el || h.contains(el)) {
+                        return h.textContent.trim()
+                    }
+                    const pos = h.compareDocumentPosition(el)
+                    // pos & 4 (DOCUMENT_POSITION_FOLLOWING): el follows h -> h strictly precedes el
+                    if (pos & 4) {
+                        lastPreceding = h
+                    } else if (pos & 2) {
+                        // h follows el -> stop so we never pick a later poem/chapter on the same page
+                        break
+                    }
                 }
-                const pos = h.compareDocumentPosition(el)
-                // pos & 4 (DOCUMENT_POSITION_FOLLOWING): el follows h, meaning h precedes el
-                if (pos & 4) {
-                    lastPreceding = h
-                } else {
-                    break
-                }
+                return lastPreceding?.textContent?.trim() || null
             }
-            if (lastPreceding?.textContent?.trim()) {
-                return lastPreceding.textContent.trim()
-            }
+
+            const semanticMatch = pickLastPreceding('h1, h2, h3, h4, h5, h6, [role="heading"]')
+            if (semanticMatch) return semanticMatch
+
+            const classMatch = pickLastPreceding(HEADING_SELECTOR)
+            if (classMatch) return classMatch
         }
 
         // 3. Fallback: backwards DOM walk taking the closest (last) heading in preceding siblings
@@ -92,13 +119,13 @@ function findNearestHeadingFromNode(node) {
         while (curr && maxWalk-- > 0) {
             let prev = curr.previousElementSibling
             while (prev) {
-                if (/^H[1-6]$/i.test(prev.tagName) && prev.textContent?.trim()) {
+                if (isHeadingCandidate(prev)) {
                     return prev.textContent.trim()
                 }
-                const nested = prev.querySelectorAll?.('h1, h2, h3, h4, h5, h6')
+                const nested = prev.querySelectorAll?.(HEADING_SELECTOR)
                 if (nested && nested.length > 0) {
                     const lastNested = nested[nested.length - 1]
-                    if (lastNested?.textContent?.trim()) {
+                    if (isHeadingCandidate(lastNested)) {
                         return lastNested.textContent.trim()
                     }
                 }
@@ -113,8 +140,45 @@ function findNearestHeadingFromNode(node) {
     return null
 }
 
+function normalizeSectionHref(rawHref) {
+    if (!rawHref || typeof rawHref !== 'string') return ''
+    const trimmed = rawHref.trim()
+    // Foliate renders EPUB sections in blob: iframes whose tail is a random UUID, never a real file path
+    if (/^(?:blob:|about:|data:)/i.test(trimmed)) return ''
+    return trimmed.split(/[?#]/)[0]
+}
+
+function extractFileName(pathStr) {
+    if (!pathStr) return ''
+    try {
+        return decodeURIComponent(pathStr.split('/').pop() || '')
+    } catch (_) {
+        return pathStr.split('/').pop() || ''
+    }
+}
+
+function resolveSectionHrefFromReader(node, snapshot = {}) {
+    if (snapshot.sectionHref) return snapshot.sectionHref
+    const doc = node?.nodeType === 9 ? node : node?.ownerDocument
+    const reader = snapshot.reader
+    if (reader && doc) {
+        try {
+            const contents = reader.renderer?.getContents?.() || []
+            const matchedContent = contents.find(c => c?.doc === doc)
+            if (matchedContent != null && matchedContent.index != null) {
+                const sec = reader.book?.sections?.[matchedContent.index]
+                if (sec?.id) return sec.id
+            }
+        } catch (_) {}
+    }
+    if (snapshot.currentLocation?.href) return snapshot.currentLocation.href
+    if (snapshot.currentLocation?.tocItem?.href) return snapshot.currentLocation.tocItem.href
+    return ''
+}
+
 /**
- * Match a DOM node to the most specific TOC item in the current section
+ * Match a DOM node to the most specific TOC item strictly preceding (or containing) it
+ * in the current section document.
  */
 function findTocItemByNode(node, sourceToc, sectionHref = '') {
     if (!node || !Array.isArray(sourceToc) || sourceToc.length === 0) return null
@@ -124,43 +188,73 @@ function findTocItemByNode(node, sourceToc, sectionHref = '') {
         const flat = flattenToc(sourceToc)
         const doc = el.ownerDocument
 
-        // Determine current document/section file name
-        const docUrl = doc?.defaultView?.location?.href || doc?.URL || sectionHref || ''
-        const docFile = docUrl ? docUrl.split(/[?#]/)[0].split('/').pop() : ''
+        // Prefer real spine/section href over iframe blob: URL
+        const realSectionPath = normalizeSectionHref(sectionHref)
+            || normalizeSectionHref(doc?.defaultView?.location?.href || '')
+            || normalizeSectionHref(doc?.URL || '')
+        const docFile = extractFileName(realSectionPath)
 
-        let bestItem = null
+        let bestAnchorItem = null
         let bestAnchorEl = null
+        let sectionLevelFallback = null
+        let sawAnyAnchorInDoc = false
 
-        // Check each TOC item whose href belongs to this section document
+        // Check each TOC item whose href belongs to this section document (or whose #id exists in doc)
         for (const item of flat) {
             const href = item.href || ''
-            const [itemPath, itemId] = href.split('#')
-            const itemFile = itemPath ? itemPath.split('/').pop() : ''
+            const hashIdx = href.indexOf('#')
+            const itemPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href
+            const itemId = hashIdx >= 0 ? href.slice(hashIdx + 1) : ''
+            const cleanItemPath = normalizeSectionHref(itemPath)
+            const itemFile = extractFileName(cleanItemPath)
 
             const fileMatches = docFile
-                ? (!itemFile || itemFile === docFile || docUrl.endsWith('/' + itemFile) || docFile.endsWith('/' + itemFile))
-                : (!itemFile && Boolean(itemId))
+                ? (!itemFile || itemFile === docFile || realSectionPath.endsWith('/' + itemFile) || cleanItemPath.endsWith('/' + docFile))
+                : false
 
-            if (fileMatches && itemId && doc && typeof doc.getElementById === 'function') {
-                const anchorEl = doc.getElementById(itemId) || doc.querySelector?.(`[name="${CSS.escape ? CSS.escape(itemId) : itemId}"]`)
+            if (itemId && doc && typeof doc.getElementById === 'function' && (fileMatches || !docFile)) {
+                const escapedId = (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
+                    ? CSS.escape(itemId)
+                    : itemId.replace(/["\\]/g, '\\$&')
+                const anchorEl = doc.getElementById(itemId) || doc.querySelector?.(`[name="${escapedId}"]`)
                 if (anchorEl) {
+                    sawAnyAnchorInDoc = true
                     if (anchorEl === el || anchorEl.contains(el)) {
                         return item.label?.trim() || null
                     }
                     const pos = anchorEl.compareDocumentPosition(el)
-                    if (pos & 4) { // el follows anchorEl
+                    if (pos & 4) { // el strictly follows anchorEl
                         if (!bestAnchorEl || (bestAnchorEl.compareDocumentPosition(anchorEl) & 4)) {
                             bestAnchorEl = anchorEl
-                            bestItem = item
+                            bestAnchorItem = item
                         }
                     }
                 }
-            } else if (!itemId && fileMatches && !bestItem) {
-                bestItem = item
+            } else if (!itemId && fileMatches && !sectionLevelFallback) {
+                sectionLevelFallback = item
             }
         }
 
-        if (bestItem?.label) return bestItem.label.trim()
+        if (bestAnchorItem?.label) return bestAnchorItem.label.trim()
+
+        // If the document has TOC anchors (e.g. Poem B starts halfway down the same file),
+        // and the selection sits BEFORE the first anchor in this file, the selection belongs to
+        // either the file-level TOC item (if any) or the immediately preceding TOC item before that anchor!
+        if (sawAnyAnchorInDoc && !bestAnchorItem) {
+            if (sectionLevelFallback?.label) return sectionLevelFallback.label.trim()
+            const firstInDocIdx = flat.findIndex(item => {
+                const href = item.href || ''
+                const hashIdx = href.indexOf('#')
+                const itemId = hashIdx >= 0 ? href.slice(hashIdx + 1) : ''
+                if (!itemId || !doc?.getElementById) return false
+                return Boolean(doc.getElementById(itemId))
+            })
+            if (firstInDocIdx > 0 && flat[firstInDocIdx - 1]?.label) {
+                return flat[firstInDocIdx - 1].label.trim()
+            }
+        }
+
+        if (sectionLevelFallback?.label) return sectionLevelFallback.label.trim()
 
         // Fallback: check ancestor id matching
         let curr = el
@@ -170,8 +264,10 @@ function findTocItemByNode(node, sourceToc, sectionHref = '') {
             if (id) {
                 const matched = flat.find(item => {
                     const href = item.href || ''
-                    const [itemPath, itemId] = href.split('#')
-                    const itemFile = itemPath ? itemPath.split('/').pop() : ''
+                    const hashIdx = href.indexOf('#')
+                    const itemPath = hashIdx >= 0 ? href.slice(0, hashIdx) : href
+                    const itemId = hashIdx >= 0 ? href.slice(hashIdx + 1) : ''
+                    const itemFile = extractFileName(normalizeSectionHref(itemPath))
                     const fileMatches = !itemFile || !docFile || itemFile === docFile
                     return fileMatches && itemId === id
                 })
@@ -239,13 +335,13 @@ export function resolveExcerptSource(snapshot = {}, sourceToc = []) {
     // --- STEP 1: Try selection's first node (Priority 1) ---
     const range = snapshot.range
     if (range && typeof range === 'object' && range.startContainer) {
-        // 1a. Try TOC item matching by anchor within section
-        const sectionHref = snapshot.currentLocation?.href || ''
+        // 1a. Try TOC item matching by anchor within section (using real spine href, never blob: URL)
+        const sectionHref = resolveSectionHrefFromReader(range.startContainer, snapshot)
         const tocMatch = findTocItemByNode(range.startContainer, sourceToc, sectionHref)
         if (tocMatch) {
             chapterTitle = sanitizeChapter(tocMatch)
         }
-        // 1b. Try nearest preceding heading in the DOM
+        // 1b. Try nearest preceding heading in the DOM strictly before selection start
         if (!chapterTitle) {
             const heading = findNearestHeadingFromNode(range.startContainer)
             if (heading) {
@@ -261,7 +357,36 @@ export function resolveExcerptSource(snapshot = {}, sourceToc = []) {
 
     if (!chapterTitle && isPdf && pdfPage0 != null) {
         const tocIdx = buildPdfTocIndex(sourceToc)
-        const activeItem = pdfTocAtPage(tocIdx, pdfPage0)
+        // If selection Y coordinate is available and a TOC item begins lower on the same page
+        // (e.g. end of Poem A at top of page, start of Poem B halfway down), choose the preceding TOC item.
+        const pdfTarget = snapshot.pdfTarget || snapshot.highlight?.pdfTarget
+        const firstSeg = Array.isArray(pdfTarget?.segments) ? pdfTarget.segments[0] : null
+        const firstRect = (firstSeg?.rects?.[0]) || (pdfTarget?.rects?.[0]) || null
+        const selectionY = Array.isArray(firstRect) && Number.isFinite(firstRect[1]) ? firstRect[1] : null
+
+        let activeItem = null
+        if (selectionY != null && Array.isArray(tocIdx) && tocIdx.length > 0) {
+            for (const entry of tocIdx) {
+                const tocNode = entry?.item || entry
+                if (entry.page < pdfPage0) {
+                    activeItem = tocNode
+                } else if (entry.page === pdfPage0) {
+                    const entryY = Number.isFinite(tocNode?.yRatio) ? tocNode.yRatio : null
+                    if (entryY != null) {
+                        if (entryY <= selectionY + 0.02) activeItem = tocNode
+                    } else if (selectionY >= 0.45 || !activeItem) {
+                        // When PDF TOC has no Y anchor and a new entry starts on this page,
+                        // avoid assigning a mid-page new chapter to a selection near the top of the page.
+                        activeItem = tocNode
+                    }
+                } else {
+                    break
+                }
+            }
+        }
+        if (!activeItem) {
+            activeItem = pdfTocAtPage(tocIdx, pdfPage0)
+        }
         if (activeItem?.label) {
             chapterTitle = sanitizeChapter(activeItem.label)
         }

@@ -45,3 +45,32 @@ export const withReadableBookTitle = book => {
     return title === book.title ? book : { ...book, title }
 }
 
+/**
+ * Split long marketing/catalog subtitles out of display titles (e.g. Hero showcase)
+ * while leaving compact titles untouched.
+ */
+export function splitDisplayTitleAndSubtitle(rawTitle) {
+    const title = String(rawTitle || '').trim()
+    if (!title) return { mainTitle: '', subtitle: '' }
+
+    // 1. Trailing full-width or ASCII parenthesized subtitle on long titles
+    const parenMatch = title.match(/^(.{2,}?)\s*[（(]([^）)]{4,})[）)]\s*$/)
+    if (parenMatch && title.length >= 16) {
+        return {
+            mainTitle: parenMatch[1].trim(),
+            subtitle: parenMatch[2].trim(),
+        }
+    }
+
+    // 2. Colon or em-dash subtitle when subtitle is substantive
+    const sepMatch = title.match(/^(.{2,}?)\s*(?:：|:|——|—)\s*(.{4,})$/)
+    if (sepMatch && title.length >= 14 && sepMatch[1].trim().length >= 2) {
+        return {
+            mainTitle: sepMatch[1].trim(),
+            subtitle: sepMatch[2].trim(),
+        }
+    }
+
+    return { mainTitle: title, subtitle: '' }
+}
+

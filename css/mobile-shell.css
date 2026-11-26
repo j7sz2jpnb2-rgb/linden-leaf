@@ -3924,3 +3924,68 @@ html.is-mobile-viewport body.mobile-ai-history-active .ai-history-content-pane {
 html.is-mobile-viewport body.mobile-ai-history-active .ai-history-split-pane.show-detail .ai-history-sidebar-pane { display:none !important; }
 html.is-mobile-viewport body.mobile-ai-history-active .ai-history-split-pane.show-detail .ai-history-content-pane { display:flex !important; }
 html.is-mobile-viewport body.mobile-ai-history-active #ai-history-page-messages-list { padding-inline:max(24px,calc((100% - 600px)/2)); }
+
+/* ==========================================================================
+   Non-Blocking Note Composer — Mobile / Android Bottom Sheet Adaptation
+   Strictly scoped to html.is-mobile-viewport so Desktop PC styles are untouched.
+   ========================================================================== */
+html.is-mobile-viewport .reader-note-composer-card,
+html.is-mobile-viewport .reader-note-composer-card.is-mobile-sheet {
+  position: fixed !important;
+  left: 0 !important;
+  right: 0 !important;
+  top: auto !important;
+  bottom: var(--ime-bottom, 0px) !important;
+  width: 100% !important;
+  max-width: 100vw !important;
+  max-height: min(56dvh, calc(100dvh - var(--safe-top, 0px) - var(--ime-bottom, 0px) - 72px));
+  border-radius: 18px 18px 0 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  padding-bottom: calc(10px + var(--safe-bottom, 0px));
+  box-shadow: 0 -10px 30px rgba(20, 18, 15, 0.16);
+  z-index: 2400;
+}
+html.is-mobile-viewport .reader-note-composer-card .note-composer-header {
+  cursor: default;
+  padding: 11px 16px 8px;
+}
+html.is-mobile-viewport .reader-note-composer-card .note-composer-grip,
+html.is-mobile-viewport .reader-note-composer-card #btn-note-composer-dock,
+html.is-mobile-viewport .reader-note-composer-card .note-composer-shortcut-hint {
+  display: none !important;
+}
+html.is-mobile-viewport .reader-note-composer-card .note-composer-close-btn {
+  width: 36px;
+  height: 36px;
+  font-size: 20px;
+}
+html.is-mobile-viewport .reader-note-composer-card .note-composer-quote-wrap {
+  margin: 8px 16px 0;
+  max-height: 54px;
+  overflow: hidden;
+}
+html.is-mobile-viewport .reader-note-composer-card .note-composer-colors {
+  padding: 10px 16px 6px;
+  gap: 12px;
+}
+html.is-mobile-viewport .reader-note-composer-card .note-composer-color-dot {
+  width: 24px;
+  height: 24px;
+}
+html.is-mobile-viewport .reader-note-composer-card .note-composer-textarea {
+  margin: 4px 16px 0;
+  font-size: 15px;
+  min-height: 76px;
+  max-height: 150px;
+}
+html.is-mobile-viewport .reader-note-composer-card .note-composer-footer {
+  padding: 10px 16px 4px;
+  justify-content: flex-end;
+}
+html.is-mobile-viewport .reader-note-composer-card .note-composer-footer-actions button {
+  min-height: 40px;
+  padding: 0 18px;
+  font-size: 14px;
+}

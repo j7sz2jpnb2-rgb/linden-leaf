@@ -9,10 +9,27 @@
 
 #ifdef _MSC_VER
 #include <float.h>
+#include <intrin.h>
 #define ll_isfinite(value) _finite((double)(value))
 #else
 #define ll_isfinite(value) isfinite(value)
 #endif
+
+static inline void ll_atomic_store_abort(int *abort_flag, int val) {
+#if defined(_MSC_VER)
+    _InterlockedExchange((volatile long *)abort_flag, (long)val);
+#else
+    __atomic_store_n(abort_flag, val, __ATOMIC_RELEASE);
+#endif
+}
+
+static inline int ll_atomic_load_abort(const int *abort_flag) {
+#if defined(_MSC_VER)
+    return (int)_InterlockedCompareExchange((volatile long *)abort_flag, 0, 0);
+#else
+    return __atomic_load_n(abort_flag, __ATOMIC_ACQUIRE);
+#endif
+}
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -105,7 +122,7 @@ static void drop_page(ll_doc *d, ll_page *p) {
     p->page = -1;
 }
 
-static ll_page *get_page_internal(ll_doc *d, int number, int *hit, int priority) {
+static ll_page *get_page_internal(ll_doc *d, int number, int *hit, int priority, ll_cancel *cancel) {
     (void)priority;
     if (hit) *hit = 0;
     if (number < 0 || number >= d->count)
@@ -122,6 +139,9 @@ static ll_page *get_page_internal(ll_doc *d, int number, int *hit, int priority)
         }
     }
 
+    if (ll_cancel_is_aborted(cancel))
+        return NULL;
+
     /* Cache miss: pick best eviction victim using clean standard LRU.
      * Select unallocated slot (-1) first; otherwise evict entry with minimum 'used' clock. */
     for (int i = 0; i < CACHE_PAGES; ++i) {
@@ -137,23 +157,34 @@ static ll_page *get_page_internal(ll_doc *d, int number, int *hit, int priority)
 
     drop_page(d, entry);
     fz_page *page = NULL;
+    fz_device *list_dev = NULL;
     fz_var(page);
+    fz_var(list_dev);
     fz_var(entry);
     fz_try(d->ctx) {
         page = fz_load_page(d->ctx, d->document, number);
         entry->bounds = fz_bound_page(d->ctx, page);
-        entry->list = fz_new_display_list_from_page(d->ctx, page);
-        entry->page = number;
-        entry->used = ++d->clock;
-        ++d->stats.list_builds;
+        entry->list = fz_new_display_list(d->ctx, entry->bounds);
+        list_dev = fz_new_list_device(d->ctx, entry->list);
+        fz_run_page(d->ctx, page, list_dev, fz_identity,
+                    cancel ? &cancel->cookie : NULL);
+        fz_close_device(d->ctx, list_dev);
     }
     fz_always(d->ctx) {
+        fz_drop_device(d->ctx, list_dev);
         fz_drop_page(d->ctx, page);
     }
     fz_catch(d->ctx) {
         drop_page(d, entry);
         fz_rethrow(d->ctx);
     }
+    if (ll_cancel_is_aborted(cancel)) {
+        drop_page(d, entry);
+        return NULL;
+    }
+    entry->page = number;
+    entry->used = ++d->clock;
+    ++d->stats.list_builds;
     return entry;
 }
 
@@ -236,45 +267,45 @@ static void adapt_stext_page(ll_doc *d, ll_page *p) {
         fz_stext_options opts = {0};
         opts.flags = FZ_STEXT_ACCURATE_BBOXES;
         acc_text = fz_new_stext_page_from_display_list(d->ctx, p->list, &opts);
-        if (!acc_text) return;
+        if (acc_text) {
+            fz_stext_block *acc_b = acc_text->first_block;
+            for (fz_stext_block *b = p->text->first_block; b; b = b->next) {
+                if (b->type != FZ_STEXT_BLOCK_TEXT) continue;
+                while (acc_b && acc_b->type != FZ_STEXT_BLOCK_TEXT) {
+                    acc_b = acc_b->next;
+                }
+                if (!acc_b) break;
 
-        fz_stext_block *acc_b = acc_text->first_block;
-        for (fz_stext_block *b = p->text->first_block; b; b = b->next) {
-            if (b->type != FZ_STEXT_BLOCK_TEXT) continue;
-            while (acc_b && acc_b->type != FZ_STEXT_BLOCK_TEXT) {
-                acc_b = acc_b->next;
-            }
-            if (!acc_b) break;
+                fz_stext_line *acc_l = acc_b->u.t.first_line;
+                for (fz_stext_line *l = b->u.t.first_line; l; l = l->next) {
+                    if (!acc_l) break;
 
-            fz_stext_line *acc_l = acc_b->u.t.first_line;
-            for (fz_stext_line *l = b->u.t.first_line; l; l = l->next) {
-                if (!acc_l) break;
-
-                fz_stext_char *acc_c = acc_l->first_char;
-                for (fz_stext_char *c = l->first_char; c; c = c->next) {
-                    fz_stext_char *matched_acc = NULL;
-                    if (acc_c && acc_c->c == c->c) {
-                        matched_acc = acc_c;
-                        acc_c = acc_c->next;
-                    } else if (acc_c) {
-                        fz_stext_char *scan = acc_c->next;
-                        for (int k = 0; scan && k < 4; k++, scan = scan->next) {
-                            if (scan->c == c->c) {
-                                matched_acc = scan;
-                                acc_c = scan->next;
-                                break;
+                    fz_stext_char *acc_c = acc_l->first_char;
+                    for (fz_stext_char *c = l->first_char; c; c = c->next) {
+                        fz_stext_char *matched_acc = NULL;
+                        if (acc_c && acc_c->c == c->c) {
+                            matched_acc = acc_c;
+                            acc_c = acc_c->next;
+                        } else if (acc_c) {
+                            fz_stext_char *scan = acc_c->next;
+                            for (int k = 0; scan && k < 4; k++, scan = scan->next) {
+                                if (scan->c == c->c) {
+                                    matched_acc = scan;
+                                    acc_c = scan->next;
+                                    break;
+                                }
                             }
                         }
-                    }
 
-                    if (matched_acc) {
-                        c->quad = adapt_quad(&c->quad, &matched_acc->quad, matched_acc->flags, acc_l->dir, c->size,
-                            c->font && fz_font_flags(c->font)->ft_substitute);
+                        if (matched_acc) {
+                            c->quad = adapt_quad(&c->quad, &matched_acc->quad, matched_acc->flags, acc_l->dir, c->size,
+                                c->font && fz_font_flags(c->font)->ft_substitute);
+                        }
                     }
+                    acc_l = acc_l->next;
                 }
-                acc_l = acc_l->next;
+                acc_b = acc_b->next;
             }
-            acc_b = acc_b->next;
         }
     }
     fz_always(d->ctx) {
@@ -286,7 +317,7 @@ static void adapt_stext_page(ll_doc *d, ll_page *p) {
 }
 
 static ll_page *get_page(ll_doc *d, int number) {
-    return get_page_internal(d, number, NULL, 0);
+    return get_page_internal(d, number, NULL, 0, NULL);
 }
 
 static fz_stext_page *get_plain_text(ll_doc *d, int number) {
@@ -587,11 +618,11 @@ ll_cancel *ll_cancel_new(void) {
 }
 
 void ll_cancel_abort(ll_cancel *cancel) {
-    if (cancel) cancel->cookie.abort = 1;
+    if (cancel) ll_atomic_store_abort(&cancel->cookie.abort, 1);
 }
 
 int ll_cancel_is_aborted(ll_cancel *cancel) {
-    return (cancel && cancel->cookie.abort) ? 1 : 0;
+    return (cancel && ll_atomic_load_abort(&cancel->cookie.abort)) ? 1 : 0;
 }
 
 void ll_cancel_free(ll_cancel *cancel) {
@@ -600,56 +631,63 @@ void ll_cancel_free(ll_cancel *cancel) {
 
 static int prepare_render(ll_doc *d, int number, float scale, float rotation,
                           const float *clip, ll_cancel *cancel, int priority, ll_render_plan *plan) {
-    if (cancel && cancel->cookie.abort) return LL_CANCELLED;
+    if (ll_cancel_is_aborted(cancel)) return LL_CANCELLED;
     clear_error(d);
     memset(plan, 0, sizeof(*plan));
+    int cancelled = 0;
+    fz_var(cancelled);
     fz_try(d->ctx) {
         if (!ll_isfinite(scale) || scale <= 0 || !ll_isfinite(rotation))
             fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Invalid render transform");
 
         uint64_t list_start = ll_now_us();
-        ll_page *page = get_page_internal(d, number, &plan->timings.list_hit, priority);
+        ll_page *page = get_page_internal(d, number, &plan->timings.list_hit, priority, cancel);
         plan->timings.list_time_us = ll_now_us() - list_start;
-        plan->list = page->list;
+        if (!page || ll_cancel_is_aborted(cancel)) {
+            cancelled = 1;
+        } else {
+            plan->list = page->list;
 
-        fz_matrix m = fz_concat(fz_rotate(rotation), fz_scale(scale, scale));
-        fz_rect box = fz_transform_rect(page->bounds, m);
-        m = fz_concat(m, fz_translate(-box.x0, -box.y0));
-        box = fz_transform_rect(page->bounds, m);
-        if (clip) {
-            for (int i = 0; i < 4; ++i)
-                if (!ll_isfinite(clip[i]))
-                    fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Invalid render clip");
-            box = fz_intersect_rect(box, (fz_rect){clip[0], clip[1], clip[2], clip[3]});
+            fz_matrix m = fz_concat(fz_rotate(rotation), fz_scale(scale, scale));
+            fz_rect box = fz_transform_rect(page->bounds, m);
+            m = fz_concat(m, fz_translate(-box.x0, -box.y0));
+            box = fz_transform_rect(page->bounds, m);
+            if (clip) {
+                for (int i = 0; i < 4; ++i)
+                    if (!ll_isfinite(clip[i]))
+                        fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Invalid render clip");
+                box = fz_intersect_rect(box, (fz_rect){clip[0], clip[1], clip[2], clip[3]});
+            }
+            /* Bound coordinates before rounding or allocating the pixmap. */
+            double box_width = (double)box.x1 - (double)box.x0;
+            double box_height = (double)box.y1 - (double)box.y0;
+            if (!ll_isfinite(box.x0) || !ll_isfinite(box.y0) ||
+                !ll_isfinite(box.x1) || !ll_isfinite(box.y1) ||
+                (double)box.x0 < -INT_MAX / 4.0 || (double)box.y0 < -INT_MAX / 4.0 ||
+                (double)box.x1 > INT_MAX / 4.0 || (double)box.y1 > INT_MAX / 4.0 ||
+                !ll_isfinite(box_width) || !ll_isfinite(box_height) ||
+                box_width <= 0 || box_height <= 0 ||
+                box_width > LL_MAX_RENDER_EDGE || box_height > LL_MAX_RENDER_EDGE ||
+                box_width * box_height > LL_MAX_RENDER_PIXELS)
+                fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
+            fz_irect bbox = fz_round_rect(box);
+            int width = bbox.x1 - bbox.x0;
+            int height = bbox.y1 - bbox.y0;
+            if (width <= 0 || height <= 0)
+                fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Empty render region");
+            if (width > LL_MAX_RENDER_EDGE || height > LL_MAX_RENDER_EDGE ||
+                (size_t)width * (size_t)height > LL_MAX_RENDER_PIXELS || width > INT_MAX / 4)
+                fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
+            plan->matrix = m;
+            plan->box = box;
+            plan->bbox = bbox;
         }
-        /* Bound coordinates before rounding or allocating the pixmap. */
-        double box_width = (double)box.x1 - (double)box.x0;
-        double box_height = (double)box.y1 - (double)box.y0;
-        if (!ll_isfinite(box.x0) || !ll_isfinite(box.y0) ||
-            !ll_isfinite(box.x1) || !ll_isfinite(box.y1) ||
-            (double)box.x0 < -INT_MAX / 4.0 || (double)box.y0 < -INT_MAX / 4.0 ||
-            (double)box.x1 > INT_MAX / 4.0 || (double)box.y1 > INT_MAX / 4.0 ||
-            !ll_isfinite(box_width) || !ll_isfinite(box_height) ||
-            box_width <= 0 || box_height <= 0 ||
-            box_width > LL_MAX_RENDER_EDGE || box_height > LL_MAX_RENDER_EDGE ||
-            box_width * box_height > LL_MAX_RENDER_PIXELS)
-            fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
-        fz_irect bbox = fz_round_rect(box);
-        int width = bbox.x1 - bbox.x0;
-        int height = bbox.y1 - bbox.y0;
-        if (width <= 0 || height <= 0)
-            fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Empty render region");
-        if (width > LL_MAX_RENDER_EDGE || height > LL_MAX_RENDER_EDGE ||
-            (size_t)width * (size_t)height > LL_MAX_RENDER_PIXELS || width > INT_MAX / 4)
-            fz_throw(d->ctx, FZ_ERROR_ARGUMENT, "Render region exceeds pixel budget");
-        plan->matrix = m;
-        plan->box = box;
-        plan->bbox = bbox;
     }
     fz_catch(d->ctx) {
         caught(d);
         return LL_ERROR;
     }
+    if (cancelled || ll_cancel_is_aborted(cancel)) return LL_CANCELLED;
     return LL_OK;
 }
 
@@ -666,7 +704,7 @@ static void free_image(fz_context *ctx, ll_image *out) {
 static int rasterize(fz_context *ctx, const ll_render_plan *plan, ll_cancel *cancel,
                      ll_image *out, ll_render_timings *timings, char *error, size_t n) {
     *timings = plan->timings;
-    if (cancel && cancel->cookie.abort) return LL_CANCELLED;
+    if (ll_cancel_is_aborted(cancel)) return LL_CANCELLED;
 
     fz_pixmap *pix = NULL;
     fz_device *dev = NULL;
@@ -683,7 +721,7 @@ static int rasterize(fz_context *ctx, const ll_render_plan *plan, ll_cancel *can
         fz_close_device(ctx, dev);
         timings->raster_time_us = ll_now_us() - raster_start;
 
-        if (!cancel || !cancel->cookie.abort) {
+        if (!ll_cancel_is_aborted(cancel)) {
             uint64_t pixmap_start = ll_now_us();
             out->width = fz_pixmap_width(ctx, pix);
             out->height = fz_pixmap_height(ctx, pix);
@@ -723,7 +761,7 @@ static int rasterize(fz_context *ctx, const ll_render_plan *plan, ll_cancel *can
         return LL_ERROR;
     }
 
-    if (cancel && cancel->cookie.abort) {
+    if (ll_cancel_is_aborted(cancel)) {
         free_image(ctx, out);
         return LL_CANCELLED;
     }

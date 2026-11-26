@@ -1,5 +1,23 @@
 import { getAiResponseState } from './ai-response-state.js'
 import { platformBridge } from './platformBridge.js'
+
+/**
+ * Releases generation lock ONLY if the controller still owns `expectedRequestId` (N12).
+ * Prevents stale prefights or aborted requests from clearing a newer request's lock.
+ */
+export function releaseAiRequestLockIfOwned(controller, expectedRequestId) {
+    if (!controller || controller.activeRequestId !== expectedRequestId) return false
+    controller.isGenerating = false
+    controller.activeRequestId = null
+    if (controller.dom?.btnAiStopGeneration) {
+        controller.dom.btnAiStopGeneration.disabled = true
+        controller.dom.btnAiStopGeneration.classList?.remove?.('active')
+    }
+    if (controller.dom?.btnAiSendMessage) {
+        controller.dom.btnAiSendMessage.disabled = false
+    }
+    return true
+}
 /**
  * ai-sidebar-controller.js - Right AI Reading Sidebar, Context & History Controller
  * AI reading assistant sidebar and conversation history.
@@ -823,14 +841,7 @@ export class AiSidebarController {
         if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = t('aiSidebar.statusPreparing')
 
         const releaseLockOnPreflightError = () => {
-            if (this.activeRequestId === currentRequestId) {
-                this.isGenerating = false
-                this.activeRequestId = null
-                if (this.dom.btnAiStopGeneration) {
-                    this.dom.btnAiStopGeneration.disabled = true
-                    this.dom.btnAiStopGeneration.classList.remove('active')
-                }
-                if (this.dom.btnAiSendMessage) this.dom.btnAiSendMessage.disabled = false
+            if (releaseAiRequestLockIfOwned(this, currentRequestId)) {
                 if (this.dom.aiStatusSummary) this.dom.aiStatusSummary.innerText = ''
             }
         }
@@ -1101,15 +1112,7 @@ export class AiSidebarController {
             if (this._activeAssistantMsg === assistantMsg) {
                 this._activeAssistantMsg = null
             }
-            if (this.activeRequestId === currentRequestId) {
-                this.isGenerating = false
-                this.activeRequestId = null
-                if (this.dom.btnAiStopGeneration) {
-                    this.dom.btnAiStopGeneration.disabled = true
-                    this.dom.btnAiStopGeneration.classList.remove('active')
-                }
-                if (this.dom.btnAiSendMessage) this.dom.btnAiSendMessage.disabled = false
-
+            if (releaseAiRequestLockIfOwned(this, currentRequestId)) {
                 // Calculate actual remaining cooldown since dispatch time:
                 const elapsedSecs = Math.floor((Date.now() - (this.dispatchedAt || 0)) / 1000)
                 const configuredCooldown = this.app?.advancedSettings?.config?.aiCooldownSeconds ?? this.app?.advancedSettings?.aiCooldownSeconds ?? 10
