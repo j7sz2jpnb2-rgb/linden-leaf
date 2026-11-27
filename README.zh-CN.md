@@ -13,7 +13,7 @@
   </p>
 
   <p>
-    <a href="https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases">
+    <a href="https://github.com/Morphosen/linden-leaf/releases">
       <img src="https://img.shields.io/badge/release-v1.0.0-3b6e52?style=flat-square" alt="Release v1.0.0" />
     </a>
     <img src="https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Android%20arm64-475569?style=flat-square" alt="Platforms" />
@@ -25,7 +25,7 @@
 
   <p>
     <a href="README.md">English</a> · <strong>简体中文</strong> ·
-    <a href="https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases">下载安装包</a> ·
+    <a href="https://github.com/Morphosen/linden-leaf/releases">下载安装包</a> ·
     <a href="docs/ARCHITECTURE.md">架构文档</a>
   </p>
 </div>
@@ -90,7 +90,7 @@
 
 ## 下载与源码构建
 
-预编译的 Windows（`x64` 安装包）与 Android（`arm64-v8a` Release APK）请在 [**GitHub Releases**](https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases) 获取。
+预编译的 Windows（`x64` 安装包）与 Android（`arm64-v8a` Release APK）请在 [**GitHub Releases**](https://github.com/Morphosen/linden-leaf/releases) 获取。
 
 **构建前置**：Node.js `>= 20`、pnpm `>= 9`、Rust `>= 1.80`，以及对应平台的 Visual Studio 生成工具 / Android SDK & NDK。
 

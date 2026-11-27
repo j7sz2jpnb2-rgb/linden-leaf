@@ -13,7 +13,7 @@
   </p>
 
   <p>
-    <a href="https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases">
+    <a href="https://github.com/Morphosen/linden-leaf/releases">
       <img src="https://img.shields.io/badge/release-v1.0.0-3b6e52?style=flat-square" alt="Release v1.0.0" />
     </a>
     <img src="https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Android%20arm64-475569?style=flat-square" alt="Platforms" />
@@ -25,7 +25,7 @@
 
   <p>
     <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a> ·
-    <a href="https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases">Downloads</a> ·
+    <a href="https://github.com/Morphosen/linden-leaf/releases">Downloads</a> ·
     <a href="docs/ARCHITECTURE.md">Architecture</a>
   </p>
 </div>
@@ -90,7 +90,7 @@ Built-in **English** and **Simplified Chinese (`简体中文`)** interfaces can 
 
 ## Downloads & Building from Source
 
-Pre-built Windows (`x64` NSIS installer) and Android (`arm64-v8a` Release APK) packages are available on [**GitHub Releases**](https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases).
+Pre-built Windows (`x64` NSIS installer) and Android (`arm64-v8a` Release APK) packages are available on [**GitHub Releases**](https://github.com/Morphosen/linden-leaf/releases).
 
 **Prerequisites**: Node.js `>= 20`, pnpm `>= 9`, Rust `>= 1.80`, plus MSVC/Windows SDK (Windows) or JDK 17 + Android SDK/NDK (Android).
 

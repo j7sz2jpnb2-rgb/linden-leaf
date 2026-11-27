@@ -8,7 +8,7 @@ import { platformBridge } from './platformBridge.js'
 export class AppUpdater {
     constructor() {
         this.currentVersion = '1.0.0'
-        this.defaultRepo = 'j7sz2jpnb2-rgb/linden-leaf'
+        this.defaultRepo = 'Morphosen/linden-leaf'
         this.lastCheckTime = 0
         this.latestRelease = null
     }

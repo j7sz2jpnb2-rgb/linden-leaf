@@ -42,7 +42,7 @@ export class UpdateController {
     setupUpdateEventListeners() {
         this.dom.btnCheckUpdates?.addEventListener('click', () => this.handleCheckForUpdates(false))
         this.dom.btnOpenGithubRepo?.addEventListener('click', () => {
-            const repoUrl = localStorage.getItem('linden_custom_github_repo_url') || 'https://github.com/j7sz2jpnb2-rgb/linden-leaf'
+            const repoUrl = localStorage.getItem('linden_custom_github_repo_url') || 'https://github.com/Morphosen/linden-leaf'
             platformBridge.openExternal(repoUrl)
         })
         this.dom.btnCloseUpdateModal?.addEventListener('click', () => this.closeUpdateModal())

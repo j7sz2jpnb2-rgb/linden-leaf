@@ -990,8 +990,8 @@ mod tests {
     #[test]
     fn test_validate_external_url() {
         assert_eq!(
-            validate_external_url("https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases"),
-            Some("https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases".to_string())
+            validate_external_url("https://github.com/Morphosen/linden-leaf/releases"),
+            Some("https://github.com/Morphosen/linden-leaf/releases".to_string())
         );
         assert_eq!(
             validate_external_url("http://example.com/path?a=1&b=2"),
