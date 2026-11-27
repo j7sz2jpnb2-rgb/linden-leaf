@@ -196,6 +196,35 @@ await test('PdfViewport single-gesture dismissal lock blocks tap toggle after se
         scrollArea.dispatchEvent({ type: 'click', target: scrollArea, clientX: 50, clientY: 50 })
         assert.strictEqual(tapCount, 1, 'Local PDF selection fallback lock must survive selectionchange clearing before click')
         vp.destroy?.()
+
+        // Cold-start sub-80ms regression: performance.now() < 80 must still capture initial gesture
+        const prevPerfNow = performance.now
+        try {
+            performance.now = () => 15
+            appActivePopup = true
+            captured = false
+            globalThis.app = {
+                captureSelectionAndPopupStateOnGestureStart() {
+                    captured = appActivePopup
+                    return captured
+                },
+                consumeDismissalGesture() {
+                    const res = captured
+                    captured = false
+                    appActivePopup = false
+                    return res
+                }
+            }
+            let coldTapCount = 0
+            const coldContainer = makeFakeElement('div')
+            const coldVp = new PdfViewport(coldContainer, { onTap: () => { coldTapCount++ } })
+            coldVp.scrollArea.dispatchEvent({ type: 'pointerdown', button: 0, pointerType: 'mouse', target: coldVp.scrollArea, clientX: 40, clientY: 40 })
+            coldVp.scrollArea.dispatchEvent({ type: 'click', target: coldVp.scrollArea, clientX: 40, clientY: 40 })
+            assert.strictEqual(coldTapCount, 0, 'Cold-start gesture (<80ms uptime) must still suppress toolbar toggle on popup dismissal')
+            coldVp.destroy?.()
+        } finally {
+            performance.now = prevPerfNow
+        }
     } finally {
         globalThis.document = prevDoc
         globalThis.window = prevWin

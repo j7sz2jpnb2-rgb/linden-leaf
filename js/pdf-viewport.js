@@ -369,7 +369,7 @@ export class PdfViewport {
         this.scrollArea.addEventListener('scroll', () => {
             const now = performance.now()
             const curTop = this.scrollArea.scrollTop
-            const dt = now - (this._lastScrollEventTs || 0)
+            const dt = now - (this._lastScrollEventTs ?? -Infinity)
             const dy = Math.abs(curTop - (this._lastScrollEventTop ?? curTop))
             this._lastScrollEventTs = now
             this._lastScrollEventTop = curTop
@@ -417,7 +417,7 @@ export class PdfViewport {
                 this._multiSelections.length ||
                 (sel && !sel.isCollapsed && sel.toString().trim())
             )
-            if (now - (this._lastGestureCaptureAt || 0) >= 80) {
+            if (now - (this._lastGestureCaptureAt ?? -Infinity) >= 80) {
                 this._lastGestureCaptureAt = now
                 if (!(e?.ctrlKey || e?.metaKey || this._ctrlSelectHeld)) {
                     globalThis.app?.captureSelectionAndPopupStateOnGestureStart?.()
@@ -1118,7 +1118,7 @@ export class PdfViewport {
     _schedulePrefetchRange() {
         if (this._destroyed || !this.pageOffsets.length || this._navigationRenderPending) return
         if (!this.options.bufferPages || this.options.bufferPages <= 0) return
-        if (performance.now() - (this._lastNavigationRequestAt || 0) < 90 && (this._navigationBurstCount || 0) > 0) return
+        if (this._lastNavigationRequestAt != null && performance.now() - this._lastNavigationRequestAt < 90 && (this._navigationBurstCount || 0) > 0) return
 
         const { first, last, start, end } = this._findVisibleRange()
         const isScrollingDown = this._lastNavigationDirection >= 0
@@ -2006,7 +2006,7 @@ export class PdfViewport {
                 const warm = () => { if (isCurrent()) this._ensureNativeGeometry(page).catch(() => {}) }
                 clearTimeout(slot.geometryTimer)
                 slot.geometryTimer = setTimeout(() => {
-                    if (performance.now() - (this._lastScrollEventTs || 0) < 160) return
+                    if (this._lastScrollEventTs != null && performance.now() - this._lastScrollEventTs < 160) return
                     warm()
                 }, 180)
             }
