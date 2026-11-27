@@ -1,0 +1,148 @@
+body {
+  margin: 0;
+  padding: 0;
+  width: 320px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #faf8f4;
+  color: #1f1e1b;
+  font-size: 13px;
+}
+
+.ll-ext-shell {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ll-ext-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ll-ext-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.ll-ext-btn-mini {
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
+.ll-ext-title {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.ll-ext-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #ebe6dc;
+  color: #4a463d;
+}
+
+.ll-ext-pill.is-ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.ll-ext-pill.is-err {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.ll-ext-card {
+  background: #ffffff;
+  border: 1px solid #e6e1d6;
+  border-radius: 10px;
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ll-ext-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #5c574d;
+}
+
+.ll-ext-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ll-ext-between {
+  justify-content: space-between;
+}
+
+.ll-ext-code {
+  flex: 1;
+  font-size: 11px;
+  background: #f4f1ea;
+  padding: 4px 6px;
+  border-radius: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ll-ext-url {
+  font-size: 11.5px;
+  color: #4a463d;
+  word-break: break-all;
+}
+
+.ll-ext-hint {
+  font-size: 11px;
+  color: #8c6d1f;
+  word-break: break-word;
+}
+
+.ll-ext-btn {
+  border: 1px solid #d5cfc2;
+  background: #f5f2eb;
+  color: #1f1e1b;
+  border-radius: 6px;
+  padding: 4px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ll-ext-btn-primary {
+  background: #da7756;
+  border-color: #da7756;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.ll-ext-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ll-ext-select,
+.ll-ext-input {
+  border: 1px solid #d5cfc2;
+  border-radius: 6px;
+  padding: 4px 7px;
+  font-size: 12px;
+  background: #ffffff;
+}
+
+.ll-ext-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}

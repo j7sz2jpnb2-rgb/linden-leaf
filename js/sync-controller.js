@@ -877,6 +877,9 @@ export class SyncController {
             if (res?.pendingAutoDownloads && res.pendingAutoDownloads.length > 0) {
                 this.processAutoDownloadQueue(res.pendingAutoDownloads)
             }
+            if (Array.isArray(res?.progressDivergences) && res.progressDivergences.length > 0) {
+                this.app.showSyncProgressDivergenceBanner?.(res.progressDivergences)
+            }
         } catch (err) {
             console.error('Manual sync error:', err)
             // Item 3: Failed sync must NOT update lastSyncTime as a success record
@@ -960,6 +963,9 @@ export class SyncController {
 
             if (res?.pendingAutoDownloads && res.pendingAutoDownloads.length > 0) {
                 this.processAutoDownloadQueue(res.pendingAutoDownloads)
+            }
+            if (Array.isArray(res?.progressDivergences) && res.progressDivergences.length > 0) {
+                this.app.showSyncProgressDivergenceBanner?.(res.progressDivergences)
             }
         } catch (e) {
             console.warn('[CloudSync] Silent background sync error (ignored):', e.message)

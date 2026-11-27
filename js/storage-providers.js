@@ -945,7 +945,7 @@ export class GoogleDriveStorageProvider extends StorageProvider {
     async findAppFile(fileName = 'linden_sync_data.json') {
         const escapedName = fileName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         const q = encodeURIComponent(`name = '${escapedName}' and 'appDataFolder' in parents and trashed = false`);
-        const url = `${this.endpoint}/files?spaces=appDataFolder&q=${q}&fields=files(id,name,version,modifiedTime)`;
+        const url = `${this.endpoint}/files?spaces=appDataFolder&q=${q}&orderBy=modifiedTime%20desc&fields=files(id,name,version,modifiedTime)`;
         const resp = await fetch(url, {
             headers: { Authorization: `Bearer ${this.accessToken}` }
         });
@@ -973,8 +973,12 @@ export class GoogleDriveStorageProvider extends StorageProvider {
         if (resp.status === 404) return { content: '', etag: null, status: 'missing', missing: true };
         if (resp.status === 401 || resp.status === 403) throw new Error(t('provider.gdrive.authInvalid', { status: resp.status }));
         if (!resp.ok) throw new Error(`Google Drive read failed: HTTP ${resp.status}`);
+        const httpEtag = resp.headers?.get?.('ETag');
         const text = await resp.text();
-        return { content: text, etag: file.version };
+        return {
+            content: text,
+            etag: httpEtag || (file.version != null ? `version:${file.version}` : null)
+        };
     }
 
     async writeFile(fileName = 'linden_sync_data.json', content, options = {}) {
@@ -982,26 +986,38 @@ export class GoogleDriveStorageProvider extends StorageProvider {
         if (!auth.success) throw new Error(auth.error);
         const file = await this.findAppFile(fileName);
         if (file) {
-            const url = `https://www.googleapis.com/upload/drive/v3/files/${file.id}?uploadType=media`;
+            if (typeof options.ifMatch === 'string' && options.ifMatch.startsWith('version:')) {
+                const expectedVersion = options.ifMatch.slice('version:'.length);
+                if (file.version != null && String(file.version) !== expectedVersion) {
+                    return { success: false, conflict: true };
+                }
+            }
+            const url = `https://www.googleapis.com/upload/drive/v3/files/${file.id}?uploadType=media&fields=id,version`;
             const headers = {
                 Authorization: `Bearer ${this.accessToken}`,
                 'Content-Type': options.contentType || 'application/json'
             };
-            if (options.ifMatch) {
+            if (options.ifMatch && !String(options.ifMatch).startsWith('version:')) {
                 headers['If-Match'] = options.ifMatch;
             }
             const resp = await fetch(url, { method: 'PATCH', headers, body: content });
             if (resp.status === 412) return { success: false, conflict: true };
             if (resp.status === 401 || resp.status === 403) throw new Error(t('provider.gdrive.authInvalid', { status: resp.status }));
             if (!resp.ok) throw new Error(`Google Drive write failed: HTTP ${resp.status}`);
-            return { success: true, etag: String(Date.now()) };
+            const httpEtag = resp.headers?.get?.('ETag');
+            let meta = null;
+            try { meta = await resp.json(); } catch (_) {}
+            return {
+                success: true,
+                etag: httpEtag || (meta?.version != null ? `version:${meta.version}` : String(Date.now()))
+            };
         } else {
             // Create in appDataFolder
             const metadata = { name: fileName, parents: ['appDataFolder'] };
             const form = new FormData();
             form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
             form.append('file', new Blob([content], { type: options.contentType || 'application/json' }));
-            const url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+            const url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,version';
             const resp = await fetch(url, {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${this.accessToken}` },
@@ -1009,7 +1025,13 @@ export class GoogleDriveStorageProvider extends StorageProvider {
             });
             if (resp.status === 401 || resp.status === 403) throw new Error(t('provider.gdrive.authInvalid', { status: resp.status }));
             if (!resp.ok) throw new Error(`Google Drive create failed: HTTP ${resp.status}`);
-            return { success: true, etag: String(Date.now()) };
+            const httpEtag = resp.headers?.get?.('ETag');
+            let meta = null;
+            try { meta = await resp.json(); } catch (_) {}
+            return {
+                success: true,
+                etag: httpEtag || (meta?.version != null ? `version:${meta.version}` : String(Date.now()))
+            };
         }
     }
 

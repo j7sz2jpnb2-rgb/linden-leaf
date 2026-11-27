@@ -11,7 +11,7 @@ import { getLocale, t } from './i18n.js'
 let _activeSyncPromise = null
 
 // Persistence and transport for multi-device sync. Pure merge rules live in sync-model.js.
-export const exportSyncPayload = async () => {
+export const exportSyncPayload = async (options = {}) => {
     const allBooks = await db.getAllBooks()
     const allLists = await db.getAllCustomLists()
     const allHighlights = await db.getAllHighlights()
@@ -104,11 +104,19 @@ export const exportSyncPayload = async () => {
         chapterTranslations = await db.getAllChapterTranslations()
     }
 
+    let lastSyncedAt = Number(options?.lastSyncedAt || 0) || 0
+    if (!lastSyncedAt && typeof localStorage !== 'undefined') {
+        try {
+            lastSyncedAt = Number(localStorage.getItem('linden_sync_last_at') || 0) || 0
+        } catch (_) {}
+    }
+
     return {
         version: 2,
         clientId: (typeof localStorage !== 'undefined' ? localStorage.getItem('linden_sync_client_id') : '') || `client_${Math.random().toString(36).slice(2, 10)}`,
         deviceName: (typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.includes('Windows')) ? 'Windows PC' : t('syncEngine.defaultDeviceName'),
         updatedAt: Date.now(),
+        ...(lastSyncedAt > 0 ? { lastSyncedAt } : {}),
         settings,
         readingPresets,
         customPalette,
@@ -827,7 +835,7 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
 
     _activeSyncPromise = (async () => {
         onProgress(t('syncEngine.progress.exporting'), 'export')
-        const localPayload = await exportSyncPayload()
+        const localPayload = await exportSyncPayload({ lastSyncedAt: Number(config?.lastSyncTime || 0) || 0 })
 
         let remoteData = null
         let remoteEtag = null
@@ -866,7 +874,7 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
 
         onProgress(t('syncEngine.progress.merging'), 'merge')
         const syncNowMs = Date.now()
-        let { merged, stats } = mergeSyncData(localPayload, remoteData, { nowMs: syncNowMs, localClientId: localPayload.clientId })
+        let { merged, stats, progressDivergences = [] } = mergeSyncData(localPayload, remoteData, { nowMs: syncNowMs, localClientId: localPayload.clientId })
 
         let maxRetries = 2
         let currentRemoteEtag = remoteEtag
@@ -879,7 +887,19 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
             if (activeProvider) {
                 const writeContent = JSON.stringify(merged, null, 2)
                 const writeRes = await activeProvider.writeFile('linden_sync_data.json', writeContent, { ifMatch: currentRemoteEtag })
-                if (writeRes.success) break
+                if (writeRes.success) {
+                    if (summaryMd) {
+                        try {
+                            const mdRes = await activeProvider.writeFile('LindenLeaf_Reading_Notes_and_Stats.md', summaryMd, { contentType: 'text/markdown; charset=utf-8' })
+                            if (mdRes && mdRes.success === false) {
+                                stats.markdownMirrorError = mdRes.error || 'Markdown mirror write failed'
+                            }
+                        } catch (mdErr) {
+                            stats.markdownMirrorError = mdErr?.message || 'Markdown mirror write failed'
+                        }
+                    }
+                    break
+                }
 
                 if (writeRes.conflict && maxRetries > 0) {
                     maxRetries--
@@ -905,6 +925,7 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
                     const reMergedResult = mergeSyncData(localPayload, reRemoteData, { nowMs: Date.now(), localClientId: localPayload.clientId })
                     merged = reMergedResult.merged
                     stats = reMergedResult.stats
+                    progressDivergences = reMergedResult.progressDivergences || []
                     continue
                 }
                 throw new Error(t('syncEngine.error.saveFailed', { detail: writeRes.error || t('syncEngine.error.conflictOrStorage') }))
@@ -925,6 +946,7 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
                     const reMergedResult = mergeSyncData(localPayload, reBridgeData, { nowMs: Date.now(), localClientId: localPayload.clientId })
                     merged = reMergedResult.merged
                     stats = reMergedResult.stats
+                    progressDivergences = reMergedResult.progressDivergences || []
                     continue
                 }
 
@@ -935,10 +957,16 @@ export const executeSyncLifecycle = async (config, { onProgress = () => {}, prov
         onProgress(t('syncEngine.progress.applying'), 'apply')
         const applyRes = await applyMergedPayload(merged)
 
+        const doneTs = Date.now()
+        if (typeof localStorage !== 'undefined') {
+            try { localStorage.setItem('linden_sync_last_at', String(doneTs)) } catch (_) {}
+        }
+
         onProgress(t('syncEngine.progress.done'), 'done')
         return { 
             success: true, 
             stats, 
+            progressDivergences,
             pendingAutoDownloads: applyRes?.pendingAutoDownloads || [], 
             deletedBookIds: applyRes?.deletedBookIds || [],
             timestamp: Date.now() 

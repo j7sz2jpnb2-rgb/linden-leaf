@@ -1,0 +1,43 @@
+/*
+ * Reversible Companion Compact Mode stylesheet.
+ * Only activates when background.js marks <html> with .ll-companion-compact on the bound tab.
+ * Never alters model selectors, attachment controls, auth banners, or quota notices.
+ */
+
+html.ll-companion-compact body {
+  overflow-x: hidden;
+}
+
+@media (max-width: 820px) {
+  /* Reduce wide horizontal margins on message containers while preserving readable typography */
+  html.ll-companion-compact.ll-provider-chatgpt main article > div,
+  html.ll-companion-compact.ll-provider-chatgpt main [data-testid="conversation-turn"] > div {
+    max-width: 100%;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  html.ll-companion-compact.ll-provider-chatgpt main form,
+  html.ll-companion-compact.ll-provider-gemini input-container,
+  html.ll-companion-compact.ll-provider-aistudio ms-prompt-input,
+  html.ll-companion-compact.ll-provider-deepseek [class*="chat-input"] {
+    max-width: 100%;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  html.ll-companion-compact.ll-provider-gemini conversation-container,
+  html.ll-companion-compact.ll-provider-gemini .conversation-container {
+    max-width: 100%;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  html.ll-companion-compact pre,
+  html.ll-companion-compact table,
+  html.ll-companion-compact .katex-display,
+  html.ll-companion-compact math {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}

@@ -66,8 +66,11 @@ fn main() {
     if let (Some(include), Some(lib_dir)) = (include, lib_dir) {
         println!("cargo:rerun-if-changed=native/ll_mupdf.c");
         println!("cargo:rerun-if-changed=native/ll_mupdf.h");
+        println!("cargo:rerun-if-changed=native/ll_mupdf_mobile.c");
+        println!("cargo:rerun-if-changed=native/ll_mupdf_mobile.h");
         cc::Build::new()
             .file("native/ll_mupdf.c")
+            .file("native/ll_mupdf_mobile.c")
             .include("native")
             .include(&include)
             .warnings(true)

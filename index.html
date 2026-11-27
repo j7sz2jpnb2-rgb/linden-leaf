@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="light" data-startup-view="pending">
 <head>
   <meta charset="utf-8"/>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' blob: data: https://api.github.com https://github.com; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; frame-src 'self' blob: data:; font-src 'self' data: blob:; img-src 'self' data: blob: https://avatars.githubusercontent.com https://github.com; media-src 'self' data: blob:; connect-src 'self' data: blob: http: https: https://api.github.com https://github.com https://*.github.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline' blob: data:; object-src 'none'; base-uri 'self';"/>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob: data: https://api.github.com https://github.com; script-src 'self' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; frame-src 'self' blob: data:; font-src 'self' data: blob:; img-src 'self' data: blob: https://avatars.githubusercontent.com https://github.com; media-src 'self' data: blob:; connect-src 'self' data: blob: http: https: https://api.github.com https://github.com https://*.github.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline' blob: data:; object-src 'none'; base-uri 'self';"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
   <title>Linden Leaf - 现代化全格式电子书阅读器</title>
   <!-- Initial background styles to prevent a white flash during startup -->
@@ -72,83 +72,9 @@
     html[data-startup-view="error"] #startup-loading { display: flex; }
     #startup-retry { margin-left: 12px; }
   </style>
-  <!-- Native Zero-Latency Hydration (底层直出机制) -->
-  <script>
-    (function() {
-      try {
-        var themeMode = localStorage.getItem('linden_leaf_theme_mode') || 'system';
-        var savedTheme = localStorage.getItem('linden_leaf_theme');
-        var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        var activeTheme = 'light';
-        if (themeMode === 'manual' && savedTheme) {
-          activeTheme = savedTheme;
-        } else {
-          activeTheme = isDark ? 'black' : 'light';
-        }
-        document.documentElement.setAttribute('data-theme', activeTheme);
-        var bg = '#FAF9F5';
-        var text = '#141413';
-        if (activeTheme === 'black') {
-          bg = '#000000';
-          text = '#cccccc';
-        } else if (activeTheme === 'dark') {
-          bg = '#1f1f1d';
-          text = '#f5f4ee';
-        } else if (activeTheme === 'sepia') {
-          bg = '#f5eedc';
-          text = '#3b2e1e';
-        }
-        document.documentElement.style.backgroundColor = bg;
-        if (document.body) document.body.style.backgroundColor = bg;
-        var savedView = 'grid';
-        document.documentElement.setAttribute('data-shelf-view', savedView);
-
-        // Early interface language hydration before first paint
-        var rawLoc = localStorage.getItem('linden_locale');
-        var hasInit = localStorage.getItem('linden_user_initialized') === 'true';
-        var resolvedLocale = 'zh-CN';
-        if (rawLoc) {
-          var normLoc = String(rawLoc).trim().toLowerCase().replace(/_/g, '-');
-          if (normLoc === 'en' || normLoc.indexOf('en-') === 0) resolvedLocale = 'en';
-          else if (normLoc === 'zh' || normLoc.indexOf('zh-') === 0) resolvedLocale = 'zh-CN';
-        } else if (!hasInit) {
-          var navLang = (navigator.language || (navigator.languages && navigator.languages[0]) || '').toLowerCase();
-          resolvedLocale = navLang && navLang.indexOf('zh') !== 0 ? 'en' : 'zh-CN';
-        }
-        document.documentElement.lang = resolvedLocale;
-        document.documentElement.dataset.locale = resolvedLocale;
-        document.title = resolvedLocale === 'en'
-          ? 'Linden Leaf - Modern Universal E-Book Reader'
-          : 'Linden Leaf - 现代化全格式电子书阅读器';
-
-        // Early mobile viewport class so desktop/mobile CSS scopes apply on first paint
-        if ((navigator.userAgent && navigator.userAgent.indexOf('Android') !== -1) || window.innerWidth < 768) {
-          document.documentElement.classList.add('is-mobile-viewport');
-        }
-
-        // Satellite Reader Window: zero-latency lock before initial render
-        if (window.location) {
-          var searchStr = window.location.search || '';
-          if (!searchStr && window.location.hash && window.location.hash.indexOf('?') !== -1) {
-            searchStr = window.location.hash.substring(window.location.hash.indexOf('?'));
-          }
-          if (searchStr) {
-            var params = new URLSearchParams(searchStr);
-            if (params.get('windowMode') === 'reader') {
-              document.documentElement.classList.add('satellite-reader-window');
-            }
-          }
-        }
-      } catch (e) {}
-    })();
-    document.addEventListener('DOMContentLoaded', function () {
-      var retryBtn = document.getElementById('startup-retry');
-      if (retryBtn) retryBtn.addEventListener('click', function () { location.reload(); });
-    }, { once: true });
-  </script>
-  <!-- Bundled offline interface fonts with preloading for immediate rendering -->
-  <link rel="preload" href="./assets/fonts/noto-serif-sc-chinese-simplified-400-normal.woff2" as="font" type="font/woff2" crossorigin/>
-  <link rel="preload" href="./assets/fonts/noto-serif-sc-chinese-simplified-600-normal.woff2" as="font" type="font/woff2" crossorigin/>
+  <!-- Native Zero-Latency Hydration & ES2024 Polyfills (externalized for strict CSP without script-src unsafe-inline) -->
+  <script src="./js/boot-hydrate.js"></script>
+  <!-- Bundled offline interface fonts (latin UI preloaded; heavy CJK fonts swap on demand) -->
   <link rel="preload" href="./assets/fonts/plus-jakarta-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin/>
   <link rel="preload" href="./assets/fonts/plus-jakarta-sans-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin/>
   <link rel="preload" href="./assets/fonts/lora-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin/>
@@ -157,144 +83,11 @@
   <link rel="stylesheet" href="./css/main.css"/>
   <link rel="stylesheet" href="./css/desktop-settings.css"/>
   <link rel="stylesheet" href="./css/desktop-ui.css"/>
-  <link rel="stylesheet" href="./css/mobile-shell.css"/>
-  <link rel="stylesheet" href="./css/mobile-preferences.css"/>
-  <link rel="stylesheet" href="./css/pdf-mobile-controls.css"/>
   <link rel="icon" type="image/png" href="./assets/icon.png"/>
-  <!-- Standard ES2024 Polyfills (Response.bytes, Uint8Array toHex/toBase64, Promise.try, Promise.withResolvers, Object.groupBy) for PDF.js v5 compatibility -->
-  <script>
-    if (typeof Response !== 'undefined' && typeof Response.prototype.bytes !== 'function') {
-      Response.prototype.bytes = async function () {
-        var buffer = await this.arrayBuffer();
-        return new Uint8Array(buffer);
-      };
-    }
-    if (typeof Uint8Array.prototype.toHex !== 'function') {
-      Uint8Array.prototype.toHex = function () {
-        var hex = '';
-        for (var i = 0; i < this.length; i++) {
-          hex += this[i].toString(16).padStart(2, '0');
-        }
-        return hex;
-      };
-    }
-    if (typeof Uint8Array.prototype.toBase64 !== 'function') {
-      Uint8Array.prototype.toBase64 = function () {
-        var binary = '';
-        var len = this.byteLength;
-        for (var i = 0; i < len; i++) {
-          binary += String.fromCharCode(this[i]);
-        }
-        return btoa(binary);
-      };
-    }
-    if (typeof Uint8Array.fromBase64 !== 'function') {
-      Uint8Array.fromBase64 = function (base64) {
-        var binary = atob(base64);
-        var len = binary.length;
-        var bytes = new Uint8Array(len);
-        for (var i = 0; i < len; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        return bytes;
-      };
-    }
-    if (typeof Map.prototype.getOrInsertComputed !== 'function') {
-      Map.prototype.getOrInsertComputed = function (key, callbackFunction) {
-        if (this.has(key)) return this.get(key);
-        var value = callbackFunction(key);
-        this.set(key, value);
-        return value;
-      };
-    }
-    if (typeof Map.prototype.getOrInsert !== 'function') {
-      Map.prototype.getOrInsert = function (key, defaultValue) {
-        if (this.has(key)) return this.get(key);
-        this.set(key, defaultValue);
-        return defaultValue;
-      };
-    }
-    if (typeof Set.prototype.intersection !== 'function') {
-      Set.prototype.intersection = function (other) {
-        var result = new Set();
-        for (var elem of this) {
-          if (other && typeof other.has === 'function' ? other.has(elem) : false) {
-            result.add(elem);
-          }
-        }
-        return result;
-      };
-    }
-    if (typeof Set.prototype.union !== 'function') {
-      Set.prototype.union = function (other) {
-        var result = new Set(this);
-        if (other && typeof other[Symbol.iterator] === 'function') {
-          for (var elem of other) {
-            result.add(elem);
-          }
-        }
-        return result;
-      };
-    }
-    if (typeof Set.prototype.difference !== 'function') {
-      Set.prototype.difference = function (other) {
-        var result = new Set(this);
-        if (other && typeof other.has === 'function') {
-          for (var elem of this) {
-            if (other.has(elem)) result.delete(elem);
-          }
-        }
-        return result;
-      };
-    }
-    if (typeof Promise.try !== 'function') {
-      Promise.try = function (fn) {
-        var args = Array.prototype.slice.call(arguments, 1);
-        return new Promise(function (resolve) {
-          resolve(fn.apply(null, args));
-        });
-      };
-    }
-    if (typeof Promise.withResolvers !== 'function') {
-      Promise.withResolvers = function () {
-        var resolve, reject;
-        var promise = new Promise(function (res, rej) {
-          resolve = res;
-          reject = rej;
-        });
-        return { promise: promise, resolve: resolve, reject: reject };
-      };
-    }
-    if (typeof Object.groupBy !== 'function') {
-      Object.groupBy = function (items, callback) {
-        var result = Object.create(null);
-        var i = 0;
-        for (var idx = 0; idx < items.length; idx++) {
-          var item = items[idx];
-          var key = callback(item, i++);
-          if (key in result) {
-            result[key].push(item);
-          } else {
-            result[key] = [item];
-          }
-        }
-        return result;
-      };
-    }
-  </script>
 </head>
 <body>
   <div id="startup-loading" role="status" aria-live="polite"><span id="startup-loading-label" data-i18n="app.startupOpening">正在打开…</span><button id="startup-retry" type="button" data-i18n="app.startupReopen" hidden>重新打开</button></div>
-  <script>
-    (function () {
-      if (document.documentElement.dataset.locale === 'en') {
-        var lbl = document.getElementById('startup-loading-label');
-        var rty = document.getElementById('startup-retry');
-        if (lbl) lbl.textContent = 'Opening…';
-        if (rty) rty.textContent = 'Reopen';
-      }
-    })();
-  </script>
+  <script src="./js/boot-loading-label.js"></script>
   <div id="app-container">
     
     <!-- ==========================================================
@@ -972,6 +765,24 @@
          READER VIEW & SAFE VIEWPORT
          ========================================================== -->
     <div id="reader-view" style="display: none;">
+      <div id="reader-reading-ruler" class="reader-reading-ruler" hidden aria-hidden="true"></div>
+      <div id="reader-privacy-veil" class="reader-privacy-veil" hidden role="dialog" aria-modal="true" aria-label="隐私防窥遮罩" data-i18n-aria-label="reader.privacyVeilTitle">
+        <div class="reader-privacy-veil-card">
+          <div class="reader-privacy-veil-title" data-i18n="reader.privacyVeilTitle">已开启隐私遮罩</div>
+          <div class="reader-privacy-veil-desc" data-i18n="reader.privacyVeilDesc">点击任意处或按 Alt+Shift+H 恢复阅读</div>
+        </div>
+      </div>
+      <div id="ephemeral-pdf-banner" class="reader-floating-notice-bar" hidden>
+        <span data-i18n="reader.ephemeralPdfBannerText">正在直接浏览外部 PDF（不会自动写入书架）</span>
+        <button type="button" id="btn-pin-ephemeral-pdf" class="btn-primary-action reader-notice-btn" data-i18n="reader.ephemeralPinBtn">加入书架</button>
+      </div>
+      <div id="sync-progress-divergence-bar" class="reader-floating-notice-bar reader-divergence-bar" hidden>
+        <span id="sync-divergence-text"></span>
+        <div class="reader-notice-actions">
+          <button type="button" id="btn-sync-divergence-jump" class="btn-primary-action reader-notice-btn" data-i18n="reader.syncDivergenceJumpBtn">跳至另一端进度</button>
+          <button type="button" id="btn-sync-divergence-dismiss" class="reader-notice-close" title="关闭" data-i18n-title="common.close" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
+        </div>
+      </div>
       <!-- Top Bar -->
       <header id="reader-top-bar" class="reader-top-bar">
         <div class="reader-top-left">
@@ -1065,6 +876,11 @@
           </div>
         </div>
       </header>
+      <div id="reader-topbar-discover-tip" class="reader-topbar-discover-tip desktop-only" role="status" hidden>
+        <span data-i18n="toolbar.discoverTipText">顶栏太挤？右键顶栏或点此处自由收纳按钮</span>
+        <button type="button" id="btn-topbar-discover-customize" class="reader-topbar-tip-link" data-i18n="toolbar.discoverTipCustomize">去自定义</button>
+        <button type="button" id="btn-topbar-discover-dismiss" class="reader-topbar-tip-close" title="知道了" data-i18n-title="toolbar.discoverTipClose" aria-label="知道了" data-i18n-aria-label="toolbar.discoverTipClose">×</button>
+      </div>
 
       <!-- Chapter Bilingual Reading Control Bar -->
       <div id="chapter-translation-bar" class="chapter-translation-bar" role="region" aria-label="章节翻译控制" data-i18n-aria-label="chapterTrans.bannerAria" style="display: none;">
@@ -1151,6 +967,7 @@
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
               <span data-i18n="aiSidebar.historyBtn">历史</span>
             </button>
+            <button type="button" id="btn-ai-popout-external" class="btn-ai-pill-action desktop-only" title="切换外部浏览器伴读（并排复用自有 AI 网页额度）" data-i18n-title="aiSidebar.popoutExternalTitle" data-i18n="aiSidebar.popoutExternalBtn">外部伴读</button>
             <button type="button" id="btn-ai-collapse-sidebar" class="btn-ai-close-action" title="收起 AI 侧边栏" data-i18n-title="aiSidebar.collapseTitle">✕</button>
           </div>
         </div>
@@ -1221,6 +1038,18 @@
           </div>
         </div>
       </aside>
+
+      <!-- Subtle Companion Floating Control Bar (shown only while External Browser AI is active) -->
+      <div id="companion-floating-bar" class="companion-floating-bar desktop-only" style="display: none;">
+        <span id="companion-bar-conn-dot" class="companion-conn-dot" title="窗口 + 剪贴板安全回退模式" data-i18n-title="companion.statusClipboardMode"></span>
+        <span id="companion-bar-provider-label" class="companion-bar-provider">ChatGPT</span>
+        <button type="button" id="btn-companion-dock" class="companion-bar-btn" title="将外部 AI 窗口重新对齐到阅读器侧边" data-i18n-title="companion.barDockTitle" data-i18n="companion.barDockBtn">并排对齐</button>
+        <button type="button" id="btn-companion-snap" class="companion-bar-btn active" title="开启或解除窗口松手磁吸（解除不丢引用）" data-i18n-title="companion.barSnapTitle" data-i18n="companion.barSnapBtn">磁吸</button>
+        <button type="button" id="btn-companion-compact" class="companion-bar-btn active" title="切换伴读标签页可逆紧凑样式与缩放" data-i18n-title="companion.barCompactTitle" data-i18n="companion.barCompactBtn">紧凑</button>
+        <button type="button" id="btn-companion-pick-win" class="companion-bar-btn" title="手动选择桌面已打开的浏览器或 AI 窗口进行并排" data-i18n-title="companion.barPickWinTitle" data-i18n="companion.barPickWinBtn">绑定窗口</button>
+        <button type="button" id="btn-companion-save-back" class="companion-bar-btn is-primary" title="将复制的 AI 回答精确存回所选原文批注 (Alt+Shift+S)" data-i18n-title="companion.barSaveBackTitle" data-i18n="companion.barSaveBackBtn">保存剪贴板解释</button>
+        <button type="button" id="btn-companion-close-bar" class="btn-ai-close-action" title="收起伴读控制条并停用本地桥接" data-i18n-title="companion.barCloseTitle">✕</button>
+      </div>
 
       <!-- Floating PDF Zoom & Freehand Annotation Controller -->
       <div id="pdf-zoom-control-bar" class="pdf-zoom-control-bar" role="toolbar" aria-label="PDF 缩放与标注" data-i18n-aria-label="pdf.toolbarAria" style="display: none;">
@@ -1349,9 +1178,13 @@
               <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               <span data-i18n="common.exportMarkdown">导出 Markdown</span>
             </button>
+            <button type="button" id="btn-sync-markdown-sidecar" class="btn-tool drawer-export-btn" style="display: none;" title="将本书划线无损增量写入本地 Markdown 伴随文件" data-i18n-title="annotations.syncSidecarTitle">
+              <span data-i18n="annotations.syncSidecarBtn">同步伴随 MD</span>
+            </button>
           </div>
           <div id="sidebar-inline-note-composer-host"></div>
           <div id="reader-portals-host" class="reader-portals-host" hidden></div>
+          <div id="reader-pdf-embedded-host" class="reader-pdf-embedded-host" hidden></div>
           <div id="notes-list-container"></div>
         </div>
 
@@ -1422,17 +1255,27 @@
               </select>
             </div>
             <p class="setting-desc" data-i18n="settings.darkPaperNote">夜间纸张会反转页面颜色。阅读彩色插图时，可以保留原始颜色。</p>
+            <div class="control-row settings-row-pair">
+              <span class="control-label" data-i18n="settings.pdfPreserveImagesLabel">深色模式下保留彩图原色</span>
+              <label class="toggle-switch" title="自动识别 PDF 内嵌彩色插图并在夜间反色中还原真彩" data-i18n-title="settings.pdfPreserveImagesTip">
+                <input type="checkbox" id="setting-pdf-preserve-images" checked />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
           </div>
 
           <!-- PDF Crop Settings (F05) -->
           <div class="setting-section" id="pdf-crop-settings-section" data-settings-domain="reading" style="display: none;">
-            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
+            <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap;">
               <span data-i18n="settings.cropLabel">PDF 裁切白边 (非破坏)</span>
-              <select id="setting-pdf-crop-mode" class="setting-select" style="font-size: 0.8rem; padding: 2px 8px;">
-                <option value="none" data-i18n="settings.cropNone">不裁切</option>
-                <option value="manual" data-i18n="settings.cropUniform">全书统一裁切</option>
-                <option value="odd-even" data-i18n="settings.cropOddEven">奇偶页独立裁切</option>
-              </select>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <button type="button" id="btn-pdf-auto-crop" class="btn-secondary-action" style="font-size: 0.75rem; padding: 2px 8px;" title="采样页面正文框自动探测白边范围" data-i18n-title="settings.pdfAutoCropTitle" data-i18n="settings.pdfAutoCropBtn">自动去白边</button>
+                <select id="setting-pdf-crop-mode" class="setting-select" style="font-size: 0.8rem; padding: 2px 8px;">
+                  <option value="none" data-i18n="settings.cropNone">不裁切</option>
+                  <option value="manual" data-i18n="settings.cropUniform">全书统一裁切</option>
+                  <option value="odd-even" data-i18n="settings.cropOddEven">奇偶页独立裁切</option>
+                </select>
+              </div>
             </div>
             <div id="pdf-crop-controls-wrap" style="display: none; flex-direction: column; gap: 6px; margin-top: 0.6rem;">
               <div class="control-row settings-row-pair">
@@ -1565,6 +1408,43 @@
               </label>
             </div>
             <div class="control-row settings-row-pair">
+              <span class="control-label" data-i18n="settings.chineseScriptLabel">简繁汉字即时互转</span>
+              <select id="setting-chinese-script-mode" class="setting-select">
+                <option value="original" selected data-i18n="settings.chineseScriptOriginal">保持原书字形</option>
+                <option value="s2t" data-i18n="settings.chineseScriptS2T">转为繁体中文</option>
+                <option value="t2s" data-i18n="settings.chineseScriptT2S">转为简体中文</option>
+              </select>
+            </div>
+            <div class="control-row settings-row-pair">
+              <span class="control-label" data-i18n="settings.readingRulerLabel">水平阅读标尺线</span>
+              <label class="toggle-switch" title="开启后在阅读区域显示跟随光标的水平引导线，防宽屏串行" data-i18n-title="settings.readingRulerTip">
+                <input type="checkbox" id="setting-reading-ruler" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="control-row settings-row-pair">
+              <span class="control-label" data-i18n="settings.focusDimmingLabel">段落聚焦聚光灯</span>
+              <label class="toggle-switch" title="仅高亮当前悬停或焦点段落，柔和暗化其余上下文" data-i18n-title="settings.focusDimmingTip">
+                <input type="checkbox" id="setting-focus-dimming" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="control-row settings-row-pair">
+              <span class="control-label" data-i18n="settings.privacyBlurLabel">失焦防窥模糊 / 老板键</span>
+              <label class="toggle-switch" title="窗口失焦时自动遮罩阅读内容，也可用 Alt+Shift+H 手动一键切换" data-i18n-title="settings.privacyBlurTip">
+                <input type="checkbox" id="setting-privacy-blur-unfocus" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="control-row settings-row-pair">
+              <span class="control-label" data-i18n="settings.pdfOpenModeLabel">外部 PDF 直开模式</span>
+              <select id="setting-pdf-open-mode" class="setting-select">
+                <option value="direct" selected data-i18n="settings.pdfOpenModeDirect">零拷贝直开（秒开 · 推荐）</option>
+                <option value="ephemeral" data-i18n="settings.pdfOpenModeEphemeral">纯净临时阅览（不写书架）</option>
+                <option value="snapshot" data-i18n="settings.pdfOpenModeSnapshot">导入私有安全副本</option>
+              </select>
+            </div>
+            <div class="control-row settings-row-pair">
               <span class="control-label" data-i18n="settings.textDirection">文字排版方向</span>
               <select id="setting-writing-mode" class="setting-select">
                 <option value="horizontal" selected data-i18n="settings.dirHorizontal">现代横排 (从左至右)</option>
@@ -1592,6 +1472,27 @@
                 <option value="slide" data-i18n="settings.animSlide">横向滑动</option>
                 <option value="cover" data-i18n="settings.animCurl">拟真翻页</option>
               </select>
+            </div>
+          </div>
+
+          <!-- Customizable Reader Topbar (Desktop; surfaced directly in Reading Settings) -->
+          <div class="setting-section desktop-only" id="reader-toolbar-settings-section" data-settings-domain="reading">
+            <div class="setting-title" data-i18n="settings.readerToolbarSectionTitle">阅读顶栏与按钮收纳</div>
+            <div class="control-row settings-row-pair desktop-only">
+              <span class="control-label" data-i18n="settings.readerTopBarAutoHide">阅读顶栏自动淡出隐藏</span>
+              <label class="toggle-switch" title="阅读时淡出顶部栏，鼠标移至顶部自动显现" data-i18n-title="settings.readerTopBarAutoHideTip">
+                <input type="checkbox" id="setting-reader-topbar-autohide" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="reader-toolbar-custom-block desktop-only">
+              <div class="reader-toolbar-custom-header">
+                <span class="control-label" data-i18n="settings.readerToolbarTitle">自定义阅读顶栏菜单</span>
+                <button type="button" id="btn-reset-reader-toolbar" class="btn-text-mini" data-i18n="settings.readerToolbarReset">恢复默认</button>
+              </div>
+              <p class="reader-toolbar-custom-hint" data-i18n="settings.readerToolbarHint">取消勾选的按钮会自动收进顶栏右侧“···”更多菜单，随时可用</p>
+              <div id="reader-toolbar-presets-row" class="reader-toolbar-presets-row"></div>
+              <div id="reader-toolbar-customize-list" class="reader-toolbar-customize-list"></div>
             </div>
           </div>
 
@@ -1720,19 +1621,27 @@
             <p id="android-pdf-engine-fallback" class="setting-hint" data-i18n="settings.pdfEngineFallback" hidden>本书当前由 PDF.js 渲染。</p>
           </div>
 
-          <!-- Self-Configured AI Assistant -->
+          <!-- Self-Configured AI Assistant & External AI Companion -->
           <div class="setting-section" id="ai-settings-section" data-settings-domain="assistant">
             <div class="setting-title" style="display: flex; justify-content: space-between; align-items: center;">
-              <span data-i18n="settings.aiTitle">自配 API 阅读助手</span>
-              <label class="toggle-switch" title="启用基于 OpenAI 兼容接口的选文翻译与上下文问答" data-i18n-title="settings.aiTooltip">
+              <span data-i18n="settings.aiTitle">AI 伴读助手</span>
+              <label id="ai-enabled-toggle-wrap" class="toggle-switch" title="启用或配置 AI 伴读助手与外部浏览器伴读" data-i18n-title="settings.aiTooltip">
                 <input type="checkbox" id="setting-ai-enabled" />
                 <span class="toggle-slider"></span>
               </label>
             </div>
             <p style="color: var(--text-muted); margin: 0.35rem 0 0.55rem 0; line-height: 1.4;" data-i18n="settings.aiDesc">
-              连接 OpenAI 兼容服务，进行选文翻译、章节翻译和阅读问答。API Key 保存在本机，仅在请求时发送给你配置的服务。
+              支持零费用外部浏览器并排伴读，或使用自配 OpenAI 兼容 API 进行侧栏问答与章节双语翻译。
             </p>
-            <div id="ai-custom-inputs-wrap" style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.5rem; margin-top: 0.4rem; display: flex; flex-direction: column; gap: 6px;">
+            <div id="ai-companion-mode-tabs" class="ai-mode-segmented desktop-only" role="group">
+              <button type="button" id="btn-ai-mode-external" class="ai-mode-seg-btn desktop-only" data-ai-mode="external" data-i18n="companion.modeExternal">外部浏览器 AI</button>
+              <button type="button" id="btn-ai-mode-api" class="ai-mode-seg-btn active" data-ai-mode="api" data-i18n="companion.modeApi">自配 API</button>
+              <button type="button" id="btn-ai-mode-siwc" class="ai-mode-seg-btn desktop-only" data-ai-mode="siwc" data-i18n="companion.modeSiwc">ChatGPT 套餐 (实验)</button>
+            </div>
+            <p id="ai-api-disabled-hint" class="companion-muted-hint" style="display: none;" data-i18n="companion.apiDisabledHint">
+              开启右上角开关并填入 Endpoint / Key，即可使用侧栏直出问答与整章双语翻译；或切换到“外部浏览器 AI”免费复用网页额度。
+            </p>
+            <div id="ai-custom-inputs-wrap" style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.5rem; margin-top: 0.4rem; flex-direction: column; gap: 6px;">
               <div class="control-row settings-row-pair">
                 <span class="control-label" data-i18n="settings.aiEndpoint">接口地址</span>
                 <input type="text" id="setting-ai-endpoint" class="leaf-modal-input" placeholder="https://api.openai.com/v1" value="https://api.openai.com/v1" />
@@ -1744,6 +1653,106 @@
               <div class="control-row settings-row-pair">
                 <span class="control-label" data-i18n="settings.aiKey">API 密钥</span>
                 <input type="password" id="setting-ai-key" class="leaf-modal-input" placeholder="sk-..." />
+              </div>
+            </div>
+            <div id="ai-siwc-wrap" class="desktop-only" style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.55rem; margin-top: 0.4rem; flex-direction: column; gap: 8px;">
+              <div style="font-weight: 600; font-size: 0.8rem;" data-i18n="companion.siwcTitle">使用官方 ChatGPT 账号直连（Sign in with ChatGPT）</div>
+              <p style="color: var(--text-muted); margin: 0; font-size: 0.76rem; line-height: 1.4;" data-i18n="companion.siwcDesc">通过官方 OAuth 2.0 + PKCE 授权使用您已购 ChatGPT 套餐内的适用额度，凭据加密存放在本机，绝不静默切换付费 API。</p>
+              <div class="siwc-status-banner">
+                <span id="siwc-status-text" data-i18n="companion.siwcStatusSignedOut">未授权登录</span>
+                <div style="display: flex; gap: 6px;">
+                  <button type="button" id="btn-siwc-login" class="btn-primary-action" style="padding: 3px 10px; font-size: 0.75rem;" data-i18n="companion.siwcLoginBtn">登录 ChatGPT 账号</button>
+                  <button type="button" id="btn-siwc-cancel" class="btn-secondary-action" style="display: none; padding: 3px 8px; font-size: 0.75rem;" data-i18n="companion.siwcCancelBtn">取消授权</button>
+                  <button type="button" id="btn-siwc-logout" class="btn-secondary-action" style="display: none; padding: 3px 8px; font-size: 0.75rem;" data-i18n="companion.siwcLogoutBtn">退出授权</button>
+                </div>
+              </div>
+              <div class="control-row settings-row-pair">
+                <span class="control-label" data-i18n="companion.siwcModelLabel">默认模型</span>
+                <input type="text" id="setting-siwc-model" class="leaf-modal-input" value="gpt-5-codex" placeholder="gpt-5-codex" />
+              </div>
+              <p style="color: var(--text-muted); margin: 0; font-size: 0.73rem; line-height: 1.35;" data-i18n="companion.siwcQuotaNote">仅使用套餐包含额度，遇限流或耗尽时立即停止；不会继承网页聊天记忆或自动扣费。</p>
+            </div>
+            <div id="ai-external-wrap" class="desktop-only" style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.55rem; margin-top: 0.4rem; flex-direction: column; gap: 8px;">
+              <div style="font-weight: 600; font-size: 0.8rem;" data-i18n="companion.extTitle">外部 AI 浏览器伴读（自带 AI）</div>
+              <p style="color: var(--text-muted); margin: 0; font-size: 0.76rem; line-height: 1.4;" data-i18n="companion.extDesc">使用您自己的 Chrome / Edge 独立应用窗口并排伴读，选中引用一键直填（保留草稿，自行发送），不增加任何 API 费用。</p>
+              <div class="control-row settings-row-pair">
+                <span class="control-label" data-i18n="companion.extProviderLabel">目标 AI 网站</span>
+                <select id="setting-companion-provider" class="leaf-modal-input">
+                  <option value="chatgpt">ChatGPT</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="aistudio">Google AI Studio</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="custom" data-i18n="companion.extCustomProvider">自定义 HTTPS AI 网址</option>
+                </select>
+              </div>
+              <div id="companion-custom-url-wrap" style="display: none; flex-direction: column; gap: 6px;">
+                <div class="control-row settings-row-pair">
+                  <span class="control-label" data-i18n="companion.extCustomUrlLabel">自定义 HTTPS 地址</span>
+                  <input type="text" id="setting-companion-custom-url" class="leaf-modal-input" placeholder="https://your-ai-site.example/" data-i18n-placeholder="companion.extCustomUrlPlaceholder" />
+                </div>
+                <label class="control-row" style="gap: 6px; font-size: 0.75rem; cursor: pointer;">
+                  <input type="checkbox" id="setting-companion-generic-insert" />
+                  <span data-i18n="companion.extGenericOptIn">试验性允许在自定义站点识别输入框（仍优先剪贴板兜底）</span>
+                </label>
+              </div>
+              <div class="control-row settings-row-pair">
+                <span class="control-label" data-i18n="companion.extBrowserLabel">伴读浏览器</span>
+                <select id="setting-companion-browser" class="leaf-modal-input">
+                  <option value="auto" data-i18n="companion.extBrowserAuto">自动优先 Edge / Chrome</option>
+                  <option value="edge">Microsoft Edge</option>
+                  <option value="chrome">Google Chrome</option>
+                  <option value="brave">Brave</option>
+                  <option value="default" data-i18n="companion.extBrowserDefault">系统默认浏览器</option>
+                </select>
+              </div>
+              <div class="control-row settings-row-pair">
+                <span class="control-label" data-i18n="companion.extProfileLabel">浏览器账户 Profile</span>
+                <div style="display: flex; gap: 4px; flex: 1;">
+                  <select id="setting-companion-profile" class="leaf-modal-input" style="flex: 1;">
+                    <option value="Default">Default</option>
+                  </select>
+                  <button type="button" id="btn-companion-refresh-browsers" class="btn-secondary-action" style="padding: 3px 8px; font-size: 0.74rem;" data-i18n="companion.extProfileRefreshBtn">刷新检测</button>
+                </div>
+              </div>
+              <label class="control-row" style="gap: 6px; font-size: 0.77rem; cursor: pointer;">
+                <input type="checkbox" id="setting-companion-auto-dock" checked />
+                <span data-i18n="companion.extAutoDock">启动时与阅读器左右并排</span>
+              </label>
+              <label class="control-row" style="gap: 6px; font-size: 0.77rem; cursor: pointer;">
+                <input type="checkbox" id="setting-companion-snap" checked />
+                <span data-i18n="companion.extSnap">启用窗口松手磁吸跟随（拖离即解除，不丢引用）</span>
+              </label>
+              <details class="companion-advanced-details">
+                <summary data-i18n="companion.extAdvancedSummary">外观紧凑与高级选项（缩放 / 右键回流）</summary>
+                <div class="companion-advanced-inner">
+                  <label class="control-row" style="gap: 6px; font-size: 0.76rem; cursor: pointer;">
+                    <input type="checkbox" id="setting-companion-compact" checked />
+                    <span data-i18n="companion.extCompact">窄窗启用可逆紧凑排版与独立标签页缩放</span>
+                  </label>
+                  <div class="control-row settings-row-pair">
+                    <span class="control-label" data-i18n="companion.extZoomLabel">伴读标签页缩放</span>
+                    <select id="setting-companion-zoom" class="leaf-modal-input">
+                      <option value="85">85%</option>
+                      <option value="90" selected>90%</option>
+                      <option value="100">100%</option>
+                      <option value="110">110%</option>
+                    </select>
+                  </div>
+                  <label class="control-row" style="gap: 6px; font-size: 0.75rem; cursor: pointer;">
+                    <input type="checkbox" id="setting-companion-context-menu" />
+                    <span data-i18n="companion.extContextMenu">允许扩展右键菜单「保存选中文本到 Linden Leaf」（请留意平台条款）</span>
+                  </label>
+                </div>
+              </details>
+              <div class="companion-bridge-card">
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap;">
+                  <span style="font-size: 0.76rem; font-weight: 600;" data-i18n="companion.extBridgeTitle">Native Messaging 扩展通信（可选增强）</span>
+                  <span id="companion-bridge-status-badge" class="settings-meta-chip" data-i18n="companion.extBridgeM0Only">基础模式（无扩展仍可并排+剪贴板）</span>
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px;">
+                  <button type="button" id="btn-open-companion-ext-wizard" class="btn-secondary-action" style="padding: 4px 10px; font-size: 0.75rem;" data-i18n="companion.extOpenWizardBtn">配置自动填框扩展（3 步向导）…</button>
+                  <button type="button" id="btn-companion-launch-now" class="btn-primary-action" style="margin-left: auto; padding: 4px 10px; font-size: 0.75rem;" data-i18n="companion.extLaunchNowBtn">立即打开并排伴读</button>
+                </div>
               </div>
             </div>
           </div>
@@ -2020,6 +2029,17 @@
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
+                <div class="control-row settings-row-pair">
+                  <span class="control-label" data-i18n="settings.txtPurifyLabel">TXT 网文广告水印净化</span>
+                  <label class="toggle-switch" title="离线剔除常见站名水印、求票尾注与多余空行（保护章节标题）" data-i18n-title="settings.txtPurifyTip">
+                    <input type="checkbox" id="setting-txt-purify-enabled" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row settings-row-stacked">
+                  <span class="control-label" data-i18n="settings.txtPurifyRulesLabel">自定义 TXT 净化替换规则（每行一条：匹配词或 /正则/ => 替换文本）</span>
+                  <textarea id="setting-txt-purify-custom-rules" class="leaf-modal-input" rows="2" placeholder="例如：/本章完.*/ => " data-i18n-placeholder="settings.txtPurifyRulesPlaceholder"></textarea>
+                </div>
               </div>
 
               <!-- Interaction and motion -->
@@ -2046,21 +2066,7 @@
                     <span class="toggle-slider"></span>
                   </label>
                 </div>
-                <div class="control-row settings-row-pair desktop-only">
-                  <span class="control-label" data-i18n="settings.readerTopBarAutoHide">阅读顶栏自动淡出隐藏</span>
-                  <label class="toggle-switch" title="阅读时淡出顶部栏，鼠标移至顶部自动显现" data-i18n-title="settings.readerTopBarAutoHideTip">
-                    <input type="checkbox" id="setting-reader-topbar-autohide" />
-                    <span class="toggle-slider"></span>
-                  </label>
-                </div>
-                <div class="reader-toolbar-custom-block desktop-only">
-                  <div class="reader-toolbar-custom-header">
-                    <span class="control-label" data-i18n="settings.readerToolbarTitle">自定义阅读顶栏菜单</span>
-                    <button type="button" id="btn-reset-reader-toolbar" class="btn-text-mini" data-i18n="settings.readerToolbarReset">恢复默认</button>
-                  </div>
-                  <p class="reader-toolbar-custom-hint" data-i18n="settings.readerToolbarHint">取消勾选的按钮会自动收进顶栏右侧“···”更多菜单，随时可用</p>
-                  <div id="reader-toolbar-customize-list" class="reader-toolbar-customize-list"></div>
-                </div>
+
                 <div class="control-row settings-row-pair">
                   <span class="control-label" data-i18n="settings.reduceMotion">遵循系统减少动效</span>
                   <label class="toggle-switch">
@@ -2251,6 +2257,75 @@
                     <button type="button" id="btn-dict-cancel-download" class="btn-secondary-action" style="display:none; padding:4px;" data-i18n="settings.cancelDownloadBtn">取消下载</button>
                     <button type="button" id="btn-dict-install-builtin" class="btn-secondary-action" style="flex: 1; min-width: 80px; padding: 4px;" data-i18n="settings.importLocalDictBtn">导入本地文件</button>
                     <button type="button" id="btn-dict-migrate-dir" class="btn-secondary-action" style="flex: 1; min-width: 80px; padding: 4px;" data-i18n="settings.chooseMigrateDirBtn">选择 / 迁移目录</button>
+                    <button type="button" id="btn-dict-import-custom" class="btn-secondary-action" style="flex: 1; min-width: 110px; padding: 4px;" title="导入 MDict (.mdx) 或 StarDict (.ifo/.idx/.dict[.dz]) 本地离线词典" data-i18n-title="settings.importCustomDictTip" data-i18n="settings.importCustomDictBtn">导入 MDX / StarDict</button>
+                    <input type="file" id="input-custom-dict-files" multiple accept=".mdx,.ifo,.idx,.dict,.dz" style="display: none;" />
+                  </div>
+                  <div id="custom-dict-list" class="custom-dict-list"></div>
+                </div>
+              </div>
+
+              <!-- Offline OCR (PP-OCRv6 & ONNX Runtime) -->
+              <div class="advanced-group" id="adv-group-ocr" data-settings-domain="assistant">
+                <div class="advanced-group-title" style="margin-bottom: 4px; color: var(--text-primary);" data-i18n="settings.ocrAdvTitle">离线 OCR 文字识别与模型管理</div>
+                <div class="control-row settings-row-pair">
+                  <span class="control-label" data-i18n="settings.ocrEngineLabel">默认 OCR 引擎</span>
+                  <select id="setting-ocr-engine" class="leaf-modal-input">
+                    <option value="auto" selected data-i18n="settings.ocrEngineAuto">自动（优先 PP-OCRv6）</option>
+                    <option value="ppocrv6-small" data-i18n="settings.ocrEngineSmall">PP-OCRv6 Small（繁简英日高精）</option>
+                    <option value="ppocrv6-tiny" data-i18n="settings.ocrEngineTiny">PP-OCRv6 Tiny（极速轻量）</option>
+                    <option value="tesseract" data-i18n="settings.ocrEngineTesseract">Tesseract（内置免下载）</option>
+                  </select>
+                </div>
+                <div class="control-row settings-row-pair">
+                  <span class="control-label" data-i18n="settings.ocrBackendLabel">推理加速后端</span>
+                  <select id="setting-ocr-backend" class="leaf-modal-input">
+                    <option value="auto" selected data-i18n="settings.ocrBackendAuto">自动（按设备选择）</option>
+                    <option value="webgpu" data-i18n="settings.ocrBackendWebgpu">WebGPU 优先</option>
+                    <option value="wasm" data-i18n="settings.ocrBackendWasm">WASM SIMD</option>
+                  </select>
+                </div>
+                <div class="control-row settings-row-pair">
+                  <span class="control-label" data-i18n="settings.ocrDirectionLabel">默认排版方向</span>
+                  <select id="setting-ocr-direction" class="leaf-modal-input">
+                    <option value="auto" selected data-i18n="settings.ocrDirectionAuto">自动检测（横排 / 竖排 / 双栏）</option>
+                    <option value="horizontal" data-i18n="settings.ocrDirectionHoriz">强制横排</option>
+                    <option value="vertical" data-i18n="settings.ocrDirectionVert">强制竖排（右起从上到下）</option>
+                  </select>
+                </div>
+                <div class="control-row settings-row-pair">
+                  <span class="control-label" data-i18n="settings.ocrMirrorLabel">优先使用国内镜像下载模型</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-ocr-use-mirror" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div class="control-row settings-row-pair">
+                  <span class="control-label" data-i18n="settings.ocrPrefetchLabel">空闲时预识别后续扫描页</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="setting-ocr-idle-prefetch" checked />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+                <div style="border-top: 1px dashed var(--border-color); padding-top: 6px; margin-top: 6px;">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <span style="color: var(--text-muted);" data-i18n="settings.ocrRuntimeLabel">ONNX 运行时状态：</span>
+                    <span id="label-ocr-runtime-status" style="color: var(--text-primary);" data-i18n="settings.dictStatusChecking">检查中...</span>
+                  </div>
+                  <div id="ocr-download-progress-wrap" class="ocr-progress-wrap" hidden>
+                    <div class="ocr-progress-bar">
+                      <div id="ocr-download-progress-fill" class="ocr-progress-fill"></div>
+                    </div>
+                    <span id="ocr-download-progress-text" class="ocr-progress-text"></span>
+                  </div>
+                  <div id="ocr-model-cards" class="ocr-model-cards"></div>
+                  <div style="display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center;">
+                    <select id="setting-ocr-import-target" class="leaf-modal-input" style="max-width: 150px;" aria-label="导入目标模型" data-i18n-aria-label="settings.ocrImportTargetAria">
+                      <option value="ppocrv6-small" data-i18n="settings.ocrImportSmall">导入至 Small</option>
+                      <option value="ppocrv6-tiny" data-i18n="settings.ocrImportTiny">导入至 Tiny</option>
+                    </select>
+                    <button type="button" id="btn-ocr-import-local" class="btn-secondary-action" style="flex: 1; min-width: 90px; padding: 4px;" title="选择本地 *det*.onnx、*rec*.onnx、*.yml 与 .wasm 文件进行离线导入" data-i18n-title="settings.ocrImportLocalTip" data-i18n="settings.ocrImportLocalBtn">导入本地模型</button>
+                    <input type="file" id="input-ocr-import-files" multiple accept=".onnx,.yml,.yaml,.txt,.wasm" style="display: none;" />
+                    <button type="button" id="btn-clear-ocr-cache" class="btn-secondary-action" style="padding: 4px 8px;" data-i18n="settings.clearOcrCacheBtn">清空 OCR 缓存</button>
                   </div>
                 </div>
               </div>
@@ -2327,6 +2402,24 @@
                   <button type="button" id="btn-restore-full-data-backup" class="btn-secondary-action" style="flex: 1; padding: 4px;" title="恢复阅读记录；缺少本地文件的图书需重新关联原书" data-i18n-title="settings.importReadingTip" data-i18n="settings.importReadingBtn">导入阅读记录</button>
                   <input type="file" id="input-restore-full-data-file" accept=".json" style="display: none;" />
                   <button type="button" id="btn-relink-missing-book" class="btn-secondary-action" style="flex: 1; padding: 4px;" title="原文件移动或改名后重新绑定本地文件，保留所有笔记和进度" data-i18n-title="settings.rebindTip" data-i18n="settings.rebindBtn">重新关联原书</button>
+                </div>
+                <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-color);">
+                  <div style="font-size: 0.78rem; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;" data-i18n="settings.sidecarSectionTitle">Obsidian / Markdown 伴随笔记库</div>
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap;">
+                    <button type="button" id="btn-pick-sidecar-dir" class="btn-secondary-action" style="padding: 4px 8px;" data-i18n="settings.sidecarDirPickBtn">选择导出目录…</button>
+                    <span id="label-sidecar-dir" style="font-size: 0.74rem; color: var(--text-muted); word-break: break-all;" data-i18n="settings.sidecarDirNotSet">未设置目录</span>
+                  </div>
+                  <div class="control-row settings-row-pair">
+                    <span class="control-label" data-i18n="settings.sidecarAutoSyncLabel">笔记变动后自动增量同步</span>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="setting-sidecar-autosync" />
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </div>
+                  <div style="display: flex; gap: 6px; margin-top: 6px;">
+                    <button type="button" id="btn-import-kindle-clippings" class="btn-secondary-action" style="flex: 1; padding: 4px;" title="免费离线解析 Kindle My Clippings.txt 并智能归入书架" data-i18n-title="settings.importKindleTip" data-i18n="settings.importKindleBtn">导入 Kindle My Clippings.txt</button>
+                    <input type="file" id="input-kindle-clippings-file" accept=".txt" style="display: none;" />
+                  </div>
                 </div>
               </div>
 
@@ -3000,6 +3093,7 @@
         <div style="display: flex; align-items: center; gap: 8px;">
           <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 7V4h3M20 7V4h-3M4 17v3h3M20 17v3h-3M9 12h6M12 9v6"/></svg>
           <span class="global-modal-title" style="font-size: 1.05rem; font-weight: 700;" data-i18n="modal.ocrTitle">图片 PDF 文本识别提取</span>
+          <span id="pdf-ocr-engine-badge" class="ocr-engine-badge" data-i18n="modal.ocrEngineChecking">检测引擎中...</span>
         </div>
         <button id="btn-close-pdf-ocr" class="footnote-popup-close" title="关闭" data-i18n-title="common.close" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
       </div>
@@ -3016,6 +3110,14 @@
               <option value="auto" selected data-i18n="modal.ocrModeAuto">自动：无文字层时转图片 OCR</option>
               <option value="text_only" data-i18n="modal.ocrModeTextOnly">只提取文字层（快速，不做 OCR）</option>
               <option value="force_image" data-i18n="modal.ocrModeForce">强制识别页面图片（扫描件 / 乱码）</option>
+            </select>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <label for="pdf-ocr-direction" style="color: var(--text-secondary); font-weight: 500;" data-i18n="modal.ocrDirectionLabel">版式:</label>
+            <select id="pdf-ocr-direction" class="setting-select" style="padding: 3px 6px; font-size: 0.8rem;">
+              <option value="auto" selected data-i18n="modal.ocrDirectionAuto">自动检测</option>
+              <option value="horizontal" data-i18n="modal.ocrDirectionHoriz">横排文字</option>
+              <option value="vertical" data-i18n="modal.ocrDirectionVert">竖排文字（右起）</option>
             </select>
           </div>
           <button type="button" id="btn-start-pdf-ocr" class="btn-primary-action" style="padding: 3px 12px; font-size: 0.8rem; margin-left: auto;" data-i18n="modal.ocrStartBtn">开始识别</button>
@@ -3124,6 +3226,46 @@
     </div>
   </div>
 
+  <!-- Modal: Relink Orphaned Notes & Progress -->
+  <div id="modal-relink-notes" class="global-modal-backdrop" style="display: none; z-index: 100000;">
+    <div class="global-modal-card" style="max-width: 560px; width: 92vw; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <span class="global-modal-title" style="font-size: 1.02rem; font-weight: 700;" data-i18n="bookDetails.relinkModalTitle">关联 / 合并旧版书籍笔记</span>
+        <button id="btn-close-relink-notes" class="footnote-popup-close" title="关闭" data-i18n-title="common.close" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 0.85rem 0; overflow-y: auto; max-height: 60vh;">
+        <p id="relink-notes-target-desc" style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 10px;"></p>
+        <div id="relink-notes-candidates-list" class="relink-candidates-list"></div>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <button type="button" id="btn-cancel-relink-notes" class="btn-secondary-action" data-i18n="common.cancel">取消</button>
+        <button type="button" id="btn-confirm-relink-notes" class="btn-primary-action" disabled data-i18n="bookDetails.relinkConfirmBtn">迁移并合并笔记</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Kindle My Clippings Importer -->
+  <div id="modal-kindle-import" class="global-modal-backdrop" style="display: none; z-index: 100000;">
+    <div class="global-modal-card" style="max-width: 600px; width: 92vw; display: flex; flex-direction: column;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-color);">
+        <span class="global-modal-title" style="font-size: 1.02rem; font-weight: 700;" data-i18n="adv.kindleModalTitle">导入 Kindle 标注记录 (My Clippings.txt)</span>
+        <button id="btn-close-kindle-import" class="footnote-popup-close" title="关闭" data-i18n-title="common.close" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
+      </div>
+      <div class="global-modal-body" style="padding: 0.85rem 0; overflow-y: auto; max-height: 60vh;">
+        <p id="kindle-import-summary" style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 10px;"></p>
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 0.8rem; margin-bottom: 10px; cursor: pointer;">
+          <input type="checkbox" id="kindle-import-create-missing" checked />
+          <span data-i18n="adv.kindleCreateMissingLabel">为未匹配到书架原书的条目自动创建读书记录（仅保存书名与笔记）</span>
+        </label>
+        <div id="kindle-import-groups-list" class="kindle-import-groups-list"></div>
+      </div>
+      <div class="global-modal-footer" style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        <button type="button" id="btn-cancel-kindle-import" class="btn-secondary-action" data-i18n="common.cancel">取消</button>
+        <button type="button" id="btn-confirm-kindle-import" class="btn-primary-action" data-i18n="adv.kindleConfirmImportBtn">开始导入选中条目</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: Cross-Book Local Full-Text Search -->
   <div id="modal-cross-book-search" class="global-modal-backdrop" style="display: none; z-index: 99999;">
     <div class="global-modal-card cross-search-modal-card" style="max-width: 680px; width: 92vw; display: flex; flex-direction: column;">
@@ -3156,6 +3298,135 @@
         </div>
       </div>
       <div id="cross-search-kbd-footer" class="cross-search-kbd-footer" data-i18n="search.crossKbdHint">↑↓ 选择 · ↵ 跳转至段落 · Esc 关闭</div>
+    </div>
+  </div>
+
+  <!-- Modal: Save External AI Explanation Back to Origin Reference -->
+  <div id="modal-companion-backflow" class="global-modal-backdrop desktop-only" style="display: none; z-index: 100001;">
+    <div class="global-modal-card" style="max-width: 560px; width: 92vw; display: flex; flex-direction: column; gap: 10px;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.65rem; border-bottom: 1px solid var(--border-color);">
+        <span class="global-modal-title modal-title-lg" data-i18n="companion.backflowModalTitle">将 AI 解释存回原文批注</span>
+        <button type="button" id="btn-close-companion-backflow" class="footnote-popup-close" title="关闭" data-i18n-title="common.close" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
+      </div>
+      <div id="companion-backflow-source-label" style="font-size: 0.76rem; color: var(--text-muted);"></div>
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <label for="companion-backflow-ref-select" style="font-size: 0.78rem; font-weight: 600;" data-i18n="companion.backflowTargetRefLabel">关联到的原始引用锚点（不会误存到当前页）</label>
+        <select id="companion-backflow-ref-select" class="leaf-modal-input"></select>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <label for="companion-backflow-text" style="font-size: 0.78rem; font-weight: 600;" data-i18n="companion.backflowContentLabel">准备保存的解释内容（可编辑）</label>
+        <textarea id="companion-backflow-text" class="leaf-modal-input" rows="6" style="resize: vertical; font-size: 0.84rem; line-height: 1.5;" placeholder="在此粘贴或微调刚刚复制的 AI 回答..." data-i18n-placeholder="companion.backflowContentPlaceholder"></textarea>
+      </div>
+      <div class="control-row settings-row-pair">
+        <span class="control-label" data-i18n="companion.backflowColorLabel">高亮颜色</span>
+        <select id="companion-backflow-color" class="leaf-modal-input">
+          <option value="#facc15" data-i18n="pdf.hlYellowAria">黄色荧光笔</option>
+          <option value="#4ade80" data-i18n="pdf.hlGreenAria">绿色荧光笔</option>
+          <option value="#60a5fa" data-i18n="readerToolbar.hlBlue">蓝色高亮</option>
+          <option value="#f472b6" data-i18n="readerToolbar.hlPink">粉色高亮</option>
+          <option value="#a855f7" data-i18n="notes.colorPurple">紫色</option>
+        </select>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 6px; border-top: 1px solid var(--border-color);">
+        <button type="button" id="btn-cancel-companion-backflow" class="btn-secondary-action" data-i18n="companion.backflowCancelBtn">取消</button>
+        <button type="button" id="btn-confirm-companion-backflow" class="btn-primary-action" data-i18n="companion.backflowSaveBtn">确认保存到原文</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Manual Window Picker for Side-by-Side Docking -->
+  <div id="modal-companion-window-picker" class="global-modal-backdrop desktop-only" style="display: none; z-index: 100001;">
+    <div class="global-modal-card" style="max-width: 520px; width: 92vw;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.65rem; border-bottom: 1px solid var(--border-color);">
+        <span class="global-modal-title modal-title-lg" data-i18n="companion.pickerModalTitle">绑定现有 AI 浏览器窗口</span>
+        <button type="button" id="btn-close-companion-picker" class="footnote-popup-close" title="关闭" data-i18n-title="common.close" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
+      </div>
+      <p style="font-size: 0.78rem; color: var(--text-muted); margin: 8px 0 4px 0; line-height: 1.45;" data-i18n="companion.pickerModalDesc">若浏览器以单进程方式唤醒而未自动识别新窗，可在此直接点击对应窗口完成并排与磁吸。</p>
+      <div id="companion-window-picker-list" class="companion-window-pick-list"></div>
+    </div>
+  </div>
+
+  <!-- Modal: External AI Companion 3-Step Extension Setup Wizard (Desktop Only) -->
+  <div id="modal-companion-ext-wizard" class="global-modal-backdrop desktop-only" style="display: none; z-index: 100001;">
+    <div class="global-modal-card" style="max-width: 580px; width: 92vw; display: flex; flex-direction: column; gap: 12px;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.65rem; border-bottom: 1px solid var(--border-color);">
+        <span class="global-modal-title modal-title-lg" data-i18n="companion.wizardTitle">配置外部 AI 自动填框扩展（3 步向导）</span>
+        <button type="button" id="btn-close-ext-wizard" class="footnote-popup-close" title="关闭" data-i18n-title="common.close" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
+      </div>
+      <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0; line-height: 1.5;" data-i18n="companion.wizardDesc">无需扩展也已支持窗口并排 + 剪贴板引用；安装下方本地 MV3 扩展后，划词引用可直接写入 AI 输入框并保护原有草稿。</p>
+
+      <div class="companion-wizard-step">
+        <div class="companion-wizard-step-title" data-i18n="companion.wizardStep1Title">第 1 步：在 Chrome / Edge 加载扩展文件夹</div>
+        <p class="companion-wizard-step-desc" data-i18n="companion.wizardStep1Desc">打开浏览器扩展页并开启右上角「开发者模式」，点击「加载解压缩的扩展」，选择下面打开的文件夹。</p>
+        <div class="companion-wizard-actions">
+          <button type="button" id="btn-companion-open-ext-dir" class="btn-primary-action" data-i18n="companion.extOpenFolderBtn">打开扩展目录</button>
+          <button type="button" id="btn-copy-edge-ext-url" class="btn-secondary-action" data-i18n="companion.wizardCopyEdgeUrl">复制 edge://extensions</button>
+          <button type="button" id="btn-copy-chrome-ext-url" class="btn-secondary-action" data-i18n="companion.wizardCopyChromeUrl">复制 chrome://extensions</button>
+        </div>
+      </div>
+
+      <div class="companion-wizard-step">
+        <div class="companion-wizard-step-title" data-i18n="companion.wizardStep2Title">第 2 步：注册本机 Native Messaging 宿主</div>
+        <p class="companion-wizard-step-desc" data-i18n="companion.wizardStep2Desc">从浏览器扩展卡片复制 32 位小写字母 ID 粘贴到下方，点击一键注册（仅写入当前用户注册表，无需管理员权限）。</p>
+        <div class="companion-wizard-actions">
+          <input type="text" id="setting-companion-ext-id" class="leaf-modal-input" style="flex: 1; min-width: 220px;" placeholder="粘贴 Chrome/Edge 扩展 ID（32 位字母）" data-i18n-placeholder="companion.extIdPlaceholder" />
+          <button type="button" id="btn-companion-install-host" class="btn-primary-action" data-i18n="companion.extInstallHostBtn">一键注册宿主</button>
+          <button type="button" id="btn-companion-uninstall-host" class="btn-secondary-action" data-i18n="companion.extUninstallHostBtn">移除注册</button>
+        </div>
+      </div>
+
+      <div class="companion-wizard-step">
+        <div class="companion-wizard-step-title" data-i18n="companion.wizardStep3Title">第 3 步：连接状态检查</div>
+        <div class="companion-wizard-actions" style="justify-content: space-between;">
+          <span id="wizard-bridge-status-text" class="settings-meta-chip" data-i18n="companion.extBridgeM0Only">基础模式（无扩展仍可并排+剪贴板）</span>
+          <button type="button" id="btn-wizard-retest-bridge" class="btn-secondary-action" data-i18n="companion.wizardRetestBtn">检测连接</button>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; padding-top: 6px; border-top: 1px solid var(--border-color);">
+        <button type="button" id="btn-wizard-done" class="btn-primary-action" data-i18n="companion.wizardDoneBtn">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Just-in-Time First-Run AI Mode Chooser (Desktop Only) -->
+  <div id="modal-ai-first-run" class="global-modal-backdrop desktop-only" style="display: none; z-index: 100001;">
+    <div class="global-modal-card" style="max-width: 620px; width: 92vw; display: flex; flex-direction: column; gap: 12px;">
+      <div class="global-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 0.65rem; border-bottom: 1px solid var(--border-color);">
+        <span class="global-modal-title modal-title-lg" data-i18n="companion.firstRunTitle">选择你的 AI 伴读方式</span>
+        <button type="button" id="btn-close-ai-first-run" class="footnote-popup-close" title="关闭" data-i18n-title="common.close" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
+      </div>
+      <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0; line-height: 1.5;" data-i18n="companion.firstRunDesc">Linden Leaf 支持直接并排复用你自己的 AI 网页（免 API 费），也支持内置自配 API 侧栏。以后可在「设置 → 语音与助手」随时切换。</p>
+
+      <div class="ai-first-run-grid">
+        <div class="ai-first-run-card is-recommended">
+          <div class="ai-first-run-card-head">
+            <span class="ai-first-run-badge" data-i18n="companion.firstRunExtBadge">零额外费用 · 推荐</span>
+            <h4 class="ai-first-run-card-title" data-i18n="companion.firstRunExtTitle">外部浏览器 AI 伴读</h4>
+          </div>
+          <p class="ai-first-run-card-desc" data-i18n="companion.firstRunExtDesc">在右侧打开轻量浏览器应用窗，自动带出处复制到剪贴板（安装扩展后可直填输入框），保留草稿、自行发送，继续用你已有会员或免费额度。</p>
+          <div class="ai-provider-chips" role="group">
+            <button type="button" class="ai-provider-chip active" data-first-run-provider="chatgpt">ChatGPT</button>
+            <button type="button" class="ai-provider-chip" data-first-run-provider="gemini">Gemini</button>
+            <button type="button" class="ai-provider-chip" data-first-run-provider="aistudio">Google AI Studio</button>
+            <button type="button" class="ai-provider-chip" data-first-run-provider="deepseek">DeepSeek</button>
+          </div>
+          <button type="button" id="btn-ai-first-use-external" class="btn-primary-action" style="margin-top: auto;" data-i18n="companion.firstRunExtLaunchBtn">立即并排开启</button>
+        </div>
+
+        <div class="ai-first-run-card">
+          <div class="ai-first-run-card-head">
+            <h4 class="ai-first-run-card-title" data-i18n="companion.firstRunApiTitle">内置自配 API 助手</h4>
+          </div>
+          <p class="ai-first-run-card-desc" data-i18n="companion.firstRunApiDesc">填入自己的 OpenAI 兼容 API Key，直接在阅读器侧栏问答，并可使用 EPUB / TXT 整章双语翻译。</p>
+          <button type="button" id="btn-ai-first-use-api" class="btn-secondary-action" style="margin-top: auto;" data-i18n="companion.firstRunApiConfigBtn">去配置 API Key</button>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 6px; border-top: 1px solid var(--border-color);">
+        <button type="button" id="btn-ai-first-use-siwc" class="btn-text-mini" data-i18n="companion.firstRunSiwcLink">使用官方 ChatGPT 套餐直连 (实验)</button>
+        <button type="button" id="btn-ai-first-use-skip" class="btn-text-mini" data-i18n="companion.firstRunSkipBtn">暂不配置，先打开侧栏</button>
+      </div>
     </div>
   </div>
 

@@ -148,6 +148,37 @@ LL_API int ll_export_annotated_pdf(const char *input_path, const char *output_pa
                                    const char *password,
                                    const ll_export_annot *annots, int annot_count);
 
+typedef struct {
+    int page;
+    int type; /* 0: highlight, 1: underline, 2: strikeout, 3: squiggly, 4: text, 5: freetext, 6: ink */
+    float color[3];
+    float opacity;
+    float rect[4];        /* normalized [nx0, ny0, nx1, ny1] in 0..1 */
+    float page_bounds[4]; /* raw page bounds [x0, y0, x1, y1] */
+    ll_quad *quads;       /* raw page-space quads */
+    int quad_count;
+    char *text;           /* contents / note text */
+    char *author;
+    char *quote_text;     /* matched text inside markup quads */
+} ll_pdf_annot;
+
+typedef struct {
+    ll_pdf_annot *items;
+    int count;
+} ll_pdf_annot_list;
+
+typedef struct {
+    float *rects; /* flat 4-float tuples: normalized [nx0, ny0, nx1, ny1] */
+    int count;
+} ll_rect_list;
+
+LL_API int ll_extract_pdf_annots(ll_doc *doc, int max_annots, ll_pdf_annot_list *out);
+LL_API void ll_free_pdf_annots(ll_pdf_annot_list *out);
+LL_API int ll_compute_auto_crop(ll_doc *doc, int max_samples,
+                                float out_uniform[4], float out_odd[4], float out_even[4]);
+LL_API int ll_get_page_image_rects(ll_doc *doc, int page, ll_rect_list *out);
+LL_API void ll_free_rect_list(ll_rect_list *out);
+
 LL_API ll_stats ll_get_stats(ll_doc *doc);
 LL_API ll_render_timings ll_get_last_render_timings(ll_doc *doc);
 

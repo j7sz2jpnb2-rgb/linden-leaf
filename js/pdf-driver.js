@@ -163,6 +163,7 @@ export class PdfJsDriver {
         this.numPages = 0
         this.loadingTask = null
         this._destroyed = false
+        this._imageRectCache = new Map()
     }
 
     async init() {
@@ -470,7 +471,186 @@ export class PdfJsDriver {
             try { this.pdfDoc.destroy?.() } catch {}
             this.pdfDoc = null
         }
+        this._plainTextCache?.clear?.()
+        this._imageRectCache?.clear?.()
         this.numPages = 0
+    }
+
+    async extractEmbeddedAnnotations() {
+        if (!this.pdfDoc || this._destroyed) return []
+        const supported = new Set(['Highlight', 'Underline', 'StrikeOut', 'Squiggly', 'Text', 'FreeText'])
+        const subtypeMap = {
+            Highlight: 'highlight',
+            Underline: 'underline',
+            StrikeOut: 'strikeout',
+            Squiggly: 'squiggly',
+            Text: 'text',
+            FreeText: 'freetext',
+        }
+        const toHex = c => {
+            if (!c || c.length < 3) return '#facc15'
+            return '#' + [c[0], c[1], c[2]].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')
+        }
+        const out = []
+        for (let i = 0; i < this.numPages; i++) {
+            if (this._destroyed) break
+            let page = null
+            try {
+                page = await this.pdfDoc.getPage(i + 1)
+                const vp = page.getViewport({ scale: 1 })
+                const w = vp.width || 1
+                const h = vp.height || 1
+                const annots = await page.getAnnotations()
+                for (const a of annots || []) {
+                    if (!supported.has(a?.subtype)) continue
+                    const r = a.rect && a.rect.length >= 4 ? vp.convertToViewportRectangle(a.rect) : [0, 0, 0, 0]
+                    const rect = [
+                        Math.max(0, Math.min(1, Math.min(r[0], r[2]) / w)),
+                        Math.max(0, Math.min(1, Math.min(r[1], r[3]) / h)),
+                        Math.max(0, Math.min(1, Math.max(r[0], r[2]) / w)),
+                        Math.max(0, Math.min(1, Math.max(r[1], r[3]) / h)),
+                    ]
+                    const quads = []
+                    if (Array.isArray(a.quadPoints) && a.quadPoints.length >= 8) {
+                        for (let q = 0; q + 7 < a.quadPoints.length; q += 8) {
+                            const quad = []
+                            for (let pIdx = 0; pIdx < 4; pIdx++) {
+                                const pt = vp.convertToViewportPoint(a.quadPoints[q + pIdx * 2], a.quadPoints[q + pIdx * 2 + 1])
+                                quad.push(Math.max(0, Math.min(1, pt[0] / w)), Math.max(0, Math.min(1, pt[1] / h)))
+                            }
+                            quads.push(quad)
+                        }
+                    }
+                    out.push({
+                        page: i,
+                        subtype: subtypeMap[a.subtype] || 'highlight',
+                        color: toHex(a.color),
+                        contents: String(a.contentsObj?.str ?? a.contents ?? '').trim(),
+                        author: String(a.titleObj?.str ?? a.title ?? '').trim(),
+                        rect,
+                        quadPoints: quads,
+                    })
+                }
+            } catch {} finally {
+                try { page?.cleanup?.() } catch {}
+            }
+        }
+        return out
+    }
+
+    async computeAutoCrop() {
+        if (!this.pdfDoc || this._destroyed || !this.numPages) {
+            return { top: 0, bottom: 0, left: 0, right: 0 }
+        }
+        const sampleCount = Math.min(8, this.numPages)
+        const step = Math.max(1, Math.floor(this.numPages / sampleCount))
+        let minNx = 1, minNy = 1, maxNx = 0, maxNy = 0
+        let foundContent = false
+        for (let k = 0; k < sampleCount; k++) {
+            const pIdx = Math.min(this.numPages - 1, k * step)
+            let page = null
+            try {
+                page = await this.pdfDoc.getPage(pIdx + 1)
+                const vp = page.getViewport({ scale: 0.35 })
+                const cw = Math.max(8, Math.round(vp.width))
+                const ch = Math.max(8, Math.round(vp.height))
+                const canvas = document.createElement('canvas')
+                canvas.width = cw
+                canvas.height = ch
+                const ctx = canvas.getContext('2d', { willReadFrequently: true })
+                if (!ctx) continue
+                ctx.fillStyle = '#ffffff'
+                ctx.fillRect(0, 0, cw, ch)
+                await page.render({ canvasContext: ctx, viewport: vp }).promise
+                const pixels = ctx.getImageData(0, 0, cw, ch).data
+                for (let y = 0; y < ch; y++) {
+                    for (let x = 0; x < cw; x++) {
+                        const off = (y * cw + x) * 4
+                        if (pixels[off] < 245 || pixels[off + 1] < 245 || pixels[off + 2] < 245) {
+                            foundContent = true
+                            minNx = Math.min(minNx, x / cw)
+                            minNy = Math.min(minNy, y / ch)
+                            maxNx = Math.max(maxNx, (x + 1) / cw)
+                            maxNy = Math.max(maxNy, (y + 1) / ch)
+                        }
+                    }
+                }
+                canvas.width = canvas.height = 0
+            } catch {} finally {
+                try { page?.cleanup?.() } catch {}
+            }
+        }
+        if (!foundContent) return { top: 0, bottom: 0, left: 0, right: 0 }
+        const clampPct = v => Math.max(0, Math.min(30, Math.floor(v * 100) - 1))
+        return {
+            top: clampPct(minNy),
+            bottom: clampPct(1 - maxNy),
+            left: clampPct(minNx),
+            right: clampPct(1 - maxNx),
+        }
+    }
+
+    async getPageImageRects(pageIndex) {
+        if (!this.pdfDoc || this._destroyed || !this.pdfjsLib) return []
+        if (this._imageRectCache.has(pageIndex)) return this._imageRectCache.get(pageIndex)
+        let page = null
+        try {
+            page = await this.pdfDoc.getPage(pageIndex + 1)
+            const vp = page.getViewport({ scale: 1 })
+            const w = vp.width || 1
+            const h = vp.height || 1
+            const OPS = this.pdfjsLib.OPS || {}
+            const opList = await page.getOperatorList()
+            const stack = []
+            let ctm = [...vp.transform]
+            const mulMat = (m1, m2) => [
+                m1[0] * m2[0] + m1[2] * m2[1],
+                m1[1] * m2[0] + m1[3] * m2[1],
+                m1[0] * m2[2] + m1[2] * m2[3],
+                m1[1] * m2[2] + m1[3] * m2[3],
+                m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
+                m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
+            ]
+            const rects = []
+            const fnArray = opList?.fnArray || []
+            const argsArray = opList?.argsArray || []
+            for (let i = 0; i < fnArray.length; i++) {
+                const fn = fnArray[i]
+                const args = argsArray[i]
+                if (fn === OPS.save) {
+                    stack.push([...ctm])
+                } else if (fn === OPS.restore) {
+                    if (stack.length) ctm = stack.pop()
+                } else if (fn === OPS.transform && Array.isArray(args) && args.length >= 6) {
+                    ctm = mulMat(ctm, args)
+                } else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject || fn === OPS.paintImageXObjectRepeat) {
+                    const corners = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([px, py]) => [
+                        ctm[0] * px + ctm[2] * py + ctm[4],
+                        ctm[1] * px + ctm[3] * py + ctm[5],
+                    ])
+                    const xs = corners.map(c => c[0] / w)
+                    const ys = corners.map(c => c[1] / h)
+                    const nx0 = Math.max(0, Math.min(1, Math.min(...xs)))
+                    const ny0 = Math.max(0, Math.min(1, Math.min(...ys)))
+                    const nx1 = Math.max(0, Math.min(1, Math.max(...xs)))
+                    const ny1 = Math.max(0, Math.min(1, Math.max(...ys)))
+                    const nw = nx1 - nx0
+                    const nh = ny1 - ny0
+                    if (nw >= 0.04 && nh >= 0.04 && nw * nh <= 0.78) {
+                        rects.push([nx0, ny0, nx1, ny1])
+                    }
+                }
+            }
+            this._imageRectCache.set(pageIndex, rects)
+            if (this._imageRectCache.size > 64) {
+                this._imageRectCache.delete(this._imageRectCache.keys().next().value)
+            }
+            return rects
+        } catch {
+            return []
+        } finally {
+            try { page?.cleanup?.() } catch {}
+        }
     }
 }
 
@@ -499,6 +679,7 @@ export class MuPdfTauriDriver {
         this._destroyed = false
         this.geometryCache = new Map()
         this.geometryCacheLimit = 8
+        this._imageRectCache = new Map()
     }
 
     static async isAvailable() {
@@ -521,6 +702,7 @@ export class MuPdfTauriDriver {
             maxStoreMb,
             parallelRendering: platformBridge.getPdfParallelRendering(),
             windowLabel: windowLabel || null,
+            directReadOnly: source?.directReadOnly === true ? true : null,
         })
         if (this._destroyed) {
             platformBridge._invokeTauri('mupdf_close_document', { docId: meta.docId }).catch(() => {})
@@ -659,6 +841,109 @@ export class MuPdfTauriDriver {
             throw err
         } finally {
             signal?.removeEventListener('abort', cancel)
+        }
+    }
+
+    async planMobileRender(pageIndex, scale, { visiblePageRect = null, quality = 1, rotation = 0, memoryMb = null } = {}) {
+        if (!this.docId) throw new Error('Document not loaded')
+        const resolvedMemoryMb = Number.isFinite(memoryMb) && memoryMb >= 0
+            ? Math.round(memoryMb)
+            : (typeof globalThis.navigator?.deviceMemory === 'number' && globalThis.navigator.deviceMemory > 0
+                ? Math.round(globalThis.navigator.deviceMemory * 1024)
+                : 0)
+        return platformBridge._invokeTauri('mupdf_plan_mobile_render', {
+            docId: this.docId,
+            pageIndex,
+            scale,
+            rotation,
+            visiblePageRect,
+            quality,
+            memoryMb: resolvedMemoryMb,
+        })
+    }
+
+    async renderMobileTile(pageIndex, plan, tileIndex, signal, generation = 0) {
+        if (!this.docId) throw new Error('Document not loaded')
+        if (signal?.aborted) throw abortError()
+        const docId = this.docId
+        const requestId = `${docId}:${pageIndex}:m${tileIndex}:${++this._seq}`
+        const cancel = () => {
+            platformBridge._invokeTauri('mupdf_cancel_render', { docId, requestId }).catch(() => {})
+        }
+        signal?.addEventListener('abort', cancel, { once: true })
+        try {
+            const response = await platformBridge._invokeTauri('mupdf_render_mobile_tile', {
+                docId,
+                pageIndex,
+                plan,
+                tileIndex,
+                requestId,
+                generation,
+            })
+            if (signal?.aborted) throw abortError()
+            const buffer = await normalizeBinaryResponse(response)
+            if (signal?.aborted) throw abortError()
+            return this._packetToCanvas(buffer)
+        } catch (err) {
+            if (signal?.aborted || /render cancelled/i.test(String(err))) throw abortError()
+            throw err
+        } finally {
+            signal?.removeEventListener('abort', cancel)
+        }
+    }
+
+    async renderMobilePlan(pageIndex, plan, signal, generation = 0) {
+        if (!plan || !Array.isArray(plan.tiles) || !plan.tiles.length || !Array.isArray(plan.region)) {
+            throw new Error('Invalid mobile render plan')
+        }
+        const [rx0, ry0, rx1, ry1] = plan.region
+        const targetW = Math.max(1, rx1 - rx0)
+        const targetH = Math.max(1, ry1 - ry0)
+        if (plan.tiles.length === 1) {
+            const single = await this.renderMobileTile(pageIndex, plan, 0, signal, generation)
+            single.offsetX = rx0
+            single.offsetY = ry0
+            single.dataset.offsetX = String(rx0)
+            single.dataset.offsetY = String(ry0)
+            single._plannedScale = plan.scale
+            single._tileCount = 1
+            return single
+        }
+
+        const composite = document.createElement('canvas')
+        composite.width = targetW
+        composite.height = targetH
+        composite.offsetX = rx0
+        composite.offsetY = ry0
+        composite.dataset.offsetX = String(rx0)
+        composite.dataset.offsetY = String(ry0)
+        const ctx = composite.getContext('2d', { alpha: false })
+        try {
+            for (let i = 0; i < plan.tiles.length; i++) {
+                if (signal?.aborted) throw abortError()
+                const tileCanvas = await this.renderMobileTile(pageIndex, plan, i, signal, generation)
+                try {
+                    if (signal?.aborted) throw abortError()
+                    const tile = plan.tiles[i]
+                    const tileX0 = tileCanvas.offsetX ?? tile.content[0]
+                    const tileY0 = tileCanvas.offsetY ?? tile.content[1]
+                    const sx = Math.max(0, tile.content[0] - tileX0)
+                    const sy = Math.max(0, tile.content[1] - tileY0)
+                    const sw = Math.max(1, Math.min(tileCanvas.width - sx, tile.content[2] - tile.content[0]))
+                    const sh = Math.max(1, Math.min(tileCanvas.height - sy, tile.content[3] - tile.content[1]))
+                    const dx = tile.content[0] - rx0
+                    const dy = tile.content[1] - ry0
+                    ctx.drawImage(tileCanvas, sx, sy, sw, sh, dx, dy, sw, sh)
+                } finally {
+                    tileCanvas.width = tileCanvas.height = 0
+                }
+            }
+            composite._plannedScale = plan.scale
+            composite._tileCount = plan.tiles.length
+            return composite
+        } catch (err) {
+            composite.width = composite.height = 0
+            throw err
         }
     }
 
@@ -859,11 +1144,33 @@ export class MuPdfTauriDriver {
         })
     }
 
+    async extractEmbeddedAnnotations() {
+        if (this._destroyed || !this.docId) return []
+        return await platformBridge.extractPdfAnnotations(this.docId)
+    }
+
+    async computeAutoCrop() {
+        if (this._destroyed || !this.docId) return { top: 0, bottom: 0, left: 0, right: 0 }
+        return (await platformBridge.computePdfAutoCrop(this.docId)) || { top: 0, bottom: 0, left: 0, right: 0 }
+    }
+
+    async getPageImageRects(pageIndex) {
+        if (this._destroyed || !this.docId) return []
+        if (this._imageRectCache.has(pageIndex)) return this._imageRectCache.get(pageIndex)
+        const rects = await platformBridge.getPdfPageImageRects(this.docId, pageIndex)
+        this._imageRectCache.set(pageIndex, rects)
+        if (this._imageRectCache.size > 96) {
+            this._imageRectCache.delete(this._imageRectCache.keys().next().value)
+        }
+        return rects
+    }
+
     destroy() {
         this._destroyed = true
         if (this.docId) platformBridge._invokeTauri('mupdf_close_document', { docId: this.docId }).catch(() => {})
         this.docId = null
         this.geometryCache.clear()
+        this._imageRectCache.clear()
     }
 }
 
@@ -907,9 +1214,30 @@ export class AdaptivePdfDriver {
     async open(source) {
         if (this._destroyed) throw new Error('Driver is destroyed')
         const password = source?.password || null
+        let snap = this.snapshot
+        const useNative = await MuPdfTauriDriver.isAvailable()
+        const directPath = (source?.directReadOnly && (source?.nativePath || source?.path))
+            || (snap?.directReadOnly && (snap?.nativeSnapshotPath || snap?.path))
+            || null
+        if (directPath && useNative) {
+            const native = new MuPdfTauriDriver()
+            this.backend = native
+            this.kind = native.kind
+            try {
+                const expectedSize = source?.expectedSize ?? snap?.nativeSnapshotSize ?? snap?.size ?? null
+                return await native.open({ nativePath: directPath, expectedSize, password, directReadOnly: true })
+            } catch (err) {
+                native.destroy()
+                if (this._destroyed) throw err
+                const msg = String(err?.message || err).toLowerCase()
+                if (err?.name === 'PasswordException' || msg.includes('password') || msg.includes('needs_password')) {
+                    throw err
+                }
+                console.warn('[PDF] Direct native PDF open failed; trying snapshot/PDF.js:', err)
+            }
+        }
         // A staged native file and the IndexedDB Blob must have been created
         // from the same immutable import snapshot and bound in one DB write.
-        let snap = this.snapshot
         let nativeReady = Boolean(
             snap?.nativeSnapshotPath && (
                 snap.nativeSnapshotOnly ||
@@ -920,7 +1248,6 @@ export class AdaptivePdfDriver {
                  (snap.nativeSnapshotSize == null || snap.nativeSnapshotSize === 0 || snap.nativeSnapshotSize === snap.blob.size))
             )
         )
-        const useNative = await MuPdfTauriDriver.isAvailable()
         if (useNative) {
             if (nativeReady && snap.blob instanceof Blob && !snap.blob.isLazySnapshot &&
                 !await platformBridge.validatePdfSnapshot(snap.nativeSnapshotPath, snap.nativeSnapshotSize || snap.blob.size)) {
@@ -989,6 +1316,9 @@ export class AdaptivePdfDriver {
         return null
     }
     renderTextLayer(...args) { return this.backend.renderTextLayer?.(...args) }
+    planMobileRender(...args) { return this.backend?.planMobileRender?.(...args) }
+    renderMobileTile(...args) { return this.backend?.renderMobileTile?.(...args) }
+    renderMobilePlan(...args) { return this.backend?.renderMobilePlan?.(...args) }
     getTextLayer(...args) { return this.backend.getTextLayer(...args) }
     getPagePlainText(...args) { return this.backend?.getPagePlainText?.(...args) || Promise.resolve('') }
     getTextGeometry(...args) { return this.backend.getTextGeometry?.(...args) }
@@ -996,6 +1326,9 @@ export class AdaptivePdfDriver {
     getOutline(...args) { return this.backend.getOutline?.(...args) }
     getPageLabels(...args) { return this.backend?.getPageLabels?.(...args) || Promise.resolve(null) }
     getLinks(...args) { return this.backend?.getLinks?.(...args) || Promise.resolve([]) }
+    extractEmbeddedAnnotations(...args) { return this.backend?.extractEmbeddedAnnotations?.(...args) || Promise.resolve([]) }
+    computeAutoCrop(...args) { return this.backend?.computeAutoCrop?.(...args) || Promise.resolve({ top: 0, bottom: 0, left: 0, right: 0 }) }
+    getPageImageRects(...args) { return this.backend?.getPageImageRects?.(...args) || Promise.resolve([]) }
     destroy() {
         this._destroyed = true
         this.backend?.destroy?.()
@@ -1041,6 +1374,18 @@ export class AdaptivePdfDriverLease {
         if (this._destroyed) throw new Error('Driver lease is destroyed')
         return this.realDriver?.renderTextLayer?.(...args)
     }
+    planMobileRender(...args) {
+        if (this._destroyed) throw new Error('Driver lease is destroyed')
+        return this.realDriver?.planMobileRender?.(...args)
+    }
+    renderMobileTile(...args) {
+        if (this._destroyed) throw new Error('Driver lease is destroyed')
+        return this.realDriver?.renderMobileTile?.(...args)
+    }
+    renderMobilePlan(...args) {
+        if (this._destroyed) throw new Error('Driver lease is destroyed')
+        return this.realDriver?.renderMobilePlan?.(...args)
+    }
     getTextLayer(...args) {
         if (this._destroyed) throw new Error('Driver lease is destroyed')
         return this.realDriver?.getTextLayer?.(...args)
@@ -1068,6 +1413,18 @@ export class AdaptivePdfDriverLease {
     getLinks(...args) {
         if (this._destroyed) return Promise.resolve([])
         return this.realDriver?.getLinks?.(...args) || Promise.resolve([])
+    }
+    extractEmbeddedAnnotations(...args) {
+        if (this._destroyed) return Promise.resolve([])
+        return this.realDriver?.extractEmbeddedAnnotations?.(...args) || Promise.resolve([])
+    }
+    computeAutoCrop(...args) {
+        if (this._destroyed) return Promise.resolve({ top: 0, bottom: 0, left: 0, right: 0 })
+        return this.realDriver?.computeAutoCrop?.(...args) || Promise.resolve({ top: 0, bottom: 0, left: 0, right: 0 })
+    }
+    getPageImageRects(...args) {
+        if (this._destroyed) return Promise.resolve([])
+        return this.realDriver?.getPageImageRects?.(...args) || Promise.resolve([])
     }
     destroy() {
         this._destroyed = true;

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Linden Leaf AI Companion</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main class="ll-ext-shell">
+    <header class="ll-ext-head">
+      <div class="ll-ext-title">Linden Leaf 伴读扩展</div>
+      <div class="ll-ext-head-actions">
+        <span id="ext-status-pill" class="ll-ext-pill">检测中…</span>
+        <button id="btn-reconnect-native" type="button" class="ll-ext-btn ll-ext-btn-mini" title="尝试重新连接 Linden Leaf 阅读器宿主">重连</button>
+      </div>
+    </header>
+
+    <section class="ll-ext-card">
+      <label class="ll-ext-label">扩展 ID（复制到阅读器完成 Native Messaging 注册）</label>
+      <div class="ll-ext-row">
+        <code id="ext-id-code" class="ll-ext-code"></code>
+        <button id="btn-copy-ext-id" type="button" class="ll-ext-btn">复制</button>
+      </div>
+      <div id="ext-native-err" class="ll-ext-hint"></div>
+    </section>
+
+    <section class="ll-ext-card">
+      <div class="ll-ext-row ll-ext-between">
+        <span class="ll-ext-label">当前绑定标签页</span>
+        <button id="btn-bind-current" type="button" class="ll-ext-btn ll-ext-btn-primary">绑定当前页</button>
+      </div>
+      <div id="ext-bound-url" class="ll-ext-url">尚未绑定</div>
+    </section>
+
+    <section class="ll-ext-card">
+      <label class="ll-ext-check">
+        <input id="chk-compact" type="checkbox" />
+        <span>当前伴读页启用紧凑排版（可随时关闭还原）</span>
+      </label>
+      <div class="ll-ext-row ll-ext-between">
+        <span class="ll-ext-label">独立标签页缩放</span>
+        <select id="sel-zoom" class="ll-ext-select">
+          <option value="85">85%</option>
+          <option value="90">90%</option>
+          <option value="100">100%</option>
+          <option value="110">110%</option>
+        </select>
+      </div>
+      <label class="ll-ext-check">
+        <input id="chk-context-menu" type="checkbox" />
+        <span>开启右键「保存选中文本到 Linden Leaf」（请留意平台条款）</span>
+      </label>
+    </section>
+
+    <details class="ll-ext-card">
+      <summary class="ll-ext-label">开发回退：本地配对端口（可选）</summary>
+      <div class="ll-ext-stack">
+        <input id="inp-relay-port" type="number" class="ll-ext-input" placeholder="端口 (如 18530)" />
+        <input id="inp-pairing-token" type="password" class="ll-ext-input" placeholder="配对密钥" />
+        <button id="btn-save-relay" type="button" class="ll-ext-btn">保存并重连</button>
+      </div>
+    </details>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

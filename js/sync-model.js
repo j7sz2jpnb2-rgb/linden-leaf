@@ -42,7 +42,7 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
     let tags = localBook.tags || []
     let tagsUpdatedAt = localBook.tagsUpdatedAt || 0
     if (Array.isArray(incomingMeta.tags)) {
-        if (isIncomingNewer(incomingMeta.tagsUpdatedAt, localBook.tagsUpdatedAt)) {
+        if (isIncomingNewer(incomingMeta.tagsUpdatedAt, localBook.tagsUpdatedAt, incomingMeta.tags, localBook.tags || [])) {
             tags = incomingMeta.tags
             tagsUpdatedAt = incomingMeta.tagsUpdatedAt || 0
         }
@@ -68,7 +68,7 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
     let customListIds = localBook.customListIds || []
     let listsUpdatedAt = localBook.listsUpdatedAt || 0
     if (Array.isArray(incomingMeta.customListIds)) {
-        if (isIncomingNewer(incomingMeta.listsUpdatedAt, localBook.listsUpdatedAt)) {
+        if (isIncomingNewer(incomingMeta.listsUpdatedAt, localBook.listsUpdatedAt, incomingMeta.customListIds, localBook.customListIds || [])) {
             customListIds = incomingMeta.customListIds
             listsUpdatedAt = incomingMeta.listsUpdatedAt || 0
         }
@@ -79,7 +79,7 @@ export const reconcileBookSyncMeta = (localBook = {}, incomingMeta = {}, localCl
     let favoriteUpdatedAt = localBook.favoriteUpdatedAt || localBook.updatedAt || 0
     if (incomingMeta.favoriteUpdatedAt || incomingMeta.isFavorite !== undefined) {
         const inFavTime = incomingMeta.favoriteUpdatedAt || incomingMeta.updatedAt || 0
-        if (isIncomingNewer(inFavTime, favoriteUpdatedAt)) {
+        if (isIncomingNewer(inFavTime, favoriteUpdatedAt, Boolean(incomingMeta.isFavorite), isFavorite)) {
             isFavorite = Boolean(incomingMeta.isFavorite)
             favoriteUpdatedAt = inFavTime
         }
@@ -227,9 +227,12 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null, options =
     if (!remotePayload || typeof remotePayload !== 'object') {
         return {
             merged: localPayload || {},
-            stats: { booksUpdated: 0, highlightsAdded: 0, sessionsAdded: 0, listsAdded: 0, staleDeviceWarning: false }
+            stats: { booksUpdated: 0, highlightsAdded: 0, sessionsAdded: 0, listsAdded: 0, staleDeviceWarning: false },
+            progressDivergences: []
         }
     }
+
+    const progressDivergences = []
 
     const stats = {
         booksUpdated: 0,
@@ -442,6 +445,33 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null, options =
             const localReadTime = localBook.lastReadAt || 0
             const remoteReadTime = rLastRead || 0
             const reconciled = reconcileBookSyncMeta(localBook, cleanRemoteBook, effectiveLocalClientId, remotePayload.clientId, { nowMs })
+
+            if (effectiveLocalClientId && remotePayload.clientId && effectiveLocalClientId !== remotePayload.clientId && localBook.progress && cleanRemoteBook.progress) {
+                const toFrac = (p) => Number.isFinite(Number(p?.fraction)) ? Number(p.fraction) : (Number.isFinite(Number(p?.percentage)) ? Number(p.percentage) / 100 : 0)
+                const locFrac = toFrac(localBook.progress)
+                const remFrac = toFrac(cleanRemoteBook.progress)
+                const locPage = Number(localBook.progress?.page || localBook.progress?.currentPage || 0)
+                const remPage = Number(cleanRemoteBook.progress?.page || cleanRemoteBook.progress?.currentPage || 0)
+                const fracDiff = Math.abs(locFrac - remFrac)
+                const pageDiff = (locPage > 0 && remPage > 0) ? Math.abs(locPage - remPage) : 0
+                if (fracDiff >= 0.03 || pageDiff >= 2) {
+                    const winnerIsRemote = reconciled.progress === cleanRemoteBook.progress
+                    const alternateProgress = winnerIsRemote ? localBook.progress : cleanRemoteBook.progress
+                    progressDivergences.push({
+                        bookId: localBook.id,
+                        title: reconciled.customTitle || localBook.customTitle || localBook.title || cleanRemoteBook.title || '',
+                        localProgress: localBook.progress,
+                        remoteProgress: cleanRemoteBook.progress,
+                        winnerProgress: reconciled.progress,
+                        alternateProgress,
+                        localFraction: locFrac,
+                        remoteFraction: remFrac,
+                        winnerFraction: winnerIsRemote ? remFrac : locFrac,
+                        alternateFraction: winnerIsRemote ? locFrac : remFrac,
+                        remoteDeviceName: remotePayload.deviceName || ''
+                    })
+                }
+            }
 
             if (remoteReadTime > localReadTime || cleanRemoteBook.totalReadingSeconds !== localBook.totalReadingSeconds || cleanRemoteBook.totalListeningSeconds !== localBook.totalListeningSeconds) {
                 stats.booksUpdated++
@@ -1000,6 +1030,7 @@ export const mergeSyncData = (localPayload = {}, remotePayload = null, options =
         deletedRecords: dedupedTombstones
     }
 
-    return { merged, stats }
+    progressDivergences.sort((a, b) => String(a?.bookId || '').localeCompare(String(b?.bookId || '')))
+    return { merged, stats, progressDivergences }
 }
 

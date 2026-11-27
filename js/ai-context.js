@@ -165,26 +165,145 @@ export function truncateToTokenBudget(text, maxTokens = 1000, { fromEnd = false,
 }
 
 /**
- * Creates a stable, immutable selection reference snapshot before popups or selection collapse.
+ * Creates a stable, immutable selection reference snapshot (ReadingReference v2)
+ * before popups close or selection collapses.
  *
  * @param {object} book
  * @param {object} selectionInfo
- * @returns {object} ReferenceSnapshot
+ * @returns {object} ReadingReference
  */
 export function createReferenceSnapshot(book, selectionInfo) {
     const rawText = (selectionInfo?.text || '').trim()
+    const pdfTarget = selectionInfo?.pdfTarget || null
+    const cfi = selectionInfo?.cfi || null
+    const pageIndex = selectionInfo?.pageIndex ?? (typeof pdfTarget?.page === 'number' ? pdfTarget.page : null)
+    const chapter = (selectionInfo?.chapterTitle || selectionInfo?.chapterOrPage || (pageIndex !== undefined && pageIndex !== null ? t('common.pageNumber', { page: pageIndex + 1 }) : '')).trim()
+    const anchor = pdfTarget
+        ? { type: 'pdf_target', pageIndex, pdfTarget }
+        : (cfi ? { type: 'epub_cfi', cfi } : { type: 'location', pageIndex })
     return {
+        schemaVersion: 2,
         referenceId: 'ref_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
-        bookId: book?.id || null,
+        bookId: book?.id || selectionInfo?.bookId || null,
+        documentVersion: book?.documentHash || selectionInfo?.documentHash || null,
+        blobRevision: book?.blobRevision || selectionInfo?.blobRevision || null,
+        revisionOrigin: book?.revisionOrigin || selectionInfo?.revisionOrigin || null,
         bookTitle: book?.title || t('book.defaultTitleCurrent'),
+        bookAuthor: book?.customAuthor || book?.author || '',
         selectedText: rawText,
-        cfi: selectionInfo?.cfi || null,
-        pdfTarget: selectionInfo?.pdfTarget || null,
-        pageIndex: selectionInfo?.pageIndex ?? null,
-        chapterOrPage: selectionInfo?.chapterOrPage || (selectionInfo?.pageIndex !== undefined ? t('common.pageNumber', { page: selectionInfo.pageIndex + 1 }) : ''),
+        context: (selectionInfo?.sentenceContext || selectionInfo?.context || '').trim(),
+        kind: selectionInfo?.kind || (selectionInfo?.isWordContext ? 'word_context' : 'passage'),
+        highlightId: selectionInfo?.highlightId || null,
+        cfi,
+        pdfTarget,
+        pageIndex,
+        chapter,
+        chapterOrPage: chapter,
+        anchor,
         sourceType: selectionInfo?.sourceType || 'native',
         createdAt: Date.now()
     }
+}
+
+/**
+ * Extracts a concise enclosing sentence/clause right around a DOM Range or plain text snippet.
+ * Strictly local (O(1) bounded slice), safe for word-level "Explain in Context" lookups.
+ *
+ * @param {object} params
+ * @param {Document|null} [params.doc]
+ * @param {Range|null} [params.range]
+ * @param {string} [params.pageText]
+ * @param {string} params.selectedText
+ * @param {number} [params.maxChars=360]
+ * @returns {string}
+ */
+export function extractEnclosingSentenceContext({ doc = null, range = null, pageText = '', selectedText = '', maxChars = 360 } = {}) {
+    const cleanSel = String(selectedText || '').trim()
+    if (!cleanSel) return ''
+    try {
+        let blockText = ''
+        if (range && range.startContainer) {
+            let node = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement
+            while (node && node !== doc?.body && node.tagName && !/^(P|DIV|LI|BLOCKQUOTE|H[1-6]|SECTION|ARTICLE|TD)$/i.test(node.tagName)) {
+                node = node.parentElement
+            }
+            if (node && (node.innerText || node.textContent)) {
+                blockText = String(node.innerText || node.textContent || '')
+            }
+        }
+        if (!blockText && pageText) {
+            blockText = String(pageText)
+        }
+        if (!blockText && doc?.body) {
+            blockText = String(doc.body.innerText || doc.body.textContent || '')
+        }
+        const normalized = blockText.replace(/\s+/g, ' ').trim()
+        if (!normalized) return ''
+        const idx = normalized.indexOf(cleanSel)
+        if (idx < 0) return ''
+
+        const boundaryRe = /[.!?。！？；;\n]/
+        let left = idx
+        while (left > 0 && idx - left < maxChars / 2) {
+            if (boundaryRe.test(normalized[left - 1])) break
+            left--
+        }
+        let right = idx + cleanSel.length
+        while (right < normalized.length && right - (idx + cleanSel.length) < maxChars / 2) {
+            right++
+            if (boundaryRe.test(normalized[right - 1])) break
+        }
+        return normalized.slice(left, right).trim().slice(0, maxChars)
+    } catch (_) {
+        return ''
+    }
+}
+
+/**
+ * Formats a portable plain-text provenance quote ready to paste or insert into any external AI chat.
+ * Leaves trailing spacing for the user to add/keep their own question and press Send manually.
+ *
+ * @param {object} reference
+ * @param {object} [options]
+ * @param {string} [options.surroundingContext]
+ * @param {string} [options.userQuestion]
+ * @returns {string}
+ */
+export function formatExternalAiReferencePrompt(reference, { surroundingContext = '', userQuestion = '' } = {}) {
+    if (!reference || !reference.selectedText) return ''
+    const title = (reference.bookTitle || t('book.defaultTitleCurrent')).trim()
+    const author = (reference.bookAuthor || '').trim()
+    const loc = (reference.chapter || reference.chapterOrPage || '').trim()
+    const headerParts = [title, author, loc].filter(Boolean)
+    const provenance = headerParts.join(' · ')
+    const extraCtx = (surroundingContext || reference.context || '').trim()
+
+    if (reference.kind === 'word_context') {
+        const lines = [
+            t('companion.promptWordHeader', { provenance }),
+            t('companion.promptWordLine', { word: reference.selectedText.trim() })
+        ]
+        if (extraCtx && extraCtx !== reference.selectedText.trim()) {
+            lines.push(t('companion.promptSentenceLine', { sentence: extraCtx }))
+        }
+        lines.push(t('companion.promptWordAsk'))
+        if (userQuestion?.trim()) lines.push(userQuestion.trim())
+        return lines.join('\n')
+    }
+
+    const lines = [
+        t('companion.promptQuoteHeader', { provenance }),
+        '<<<',
+        reference.selectedText.trim(),
+        '>>>'
+    ]
+    if (extraCtx && extraCtx !== reference.selectedText.trim()) {
+        lines.push('', t('companion.promptContextHeader'), extraCtx)
+    }
+    if (userQuestion?.trim()) {
+        lines.push('', userQuestion.trim())
+    }
+    return lines.join('\n')
 }
 
 /**

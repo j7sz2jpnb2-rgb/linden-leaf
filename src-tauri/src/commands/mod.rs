@@ -4,7 +4,11 @@ pub mod window;
 pub mod sync;
 pub mod mupdf;
 pub mod ai;
+pub mod ai_companion;
+pub mod siwc;
 pub mod dictionary;
+pub mod ocr_models;
+pub mod txt_stream;
 pub mod android;
 pub mod security;
 
@@ -14,7 +18,11 @@ pub use window::*;
 pub use sync::*;
 pub use mupdf::*;
 pub use ai::*;
+pub use ai_companion::*;
+pub use siwc::*;
 pub use dictionary::*;
+pub use ocr_models::*;
+pub use txt_stream::*;
 pub use android::*;
 pub use security::*;
 

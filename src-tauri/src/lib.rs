@@ -1,6 +1,7 @@
 mod content_hash;
 pub mod commands;
 
+pub use commands::ai_companion::run_native_messaging_host;
 use commands::*;
 use tauri::Manager;
 
@@ -9,6 +10,43 @@ fn app_write_debug_log(message: String) {
     // Keep diagnostics portable. Persisted debug logs, when needed, should use
     // Tauri's app-data directory rather than a developer-specific absolute path.
     eprintln!("[renderer] {message}");
+}
+
+fn format_sanitized_panic_record(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let thread = std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .to_string();
+    let location = info
+        .location()
+        .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+        .unwrap_or_else(|| "unknown".to_string());
+    // Intentionally omit panic payload strings so user file paths or secrets are never persisted.
+    format!(
+        "version={} ts_ms={} thread={} location={}\n",
+        env!("CARGO_PKG_VERSION"),
+        ts_ms,
+        thread,
+        location
+    )
+}
+
+fn install_panic_recorder(app_data_dir: Option<std::path::PathBuf>) {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some(ref dir) = app_data_dir {
+                let _ = std::fs::create_dir_all(dir);
+                let _ = std::fs::write(dir.join("crash-last.txt"), format_sanitized_panic_record(info));
+            }
+            prev(info);
+        }));
+    });
 }
 
 #[cfg(target_os = "android")]
@@ -55,6 +93,13 @@ pub fn run() {
         }
 
         // When file paths are provided, spawn a dedicated new window for reading.
+        for file_path in &file_paths {
+            if file_path.to_ascii_lowercase().ends_with(".pdf") {
+                let p = std::path::Path::new(file_path);
+                let _ = authorize_direct_pdf_path(p);
+                prewarm_pdf_launch(app, file_path.clone());
+            }
+        }
         match spawn_new_app_window(app, None, None, None) {
             Ok((new_label, _already_exists)) => {
                 let state = app.state::<AppState>();
@@ -117,8 +162,10 @@ pub fn run() {
     builder
         .setup(|app| {
             eprintln!("[TAURI SETUP] Setting up application...");
+            let app_data_dir = app.path().app_data_dir().ok();
+            install_panic_recorder(app_data_dir.clone());
             crate::commands::fs::set_cached_app_dirs(
-                app.path().app_data_dir().ok(),
+                app_data_dir,
                 app.path().resource_dir().ok(),
             );
             crate::commands::fs::set_cached_extra_app_dirs(
@@ -135,6 +182,8 @@ pub fn run() {
             }
             app.manage(AppState::default());
             app.manage(AiState::default());
+            app.manage(CompanionState::default());
+            app.manage(SiwcState::default());
 
             let args: Vec<String> = std::env::args().collect();
             let file_paths = extract_book_paths_from_args(&args);
@@ -143,6 +192,10 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 let mut pending = state.pending_files.lock().unwrap_or_else(|e| e.into_inner());
                 for file_path in file_paths {
+                    if file_path.to_ascii_lowercase().ends_with(".pdf") {
+                        let _ = authorize_direct_pdf_path(std::path::Path::new(&file_path));
+                        prewarm_pdf_launch(app.handle(), file_path.clone());
+                    }
                     pending.push((Some("main".to_string()), file_path.clone()));
                     state
                         .initial_boot_files
@@ -242,6 +295,10 @@ pub fn run() {
                     let _ = state.close_state.lock().map(|mut m| m.remove(&win_label));
                     let _ = state.ready_windows.lock().map(|mut m| m.remove(&win_label));
                     crate::commands::mupdf::mupdf_close_documents_for_window(&win_label);
+                    if win_label == "main" {
+                        let cstate = window.state::<CompanionState>();
+                        companion_stop_bridge(window.app_handle().clone(), cstate);
+                    }
                 }
                 _ => {}
             }
@@ -252,12 +309,16 @@ pub fn run() {
             dialog_open_file,
             dialog_open_dict_file,
             dialog_pick_folder,
+            dialog_pick_sidecar_folder,
             dialog_save_text_file,
             dialog_pick_save_path,
             fs_scan_folder,
+            fs_get_file_identity,
             fs_get_app_paths,
             fs_open_in_explorer,
             fs_read_buffer,
+            fs_read_text_file,
+            fs_register_sidecar_dir,
             fs_stage_epub_snapshot,
             fs_write_file,
             fs_write_binary_file,
@@ -308,6 +369,31 @@ pub fn run() {
             ai_clear_audit_log,
             ai_set_cooldown_and_limit,
             ai_bind_credential,
+            // External AI Browser Companion & Native Messaging / Side-by-Side
+            companion_detect_browsers,
+            companion_snapshot_browser_hwnds,
+            companion_list_candidate_windows,
+            companion_launch_app_window,
+            companion_dock_new_browser_window,
+            companion_dock_side_by_side,
+            companion_set_snap_state,
+            companion_activate_window,
+            companion_is_window_alive,
+            companion_start_bridge,
+            companion_stop_bridge,
+            companion_get_status,
+            companion_install_native_host,
+            companion_uninstall_native_host,
+            companion_send_command,
+            companion_open_extension_folder,
+            companion_clipboard_write,
+            companion_clipboard_read,
+            // Sign in with ChatGPT Official Branch
+            siwc_get_status,
+            siwc_sign_out,
+            siwc_cancel_sign_in,
+            siwc_start_sign_in,
+            ai_request_siwc_completion,
             // Offline ECDICT SQLite Dictionary & Resource Management
             dict_get_status,
             dict_lookup,
@@ -318,10 +404,30 @@ pub fn run() {
             dict_uninstall,
             dict_get_resource_locations,
             dict_migrate_storage,
+            dict_custom_begin_import,
+            dict_custom_insert_batch,
+            dict_custom_finish_import,
+            dict_custom_list,
+            dict_custom_toggle,
+            dict_custom_delete,
             resource_clear_audio_cache,
+            // Offline PP-OCRv6 & ONNX Runtime Asset Manager
+            ocr_model_list_status,
+            ocr_model_download,
+            ocr_model_cancel_download,
+            ocr_model_get_download_progress,
+            ocr_model_read_asset,
+            ocr_model_write_asset,
+            ocr_model_delete,
+            // Streaming Large TXT
+            txt_open_stream,
+            txt_read_chapter,
+            txt_close_stream,
             // MuPDF Native Reader
             mupdf_is_available,
             mupdf_set_store_limit,
+            mupdf_authorize_direct_pdf_path,
+            mupdf_update_quick_index,
             mupdf_stage_pdf,
             mupdf_stage_pdf_bytes,
             mupdf_stage_pdf_chunk,
@@ -333,6 +439,8 @@ pub fn run() {
             mupdf_select,
             mupdf_get_links,
             mupdf_render_page,
+            mupdf_plan_mobile_render,
+            mupdf_render_mobile_tile,
             mupdf_cancel_render,
             mupdf_enable_diagnostics,
             mupdf_get_render_diagnostics,
@@ -340,6 +448,9 @@ pub fn run() {
             mupdf_reclaim_snapshot,
             mupdf_validate_snapshot,
             mupdf_get_plain_text,
+            mupdf_extract_annotations,
+            mupdf_compute_auto_crop,
+            mupdf_get_page_image_rects,
             mupdf_export_annotated_pdf,
             // Android SAF & Keystore & Media Background Playback
             android_resolve_content_uri,

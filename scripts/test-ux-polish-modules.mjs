@@ -18,6 +18,7 @@ import {
 } from '../js/highlight-pulse.js'
 import {
     READER_TOOLBAR_ITEMS,
+    READER_TOOLBAR_PRESETS,
     getDefaultReaderToolbarVisibility,
     normalizeReaderToolbarVisibility,
     resolveReaderToolbarLayout,
@@ -165,6 +166,15 @@ test('resolveReaderToolbarLayout routes hidden applicable items into overflow me
     const pdfLayout = resolveReaderToolbarLayout(norm, { isPdf: true, isDesktop: true })
     assert.ok(pdfLayout.overflowKeys.includes('ocrPage'))
     assert.ok(!pdfLayout.overflowKeys.includes('chapterTranslate'))
+
+    // Presets exist cleanly and only reference valid READER_TOOLBAR_ITEMS keys
+    assert.ok(READER_TOOLBAR_PRESETS.full && READER_TOOLBAR_PRESETS.study && READER_TOOLBAR_PRESETS.minimal)
+    const validKeys = new Set(READER_TOOLBAR_ITEMS.map(item => item.key))
+    for (const preset of Object.values(READER_TOOLBAR_PRESETS)) {
+        for (const k of Object.keys(preset.visibility)) {
+            assert.ok(validKeys.has(k), `Preset "${preset.key}" references valid toolbar key "${k}"`)
+        }
+    }
 })
 
 // ============================================================================

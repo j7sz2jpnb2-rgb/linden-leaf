@@ -98,6 +98,7 @@ for (const item of requiredWhitelist) {
             // Omit upstream reference files and dev-only metadata from production bundle
             if (rel === 'foliate-js-main/upstream_paginator_reference.js') return false;
             if (rel === 'foliate-js-main/package.json' || rel === 'foliate-js-main/package-lock.json') return false;
+            if (rel === 'js/package.json') return false;
             if (rel === 'foliate-js-main/.github' || rel.startsWith('foliate-js-main/.github/')) return false;
             if (rel === 'foliate-js-main/tests' || rel.startsWith('foliate-js-main/tests/')) return false;
             // Tesseract: .wasm.js factories inline WASM via Base64; omit duplicate standalone .wasm binaries

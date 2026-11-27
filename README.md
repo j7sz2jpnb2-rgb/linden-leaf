@@ -4,8 +4,8 @@
   <h1>Linden Leaf</h1>
 
   <p>
-    <strong>A quiet, local-first eBook reader &amp; PDF study workbench for Windows and Android.</strong><br/>
-    <sub>菩提叶阅读 · 轻盈、本地优先的跨平台全格式电子书阅读与研读工作台</sub>
+    <strong>A local-first eBook reader &amp; PDF study workbench for Windows and Android.</strong><br/>
+    <sub>菩提叶阅读 · 本地优先的跨平台全格式电子书与 PDF 研读工作台</sub>
   </p>
 
   <p>
@@ -14,7 +14,7 @@
 
   <p>
     <a href="https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases">
-      <img src="https://img.shields.io/badge/release-v1.0.0%20beta-3b6e52?style=flat-square" alt="Release v1.0.0 beta" />
+      <img src="https://img.shields.io/badge/release-v1.0.0-3b6e52?style=flat-square" alt="Release v1.0.0" />
     </a>
     <img src="https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Android%20arm64-475569?style=flat-square" alt="Platforms" />
     <img src="https://img.shields.io/badge/engine-Tauri%202%20%C2%B7%20MuPDF%20%C2%B7%20Foliate.js-52525b?style=flat-square" alt="Stack" />
@@ -32,118 +32,87 @@
 
 ---
 
-Linden Leaf is built for unhurried long-form reading, serious PDF study, and lasting personal notes. Your books, highlights, and reading history stay local on your own devices first—fast offline, calm on screen, and cleanly portable between Windows and Android in open formats.
+Linden Leaf is built for serious long-form reading, technical PDF study, and durable personal notes. Your books, highlights, and reading history stay local on your own devices first—fast offline, quiet on screen, and portable across Windows and Android in open formats.
 
-Built-in **English** and **Simplified Chinese (`简体中文`)** interfaces are selectable on first launch or anytime in Settings.
-
----
-
-## Platforms & Rendering Engines
-
-| Platform | Shell & Storage | PDF Engine | Reflowable & Comic Engine | Page Turns & Native UX |
-| --- | --- | --- | --- | --- |
-| **Windows 10 / 11 (x64)** | Tauri 2 (Rust) + WebView2 · IndexedDB + SQLite | Native **MuPDF 1.25.4** (optional multi-threaded rendering) + **PDF.js** fallback | **Foliate.js** (`EPUB`, `MOBI`, `AZW`, `AZW3`, `DOCX`, `FB2`, `CBZ`, `TXT`, `MD`) | Instant zero-latency turns, smooth scroll, true multi-window reading, 10 file associations |
-| **Android (arm64, API 24+)** | Tauri 2 Mobile + Android WebView · IndexedDB + SQLite | **PDF.js** (default) + switchable native **MuPDF 1.25.4** in Release builds | **Foliate.js** (`EPUB`, `MOBI`, `AZW`, `AZW3`, `DOCX`, `FB2`, `CBZ`, `TXT`, `MD`) | 3D WebGL Page Curl / Slide / Instant, full-screen tap controls, background media TTS, SAF export |
+Built-in **English** and **Simplified Chinese (`简体中文`)** interfaces can be switched anytime.
 
 ---
 
-## What Makes Linden Leaf Stand Out
+## Features
 
-### 1. A Serious PDF Study Workbench
-- **Native MuPDF 1.25.4 Core**: Crisp vector rendering and accurate text selection on Windows—with optional dual-page parallel rasterization for heavy documents—plus in-place **PDF.js ↔ MuPDF** engine switching on Android Release builds with automatic fallback.
-- **Split-Screen Reference View**: Pin a figure, table, footnote, or appendix in a secondary viewport while continuing to read and annotate in the main view.
-- **Crop, Scan Cleanup & Offline OCR**: Independent odd/even page margin cropping, non-destructive scan enhancement filters, and built-in offline **Tesseract.js OCR** that turns scanned pages into selectable, searchable text layers.
-- **Real Annotated PDF Export**: Highlights, underlines, strikethroughs, sticky notes, freehand ink, and eraser strokes write back cleanly into standard annotated PDF files alongside manual or OCR-assisted tables of contents.
+### PDF Study Workbench
+- **Native MuPDF + PDF.js Dual Engine**: High-precision vector rendering on Windows (with optional dual-page parallel rasterization), plus switchable **PDF.js ↔ MuPDF** engines on Android Release builds with automatic fallback.
+- **Zero-Copy Opening & Split Reference View**: Open external local PDFs instantly without duplicating files first; pin figures, tables, or appendices into a split reference pane while navigating forward/back through your reading history.
+- **Crop, Scan Cleanup & Dark-Mode Color Preservation**: Automatic whitespace detection with odd/even margin cropping, scan clarity presets, and true-color preservation for embedded illustrations when reading in dark mode.
+- **Standard PDF Annotation Round-Trip**: Reads embedded PDF annotations and writes highlights, underlines, strikethroughs, sticky notes, freehand ink, and eraser edits cleanly back into standard `.pdf` files.
 
-### 2. Reflowable Reading & Smart TXT Formatting
-- **10 Formats, One Quiet Desk**: Native support for `EPUB`, `PDF`, `DOCX`, `TXT`, `MD`, `MOBI`, `AZW`, `AZW3`, `FB2`, and `CBZ`.
-- **Typography That Respects the Book**: Preserves publisher EPUB layouts by default while letting you customize fonts, margins, line height, dual-column spreads, vertical CJK typesetting, custom font imports, named reading presets, and per-book overrides.
-- **Thoughtful TXT & Markdown Engine**: Automatic encoding detection, chapter & table-of-contents parsing, poetry layout recognition, soft line-wrap repair, and custom regex chapter rules tested safely in an isolated Worker.
-- **Tactile Themes**: Follows your system light/dark mode with warm paper, parchment, dark, OLED black, and customizable semantic color themes.
+### Offline OCR for Real Books
+- **Ready Out of the Box + On-Demand PP-OCRv6**: Works offline immediately with built-in **Tesseract.js**, or enable on-demand **PP-OCRv6** (*Small* for multilingual/Traditional/classical texts, *Tiny* for fast light hardware) accelerated via Web Worker **WebGPU** or **WASM SIMD** with mirror and local file import support.
+- **Horizontal, Two-Column & Vertical Right-to-Left**: Reconstructs academic two-column layouts and Classical/Traditional Chinese **vertical right-to-left columns** into selectable text overlays with per-character bounding boxes, persistent page caching, and idle lookahead pre-OCR. *(See [docs/OFFLINE_OCR.md](docs/OFFLINE_OCR.md) for architecture details.)*
 
-### 3. Tailored Desktop Productivity & Mobile Craft
-- **True Multi-Window Desktop Reading**: Open multiple books simultaneously in independent satellite reader windows alongside the main bookshelf, with live cross-window theme and language sync.
-- **Linked Local Libraries**: Link existing folders on Windows as live shelves with incremental rescanning, plus always-on-top pinning, auto-scroll, and back/forward reading location history.
-- **Fluid Mobile Reading**: Dedicated Android shell with warm editorial aesthetics, high-frame-rate **3D WebGL Page Curl** and **Slide** modes, full-screen tap-to-toggle toolbars, and swipe navigation.
+### Ten Formats, Typography & Giant TXT
+- **Ten Native Formats**: `EPUB`, `PDF`, `DOCX`, `TXT`, `MD`, `MOBI`, `AZW`, `AZW3`, `FB2`, and `CBZ`.
+- **Publisher Fidelity & Fine Controls**: Preserves publisher EPUB typography by default while unlocking fonts, custom font imports, margins, dual-column spreads, vertical CJK typesetting, named presets, and reversible **Simplified ↔ Traditional Chinese** conversion.
+- **Streaming Large TXT Engine**: Rust-backed incremental chapter streaming handles massive `.txt` novels smoothly alongside encoding detection, poetry formatting, content purification rules, and isolated regex TOC rules.
 
-### 4. Notes, Full-Library Search & Reading Journal
-- **Full-Text Search**: Fast search inside the current book or across your entire library—including accurate CJK matching—with progressive results and direct jump-to-passage navigation.
-- **Highlights & Quote Cards**: Multi-color highlights, inline notes, bookmarks, footnote popups, and typographic quote cards ready to save or share.
-- **Honest Reading & Listening Timeline**: Tracks daily per-book reading and listening duration (intelligently merging overlapping sessions), complete with a yearly activity heatmap, reading goals, and Markdown/JSON export via Windows native dialogs or Android SAF.
+### Local-First Sync & Obsidian Workflow
+- **Four Sync Backends + Divergence Guard**: Bidirectional incremental sync via **WebDAV**, **Local Folder**, **OneDrive**, or **Google Drive**, with an explicit conflict/divergence banner so remote progress never silently overwrites local reading.
+- **Obsidian-Friendly Markdown Sidecar**: Updates Linden Leaf's managed note blocks per book idempotently while keeping your own Obsidian/Logseq prose, tags, and backlinks untouched, alongside `LindenLeaf_Reading_Notes_and_Stats.md`.
+- **Text-Fingerprint Relinking & Kindle Import**: Rebind moved or renamed local books via text fingerprints without losing notes, import deduplicated **Kindle `My Clippings.txt`** highlights, and export/restore full JSON backups anytime.
 
-### 5. Local-First Multi-Cloud Sync (Obsidian-Friendly)
-- **Choose Your Own Storage**: Bidirectional incremental sync across **WebDAV**, **Local Folder**, **OneDrive**, and **Google Drive**—syncing reading progress, highlights, notes, PDF annotations, reading lists, ratings, tags, presets, and daily timelines.
-- **Readable Markdown Mirror**: Your sync directory automatically maintains a clean, human-readable `LindenLeaf_Reading_Notes_and_Stats.md` so you can browse your notes and daily log directly in **Obsidian**, **Logseq**, or any text editor.
-- **Full Local Backups**: Export and restore complete structured JSON backups of metadata, annotations, reading history, and preferences at any time.
+### Ergonomics, Dictionaries & Listening
+- **Focus & Privacy Aids**: Horizontal reading ruler, paragraph focus dimming, instant Privacy Veil (`Alt+Shift+H`), customizable reader top toolbar with onboarding guide, tactile paper/OLED themes, and **Android 3D WebGL Page Curl**.
+- **ECDICT + Custom MDict / StarDict**: Download the offline **ECDICT** dictionary on demand or import local **`.mdx`** and **StarDict** dictionaries.
+- **Background TTS & Honest Stats**: System or custom HTTP TTS with Android foreground media controls (lock-screen playback, audio focus, headphone-unplug pause), plus full-library CJK search and overlap-aware reading/listening heatmaps.
 
-### 6. Background Listening, Offline Dictionary & Optional AI
-- **TTS & Android Background Audio**: Works with system voices and custom HTTP/OpenAI-compatible TTS endpoints. On Android, a dedicated foreground media service brings lock-screen & notification controls, audio focus handling, and automatic pause when headphones disconnect.
-- **On-Demand Offline Dictionary**: Download or import the 770,000+ entry **ECDICT** SQLite dictionary for instant offline word lookup without bloating the base installer.
-- **Bring-Your-Own AI Companion**: Optionally connect **OpenAI**, **DeepSeek**, local **Ollama**, or any OpenAI-compatible API for selection Q&A, passage explanations, chapter summaries, and inline bilingual chapter translation.
+### AI Reading Companion (BYOA & BYOK)
+- **Bring Your Own AI (Windows Browser Companion)**: Connect your already logged-in Chrome or Edge session (**ChatGPT**, **Gemini**, **Google AI Studio**, **DeepSeek**, or custom HTTPS sites) via the bundled Chromium extension ([setup guide](extensions/chromium-companion/README.md)) and side-by-side window docking. Keeps one continuous conversation per book without extra API billing or WebView login issues, and lets you pull replies back into your book notes.
+- **Bring Your Own Key (BYOK) & Official Sign-In**: Also supports connecting **OpenAI**, **DeepSeek**, local **Ollama**, or any OpenAI-compatible API directly in the built-in sidebar, plus optional **Sign in with ChatGPT**, with local cooldowns, daily limits, and audit logs.
 
 ---
 
-## Privacy & Security by Design
+## Platforms at a Glance
 
-- **Local-First, Zero Telemetry**: No account required, no ads, no analytics, and no hidden background tracking.
-- **OS-Level Credential Protection**: Sync passwords, OAuth tokens, and AI/TTS API keys are encrypted locally using **Windows DPAPI** and **Android Keystore (AES-GCM)** and are excluded from sync payloads.
-- **Hardened Rendering**: Reflowable books render inside script-disabled sandboxed frames; the bundled MuPDF 1.25.4 core includes security backports (`CVE-2026-7233`, `CVE-2026-3308`, `CVE-2026-25556`).
-- **Transparent Network Access**: Network requests occur only for user-configured sync, dictionary downloads, AI/TTS endpoints, and an optional GitHub Releases update check on startup. See [LICENSE.txt](LICENSE.txt) for full disclosures.
-
----
-
-## Downloads
-
-Pre-built beta packages are available on the [**GitHub Releases**](https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases) page:
-
-- **Windows (x64)**: `Linden-Leaf-1.0.0-x64-setup.exe` — Bilingual NSIS installer with native MuPDF and file associations for all 10 formats.
-- **Android (arm64-v8a)**: `Linden-Leaf-1.0.0-android-arm64-release.apk` — Signed Release APK for Android 7.0+ (API 24+).
-
-> If upgrading from an earlier debug APK on Android, uninstall the debug build once before installing the signed Release APK.
+| Platform | Stack | Key Capabilities |
+| --- | --- | --- |
+| **Windows 10 / 11 (x64)** | Tauri 2 (Rust) + WebView2 · MuPDF 1.25.4 + PDF.js · Foliate.js | Zero-copy PDF open, multi-window reading, Chromium Browser AI Companion, linked local folders, 10 file associations |
+| **Android (arm64, API 24+)** | Tauri 2 Mobile + Android WebView · PDF.js + switchable MuPDF · Foliate.js | 3D WebGL Page Curl / Slide modes, full-screen tap UI, foreground media TTS service, SAF import/export |
 
 ---
 
-## Building from Source
+## Privacy & Security
 
-### Prerequisites
-- **Node.js** `>= 20` and **pnpm** `>= 9`
-- **Rust** `>= 1.80` (with `aarch64-linux-android` target for Android)
-- **Windows**: Visual Studio Build Tools (MSVC + Windows 10/11 SDK) and MuPDF 1.25.4 source (optional `MUPDF_ROOT`)
-- **Android**: JDK 17+, Android SDK & NDK (`JAVA_HOME`, `ANDROID_HOME`, `ANDROID_NDK_HOME`)
+- **Zero Telemetry**: No user accounts, no ads, and no analytics. Books, highlights, and reading logs stay on your device unless you configure sync or AI.
+- **OS Credential Protection**: Sync secrets, OAuth tokens, and API keys are encrypted via **Windows DPAPI** and **Android Keystore** and omitted from sync payloads.
+- **Sandboxed Rendering & Hardening**: Reflowable books run in script-disabled frames; local companion IPC enforces user-scoped ACLs; bundled MuPDF includes CVE security backports. See [SECURITY.md](SECURITY.md) and [LICENSE.txt](LICENSE.txt).
 
-### Development & Verification
+---
+
+## Downloads & Building from Source
+
+Pre-built Windows (`x64` NSIS installer) and Android (`arm64-v8a` Release APK) packages are available on [**GitHub Releases**](https://github.com/j7sz2jpnb2-rgb/linden-leaf/releases).
+
+**Prerequisites**: Node.js `>= 20`, pnpm `>= 9`, Rust `>= 1.80`, plus MSVC/Windows SDK (Windows) or JDK 17 + Android SDK/NDK (Android).
+
 ```powershell
-# Load session toolchain variables (optional: set LINDEN_TOOLCHAINS_DIR / MUPDF_ROOT)
+# Load local session toolchain paths if needed
 . .\scripts\env.ps1
 
-# Launch desktop development preview
+# Start desktop dev window
 pnpm tauri dev
 
-# Run full JS & Rust verification suites
-pnpm check:syntax
-pnpm check:structure
-pnpm test:contracts
-pnpm test:composition
-pnpm test:reader-search
-pnpm test:android-tts
-pnpm test:prebeta
-node scripts/test-i18n.mjs
-node scripts/test-i18n-interactions.mjs
-node scripts/test-ui-output-safety.mjs
-node scripts/test-regression-suite.mjs
+# Run all 17 frontend verification suites (syntax, structure, i18n, safety, contracts, OCR, regressions)
+npm run verify
+
+# Run Rust unit tests
 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked --offline
-```
 
-### Release Packaging
-```powershell
-# Build Windows x64 Release binary & NSIS installer
+# Package Windows x64 installer or Android arm64 APK
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows-current.ps1
-
-# Build Android arm64 Release APK (includes both PDF.js and MuPDF by default)
 powershell -ExecutionPolicy Bypass -File .\scripts\build-android.ps1 -Mode Release -Version 1.0.0
 ```
 
-> **Android Release Signing**: Copy `src-tauri/gen/android/keystore.properties.example` to `src-tauri/gen/android/keystore.properties` (gitignored) or set `LINDEN_ANDROID_KEYSTORE_PATH`, `LINDEN_ANDROID_KEYSTORE_PASSWORD`, `LINDEN_ANDROID_KEY_ALIAS`, and `LINDEN_ANDROID_KEY_PASSWORD`. Community builds without a local keystore automatically fall back to debug signing.
+> Community Android builds without a local release keystore automatically fall back to debug signing (`src-tauri/gen/android/keystore.properties.example`).
 
 ---
 
@@ -151,16 +120,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-android.ps1 -Mode Relea
 
 | Document | Scope |
 | --- | --- |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module boundaries, shared data models, and verification commands |
-| [docs/WEBDAV_SYNC_SPECIFICATION.md](docs/WEBDAV_SYNC_SPECIFICATION.md) | Sync data schema, merge rules, and backup format specification |
-| [docs/ANDROID_MUPDF_CORE.md](docs/ANDROID_MUPDF_CORE.md) | Android native MuPDF rendering bridge, tile planner, and dual-engine switching |
-| [docs/ANDROID_PAGE_CURL.md](docs/ANDROID_PAGE_CURL.md) | Mobile WebGL page curl architecture, texture budgets, and fallbacks |
-| [patches/README.md](patches/README.md) | MuPDF 1.25.4 CVE security patch backport notes |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module boundaries, shared data models, and verification entrypoints |
+| [docs/OFFLINE_OCR.md](docs/OFFLINE_OCR.md) | Dual-tier PP-OCRv6 + Tesseract architecture, vertical/column layout, and offline import |
+| [extensions/chromium-companion/README.md](extensions/chromium-companion/README.md) | Windows Browser AI Companion extension setup and local IPC security model |
+| [docs/WEBDAV_SYNC_SPECIFICATION.md](docs/WEBDAV_SYNC_SPECIFICATION.md) | Sync schema, merge rules, divergence checks, and backups |
+| [docs/ANDROID_MUPDF_CORE.md](docs/ANDROID_MUPDF_CORE.md) | Android native MuPDF bridge, tile planner, and dual-engine switching |
+| [docs/ANDROID_PAGE_CURL.md](docs/ANDROID_PAGE_CURL.md) | Android WebGL page curl architecture and texture budgets |
+| [patches/README.md](patches/README.md) | MuPDF 1.25.4 CVE security patch backports |
+| [CHANGELOG.md](CHANGELOG.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) | Changelog, contributor guide, and security policy |
 
 ---
 
 ## License
 
-- **Original source code**: licensed under **GNU GPL-3.0-or-later** ([LICENSE-GPL-3.0.txt](LICENSE-GPL-3.0.txt)).
-- **Combined binaries linking MuPDF**: distributed under **GNU AGPL-3.0-or-later** ([LICENSE-AGPL-3.0.txt](LICENSE-AGPL-3.0.txt)) unless under a commercial Artifex license.
-- Complete third-party notices (Foliate.js, PDF.js, Tesseract.js, Mammoth.js, bundled OFL fonts) and network/privacy disclosures are listed in [LICENSE.txt](LICENSE.txt).
+- **Original source code**: **GNU GPL-3.0-or-later** ([LICENSE-GPL-3.0.txt](LICENSE-GPL-3.0.txt))
+- **Combined binaries linking MuPDF**: **GNU AGPL-3.0-or-later** ([LICENSE-AGPL-3.0.txt](LICENSE-AGPL-3.0.txt)) unless under a commercial Artifex license
+- Full third-party notices and network disclosures are documented in [LICENSE.txt](LICENSE.txt).

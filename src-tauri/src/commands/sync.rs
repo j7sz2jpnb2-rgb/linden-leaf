@@ -1527,7 +1527,7 @@ pub fn sync_oauth_loopback_cancel(session_id: String) -> bool {
     false
 }
 
-fn sync_oauth_html_body(en: bool, ok: bool) -> &'static str {
+pub(crate) fn sync_oauth_html_body(en: bool, ok: bool) -> &'static str {
     if ok {
         l10n(
             en,

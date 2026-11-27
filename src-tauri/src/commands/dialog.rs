@@ -111,6 +111,9 @@ pub async fn dialog_open_file(
                 let items: Vec<SelectedBookItem> = paths
                     .into_iter()
                     .map(|p| {
+                        if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+                            let _ = crate::commands::mupdf::authorize_direct_pdf_path(&p);
+                        }
                         let filename = p
                             .file_name()
                             .and_then(|n| n.to_str())
@@ -191,6 +194,37 @@ pub async fn dialog_pick_folder(
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| pick_folder_dialog_title(locale.as_deref()).to_string());
+        let folder: Option<PathBuf> = tokio::task::spawn_blocking(move || {
+            rfd::FileDialog::new()
+                .set_title(&dialog_title)
+                .pick_folder()
+        })
+        .await
+        .map_err(|e| format!("Dialog task failed: {}", e))?;
+
+        if let Some(ref p) = folder {
+            crate::commands::fs::register_authorized_write_dir(p);
+        }
+        Ok(folder.map(|p| p.to_string_lossy().to_string()))
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+pub async fn dialog_pick_sidecar_folder(
+    #[allow(unused)] locale: Option<String>,
+) -> Result<Option<String>, String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let dialog_title = l10n(
+            is_en_locale(locale.as_deref()),
+            "选择 Markdown 伴随笔记保存目录",
+            "Select Markdown Sidecar Notes Folder",
+        )
+        .to_string();
         let folder: Option<PathBuf> = tokio::task::spawn_blocking(move || {
             rfd::FileDialog::new()
                 .set_title(&dialog_title)

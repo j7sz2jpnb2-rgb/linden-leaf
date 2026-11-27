@@ -4601,18 +4601,19 @@ await runAsyncTest('FOCUS-04: Create-list modal provides live preview, inline er
     }
 })
 
-await runAsyncTest('U01: highlight-palette Warm Morandi 5-color normalization, legacy aliases, and dashed stroke preservation', async () => {
+await runAsyncTest('U01: highlight-palette Warm Morandi 5-color normalization and stroke tones', async () => {
     const pal = await import('../js/highlight-palette.js')
     assert.strictEqual(pal.HIGHLIGHT_PALETTE.length, 5)
     assert.strictEqual(pal.normalizeHighlightColor('yellow'), '#facc15')
-    assert.strictEqual(pal.normalizeHighlightColor('#f87171'), '#f472b6')
-    assert.strictEqual(pal.normalizeHighlightColor('red'), '#f472b6')
-    assert.strictEqual(pal.normalizeHighlightColor('#c084fc'), '#a855f7')
+    assert.strictEqual(pal.normalizeHighlightColor('pink'), '#f472b6')
+    assert.strictEqual(pal.normalizeHighlightColor('coral'), '#f472b6')
     assert.strictEqual(pal.normalizeHighlightColor('purple'), '#a855f7')
+    assert.strictEqual(pal.normalizeHighlightColor('lilac'), '#a855f7')
+    assert.strictEqual(pal.getHighlightUiHex('#facc15', false), '#d4a644')
     assert.strictEqual(pal.getHighlightStrokeHex('#facc15', false), '#c8921e')
     assert.strictEqual(pal.getHighlightStrokeHex('#facc15', true), '#e5b84b')
-    assert.strictEqual(pal.matchesHighlightColorFilter('#f87171', '#f472b6'), true)
-    assert.strictEqual(pal.matchesHighlightColorFilter('#c084fc', '#a855f7'), true)
+    assert.strictEqual(pal.matchesHighlightColorFilter('coral', '#f472b6'), true)
+    assert.strictEqual(pal.matchesHighlightColorFilter('lilac', '#a855f7'), true)
     assert.strictEqual(pal.matchesHighlightColorFilter('#60a5fa', 'all'), true)
     assert.strictEqual(pal.matchesHighlightColorFilter('#60a5fa', '#4ade80'), false)
 })
@@ -4721,6 +4722,10 @@ await runAsyncTest('U04: epub-range-editor sentence boundary snap handles CJK qu
     const en = 'First sentence. Second key idea! Third sentence.'
     const resEn = expandTextRangeOffsetsToSentence(en, 23, 26)
     assert.strictEqual(en.slice(resEn.start, resEn.end), 'Second key idea!')
+
+    const abbr = 'Earlier. Dr. Smith measured 3.14 in the U.S. yesterday. Next sentence.'
+    const resAbbr = expandTextRangeOffsetsToSentence(abbr, abbr.indexOf('measured'), abbr.indexOf('measured') + 8)
+    assert.strictEqual(abbr.slice(resAbbr.start, resAbbr.end), 'Dr. Smith measured 3.14 in the U.S. yesterday.')
 })
 
 await runAsyncTest('U05: tts-player shouldStripTtsSuperscript strips footnotes and preserves math/unit exponents', async () => {
@@ -4751,6 +4756,10 @@ await runAsyncTest('U06: text-copy-utils smartCleanPdfCopyText joins CJK/EN pros
     )
     const listText = '- item alpha\n- item beta\n- item gamma'
     assert.strictEqual(smartCleanPdfCopyText(listText), listText)
+    assert.strictEqual(
+        smartCleanPdfCopyText('A well-\nknown and cost-\neffective approach.'),
+        'A well-known and cost-effective approach.'
+    )
 })
 
 await runAsyncTest('U07: reader-cards-controller sanitizeFootnoteHtml strips active scripts/handlers while keeping safe markup', async () => {
@@ -4948,6 +4957,320 @@ await runAsyncTest('U11: Peek mode skips progress snapshots and sidebar delete c
         drawerSrc.includes('deleteAnnotation({ value: `${note.cfi}::${note.style || \'highlight\'}`, id: note.id })'),
         'Sidebar card delete must pass compound value::style key matching Overlayer'
     )
+})
+
+await runAsyncTest('U18: Same-book Portal navigates bidirectionally and EpubRangeEditor keeps handles & cancels on pointercancel', async () => {
+    const { AnnotationsDrawerController } = await import('../js/annotations-drawer-controller.js')
+    const visitedPages = []
+    const controller = Object.create(AnnotationsDrawerController.prototype)
+    controller._portalNextDirection = new Map()
+    controller.closeDrawer = () => {}
+    controller.app = {
+        navHistory: { pushLocation() {} },
+        pdfViewport: {
+            goToPage(p) { visitedPages.push(p) },
+            pulseHighlight() {},
+        },
+    }
+    const sameBookPortal = {
+        id: 'ptl-same-book',
+        sourceBookId: 'b1',
+        targetBookId: 'b1',
+        sourceHighlightId: 'h1',
+        targetHighlightId: 'h2',
+        sourcePdfTarget: { page: 2, rects: [[0, 0.1, 0.5, 0.2]] },
+        targetPdfTarget: { page: 9, rects: [[0, 0.2, 0.5, 0.3]] },
+    }
+    await controller.navigateToPortal(sameBookPortal, 'b1')
+    await controller.navigateToPortal(sameBookPortal, 'b1')
+    await controller.navigateToPortal(sameBookPortal, 'b1', { fromHighlightId: 'h2' })
+    assert.deepStrictEqual(visitedPages, [9, 2, 2], 'Same-book portal must alternate target <-> source and respect active endpoint')
+
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+    const editorSrc = fs.readFileSync(path.join(root, 'js', 'epub-range-editor.js'), 'utf8')
+    assert.ok(editorSrc.includes('pointercancel') && editorSrc.includes('cancelDrag'), 'EPUB range editor must separate pointercancel rollback from finishDrag')
+    assert.ok(editorSrc.includes('this._previewLayer') && editorSrc.includes('this._startHandle'), 'EPUB range editor must reuse persistent handle elements during drag')
+})
+
+await runAsyncTest('U16: MuPdfTauriDriver.renderMobilePlan composites bleed-trimmed tiles into target region', async () => {
+    const { MuPdfTauriDriver } = await import('../js/pdf-driver.js')
+    const { platformBridge } = await import('../js/platformBridge.js')
+    const prevInvoke = platformBridge._invokeTauri
+    const prevDocument = globalThis.document
+    const prevImageData = globalThis.ImageData
+    const drawCalls = []
+    const zeroedSizes = []
+    const makeMockCanvas = () => {
+        const ctx = {
+            putImageData() {},
+            drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh) {
+                drawCalls.push({ sx, sy, sw, sh, dx, dy, dw, dh })
+            },
+        }
+        const c = {
+            _w: 0, _h: 0, dataset: {},
+            get width() { return this._w },
+            set width(v) { this._w = v; if (v === 0) zeroedSizes.push('zeroed') },
+            get height() { return this._h },
+            set height(v) { this._h = v },
+            getContext() { return ctx },
+        }
+        return c
+    }
+    const makeLlp2 = (w, h, ox, oy) => {
+        const len = w * h * 4
+        const buf = new ArrayBuffer(52 + len)
+        const u8 = new Uint8Array(buf)
+        u8[0] = 76; u8[1] = 76; u8[2] = 80; u8[3] = 50 // LLP2
+        const dv = new DataView(buf)
+        dv.setUint32(4, w, true)
+        dv.setUint32(8, h, true)
+        dv.setUint32(12, w * 4, true)
+        dv.setInt32(16, ox, true)
+        dv.setInt32(20, oy, true)
+        dv.setUint32(48, len, true)
+        return buf
+    }
+    globalThis.ImageData = class { constructor(data, w, h) { this.data = data || new Uint8ClampedArray(w * h * 4); this.width = w; this.height = h } }
+    globalThis.document = { createElement: () => makeMockCanvas() }
+    const packets = [makeLlp2(51, 50, 100, 200), makeLlp2(51, 50, 149, 200)]
+    platformBridge._invokeTauri = async (cmd, args) => {
+        if (cmd === 'mupdf_render_mobile_tile') return packets[args.tileIndex]
+        return null
+    }
+    try {
+        const driver = new MuPdfTauriDriver()
+        driver.docId = 'doc-mobile-tile'
+        const plan = {
+            scale: 2, rotation: 0, matrix: [2, 0, 0, 2, 0, 0],
+            region: [100, 200, 200, 250], tileEdge: 50, bleed: 1, columns: 2, rows: 1, maxTileBytes: 4 * 1024 * 1024,
+            tiles: [
+                { content: [100, 200, 150, 250], clip: [100, 200, 151, 250], rgbaBytes: 51 * 50 * 4 },
+                { content: [150, 200, 200, 250], clip: [149, 200, 200, 250], rgbaBytes: 51 * 50 * 4 },
+            ]
+        }
+        const composite = await driver.renderMobilePlan(0, plan, new AbortController().signal, 1)
+        assert.strictEqual(composite.width, 100)
+        assert.strictEqual(composite.height, 50)
+        assert.strictEqual(composite.offsetX, 100)
+        assert.strictEqual(composite.offsetY, 200)
+        assert.deepStrictEqual(drawCalls, [
+            { sx: 0, sy: 0, sw: 50, sh: 50, dx: 0, dy: 0, dw: 50, dh: 50 },
+            { sx: 1, sy: 0, sw: 50, sh: 50, dx: 50, dy: 0, dw: 50, dh: 50 },
+        ])
+        assert.strictEqual(zeroedSizes.length, 2, 'Each temporary tile bitmap must be freed immediately after drawImage')
+    } finally {
+        platformBridge._invokeTauri = prevInvoke
+        globalThis.document = prevDocument
+        globalThis.ImageData = prevImageData
+    }
+})
+
+await runAsyncTest('U17: PdfViewport touch long-press selects word and drag extends native MuPDF selection', async () => {
+    const { PdfViewport } = await import('../js/pdf-viewport.js')
+    const prevDoc = globalThis.document
+    const prevWin = globalThis.window
+    const makeNode = (tag = 'DIV') => {
+        const classes = new Set()
+        const el = {
+            tagName: tag.toUpperCase(),
+            className: '',
+            classList: {
+                add: (...xs) => xs.forEach(x => classes.add(x)),
+                remove: (...xs) => xs.forEach(x => classes.delete(x)),
+                toggle: (x, f) => { if (f === undefined ? !classes.has(x) : f) classes.add(x); else classes.delete(x) },
+                contains: (x) => classes.has(x),
+            },
+            innerHTML: '',
+            style: {},
+            dataset: {},
+            children: [],
+            listeners: {},
+            setAttribute(k, v) { this[k] = v },
+            addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn) },
+            removeEventListener() {},
+            append(...args) { for (const a of args) { if (a && typeof a === 'object') a.parentElement = this; this.children.push(a) } },
+            replaceChildren(...args) { this.children = []; this.append(...args) },
+            querySelector(sel) {
+                const cls = sel.startsWith('.') ? sel.slice(1) : null
+                for (const c of this.children) {
+                    if (cls && (String(c.className || '').split(/\s+/).includes(cls) || c.classList?.contains?.(cls))) return c
+                    const deep = c?.querySelector?.(sel)
+                    if (deep) return deep
+                }
+                return null
+            },
+            querySelectorAll(sel) { const r = []; const hit = this.querySelector(sel); if (hit) r.push(hit); return r },
+            get firstChild() { return this.children[0] || null },
+            getBoundingClientRect() { return { left: 0, top: 0, width: 595, height: 842, right: 595, bottom: 842 } },
+            closest() { return null },
+            remove() {},
+        }
+        return el
+    }
+    const container = makeNode('DIV')
+    globalThis.window = { devicePixelRatio: 1, innerWidth: 400, innerHeight: 800, addEventListener() {}, removeEventListener() {} }
+    globalThis.document = {
+        head: makeNode('HEAD'),
+        getElementById: () => 'style',
+        createElement: (tag) => makeNode(tag),
+        createElementNS: (_ns, tag) => makeNode(tag),
+    }
+    let emitted = null
+    try {
+        const chars = [
+            { text: 'H', line: 0, size: 14, quad: [20, 20, 32, 20, 20, 40, 32, 40] },
+            { text: 'i', line: 0, size: 14, quad: [32, 20, 40, 20, 32, 40, 40, 40] },
+            { text: ' ', line: 0, size: 14, quad: [40, 20, 48, 20, 40, 40, 48, 40] },
+            { text: 'A', line: 0, size: 14, quad: [48, 20, 62, 20, 48, 40, 62, 40] },
+        ]
+        const driver = {
+            kind: 'mupdf',
+            numPages: 1,
+            async getTextGeometry() { return chars },
+            async select(_page, a, b, mode) {
+                if (mode === 'word') return { text: 'Hi', quads: [[20, 20, 40, 20, 20, 40, 40, 40]], a, b }
+                return { text: 'Hi A', quads: [[20, 20, 62, 20, 20, 40, 62, 40]], a, b }
+            },
+            destroy() {},
+        }
+        const viewport = new PdfViewport(container, {
+            onSelection: (sel) => { emitted = sel },
+        })
+        viewport.driver = driver
+        viewport.pageSizes = [{ width: 595, height: 842, x0: 0, y0: 0 }]
+        const slot = makeNode('DIV')
+        const selLayer = makeNode('DIV')
+        selLayer.className = 'pdf-native-selection-layer'
+        slot.append(selLayer)
+        viewport.activeSlots.set(0, slot)
+
+        const gesture = { time: 0, x: 26, y: 30, moved: false }
+        viewport._singleTouchStart = gesture
+        const started = await viewport._startTouchNativeSelection(26, 30, gesture)
+        assert.strictEqual(started, true)
+        assert.strictEqual(viewport.scrollArea.style.touchAction, 'none')
+        await viewport._updateTouchNativeDrag(56, 30)
+        await viewport._finishTouchNativeDrag({
+            changedTouches: [{ clientX: 56, clientY: 30 }],
+            cancelable: true,
+            preventDefault() {},
+        })
+        assert.ok(emitted && emitted.text.includes('Hi A'), 'Touch drag should emit extended native MuPDF selection')
+        assert.strictEqual(viewport.scrollArea.style.touchAction, '', 'Scroll touchAction must restore on touchend')
+        const startHandle = selLayer.children.find(c => c?.dataset?.handle === 'start')
+        const endHandle = selLayer.children.find(c => c?.dataset?.handle === 'end')
+        assert.ok(startHandle && endHandle, 'Touch selection should render draggable start/end handles')
+        viewport.destroy()
+    } finally {
+        globalThis.document = prevDoc
+        globalThis.window = prevWin
+    }
+})
+
+await runAsyncTest('U19: ReadingReference v2, Dictionary context explain, External Companion Level C fallback, and SIWC config work cleanly', async () => {
+    const {
+        createReferenceSnapshot,
+        extractEnclosingSentenceContext,
+        formatExternalAiReferencePrompt
+    } = await import('../js/ai-context.js')
+    const {
+        ExternalAiCompanionManager,
+        saveCompanionConfig,
+        validateCustomHttpsUrl
+    } = await import('../js/external-ai-companion.js')
+    const { DEFAULT_AI_CONFIG, getAiConfig, saveAiConfig } = await import('../js/reading-ai-assistant.js')
+
+    assert.strictEqual(DEFAULT_AI_CONFIG.authMode, 'api')
+    assert.strictEqual(validateCustomHttpsUrl('http://example.com').valid, false)
+    assert.strictEqual(validateCustomHttpsUrl('https://chat.example.com/').valid, true)
+
+    const sentence = extractEnclosingSentenceContext({
+        pageText: 'First sentence ends here. The ephemeral beauty of dawn faded quickly across the hills. Next line follows.',
+        selectedText: 'ephemeral'
+    })
+    assert.ok(sentence.includes('ephemeral beauty of dawn'), `Expected enclosing sentence, got: ${sentence}`)
+
+    const ref = createReferenceSnapshot(
+        { id: 'b_ephem', title: 'Dawn Essays', author: 'A. Writer', documentHash: 'hash_1' },
+        {
+            text: 'ephemeral',
+            cfi: 'epubcfi(/6/4!/4/2:10)',
+            sentenceContext: sentence,
+            chapterOrPage: 'Ch. 1',
+            isWordContext: true
+        }
+    )
+    assert.strictEqual(ref.schemaVersion, 2)
+    assert.strictEqual(ref.kind, 'word_context')
+    assert.strictEqual(ref.anchor.type, 'epub_cfi')
+    assert.strictEqual(ref.anchor.cfi, 'epubcfi(/6/4!/4/2:10)')
+
+    const pdfRef = createReferenceSnapshot(
+        { id: 'b_pdf_ref', title: 'PDF Treatise', documentHash: 'hash_pdf' },
+        { text: 'theorem', pdfTarget: { page: 11, rects: [] } }
+    )
+    assert.strictEqual(pdfRef.pageIndex, 11)
+    assert.strictEqual(pdfRef.anchor.type, 'pdf_target')
+    assert.strictEqual(pdfRef.anchor.pageIndex, 11)
+    assert.ok(pdfRef.chapterOrPage.includes('12'), `Expected 1-based page number 12 in chapterOrPage, got: ${pdfRef.chapterOrPage}`)
+
+    const { readFileSync } = await import('node:fs')
+    const assistantSrc = readFileSync(new URL('../js/reading-ai-assistant.js', import.meta.url), 'utf8')
+    const queueBlockMatch = assistantSrc.match(/if \(queueIfBusy\) \{[\s\S]*?\n    \}/)
+    assert.ok(queueBlockMatch, 'queueIfBusy recursion block should exist in reading-ai-assistant.js')
+    assert.ok(queueBlockMatch[0].includes('purpose, endpoint, model, apiKey'), 'queueIfBusy must forward original endpoint & model so SIWC requests stay SIWC')
+    assert.ok(!queueBlockMatch[0].includes('targetEndpoint') && !queueBlockMatch[0].includes('targetModel'), 'queueIfBusy must not rewrite endpoint/model into resolved targetEndpoint/targetModel')
+
+    const formatted = formatExternalAiReferencePrompt(ref)
+    assert.ok(formatted.includes('Dawn Essays') && formatted.includes('ephemeral') && formatted.includes('faded quickly'))
+
+    const prevLs = globalThis.localStorage
+    const prevWin = globalThis.window
+    const mem = new Map()
+    globalThis.localStorage = {
+        getItem: k => mem.get(k) ?? null,
+        setItem: (k, v) => mem.set(k, String(v)),
+        removeItem: k => mem.delete(k)
+    }
+    globalThis.window = { open() {}, innerWidth: 1280 }
+    try {
+        saveCompanionConfig({ companionMode: 'external', providerId: 'gemini' })
+        await saveAiConfig({ authMode: 'siwc', siwcModel: 'gpt-5-codex' })
+        assert.strictEqual(getAiConfig().authMode, 'siwc')
+
+        let copiedPayload = ''
+        const toasts = []
+        const mgr = new ExternalAiCompanionManager({
+            currentBookId: 'b_ephem',
+            currentBookData: { id: 'b_ephem', title: 'Dawn Essays' },
+            dialogs: { showToast(m) { toasts.push(m) } }
+        })
+        mgr._copyTextSafe = async (txt) => { copiedPayload = txt; return true }
+
+        const delivery = await mgr.sendReference({
+            text: 'ephemeral',
+            cfi: 'epubcfi(/6/4!/4/2:10)',
+            sentenceContext: sentence,
+            chapterOrPage: 'Ch. 1'
+        }, { isWordContext: true })
+        assert.strictEqual(delivery.ok, true)
+        assert.strictEqual(delivery.fallback, 'clipboard')
+        assert.ok(copiedPayload.includes('ephemeral') && copiedPayload.includes('Dawn Essays'))
+
+        // Origin anchor remains addressable after switching current book
+        mgr.app.currentBookId = 'other_book'
+        const resolved = mgr.getReferenceById(delivery.referenceId)
+        assert.strictEqual(resolved.bookId, 'b_ephem')
+        assert.strictEqual(resolved.cfi, 'epubcfi(/6/4!/4/2:10)')
+    } finally {
+        if (prevLs === undefined) delete globalThis.localStorage
+        else globalThis.localStorage = prevLs
+        if (prevWin === undefined) delete globalThis.window
+        else globalThis.window = prevWin
+    }
 })
 
 // Sequential async runner (Q09)

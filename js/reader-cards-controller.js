@@ -195,12 +195,23 @@ export class ReaderCardsController {
             }
         });
         this.events.on(this.dom.btnDictAskAi, 'click', () => {
-            const word = this._currentDictResult?.word || this._currentDictResult?.normalizedWord
+            const word = this._currentDictResult?.word || this._currentDictResult?.normalizedWord || this._lastDictSelectionInfo?.text
+            const dictSel = this._lastDictSelectionInfo ? { ...this._lastDictSelectionInfo } : {}
             this.hideDictionaryCard()
             this.app.annotations?.clearActiveTextSelection?.()
             this.app.annotations?.hideSelectionPopup?.()
-            if (word && this.app.aiSidebar) {
-                this.app.aiSidebar.openWithSelection({ text: word, chapterOrPage: t('cards.dict.aiLabel') })
+            if (!word) return
+            const refPayload = {
+                ...dictSel,
+                text: word,
+                chapterOrPage: dictSel.chapterOrPage || t('cards.dict.aiLabel'),
+                isWordContext: true,
+                kind: 'word_context'
+            }
+            if (typeof this.app.openAiWithReference === 'function') {
+                this.app.openAiWithReference(refPayload, { isWordContext: true })
+            } else if (this.app.aiSidebar) {
+                this.app.aiSidebar.openWithSelection(refPayload, { isWordContext: true })
             }
         });
         this.events.on(this.app.appearance.dom.settingDictEnabled, 'change', (e) => {
@@ -223,8 +234,12 @@ export class ReaderCardsController {
             this.hideParaTranslationCard()
             this.app.annotations?.clearActiveTextSelection?.()
             this.app.annotations?.hideSelectionPopup?.()
-            if (original && this.app.aiSidebar) {
-                this.app.aiSidebar.openWithSelection({ text: original, chapterOrPage: t('cards.para.aiLabel') })
+            if (!original) return
+            const refPayload = { text: original, chapterOrPage: t('cards.para.aiLabel') }
+            if (typeof this.app.openAiWithReference === 'function') {
+                this.app.openAiWithReference(refPayload)
+            } else if (this.app.aiSidebar) {
+                this.app.aiSidebar.openWithSelection(refPayload)
             }
         });
         if (this.dom.dictCardBody) {

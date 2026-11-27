@@ -281,7 +281,12 @@ export class MobileShellController {
     }
 
     isMobileViewport() {
-        return platformBridge.isAndroid || window.innerWidth < 768
+        if (platformBridge.isAndroid) return true
+        // Keep Windows/desktop side-by-side companion docked mode in desktop UI down to 480px width
+        if (platformBridge.isTauri && window.app?.externalCompanion?.isActive && window.innerWidth >= 480) {
+            return false
+        }
+        return window.innerWidth < 768
     }
 
     syncViewportArtifacts(isMobile) {

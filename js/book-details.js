@@ -5,6 +5,7 @@
 import * as db from './db.js'
 import { setReadingStatus, updateBookTags, resolveReadingState } from './tags-manager.js'
 import { regenerateBookCover, normalizeCoverBlob } from './pdf-cover.js'
+import { scoreRelinkCandidate } from './document-identity.js'
 import { escapeHTML, renderEditorialCoverHTML } from './ui-format.js'
 import { t } from './i18n.js'
 
@@ -260,6 +261,7 @@ export class BookDetailsModal {
                             <button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-change-cover" title="${escapeHTML(t('bookDetails.changeCoverTitle'))}">${escapeHTML(t('bookDetails.changeCoverBtn'))}</button>
                             <button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-reset-cover" title="${escapeHTML(t('bookDetails.resetCoverTitle'))}">${escapeHTML(t('bookDetails.resetCoverBtn'))}</button>
                             <button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-toggle-archive" title="${escapeHTML(isArchived ? t('bookDetails.unarchiveTitle') : t('bookDetails.archiveTitle'))}">${escapeHTML(isArchived ? t('bookDetails.unarchiveBtn') : t('bookDetails.archiveBtn'))}</button>
+                            <button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-relink-notes" title="${escapeHTML(t('bookDetails.relinkNotesTitle'))}">${escapeHTML(t('bookDetails.relinkNotesBtn'))}</button>
                             ${hasLocalFile ? `<button type="button" class="book-details-menu-item" role="menuitem" id="btn-details-remove-local-file" title="${escapeHTML(t('bookDetails.removeLocalFileTitle'))}">${escapeHTML(t('bookDetails.removeLocalFileBtn'))}</button>` : ''}
                             <div class="book-details-menu-sep" aria-hidden="true"></div>
                             <button type="button" class="book-details-menu-item is-danger" role="menuitem" id="btn-details-delete" title="${escapeHTML(t('bookDetails.deleteTitle'))}">${escapeHTML(t('bookDetails.deleteBtn'))}</button>
@@ -480,6 +482,11 @@ export class BookDetailsModal {
             }
         })
 
+        container.querySelector('#btn-details-relink-notes')?.addEventListener('click', async () => {
+            closeMoreMenu()
+            await this.openRelinkNotesModal(bookId, b, { container, callbacks, gen })
+        })
+
         container.querySelector('#btn-details-remove-local-file')?.addEventListener('click', async () => {
             closeMoreMenu()
             await callbacks.onRemoveLocalFile?.(bookId)
@@ -579,6 +586,122 @@ export class BookDetailsModal {
         this.currentBookId = null
         this.currentContainer = null
         this._revokeCoverUrl()
+    }
+
+    async openRelinkNotesModal(targetBookId, targetBook, { container, callbacks, gen } = {}) {
+        const modal = document.getElementById('modal-relink-notes')
+        const listEl = document.getElementById('relink-notes-candidates-list')
+        const descEl = document.getElementById('relink-notes-target-desc')
+        const btnConfirm = document.getElementById('btn-confirm-relink-notes')
+        const btnClose = document.getElementById('btn-close-relink-notes')
+        const btnCancel = document.getElementById('btn-cancel-relink-notes')
+        if (!modal || !listEl || !btnConfirm) return
+
+        const closeModal = () => {
+            modal.classList.remove('show')
+            modal.style.display = 'none'
+        }
+        if (btnClose) btnClose.onclick = closeModal
+        if (btnCancel) btnCancel.onclick = closeModal
+
+        if (descEl) {
+            descEl.textContent = t('bookDetails.relinkTargetDesc', { title: targetBook?.customTitle || targetBook?.title || targetBookId })
+        }
+        listEl.innerHTML = `<div class="relink-loading">${escapeHTML(t('bookDetails.relinkScanning'))}</div>`
+        btnConfirm.disabled = true
+        modal.style.display = 'flex'
+        modal.classList.add('show')
+
+        const allBooks = await db.getAllBooks().catch(() => [])
+        const candidateScores = []
+        for (const cand of allBooks) {
+            if (!cand || String(cand.id) === String(targetBookId)) continue
+            const summary = typeof db.getBookKnowledgeSummary === 'function'
+                ? await db.getBookKnowledgeSummary(cand.id).catch(() => null)
+                : null
+            const noteCount = summary
+                ? ((summary.highlights || 0) + (summary.bookmarks || 0) + (summary.pdfDrawings || 0))
+                : 0
+            if (noteCount === 0 && !(cand.progress?.percentage > 0) && !(cand.progress?.fraction > 0)) continue
+            const scored = scoreRelinkCandidate(targetBook, cand, summary)
+            candidateScores.push({ cand, summary, noteCount, ...scored })
+        }
+        candidateScores.sort((a, b) => (b.score - a.score) || (b.noteCount - a.noteCount))
+
+        let selectedSourceId = candidateScores[0]?.cand?.id || null
+        if (candidateScores.length === 0) {
+            listEl.innerHTML = `<div class="relink-empty">${escapeHTML(t('bookDetails.relinkNoCandidates'))}</div>`
+            btnConfirm.disabled = true
+            return
+        }
+
+        const reasonLabel = code => {
+            if (code === 'exact_hash') return t('bookDetails.relinkReasonHash')
+            if (code === 'text_fingerprint') return t('bookDetails.relinkReasonFingerprint')
+            if (code === 'title_exact' || code === 'title_similar') return t('bookDetails.relinkReasonTitle')
+            if (code === 'author_match') return t('bookDetails.relinkReasonAuthor')
+            return ''
+        }
+
+        listEl.innerHTML = candidateScores.slice(0, 25).map((entry, idx) => {
+            const c = entry.cand
+            const title = c.customTitle || c.title || c.id
+            const author = c.customAuthor || c.author || t('book.unknownAuthor')
+            const tagsHtml = entry.reasons.map(reasonLabel).filter(Boolean).map(lbl => `<span class="relink-reason-chip">${escapeHTML(lbl)}</span>`).join('')
+            const hlCount = entry.summary?.highlights || 0
+            const bmCount = entry.summary?.bookmarks || 0
+            const drCount = entry.summary?.pdfDrawings || 0
+            return `
+                <label class="relink-candidate-row">
+                    <input type="radio" name="relink-source-book" value="${escapeHTML(c.id)}" ${idx === 0 ? 'checked' : ''} />
+                    <div class="relink-candidate-meta">
+                        <div class="relink-candidate-title">${escapeHTML(title)} <span class="relink-score-badge">${entry.score}%</span></div>
+                        <div class="relink-candidate-sub">${escapeHTML(author)} · ${(c.format || '').toUpperCase()} · ${escapeHTML(t('bookDetails.relinkCounts', { highlights: hlCount, bookmarks: bmCount, drawings: drCount }))}</div>
+                        ${tagsHtml ? `<div class="relink-reasons-row">${tagsHtml}</div>` : ''}
+                    </div>
+                </label>
+            `
+        }).join('')
+
+        listEl.querySelectorAll('input[name="relink-source-book"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                selectedSourceId = radio.value
+                btnConfirm.disabled = !selectedSourceId
+            })
+        })
+        btnConfirm.disabled = !selectedSourceId
+        btnConfirm.onclick = async () => {
+            if (!selectedSourceId) return
+            btnConfirm.disabled = true
+            try {
+                const stats = await db.relinkBookAnnotations(targetBookId, selectedSourceId)
+                closeModal()
+                window.app?.showToast?.(
+                    t('bookDetails.relinkSuccess', {
+                        highlights: stats.migratedHighlights || 0,
+                        bookmarks: stats.migratedBookmarks || 0,
+                        drawings: stats.migratedDrawings || 0
+                    }),
+                    'success'
+                )
+                if (this._renderGeneration === gen && this.currentBookId === targetBookId && this.currentContainer === container) {
+                    await this.render(container, targetBookId, callbacks)
+                }
+                if (String(window.app?.currentBookId) === String(targetBookId)) {
+                    window.app?.annotations?.loadNotesList?.()
+                    window.app?.annotations?.updateSidebarNotesCount?.()
+                    if (window.app?.pdfViewport) {
+                        const hls = await db.getHighlightsByBook(targetBookId)
+                        window.app.pdfViewport.setHighlights(hls, window.app._currentSnapshot)
+                    }
+                }
+                callbacks?.onShelfRefresh?.()
+            } catch (err) {
+                console.error('[BookDetails] relink failed:', err)
+                window.app?.showToast?.(t('bookDetails.relinkFailed', { error: err?.message || err }), 'warning')
+                btnConfirm.disabled = false
+            }
+        }
     }
 
     close() {

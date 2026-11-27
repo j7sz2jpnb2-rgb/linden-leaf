@@ -1930,6 +1930,36 @@ export const setSetting = async (key, value) => {
     }
 }
 
+export const clearSettingsByPrefix = async (prefix) => {
+    if (!prefix) return 0
+    try {
+        const db = await openDB()
+        return new Promise((resolve) => {
+            try {
+                const tx = db.transaction('settings', 'readwrite')
+                const store = tx.objectStore('settings')
+                const req = store.getAllKeys()
+                let deleted = 0
+                req.onsuccess = () => {
+                    const keys = Array.isArray(req.result) ? req.result : []
+                    for (const k of keys) {
+                        if (typeof k === 'string' && k.startsWith(prefix)) {
+                            store.delete(k)
+                            deleted++
+                        }
+                    }
+                }
+                tx.oncomplete = () => resolve(deleted)
+                tx.onerror = () => resolve(deleted)
+            } catch (_) {
+                resolve(0)
+            }
+        })
+    } catch (_) {
+        return 0
+    }
+}
+
 // ==========================================
 // ==========================================
 // Reading Sessions & Reading Analytics
@@ -4551,5 +4581,177 @@ export const deletePortal = async (id, recordTombstone = true, tombstoneTime = D
         tx.oncomplete = () => resolve(true)
         tx.onerror = () => reject(tx.error || new Error('Failed to delete portal'))
         tx.onabort = () => reject(tx.error || new Error('Transaction aborted deleting portal'))
+    })
+}
+
+// Re-associate orphaned highlights, bookmarks, PDF ink drawings, portals, hash aliases, and progress
+// from an older book record (sourceBookId) onto the active book record (targetBookId).
+export const relinkBookAnnotations = async (targetBookId, sourceBookId, options = {}) => {
+    const tgtId = String(targetBookId || '')
+    const srcId = String(sourceBookId || '')
+    if (!tgtId || !srcId || tgtId === srcId) {
+        return {
+            targetBookId: tgtId,
+            sourceBookId: srcId,
+            migratedHighlights: 0,
+            migratedBookmarks: 0,
+            migratedDrawings: 0,
+            migratedPortals: 0,
+            adoptedProgress: false,
+            mergedAliases: 0
+        }
+    }
+
+    const db = await openDB()
+    const candidateStores = ['books', 'highlights', 'bookmarks', 'pdf_drawings', 'portals']
+        .filter(name => db.objectStoreNames.contains(name))
+
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(candidateStores, 'readwrite')
+        const nowMs = Number.isFinite(options?.nowMs) ? options.nowMs : Date.now()
+        const stats = {
+            targetBookId: tgtId,
+            sourceBookId: srcId,
+            migratedHighlights: 0,
+            migratedBookmarks: 0,
+            migratedDrawings: 0,
+            migratedPortals: 0,
+            adoptedProgress: false,
+            mergedAliases: 0
+        }
+
+        const booksStore = tx.objectStore('books')
+        const tgtBookReq = booksStore.get(tgtId)
+        const srcBookReq = booksStore.get(srcId)
+
+        let targetBook = null
+        let sourceBook = null
+        let booksLoaded = 0
+
+        const runMigrations = () => {
+            if (!targetBook) {
+                return
+            }
+
+            if (sourceBook) {
+                const aliasSet = new Set([
+                    ...(Array.isArray(targetBook.documentHashAliases) ? targetBook.documentHashAliases : []),
+                    ...(Array.isArray(sourceBook.documentHashAliases) ? sourceBook.documentHashAliases : []),
+                    ...(sourceBook.documentHash ? [sourceBook.documentHash] : [])
+                ].filter(Boolean))
+                if (targetBook.documentHash) aliasSet.delete(targetBook.documentHash)
+                const mergedAliases = Array.from(aliasSet)
+                const prevAliases = Array.isArray(targetBook.documentHashAliases) ? targetBook.documentHashAliases : []
+                stats.mergedAliases = Math.max(0, mergedAliases.length - prevAliases.length)
+                targetBook.documentHashAliases = mergedAliases
+
+                const tgtPct = Number(targetBook.progress?.percentage || targetBook.progress?.fraction * 100 || 0)
+                const srcPct = Number(sourceBook.progress?.percentage || sourceBook.progress?.fraction * 100 || 0)
+                if (options?.adoptProgress !== false && sourceBook.progress && (!targetBook.progress || tgtPct < srcPct)) {
+                    targetBook.progress = { ...sourceBook.progress, updatedAt: Math.max(nowMs, sourceBook.progress.updatedAt || 0) }
+                    if ((!targetBook.lastReadAt || (sourceBook.lastReadAt || 0) > targetBook.lastReadAt)) {
+                        targetBook.lastReadAt = sourceBook.lastReadAt || nowMs
+                    }
+                    stats.adoptedProgress = true
+                }
+                if (!targetBook.textFingerprint && sourceBook.textFingerprint) {
+                    targetBook.textFingerprint = sourceBook.textFingerprint
+                }
+                targetBook.updatedAt = Math.max(nowMs, targetBook.updatedAt || 0)
+                booksStore.put(targetBook)
+            }
+
+            if (db.objectStoreNames.contains('highlights')) {
+                const hlStore = tx.objectStore('highlights')
+                const req = hlStore.indexNames.contains('bookId') ? hlStore.index('bookId').getAll(srcId) : hlStore.getAll()
+                req.onsuccess = () => {
+                    for (const hl of (req.result || [])) {
+                        if (!hl || String(hl.bookId) !== srcId) continue
+                        hlStore.put({ ...hl, bookId: tgtId, updatedAt: Math.max(nowMs, hl.updatedAt || 0) })
+                        stats.migratedHighlights++
+                    }
+                }
+            }
+
+            if (db.objectStoreNames.contains('bookmarks')) {
+                const bmStore = tx.objectStore('bookmarks')
+                const req = bmStore.indexNames.contains('bookId') ? bmStore.index('bookId').getAll(srcId) : bmStore.getAll()
+                req.onsuccess = () => {
+                    for (const bm of (req.result || [])) {
+                        if (!bm || String(bm.bookId) !== srcId) continue
+                        bmStore.put({ ...bm, bookId: tgtId, updatedAt: Math.max(nowMs, bm.updatedAt || 0) })
+                        stats.migratedBookmarks++
+                    }
+                }
+            }
+
+            if (db.objectStoreNames.contains('pdf_drawings')) {
+                const drawStore = tx.objectStore('pdf_drawings')
+                const existingPages = new Set()
+                const loadDrawings = () => {
+                    const srcReq = drawStore.indexNames.contains('bookId') ? drawStore.index('bookId').getAll(srcId) : drawStore.getAll()
+                    srcReq.onsuccess = () => {
+                        for (const dr of (srcReq.result || [])) {
+                            if (!dr || String(dr.bookId) !== srcId) continue
+                            if (!options?.overwriteDrawings && existingPages.has(dr.pageIndex)) continue
+                            drawStore.put({
+                                ...dr,
+                                bookId: tgtId,
+                                ...(targetBook.documentHash ? { documentHash: targetBook.documentHash } : {}),
+                                updatedAt: Math.max(nowMs, dr.updatedAt || 0)
+                            })
+                            stats.migratedDrawings++
+                        }
+                    }
+                }
+                if (drawStore.indexNames.contains('bookId')) {
+                    const tgtDrawReq = drawStore.index('bookId').getAll(tgtId)
+                    tgtDrawReq.onsuccess = () => {
+                        for (const d of (tgtDrawReq.result || [])) {
+                            if (d && Array.isArray(d.strokes) && d.strokes.length > 0) {
+                                existingPages.add(d.pageIndex)
+                            }
+                        }
+                        loadDrawings()
+                    }
+                } else {
+                    loadDrawings()
+                }
+            }
+
+            if (db.objectStoreNames.contains('portals')) {
+                const portalStore = tx.objectStore('portals')
+                const pReq = portalStore.getAll()
+                pReq.onsuccess = () => {
+                    for (const p of (pReq.result || [])) {
+                        if (!p) continue
+                        const matchSrc = String(p.sourceBookId) === srcId
+                        const matchTgt = String(p.targetBookId) === srcId
+                        if (!matchSrc && !matchTgt) continue
+                        portalStore.put({
+                            ...p,
+                            sourceBookId: matchSrc ? tgtId : p.sourceBookId,
+                            targetBookId: matchTgt ? tgtId : p.targetBookId,
+                            updatedAt: Math.max(nowMs, p.updatedAt || 0)
+                        })
+                        stats.migratedPortals++
+                    }
+                }
+            }
+        }
+
+        const onBookLoaded = () => {
+            booksLoaded++
+            if (booksLoaded === 2) runMigrations()
+        }
+        tgtBookReq.onsuccess = () => { targetBook = tgtBookReq.result || null; onBookLoaded() }
+        srcBookReq.onsuccess = () => { sourceBook = srcBookReq.result || null; onBookLoaded() }
+
+        tx.oncomplete = () => {
+            invalidateReadingStatsCache()
+            resolve(stats)
+        }
+        tx.onerror = () => reject(tx.error || new Error('Failed to relink book annotations'))
+        tx.onabort = () => reject(tx.error || new Error('Transaction aborted relinking book annotations'))
     })
 }

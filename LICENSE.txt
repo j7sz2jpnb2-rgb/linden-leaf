@@ -42,21 +42,31 @@ Linden Leaf 软件开源许可与合规声明 (License & Compliance Notice)
      详见 foliate-js-main/vendor/pdfjs/ 下对应 LICENSE 文件）。
 
 4. Tesseract.js / Tesseract Core (位于 vendor/tesseract/)
-   - 用途：离线 OCR 文字识别引擎与简体中文/英文训练数据。
+   - 用途：内置免下载离线 OCR 兜底识别引擎与简体中文/英文训练数据。
    - 许可方式：Apache License 2.0。
 
-5. Mammoth.js (Michael Williamson，位于 vendor/mammoth/)
+5. ONNX Runtime Web (Microsoft Corporation，位于 vendor/onnxruntime/)
+   - 用途：本地 Web Worker 离线 PP-OCRv6 推理运行时（随安装包仅分发轻量 JS 胶水脚本；
+     `ort-wasm-simd-threaded.jsep.wasm` 运行时按需下载至应用私有目录）。
+   - 许可方式：MIT License。
+
+6. PP-OCRv6 Models (PaddlePaddle Authors)
+   - 用途：可选高精度多语种（Small）与轻量极速（Tiny）离线 OCR 检测/识别模型权重
+     （默认二进制包不预打包权重文件，由用户在设置中按需从 Hugging Face / 镜像下载或本地导入）。
+   - 许可方式：Apache License 2.0。
+
+7. Mammoth.js (Michael Williamson，位于 vendor/mammoth/)
    - 用途：DOCX 文档到 HTML 语义转换引擎。
    - 许可方式：BSD 2-Clause License。
 
-6. SQLite (Public Domain，经由 rusqlite bundled)
+8. SQLite (Public Domain，经由 rusqlite bundled)
    - 用途：本地离线词库及应用辅助数据存储。
 
-7. ECDICT (skywind3000)
+9. ECDICT (skywind3000)
    - 用途：可选英汉词典数据源（运行时按需下载构建或手动导入，默认二进制包仅含 metadata.json，不预打包数据库）。
    - 许可方式：MIT License。
 
-8. 内置开源字体资源 (位于 assets/fonts/)
+10. 内置开源字体资源 (位于 assets/fonts/)
    - Lora (The Lora Project Authors)：SIL Open Font License 1.1。
    - Noto Serif SC / 思源宋体 (Google Inc.)：SIL Open Font License 1.1。
    - Plus Jakarta Sans (The Plus Jakarta Sans Project Authors)：SIL Open Font License 1.1。
@@ -87,6 +97,16 @@ Linden Leaf 软件开源许可与合规声明 (License & Compliance Notice)
      而非客户端端到端密文格式（请确保使用可信的 HTTPS 服务并妥善保护云端账号权限）。
    - 词库在线下载（需用户手动点击下载）：
      仅在用户手动触发“下载词库”时，通过 HTTPS 从 GitHub / jsDelivr 公开源拉取 ECDICT CSV 并在本地建库。
+   - 离线 OCR 模型按需下载（需用户手动点击下载）：
+     仅在用户于设置中手动点击下载 PP-OCRv6 模型时，通过 HTTPS 从 Hugging Face（或用户开启的
+     国内镜像 hf-mirror.com）及 jsDelivr / unpkg 拉取 ONNX 权重与 WASM 运行时文件并校验写入应用私有目录；
+     模型启用后的所有页面识别均在本地离线完成，不上传任何页面图像或书籍内容。
+   - 外部浏览器 AI 伴读（Windows 可选功能，仅本机进程通信）：
+     与随附 Chromium 扩展之间仅通过操作系统 Chromium Native Messaging（及必要时的 127.0.0.1 配对令牌回环）
+     进行本机点对点通信，不经过任何第三方中转服务器；访问网页版 AI 服务完全遵循用户在浏览器中自行登录的会话。
+   - Sign in with ChatGPT 官方登录分支（可选功能，需用户手动授权）：
+     通过本机临时回环端口执行 OAuth 2.0 PKCE 授权流程直连 OpenAI 官方认证与响应接口，
+     刷新令牌及访问令牌均加密保存于操作系统凭据库，绝不写入同步或备份明文。
 
 ================================================================================
 四、 完整对应源码获取 (Corresponding Source Availability)

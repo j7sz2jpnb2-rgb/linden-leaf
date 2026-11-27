@@ -1,7 +1,16 @@
 import { DomEvents } from './dom-events.js'
 import { setMuPdfStoreLimit } from './pdf-driver.js'
 import { platformBridge } from './platformBridge.js'
-import { getAiConfig, saveAiConfig, getAiApiKey } from './reading-ai-assistant.js'
+import {
+    getAiConfig,
+    saveAiConfig,
+    getAiApiKey,
+    getSiwcStatus,
+    startSiwcSignIn,
+    cancelSiwcSignIn,
+    signOutSiwc
+} from './reading-ai-assistant.js'
+import { getCompanionConfig, saveCompanionConfig } from './external-ai-companion.js'
 import { readingPresetsManager, MAX_READING_PRESETS } from './reading-presets.js'
 import { customFontManager } from './custom-font-manager.js'
 import { themeCustomizer } from './theme-customizer.js'
@@ -13,8 +22,11 @@ import {
     resolveEffectiveReaderLayout,
 } from './reader-style-builder.js'
 import { applyChineseQuotesToDocument } from './chinese-quotes.js'
+import { applyChineseScriptToDocument } from './chinese-script.js'
+import { ReaderErgonomicsController, applyFocusDimmingToDocument } from './reading-ergonomics.js'
 import {
     READER_TOOLBAR_ITEMS,
+    READER_TOOLBAR_PRESETS,
     getDefaultReaderToolbarVisibility,
     normalizeReaderToolbarVisibility,
     resolveReaderToolbarLayout,
@@ -28,6 +40,7 @@ export class ReaderAppearanceController {
         this.events = new DomEvents()
         this.dom = {}
         this._bookSettingsOverride = null
+        this.ergonomics = new ReaderErgonomicsController(app)
     }
 
     initDOM() {
@@ -68,6 +81,11 @@ export class ReaderAppearanceController {
             letterSpacingSlider: document.getElementById('setting-letter-spacing'),
             letterSpacingValue: document.getElementById('value-letter-spacing'),
             chineseQuotesSwitch: document.getElementById('setting-chinese-quotes'),
+            chineseScriptModeSelect: document.getElementById('setting-chinese-script-mode'),
+            readingRulerSwitch: document.getElementById('setting-reading-ruler'),
+            focusDimmingSwitch: document.getElementById('setting-focus-dimming'),
+            privacyBlurSwitch: document.getElementById('setting-privacy-blur-unfocus'),
+            pdfOpenModeSelect: document.getElementById('setting-pdf-open-mode'),
             comicModeSwitch: document.getElementById('setting-comic-mode'),
             btnResetTypography: document.getElementById('btn-reset-typography'),
             btnToggleCustomPalette: document.getElementById('btn-toggle-custom-palette'),
@@ -106,7 +124,43 @@ export class ReaderAppearanceController {
             settingSearchCustomRow: document.getElementById('setting-search-custom-row'),
             settingSearchCustomUrl: document.getElementById('setting-search-custom-url'),
             settingAiEnabled: document.getElementById('setting-ai-enabled'),
+            aiEnabledToggleWrap: document.getElementById('ai-enabled-toggle-wrap'),
+            aiApiDisabledHint: document.getElementById('ai-api-disabled-hint'),
             aiCustomInputsWrap: document.getElementById('ai-custom-inputs-wrap'),
+            aiSiwcWrap: document.getElementById('ai-siwc-wrap'),
+            aiExternalWrap: document.getElementById('ai-external-wrap'),
+            aiModeButtons: document.querySelectorAll('#ai-companion-mode-tabs .ai-mode-seg-btn'),
+            siwcStatusText: document.getElementById('siwc-status-text'),
+            btnSiwcLogin: document.getElementById('btn-siwc-login'),
+            btnSiwcCancel: document.getElementById('btn-siwc-cancel'),
+            btnSiwcLogout: document.getElementById('btn-siwc-logout'),
+            settingSiwcModel: document.getElementById('setting-siwc-model'),
+            settingCompanionProvider: document.getElementById('setting-companion-provider'),
+            companionCustomUrlWrap: document.getElementById('companion-custom-url-wrap'),
+            settingCompanionCustomUrl: document.getElementById('setting-companion-custom-url'),
+            settingCompanionGenericInsert: document.getElementById('setting-companion-generic-insert'),
+            settingCompanionBrowser: document.getElementById('setting-companion-browser'),
+            settingCompanionProfile: document.getElementById('setting-companion-profile'),
+            btnCompanionRefreshBrowsers: document.getElementById('btn-companion-refresh-browsers'),
+            settingCompanionAutoDock: document.getElementById('setting-companion-auto-dock'),
+            settingCompanionSnap: document.getElementById('setting-companion-snap'),
+            settingCompanionCompact: document.getElementById('setting-companion-compact'),
+            settingCompanionZoom: document.getElementById('setting-companion-zoom'),
+            settingCompanionContextMenu: document.getElementById('setting-companion-context-menu'),
+            companionBridgeStatusBadge: document.getElementById('companion-bridge-status-badge'),
+            btnOpenCompanionExtWizard: document.getElementById('btn-open-companion-ext-wizard'),
+            modalCompanionExtWizard: document.getElementById('modal-companion-ext-wizard'),
+            btnCloseExtWizard: document.getElementById('btn-close-ext-wizard'),
+            btnWizardDone: document.getElementById('btn-wizard-done'),
+            btnCopyEdgeExtUrl: document.getElementById('btn-copy-edge-ext-url'),
+            btnCopyChromeExtUrl: document.getElementById('btn-copy-chrome-ext-url'),
+            wizardBridgeStatusText: document.getElementById('wizard-bridge-status-text'),
+            btnWizardRetestBridge: document.getElementById('btn-wizard-retest-bridge'),
+            settingCompanionExtId: document.getElementById('setting-companion-ext-id'),
+            btnCompanionOpenExtDir: document.getElementById('btn-companion-open-ext-dir'),
+            btnCompanionInstallHost: document.getElementById('btn-companion-install-host'),
+            btnCompanionUninstallHost: document.getElementById('btn-companion-uninstall-host'),
+            btnCompanionLaunchNow: document.getElementById('btn-companion-launch-now'),
             settingAiEndpoint: document.getElementById('setting-ai-endpoint'),
             settingAiModel: document.getElementById('setting-ai-model'),
             settingAiKey: document.getElementById('setting-ai-key'),
@@ -120,6 +174,7 @@ export class ReaderAppearanceController {
             settingDictSaveHistory: document.getElementById('setting-dict-save-history'),
             settingDirectShelfLanding: document.getElementById('setting-direct-shelf-landing'),
             settingReaderTopBarAutoHide: document.getElementById('setting-reader-topbar-autohide'),
+            readerToolbarPresetsRow: document.getElementById('reader-toolbar-presets-row'),
             readerToolbarCustomizeList: document.getElementById('reader-toolbar-customize-list'),
             btnResetReaderToolbar: document.getElementById('btn-reset-reader-toolbar'),
             btnReaderToolbarOverflow: document.getElementById('btn-reader-toolbar-overflow'),
@@ -321,6 +376,36 @@ export class ReaderAppearanceController {
             await this.app.saveSettings()
             this.applyChineseQuotesLive(enabled)
         });
+        this.events.on(this.dom.chineseScriptModeSelect, 'change', async e => {
+            const mode = ['s2t', 't2s'].includes(e.target.value) ? e.target.value : 'original'
+            this.app.setSetting('chineseScriptMode', mode)
+            await this.app.saveSettings()
+            this.applyChineseScriptLive(mode)
+        });
+        this.events.on(this.dom.readingRulerSwitch, 'change', async e => {
+            const enabled = Boolean(e.target.checked)
+            this.app.setSetting('readingRuler', enabled)
+            await this.app.saveSettings()
+            this.ergonomics?.setReadingRuler?.(enabled)
+        });
+        this.events.on(this.dom.focusDimmingSwitch, 'change', async e => {
+            const enabled = Boolean(e.target.checked)
+            this.app.setSetting('focusDimming', enabled)
+            await this.app.saveSettings()
+            this.applyFocusDimmingLive(enabled)
+        });
+        this.events.on(this.dom.privacyBlurSwitch, 'change', async e => {
+            const enabled = Boolean(e.target.checked)
+            this.app.setSetting('privacyBlurOnUnfocus', enabled)
+            await this.app.saveSettings()
+            this.ergonomics?.setPrivacyBlurOnUnfocus?.(enabled)
+        });
+        this.events.on(this.dom.pdfOpenModeSelect, 'change', async e => {
+            const mode = ['direct', 'ephemeral', 'snapshot'].includes(e.target.value) ? e.target.value : 'direct'
+            this.app.setSetting('pdfOpenMode', mode)
+            await this.app.saveSettings()
+        });
+        this.ergonomics?.init?.()
         this.events.on(this.dom.settingDirectShelfLanding, 'change', async e => {
             const mode = e.target.checked ? 'shelf' : 'hero'
             this.app.setSetting('shelfLandingMode', mode)
@@ -421,15 +506,171 @@ export class ReaderAppearanceController {
         });
         this.events.on(this.dom.settingAiEnabled, 'change', async e => {
             const enabled = e.target.checked
-            if (this.dom.aiCustomInputsWrap) {
-                this.dom.aiCustomInputsWrap.style.display = enabled ? 'flex' : 'none'
-            }
             try {
                 await saveAiConfig({ enabled })
             } catch (err) {
                 this.app.dialogs.showToast(err.message, 'warning')
             }
+            this.syncCompanionSettingsUI()
         });
+        this.dom.aiModeButtons?.forEach(btn => {
+            this.events.on(btn, 'click', async () => {
+                const mode = btn.dataset.aiMode || 'api'
+                if (mode === 'external') {
+                    saveCompanionConfig({ companionMode: 'external' })
+                } else {
+                    saveCompanionConfig({ companionMode: 'sidebar' })
+                    await saveAiConfig({ authMode: mode === 'siwc' ? 'siwc' : 'api' }).catch(() => {})
+                }
+                this.syncCompanionSettingsUI()
+            })
+        })
+        this.events.on(this.dom.btnSiwcLogin, 'click', async () => {
+            const sid = `siwc_${Date.now()}`
+            this._activeSiwcSessionId = sid
+            if (this.dom.btnSiwcLogin) this.dom.btnSiwcLogin.disabled = true
+            if (this.dom.btnSiwcCancel) this.dom.btnSiwcCancel.style.display = 'inline-flex'
+            try {
+                await saveAiConfig({ authMode: 'siwc', enabled: true })
+                await startSiwcSignIn(sid)
+                this.app.dialogs.showToast(t('companion.siwcLoginToast'), 'success')
+            } catch (err) {
+                this.app.dialogs.showToast(err?.message || String(err), 'warning')
+            } finally {
+                this._activeSiwcSessionId = null
+                if (this.dom.btnSiwcLogin) this.dom.btnSiwcLogin.disabled = false
+                if (this.dom.btnSiwcCancel) this.dom.btnSiwcCancel.style.display = 'none'
+                this.syncCompanionSettingsUI()
+            }
+        })
+        this.events.on(this.dom.btnSiwcCancel, 'click', async () => {
+            if (this._activeSiwcSessionId) {
+                await cancelSiwcSignIn(this._activeSiwcSessionId)
+            }
+        })
+        this.events.on(this.dom.btnSiwcLogout, 'click', async () => {
+            await signOutSiwc()
+            this.app.dialogs.showToast(t('companion.siwcLogoutToast'), 'info')
+            this.syncCompanionSettingsUI()
+        })
+        this.events.on(this.dom.settingSiwcModel, 'change', async e => {
+            await saveAiConfig({ siwcModel: e.target.value.trim() }).catch(() => {})
+        })
+        this.events.on(this.dom.settingCompanionProvider, 'change', e => {
+            saveCompanionConfig({ providerId: e.target.value })
+            this.syncCompanionSettingsUI()
+        })
+        this.events.on(this.dom.settingCompanionCustomUrl, 'change', e => {
+            try {
+                saveCompanionConfig({ customUrl: e.target.value.trim() })
+            } catch (err) {
+                this.app.dialogs.showToast(err.message, 'warning')
+            }
+        })
+        this.events.on(this.dom.settingCompanionGenericInsert, 'change', e => {
+            saveCompanionConfig({ allowGenericCustomInsert: e.target.checked })
+        })
+        this.events.on(this.dom.settingCompanionBrowser, 'change', e => {
+            saveCompanionConfig({ browserId: e.target.value })
+            this.refreshCompanionBrowsersUI()
+        })
+        this.events.on(this.dom.settingCompanionProfile, 'change', e => {
+            saveCompanionConfig({ profileDirectory: e.target.value })
+        })
+        this.events.on(this.dom.btnCompanionRefreshBrowsers, 'click', () => {
+            this.refreshCompanionBrowsersUI()
+        })
+        this.events.on(this.dom.settingCompanionAutoDock, 'change', e => {
+            saveCompanionConfig({ autoDock: e.target.checked })
+        })
+        this.events.on(this.dom.settingCompanionSnap, 'change', e => {
+            saveCompanionConfig({ snapEnabled: e.target.checked })
+        })
+        this.events.on(this.dom.settingCompanionCompact, 'change', e => {
+            saveCompanionConfig({ compactMode: e.target.checked })
+        })
+        this.events.on(this.dom.settingCompanionZoom, 'change', e => {
+            saveCompanionConfig({ zoomPercent: Number(e.target.value) })
+        })
+        this.events.on(this.dom.settingCompanionContextMenu, 'change', e => {
+            saveCompanionConfig({ allowContextMenu: e.target.checked })
+        })
+        this.events.on(this.dom.btnOpenCompanionExtWizard, 'click', () => {
+            this.openCompanionExtWizard()
+        })
+        this.events.on(this.dom.btnCloseExtWizard, 'click', () => {
+            this.closeCompanionExtWizard()
+        })
+        this.events.on(this.dom.btnWizardDone, 'click', () => {
+            this.closeCompanionExtWizard()
+        })
+        this.events.on(this.dom.modalCompanionExtWizard, 'click', (e) => {
+            if (e.target === this.dom.modalCompanionExtWizard) {
+                this.closeCompanionExtWizard()
+            }
+        })
+        const copyBrowserExtUrl = async (url) => {
+            let copied = false
+            try {
+                if (navigator?.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(url)
+                    copied = true
+                }
+            } catch (_) {}
+            if (!copied) {
+                copied = await globalThis.__TAURI__?.core?.invoke?.('companion_clipboard_write', { text: url }).catch(() => false)
+            }
+            this.app.dialogs.showToast(
+                copied ? t('companion.wizardCopiedUrl', { url }) : url,
+                copied ? 'success' : 'info'
+            )
+        }
+        this.events.on(this.dom.btnCopyEdgeExtUrl, 'click', () => copyBrowserExtUrl('edge://extensions'))
+        this.events.on(this.dom.btnCopyChromeExtUrl, 'click', () => copyBrowserExtUrl('chrome://extensions'))
+        this.events.on(this.dom.btnCompanionOpenExtDir, 'click', async () => {
+            try {
+                const dir = await globalThis.__TAURI__?.core?.invoke?.('companion_open_extension_folder')
+                if (dir) {
+                    this.app.dialogs.showToast(dir, 'info')
+                }
+            } catch (err) {
+                this.app.dialogs.showToast(err?.message || String(err), 'warning')
+            }
+        })
+        this.events.on(this.dom.btnCompanionInstallHost, 'click', async () => {
+            const extId = (this.dom.settingCompanionExtId?.value || '').trim().toLowerCase()
+            saveCompanionConfig({ extensionId: extId })
+            try {
+                await globalThis.__TAURI__?.core?.invoke?.('companion_install_native_host', {
+                    extensionId: extId,
+                    browser: 'both'
+                })
+                await globalThis.__TAURI__?.core?.invoke?.('companion_start_bridge', { enableRelay: true }).catch(() => {})
+                this.app.dialogs.showToast(t('companion.extHostInstalledToast'), 'success')
+                await this.refreshCompanionBridgeStatusUI()
+            } catch (err) {
+                this.app.dialogs.showToast(err?.message || String(err), 'warning')
+            }
+        })
+        this.events.on(this.dom.btnCompanionUninstallHost, 'click', async () => {
+            await globalThis.__TAURI__?.core?.invoke?.('companion_uninstall_native_host').catch(() => {})
+            this.app.dialogs.showToast(t('companion.extHostUninstalledToast'), 'info')
+            await this.refreshCompanionBridgeStatusUI()
+        })
+        this.events.on(this.dom.btnWizardRetestBridge, 'click', async () => {
+            await globalThis.__TAURI__?.core?.invoke?.('companion_start_bridge', { enableRelay: true }).catch(() => {})
+            await globalThis.__TAURI__?.core?.invoke?.('companion_send_command', {
+                command: { type: 'ping' },
+                timeoutMs: 800
+            }).catch(() => null)
+            await this.refreshCompanionBridgeStatusUI()
+        })
+        this.events.on(this.dom.btnCompanionLaunchNow, 'click', async () => {
+            saveCompanionConfig({ companionMode: 'external' })
+            this.syncCompanionSettingsUI()
+            this.app.annotations?.closeDrawer?.()
+            await this.app.switchToExternalCompanion?.(null)
+        })
         this.events.on(this.dom.settingAiEndpoint, 'change', async e => {
             try {
                 await saveAiConfig({ endpoint: e.target.value.trim() })
@@ -512,6 +753,35 @@ export class ReaderAppearanceController {
         }
     }
 
+    applyChineseScriptLive(mode = 'original') {
+        const view = this.app.foliateView
+        if (!view || !this.app.currentBookId) return
+        const contents = view.renderer?.getContents?.() || []
+        for (const item of contents) {
+            if (!item?.doc) continue
+            try {
+                applyChineseScriptToDocument(item.doc, mode)
+            } catch (err) {
+                console.warn('applyChineseScriptLive error:', err)
+            }
+        }
+    }
+
+    applyFocusDimmingLive(enabled = false) {
+        this.ergonomics?.setFocusDimming?.(Boolean(enabled))
+        const view = this.app.foliateView
+        if (!view || !this.app.currentBookId) return
+        const contents = view.renderer?.getContents?.() || []
+        for (const item of contents) {
+            if (!item?.doc) continue
+            try {
+                applyFocusDimmingToDocument(item.doc, Boolean(enabled))
+            } catch (err) {
+                console.warn('applyFocusDimmingLive error:', err)
+            }
+        }
+    }
+
     applyReaderTopBarAutoHide(enabled = Boolean(this.app.settings?.readerTopBarAutoHide)) {
         const readerView = this.app.dom?.readerView || document.getElementById('reader-view')
         if (!readerView) return
@@ -561,11 +831,9 @@ export class ReaderAppearanceController {
 
         const overflowWrap = document.getElementById('reader-toolbar-overflow-wrap')
         if (overflowWrap) {
-            overflowWrap.hidden = layout.overflowKeys.length === 0
+            overflowWrap.hidden = false
         }
-        if (layout.overflowKeys.length === 0) {
-            this.closeReaderToolbarOverflowMenu()
-        } else if (this.dom.readerToolbarOverflowMenu && !this.dom.readerToolbarOverflowMenu.hidden) {
+        if (this.dom.readerToolbarOverflowMenu && !this.dom.readerToolbarOverflowMenu.hidden) {
             this.renderReaderToolbarOverflowMenu()
         }
     }
@@ -619,12 +887,87 @@ export class ReaderAppearanceController {
             })
             menu.appendChild(btn)
         }
+
+        if (menu.childElementCount > 0) {
+            const divider = document.createElement('div')
+            divider.className = 'reader-toolbar-overflow-divider'
+            divider.setAttribute('role', 'separator')
+            menu.appendChild(divider)
+        }
+        const customizeBtn = document.createElement('button')
+        customizeBtn.type = 'button'
+        customizeBtn.className = 'reader-toolbar-overflow-item is-customize-action'
+        customizeBtn.textContent = t('toolbar.customizeAction')
+        customizeBtn.addEventListener('click', () => {
+            this.closeReaderToolbarOverflowMenu()
+            this.openToolbarCustomizationInSettings()
+        })
+        menu.appendChild(customizeBtn)
+    }
+
+    _syncReaderToolbarPresetStates(visibility) {
+        const presetsRow = this.dom.readerToolbarPresetsRow
+        if (!presetsRow) return
+        const norm = normalizeReaderToolbarVisibility(visibility)
+        presetsRow.querySelectorAll('.reader-toolbar-preset-btn').forEach(btn => {
+            const preset = READER_TOOLBAR_PRESETS[btn.dataset.toolbarPreset]
+            if (!preset) return
+            const isActive = Object.keys(preset.visibility).every(
+                k => Boolean(norm[k] !== false) === Boolean(preset.visibility[k])
+            )
+            btn.classList.toggle('active', isActive)
+        })
+    }
+
+    openToolbarCustomizationInSettings() {
+        this.app.annotations?.openDrawer?.('settings')
+        this.switchSettingsDomain('reading')
+        this.renderReaderToolbarSettingsUI()
+        const section = document.getElementById('reader-toolbar-settings-section')
+        if (section) {
+            if (this._toolbarFocusTimer) clearTimeout(this._toolbarFocusTimer)
+            section.classList.remove('is-highlight-focus')
+            requestAnimationFrame(() => {
+                section.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+                section.classList.add('is-highlight-focus')
+            })
+            this._toolbarFocusTimer = setTimeout(() => {
+                section.classList.remove('is-highlight-focus')
+                this._toolbarFocusTimer = null
+            }, 1600)
+        }
+        this.app.dialogs?.showToast?.(t('toolbar.openedSettingsToast'), 'info')
     }
 
     renderReaderToolbarSettingsUI() {
         const container = this.dom.readerToolbarCustomizeList
-        if (!container) return
+        const presetsRow = this.dom.readerToolbarPresetsRow
         const visibility = normalizeReaderToolbarVisibility(this.app.settings?.readerToolbarVisibility)
+
+        if (presetsRow) {
+            presetsRow.innerHTML = ''
+            for (const preset of Object.values(READER_TOOLBAR_PRESETS)) {
+                const isActive = Object.keys(preset.visibility).every(
+                    k => Boolean(visibility[k] !== false) === Boolean(preset.visibility[k])
+                )
+                const btn = document.createElement('button')
+                btn.type = 'button'
+                btn.className = 'reader-toolbar-preset-btn'
+                if (isActive) btn.classList.add('active')
+                btn.dataset.toolbarPreset = preset.key
+                btn.textContent = t(preset.i18nKey) || preset.fallbackLabel
+                btn.addEventListener('click', async () => {
+                    const nextVis = normalizeReaderToolbarVisibility({ ...preset.visibility })
+                    this.app.setSetting('readerToolbarVisibility', nextVis)
+                    await this.app.saveSettings()
+                    this.applyReaderToolbarCustomization()
+                    this.renderReaderToolbarSettingsUI()
+                })
+                presetsRow.appendChild(btn)
+            }
+        }
+
+        if (!container) return
         container.innerHTML = ''
 
         for (const item of READER_TOOLBAR_ITEMS) {
@@ -641,6 +984,7 @@ export class ReaderAppearanceController {
                 this.app.setSetting('readerToolbarVisibility', nextVis)
                 await this.app.saveSettings()
                 this.applyReaderToolbarCustomization()
+                this._syncReaderToolbarPresetStates(nextVis)
             })
 
             const text = document.createElement('span')
@@ -743,6 +1087,24 @@ export class ReaderAppearanceController {
         if (this.dom.chineseQuotesSwitch) {
             this.dom.chineseQuotesSwitch.checked = !!this.app.settings.chineseQuotes
         }
+        if (this.dom.chineseScriptModeSelect) {
+            this.dom.chineseScriptModeSelect.value = this.app.settings.chineseScriptMode || 'original'
+        }
+        if (this.dom.readingRulerSwitch) {
+            this.dom.readingRulerSwitch.checked = !!this.app.settings.readingRuler
+        }
+        if (this.dom.focusDimmingSwitch) {
+            this.dom.focusDimmingSwitch.checked = !!this.app.settings.focusDimming
+        }
+        if (this.dom.privacyBlurSwitch) {
+            this.dom.privacyBlurSwitch.checked = !!this.app.settings.privacyBlurOnUnfocus
+        }
+        if (this.dom.pdfOpenModeSelect) {
+            this.dom.pdfOpenModeSelect.value = this.app.settings.pdfOpenMode || 'direct'
+        }
+        this.ergonomics?.setReadingRuler?.(Boolean(this.app.settings.readingRuler))
+        this.ergonomics?.setFocusDimming?.(Boolean(this.app.settings.focusDimming))
+        this.ergonomics?.setPrivacyBlurOnUnfocus?.(Boolean(this.app.settings.privacyBlurOnUnfocus))
         if (this.dom.comicModeSwitch) {
             this.dom.comicModeSwitch.checked = !!this.app.settings.comicMode
         }
@@ -890,6 +1252,7 @@ export class ReaderAppearanceController {
                 if (this.dom.settingAiKey) this.dom.settingAiKey.value = k || ''
             })
         }
+        this.syncCompanionSettingsUI()
 
         // View mode switcher buttons
         this.app.bookshelf.dom.btnViewGrid?.classList.toggle('active', this.app.bookshelf.shelfViewMode !== 'list')
@@ -915,6 +1278,171 @@ export class ReaderAppearanceController {
 
     syncSettingsUI() {
         this.updateSettingsUI()
+    }
+
+    openCompanionExtWizard() {
+        const modal = this.dom.modalCompanionExtWizard
+        if (!modal) return
+        if (typeof localStorage !== 'undefined') {
+            const cfg = getCompanionConfig()
+            if (this.dom.settingCompanionExtId && cfg.extensionId) {
+                this.dom.settingCompanionExtId.value = cfg.extensionId
+            }
+        }
+        modal.style.display = 'flex'
+        requestAnimationFrame(() => modal.classList.add('show'))
+        this.refreshCompanionBridgeStatusUI()
+    }
+
+    closeCompanionExtWizard() {
+        const modal = this.dom.modalCompanionExtWizard
+        if (!modal) return
+        modal.classList.remove('show')
+        setTimeout(() => {
+            if (!modal.classList.contains('show')) modal.style.display = 'none'
+        }, 180)
+    }
+
+    syncCompanionSettingsUI() {
+        if (typeof localStorage === 'undefined') return
+        const aiCfg = getAiConfig()
+        const compCfg = getCompanionConfig()
+        const isAndroid = Boolean(platformBridge?.isAndroid)
+        const activeMode = isAndroid
+            ? 'api'
+            : (compCfg.companionMode === 'external'
+                ? 'external'
+                : (aiCfg.authMode === 'siwc' ? 'siwc' : 'api'))
+
+        this.dom.aiModeButtons?.forEach(btn => {
+            btn.classList?.toggle?.('active', btn.dataset?.aiMode === activeMode)
+        })
+
+        if (this.dom.settingAiEnabled) {
+            this.dom.settingAiEnabled.checked = Boolean(aiCfg.enabled)
+        }
+        if (this.dom.aiEnabledToggleWrap) {
+            this.dom.aiEnabledToggleWrap.style.display = activeMode === 'external' ? 'none' : ''
+        }
+        if (this.dom.aiApiDisabledHint) {
+            this.dom.aiApiDisabledHint.style.display = (activeMode === 'api' && !aiCfg.enabled) ? 'block' : 'none'
+        }
+        if (this.dom.aiCustomInputsWrap) {
+            this.dom.aiCustomInputsWrap.style.display = (activeMode === 'api' && aiCfg.enabled) ? 'flex' : 'none'
+        }
+        if (this.dom.aiSiwcWrap) {
+            this.dom.aiSiwcWrap.style.display = activeMode === 'siwc' ? 'flex' : 'none'
+        }
+        if (this.dom.aiExternalWrap) {
+            this.dom.aiExternalWrap.style.display = activeMode === 'external' ? 'flex' : 'none'
+        }
+
+        if (this.dom.settingSiwcModel) {
+            this.dom.settingSiwcModel.value = aiCfg.siwcModel || 'gpt-5-codex'
+        }
+        if (this.dom.settingCompanionProvider) {
+            this.dom.settingCompanionProvider.value = compCfg.providerId || 'chatgpt'
+        }
+        if (this.dom.companionCustomUrlWrap) {
+            this.dom.companionCustomUrlWrap.style.display = compCfg.providerId === 'custom' ? 'flex' : 'none'
+        }
+        if (this.dom.settingCompanionCustomUrl) {
+            this.dom.settingCompanionCustomUrl.value = compCfg.customUrl || ''
+        }
+        if (this.dom.settingCompanionGenericInsert) {
+            this.dom.settingCompanionGenericInsert.checked = Boolean(compCfg.allowGenericCustomInsert)
+        }
+        if (this.dom.settingCompanionBrowser) {
+            this.dom.settingCompanionBrowser.value = compCfg.browserId || 'auto'
+        }
+        if (this.dom.settingCompanionAutoDock) {
+            this.dom.settingCompanionAutoDock.checked = Boolean(compCfg.autoDock)
+        }
+        if (this.dom.settingCompanionSnap) {
+            this.dom.settingCompanionSnap.checked = Boolean(compCfg.snapEnabled)
+        }
+        if (this.dom.settingCompanionCompact) {
+            this.dom.settingCompanionCompact.checked = Boolean(compCfg.compactMode)
+        }
+        if (this.dom.settingCompanionZoom) {
+            this.dom.settingCompanionZoom.value = String(compCfg.zoomPercent || 90)
+        }
+        if (this.dom.settingCompanionContextMenu) {
+            this.dom.settingCompanionContextMenu.checked = Boolean(compCfg.allowContextMenu)
+        }
+        if (this.dom.settingCompanionExtId && compCfg.extensionId) {
+            this.dom.settingCompanionExtId.value = compCfg.extensionId
+        }
+
+        if (activeMode === 'siwc') {
+            this.refreshSiwcStatusUI()
+        } else if (activeMode === 'external') {
+            this.refreshCompanionBrowsersUI()
+            this.refreshCompanionBridgeStatusUI()
+        }
+    }
+
+    async refreshSiwcStatusUI() {
+        const status = await getSiwcStatus().catch(() => null)
+        if (!status) return
+        if (this.dom.siwcStatusText) {
+            if (!status.signedIn) {
+                this.dom.siwcStatusText.textContent = t('companion.siwcStatusSignedOut')
+            } else if (!status.hasDirectScope) {
+                this.dom.siwcStatusText.textContent = t('companion.siwcStatusNoScope')
+            } else {
+                const account = status.email || status.name || (status.planType ? `ChatGPT (${status.planType})` : 'ChatGPT')
+                this.dom.siwcStatusText.textContent = t('companion.siwcStatusSignedIn', { account })
+            }
+        }
+        if (this.dom.btnSiwcLogout) {
+            this.dom.btnSiwcLogout.style.display = status.signedIn ? 'inline-flex' : 'none'
+        }
+        if (this.dom.btnSiwcLogin) {
+            this.dom.btnSiwcLogin.style.display = status.signedIn ? 'none' : 'inline-flex'
+        }
+    }
+
+    async refreshCompanionBrowsersUI() {
+        if (!globalThis.__TAURI__?.core?.invoke || !this.dom.settingCompanionProfile) return
+        const browsers = await globalThis.__TAURI__.core.invoke('companion_detect_browsers').catch(() => [])
+        if (!Array.isArray(browsers) || !browsers.length) return
+        const cfg = getCompanionConfig()
+        const target = cfg.browserId === 'auto'
+            ? browsers[0]
+            : (browsers.find(b => b.id === cfg.browserId) || browsers[0])
+        if (!target || !Array.isArray(target.profiles)) return
+        const sel = this.dom.settingCompanionProfile
+        sel.innerHTML = ''
+        for (const p of target.profiles) {
+            const opt = document.createElement('option')
+            opt.value = p.id
+            opt.textContent = p.name && p.name !== p.id ? `${p.name} (${p.id})` : p.id
+            if (p.id === cfg.profileDirectory) opt.selected = true
+            sel.appendChild(opt)
+        }
+    }
+
+    async refreshCompanionBridgeStatusUI() {
+        const badge = this.dom.companionBridgeStatusBadge
+        const wizardBadge = this.dom.wizardBridgeStatusText
+        if (!globalThis.__TAURI__?.core?.invoke || (!badge && !wizardBadge)) return
+        const st = await globalThis.__TAURI__.core.invoke('companion_get_status').catch(() => null)
+        if (!st) return
+        let text = t('companion.extBridgeM0Only')
+        let isOk = false
+        if (st.nativeConnected) {
+            text = t('companion.extBridgeConnected')
+            isOk = true
+        } else if (st.chromeManifestRegistered || st.edgeManifestRegistered) {
+            text = t('companion.extBridgeRegistered')
+            isOk = true
+        }
+        for (const el of [badge, wizardBadge]) {
+            if (!el) continue
+            el.textContent = text
+            el.classList.toggle('is-ok', isOk)
+        }
     }
 
     initCustomPaletteUI() {

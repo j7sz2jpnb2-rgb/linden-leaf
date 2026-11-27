@@ -1,0 +1,53 @@
+name: Bug Report / 问题反馈
+description: Report a bug, crash, rendering glitch, or sync/OCR issue in Linden Leaf
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue! Please do not attach private books, API keys, or personal sync credentials.
+        感谢反馈问题！请勿在日志或附件中包含私人受版权保护的书籍文件、API 密钥或云盘凭据。
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform / 运行平台
+      options:
+        - Windows 11 (x64)
+        - Windows 10 (x64)
+        - Android (arm64-v8a)
+        - Source / Dev Build
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App Version / 应用版本
+      placeholder: e.g. v1.0.0 (or git commit hash)
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Book Format / Engine (if applicable) / 涉及格式或引擎
+      options:
+        - PDF (MuPDF)
+        - PDF (PDF.js)
+        - EPUB / MOBI / AZW3 / FB2 / CBZ
+        - TXT / Markdown / DOCX
+        - Offline OCR (PP-OCRv6 / Tesseract)
+        - Sync (WebDAV / Local / OneDrive / Google Drive)
+        - AI Companion / TTS / Dictionary
+        - General UI / Bookshelf
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened? / 问题描述与复现步骤
+      description: Clear steps to reproduce and what you expected vs. what occurred.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console Errors or Diagnostic Output (optional) / 错误信息或日志（可选）
+      render: text

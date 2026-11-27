@@ -1,0 +1,11 @@
+{
+  "extName": {
+    "message": "Linden Leaf AI 伴读助手"
+  },
+  "extDesc": {
+    "message": "将 Linden Leaf 阅读器选中引用安全送达你自己的 ChatGPT / Gemini / AI Studio / DeepSeek 网页窗口，保留草稿并提供可逆紧凑排版。"
+  },
+  "menuSaveSelection": {
+    "message": "保存选中文本到 Linden Leaf 原文批注"
+  }
+}

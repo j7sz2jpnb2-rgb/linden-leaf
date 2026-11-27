@@ -1,0 +1,23 @@
+name: Feature Request / 功能建议
+description: Propose a new capability or UX improvement for Linden Leaf
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Reading Problem or Workflow Need / 使用场景与痛点
+      description: What reading or study workflow is currently difficult or missing?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution / 期望的实现方式
+      description: How should it behave, and should it apply to Windows, Android, or both?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or Notes / 备选方案或补充说明

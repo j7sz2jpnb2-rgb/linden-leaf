@@ -19,7 +19,10 @@ import * as backups from './backup-service.js'
  * Advanced reader and AI settings.
  */
 
-import { setCustomTxtPatterns, setTxtMergeSoftBreaks, TXT_LAYOUT_VERSION } from '../foliate-js-main/txt.js'
+import { setCustomTxtPatterns, setTxtMergeSoftBreaks, setTxtPurifyConfig, TXT_LAYOUT_VERSION } from '../foliate-js-main/txt.js'
+import { parseStarDictFiles, parseMdxBuffer } from './custom-dict-importer.js'
+import { parseKindleClippings, matchClippingsToLibrary } from './clippings-importer.js'
+import { escapeHTML } from './ui-format.js'
 import { fullTextSearchEngine } from './fulltext-search.js'
 import { getChapterTranslationsStats, clearAllChapterTranslations } from './db.js'
 import * as db from './db.js'
@@ -27,6 +30,8 @@ import { runTxtRulesWorker } from './txt-toc-worker.js'
 import { dictionaryService } from './dictionary-service.js'
 import { ttsPlayer } from './tts-player.js'
 import { platformBridge } from './platformBridge.js'
+import { ocrService } from './ocr-service.js'
+import { OCR_MODEL_CATALOG, ocrModelManager } from './ocr-model-manager.js'
 
 const TXT_RULE_TEMPLATES = Object.freeze({
     zh_chapter: DEFAULT_ADVANCED_SETTINGS.txtRegexPattern,
@@ -59,16 +64,8 @@ export class AdvancedSettingsManager {
             const saved = localStorage.getItem(STORAGE_KEY_CONFIG)
             if (saved) {
                 const parsed = JSON.parse(saved)
-                // Migrate legacy plaintext TTS API key if present in old config
-                if (parsed.ttsApiKey) {
-                    this._migrateLegacyTtsKey(parsed.ttsApiKey)
-                    delete parsed.ttsApiKey
-                }
+                delete parsed.ttsApiKey
                 this.config = sanitizeAdvancedSettings(parsed)
-                const legacyVoice = parsed.ttsVoiceId
-                if (legacyVoice && !Object.hasOwn(parsed, 'ttsApiVoiceId') && parsed.ttsProvider === 'api') this.config.ttsApiVoiceId = legacyVoice
-                if (legacyVoice && !Object.hasOwn(parsed, 'ttsOfflineVoiceId') && parsed.ttsProvider === 'offline') this.config.ttsOfflineVoiceId = legacyVoice
-                delete this.config.ttsApiKey
 
                 // Enforce budget bounds [0, 10000] (0 is a valid budget that disables extra context)
                 const rawBudget = Number(this.config.aiContextTokenBudget)
@@ -83,28 +80,6 @@ export class AdvancedSettingsManager {
         }
 
         this.applyRuntimeConfig()
-    }
-
-    async _migrateLegacyTtsKey(legacyKey) {
-        if (!legacyKey || !legacyKey.trim()) return
-        const clean = legacyKey.trim()
-        try {
-            const ok = await platformBridge.secureStoreCredential('tts_api_key', clean)
-            if (ok) {
-                const endpoint = this.config.ttsApiEndpoint || 'https://api.openai.com/v1/audio/speech'
-                let origin = ''
-                try { origin = new URL(endpoint).origin } catch (_) { origin = endpoint }
-                await platformBridge.secureStoreCredential('tts_api_origin', origin)
-                this.config.ttsApiKeyConfigured = true
-                this._sessionTtsApiKey = clean
-                this.save()
-            } else {
-                this._sessionTtsApiKey = clean
-                this.config.ttsApiKeyConfigured = true
-            }
-        } catch (e) {
-            this._sessionTtsApiKey = clean
-        }
     }
 
     save() {
@@ -143,8 +118,21 @@ export class AdvancedSettingsManager {
 
     applyRuntimeConfig() {
         setTxtMergeSoftBreaks(this.config.txtMergeSoftBreaks !== false)
+        setTxtPurifyConfig({
+            enabled: !!this.config.txtPurifyEnabled,
+            stripAds: true,
+            collapseBlankLines: true,
+            customRulesText: this.config.txtPurifyCustomRules || ''
+        })
         try { localStorage.setItem('linden_sync_chapter_translations', String(!!this.config.webdavSyncTranslations)) } catch (_) {}
         if (typeof ttsPlayer !== 'undefined') ttsPlayer.loadSettings?.(this.config)
+        try {
+            ocrService?.configure?.({
+                engine: this.config.ocrEngine,
+                backend: this.config.ocrBackend,
+                direction: this.config.ocrDirection
+            })
+        } catch (_) {}
         try {
             // 1. Reduced motion
             document.documentElement.dataset.reducedMotion = String(!!this.config.reducedMotion)
@@ -347,6 +335,15 @@ export class AdvancedSettingsManager {
         // TXT soft break merge & Background indexing settings
         const softBreaks = document.getElementById('setting-txt-merge-soft-breaks')
         if (softBreaks) softBreaks.checked = this.config.txtMergeSoftBreaks !== false
+        const txtPurifyToggle = document.getElementById('setting-txt-purify-enabled')
+        if (txtPurifyToggle) txtPurifyToggle.checked = !!this.config.txtPurifyEnabled
+        const txtPurifyRules = document.getElementById('setting-txt-purify-custom-rules')
+        if (txtPurifyRules) txtPurifyRules.value = this.config.txtPurifyCustomRules || ''
+        const sidecarLabel = document.getElementById('label-sidecar-dir')
+        const savedSidecarDir = typeof localStorage !== 'undefined' ? (localStorage.getItem('linden_markdown_sidecar_dir') || '').trim() : ''
+        if (sidecarLabel) sidecarLabel.textContent = savedSidecarDir || t('settings.sidecarDirNotSet')
+        const sidecarAuto = document.getElementById('setting-sidecar-autosync')
+        if (sidecarAuto) sidecarAuto.checked = typeof localStorage !== 'undefined' && localStorage.getItem('linden_markdown_sidecar_autosync') === 'true'
         const bgIndexIdle = document.getElementById('setting-bg-index-idle-only')
         if (bgIndexIdle) bgIndexIdle.checked = this.config.bgIndexIdleOnly !== false
         const bgIndexConcurrency = document.getElementById('setting-bg-index-concurrency')
@@ -375,8 +372,23 @@ export class AdvancedSettingsManager {
         const noAuth = document.getElementById('setting-tts-api-no-auth')
         if (noAuth) noAuth.checked = this.config.ttsApiNoAuth === true
         this.updateTtsProviderVisibility()
+
+        // Offline OCR settings
+        const ocrEngineEl = document.getElementById('setting-ocr-engine')
+        if (ocrEngineEl) ocrEngineEl.value = this.config.ocrEngine || 'auto'
+        const ocrBackendEl = document.getElementById('setting-ocr-backend')
+        if (ocrBackendEl) ocrBackendEl.value = this.config.ocrBackend || 'auto'
+        const ocrDirectionEl = document.getElementById('setting-ocr-direction')
+        if (ocrDirectionEl) ocrDirectionEl.value = this.config.ocrDirection || 'auto'
+        const ocrMirrorEl = document.getElementById('setting-ocr-use-mirror')
+        if (ocrMirrorEl) ocrMirrorEl.checked = !!this.config.ocrUseMirror
+        const ocrPrefetchEl = document.getElementById('setting-ocr-idle-prefetch')
+        if (ocrPrefetchEl) ocrPrefetchEl.checked = this.config.ocrIdlePrefetch !== false
+        this.updateOcrModelsStatus()
+
         if (this.isUnlocked) this.updateTransStorageStats()
         this.updateDictResourceStatus()
+        if (platformBridge.isTauri) this.renderCustomDictionariesList()
     }
 
     _formatAndroidDiagStatusLabel(status) {
@@ -743,6 +755,20 @@ export class AdvancedSettingsManager {
             this.app?.showToast?.(t('adv.toast.softWrapSaved'), 'info')
         })
 
+        document.getElementById('setting-txt-purify-enabled')?.addEventListener('change', (e) => {
+            this.config.txtPurifyEnabled = !!e.target.checked
+            this.applyRuntimeConfig()
+            this.save()
+            this.app?.showToast?.(t('adv.toast.txtPurifySaved'), 'info')
+        })
+        const savePurifyRules = (e) => {
+            this.config.txtPurifyCustomRules = String(e?.target?.value || '')
+            this.applyRuntimeConfig()
+            this.save()
+        }
+        document.getElementById('setting-txt-purify-custom-rules')?.addEventListener('change', savePurifyRules)
+        document.getElementById('setting-txt-purify-custom-rules')?.addEventListener('blur', savePurifyRules)
+
         document.getElementById('setting-bg-index-idle-only')?.addEventListener('change', (e) => {
             this.config.bgIndexIdleOnly = !!e.target.checked
             this.save()
@@ -905,6 +931,66 @@ export class AdvancedSettingsManager {
             }
         })
 
+        const customDictInput = document.getElementById('input-custom-dict-files')
+        document.getElementById('btn-dict-import-custom')?.addEventListener('click', () => {
+            if (!platformBridge.isTauri) {
+                this.app?.showToast?.(t('adv.toast.customDictDesktopOnly'), 'info')
+                return
+            }
+            if (customDictInput) {
+                customDictInput.value = ''
+                customDictInput.click()
+            }
+        })
+        customDictInput?.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files || [])
+            if (!files.length) return
+            try {
+                this.app?.showToast?.(t('adv.toast.customDictParsing'), 'info')
+                const mdxFile = files.find(f => /\.mdx$/i.test(f.name))
+                let parsed
+                if (mdxFile) {
+                    const buf = await mdxFile.arrayBuffer()
+                    parsed = await parseMdxBuffer(buf, mdxFile.name.replace(/\.mdx$/i, ''))
+                } else {
+                    const idxFile = files.find(f => /\.idx$/i.test(f.name))
+                    const dictFile = files.find(f => /\.dict(\.dz)?$/i.test(f.name))
+                    const ifoFile = files.find(f => /\.ifo$/i.test(f.name))
+                    if (!idxFile || !dictFile) {
+                        throw new Error(t('adv.toast.customDictSelectPair'))
+                    }
+                    const [ifoBytes, idxBytes, dictBytes] = await Promise.all([
+                        ifoFile ? ifoFile.arrayBuffer().then(b => new Uint8Array(b)) : Promise.resolve(null),
+                        idxFile.arrayBuffer().then(b => new Uint8Array(b)),
+                        dictFile.arrayBuffer().then(b => new Uint8Array(b)),
+                    ])
+                    parsed = await parseStarDictFiles({
+                        ifoBytes,
+                        idxBytes,
+                        dictBytes,
+                        isGzipped: /\.dz$/i.test(dictFile.name),
+                        fileName: ifoFile?.name || idxFile.name,
+                    })
+                }
+                const entries = Array.isArray(parsed?.entries) ? parsed.entries : []
+                if (!entries.length) {
+                    throw new Error(t('adv.toast.customDictEmpty'))
+                }
+                const dictId = await platformBridge.dictCustomBeginImport(parsed.title || 'Custom Dict', parsed.format || 'mdx')
+                const BATCH = 2000
+                for (let i = 0; i < entries.length; i += BATCH) {
+                    await platformBridge.dictCustomInsertBatch(dictId, entries.slice(i, i + BATCH))
+                }
+                await platformBridge.dictCustomFinishImport(dictId)
+                await this.renderCustomDictionariesList()
+                await this.updateDictResourceStatus()
+                this.app?.showToast?.(t('adv.toast.customDictImported', { name: parsed.title, count: entries.length }), 'success')
+            } catch (err) {
+                console.warn('[AdvancedSettings] custom dict import failed:', err)
+                this.app?.showToast?.(t('adv.toast.customDictFailed', { error: err?.message || err }), 'warning')
+            }
+        })
+
         // Settings JSON Export & Import
         document.getElementById('btn-export-settings-json')?.addEventListener('click', () => {
             this.exportSettingsJSON()
@@ -1041,10 +1127,219 @@ export class AdvancedSettingsManager {
             this.relinkMissingBook()
         })
 
+        // Markdown Sidecar Folder & Auto-Sync
+        document.getElementById('btn-pick-sidecar-dir')?.addEventListener('click', async () => {
+            if (!platformBridge.isTauri) {
+                this.app?.showToast?.(t('annotations.sidecarDesktopOnly'), 'info')
+                return
+            }
+            try {
+                const dir = await platformBridge.pickSidecarFolder?.()
+                if (!dir) return
+                const authorized = (await platformBridge.registerSidecarDir(dir)) || dir
+                try { localStorage.setItem('linden_markdown_sidecar_dir', authorized) } catch {}
+                const lbl = document.getElementById('label-sidecar-dir')
+                if (lbl) lbl.textContent = authorized
+                this.app?.showToast?.(t('adv.toast.sidecarDirSet', { dir: authorized }), 'success')
+            } catch (err) {
+                this.app?.showToast?.(t('adv.toast.opFailed', { error: err?.message || err }), 'warning')
+            }
+        })
+        document.getElementById('setting-sidecar-autosync')?.addEventListener('change', (e) => {
+            try { localStorage.setItem('linden_markdown_sidecar_autosync', e.target.checked ? 'true' : 'false') } catch {}
+        })
+
+        // Kindle My Clippings.txt Importer
+        const kindleInput = document.getElementById('input-kindle-clippings-file')
+        document.getElementById('btn-import-kindle-clippings')?.addEventListener('click', () => {
+            if (kindleInput) {
+                kindleInput.value = ''
+                kindleInput.click()
+            }
+        })
+        kindleInput?.addEventListener('change', async (e) => {
+            const file = e.target.files?.[0]
+            if (!file) return
+            try {
+                const text = await file.text()
+                const parsedGroups = parseKindleClippings(text)
+                if (!parsedGroups.length) {
+                    this.app?.showToast?.(t('adv.toast.kindleEmpty'), 'info')
+                    return
+                }
+                const matched = matchClippingsToLibrary(parsedGroups, await db.getAllBooks().catch(() => []))
+                this.openKindleImportModal(matched)
+            } catch (err) {
+                this.app?.showToast?.(t('adv.toast.opFailed', { error: err?.message || err }), 'warning')
+            }
+        })
+
         // Reset & Re-lock Button
         document.getElementById('btn-reset-advanced-settings')?.addEventListener('click', () => {
             this.resetAndLock()
         })
+
+        // Offline OCR settings & model manager controls
+        for (const [id, key] of [
+            ['setting-ocr-engine', 'ocrEngine'],
+            ['setting-ocr-backend', 'ocrBackend'],
+            ['setting-ocr-direction', 'ocrDirection']
+        ]) {
+            document.getElementById(id)?.addEventListener('change', (e) => {
+                this.config[key] = e.target.value
+                this.save()
+            })
+        }
+        document.getElementById('setting-ocr-use-mirror')?.addEventListener('change', (e) => {
+            this.config.ocrUseMirror = !!e.target.checked
+            this.save()
+        })
+        document.getElementById('setting-ocr-idle-prefetch')?.addEventListener('change', (e) => {
+            this.config.ocrIdlePrefetch = !!e.target.checked
+            this.save()
+        })
+
+        const ocrImportInput = document.getElementById('input-ocr-import-files')
+        document.getElementById('btn-ocr-import-local')?.addEventListener('click', () => {
+            if (ocrImportInput) {
+                ocrImportInput.value = ''
+                ocrImportInput.click()
+            }
+        })
+        ocrImportInput?.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files || [])
+            if (!files.length) return
+            const targetModel = document.getElementById('setting-ocr-import-target')?.value || 'ppocrv6-small'
+            try {
+                const res = await ocrModelManager.importLocalFiles(targetModel, files)
+                await this.updateOcrModelsStatus({ force: true })
+                if (res.imported?.length) {
+                    this.app?.showToast?.(t('adv.toast.ocrImported', { count: res.imported.length }), 'success')
+                } else {
+                    this.app?.showToast?.(t('adv.toast.ocrImportNone'), 'warning')
+                }
+            } catch (err) {
+                this.app?.showToast?.(t('adv.toast.opFailed', { error: err?.message || err }), 'warning')
+            }
+        })
+
+        document.getElementById('btn-clear-ocr-cache')?.addEventListener('click', async () => {
+            try {
+                const count = await db.clearSettingsByPrefix('linden_ocr_')
+                this.app?.showToast?.(t('adv.toast.ocrCacheCleared', { count }), 'info')
+            } catch (err) {
+                this.app?.showToast?.(t('adv.toast.opFailed', { error: err?.message || err }), 'warning')
+            }
+        })
+    }
+
+    async updateOcrModelsStatus({ force = false } = {}) {
+        const runtimeEl = document.getElementById('label-ocr-runtime-status')
+        const cardsEl = document.getElementById('ocr-model-cards')
+        if (!runtimeEl && !cardsEl) return
+
+        const status = await ocrModelManager.getStatus({ force }).catch(() => null)
+        if (!status) return
+
+        if (runtimeEl) {
+            if (status.runtimeInstalled) {
+                const mb = (status.runtimeSizeBytes / (1024 * 1024)).toFixed(1)
+                runtimeEl.textContent = t('settings.ocrRuntimeReady', { mb })
+            } else {
+                runtimeEl.textContent = t('settings.ocrRuntimeNotInstalled', { mb: '28.2' })
+            }
+        }
+
+        if (!cardsEl) return
+        const statusById = new Map((status.models || []).map(m => [m.id, m]))
+        cardsEl.innerHTML = OCR_MODEL_CATALOG.map((item) => {
+            const st = statusById.get(item.id) || { installed: false, ready: false, sizeBytes: 0, missingAssets: [] }
+            const isDownloading = this._ocrDownloadingModelId === item.id
+            const badgeClass = st.ready ? 'ocr-model-badge ready' : 'ocr-model-badge'
+            const badgeText = st.ready
+                ? `${t('settings.ocrBadgeReady')} (${(st.sizeBytes / (1024 * 1024)).toFixed(1)} MB)`
+                : (st.installed ? t('settings.ocrBadgeMissingRuntime') : t('settings.ocrBadgeNotInstalled'))
+            const actionBtn = isDownloading
+                ? `<button type="button" class="btn-secondary-action ocr-model-cancel-btn" data-model-id="${escapeHTML(item.id)}">${escapeHTML(t('settings.ocrModelCancelBtn'))}</button>`
+                : `<button type="button" class="${st.ready ? 'btn-secondary-action' : 'btn-primary-action'} ocr-model-download-btn" data-model-id="${escapeHTML(item.id)}"${this._ocrDownloadingModelId ? ' disabled' : ''}>${escapeHTML(t(st.ready ? 'settings.ocrModelRedownloadBtn' : 'settings.ocrModelDownloadBtn'))}</button>`
+            const deleteBtn = (st.installed && !isDownloading)
+                ? `<button type="button" class="btn-secondary-action ocr-model-delete-btn" data-model-id="${escapeHTML(item.id)}">${escapeHTML(t('settings.ocrModelDeleteBtn'))}</button>`
+                : ''
+            return `
+                <div class="ocr-model-card">
+                    <div class="ocr-model-card-header">
+                        <span class="ocr-model-title">${escapeHTML(t(item.titleKey))}</span>
+                        <span class="${escapeHTML(badgeClass)}">${escapeHTML(badgeText)}</span>
+                    </div>
+                    <div class="ocr-model-desc">${escapeHTML(t(item.descKey))}</div>
+                    <div class="ocr-model-actions">${actionBtn}${deleteBtn}</div>
+                </div>
+            `
+        }).join('')
+
+        cardsEl.querySelectorAll('.ocr-model-download-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const modelId = btn.dataset.modelId
+                if (modelId) this.downloadOcrModel(modelId)
+            })
+        })
+        cardsEl.querySelectorAll('.ocr-model-cancel-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                this._ocrDownloadAbortController?.abort()
+                ocrModelManager.cancelDownload().catch(() => {})
+            })
+        })
+        cardsEl.querySelectorAll('.ocr-model-delete-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                const modelId = btn.dataset.modelId
+                if (!modelId) return
+                try {
+                    await ocrModelManager.deleteModel(modelId)
+                    await this.updateOcrModelsStatus({ force: true })
+                    this.app?.showToast?.(t('adv.toast.ocrDeleted', { model: modelId }), 'info')
+                } catch (err) {
+                    this.app?.showToast?.(t('adv.toast.opFailed', { error: err?.message || err }), 'warning')
+                }
+            })
+        })
+    }
+
+    async downloadOcrModel(modelId) {
+        if (this._ocrDownloadingModelId) return
+        const wrap = document.getElementById('ocr-download-progress-wrap')
+        const fill = document.getElementById('ocr-download-progress-fill')
+        const text = document.getElementById('ocr-download-progress-text')
+        const controller = this._ocrDownloadAbortController = new AbortController()
+        this._ocrDownloadingModelId = modelId
+        if (wrap) wrap.hidden = false
+        if (fill) fill.style.width = '2%'
+        if (text) text.textContent = t('adv.toast.ocrDownloading')
+        await this.updateOcrModelsStatus()
+
+        try {
+            this.app?.showToast?.(t('adv.toast.ocrDownloading'), 'info')
+            await ocrModelManager.downloadModel(modelId, {
+                useMirror: !!this.config.ocrUseMirror,
+                signal: controller.signal,
+                onProgress: (p) => {
+                    if (fill) fill.style.width = `${Math.max(0, Math.min(100, Number(p.percent) || 0))}%`
+                    if (text) text.textContent = p.message || `${p.percent || 0}%`
+                }
+            })
+            this.app?.showToast?.(t('adv.toast.ocrDownloaded'), 'success')
+        } catch (err) {
+            const msg = controller.signal.aborted
+                ? t('adv.toast.ocrDownloadCancelled')
+                : t('adv.toast.ocrDownloadFailed', { error: err?.message || String(err) })
+            this.app?.showToast?.(msg, 'warning')
+        } finally {
+            this._ocrDownloadingModelId = null
+            if (this._ocrDownloadAbortController === controller) {
+                this._ocrDownloadAbortController = null
+            }
+            if (wrap) wrap.hidden = true
+            await this.updateOcrModelsStatus({ force: true })
+        }
     }
 
     async setTtsApiKey(key) {
@@ -1270,6 +1565,172 @@ export class AdvancedSettingsManager {
         } catch (_) {
             if (labelStatus) { labelStatus.innerText = t('adv.dictReadError'); labelStatus.style.color = 'var(--text-muted)' }
             if (labelPath) labelPath.innerText = t('adv.dictRetryLater')
+        }
+    }
+
+    async renderCustomDictionariesList() {
+        const listEl = document.getElementById('custom-dict-list')
+        if (!listEl) return
+        if (!platformBridge.isTauri) {
+            listEl.replaceChildren()
+            return
+        }
+        const dicts = await platformBridge.dictCustomList().catch(() => [])
+        if (!Array.isArray(dicts) || dicts.length === 0) {
+            listEl.innerHTML = `<div class="custom-dict-empty">${escapeHTML(t('adv.customDictEmptyList'))}</div>`
+            return
+        }
+        listEl.innerHTML = dicts.map(d => `
+            <div class="custom-dict-row" data-dict-id="${Number(d.id)}">
+                <label class="custom-dict-toggle-wrap">
+                    <input type="checkbox" class="custom-dict-toggle" data-dict-id="${Number(d.id)}" ${d.enabled ? 'checked' : ''} />
+                    <span class="custom-dict-name">${escapeHTML(d.name || 'Dictionary')}</span>
+                </label>
+                <span class="custom-dict-meta">${escapeHTML(String(d.format || '').toUpperCase())} · ${Number(d.entryCount ?? d.entry_count ?? 0)}</span>
+                <button type="button" class="btn-secondary-action custom-dict-del-btn" data-dict-id="${Number(d.id)}">${escapeHTML(t('common.delete'))}</button>
+            </div>
+        `).join('')
+
+        listEl.querySelectorAll('.custom-dict-toggle').forEach(cb => {
+            cb.addEventListener('change', async () => {
+                await platformBridge.dictCustomToggle(Number(cb.dataset.dictId), Boolean(cb.checked)).catch(() => {})
+            })
+        })
+        listEl.querySelectorAll('.custom-dict-del-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                await platformBridge.dictCustomDelete(Number(btn.dataset.dictId)).catch(() => {})
+                await this.renderCustomDictionariesList()
+                await this.updateDictResourceStatus()
+            })
+        })
+    }
+
+    _hashKindleId(seed) {
+        let h = 2166136261
+        for (let i = 0; i < seed.length; i++) {
+            h ^= seed.charCodeAt(i)
+            h = Math.imul(h, 16777619)
+        }
+        return `kindle_${(h >>> 0).toString(36)}`
+    }
+
+    openKindleImportModal(groups = []) {
+        const modal = document.getElementById('modal-kindle-import')
+        const listEl = document.getElementById('kindle-import-groups-list')
+        const createMissingCb = document.getElementById('kindle-import-create-missing')
+        const summaryEl = document.getElementById('kindle-import-summary')
+        const btnConfirm = document.getElementById('btn-confirm-kindle-import')
+        const btnClose = document.getElementById('btn-close-kindle-import')
+        const btnCancel = document.getElementById('btn-cancel-kindle-import')
+        if (!modal || !listEl || !btnConfirm) return
+
+        const closeModal = () => {
+            modal.classList.remove('show')
+            modal.style.display = 'none'
+        }
+        if (btnClose) btnClose.onclick = closeModal
+        if (btnCancel) btnCancel.onclick = closeModal
+
+        const matchedCount = groups.filter(g => g.matchedBookId).length
+        const totalHighlights = groups.reduce((acc, g) => acc + (g.highlights?.length || 0), 0)
+        if (summaryEl) {
+            summaryEl.textContent = t('adv.kindleSummary', { books: groups.length, matched: matchedCount, highlights: totalHighlights })
+        }
+
+        listEl.innerHTML = groups.map((g, idx) => {
+            const matchedBadge = g.matchedBookId
+                ? `<span class="kindle-match-badge matched">${escapeHTML(t('adv.kindleMatchedBadge', { title: g.matchedBookTitle || g.title }))}</span>`
+                : `<span class="kindle-match-badge unmatched">${escapeHTML(t('adv.kindleUnmatchedBadge'))}</span>`
+            const previewQuote = g.highlights?.[0]?.text ? `<div class="kindle-group-preview">“${escapeHTML(g.highlights[0].text.slice(0, 120))}”</div>` : ''
+            return `
+                <label class="kindle-group-row">
+                    <input type="checkbox" class="kindle-group-check" data-group-idx="${idx}" checked />
+                    <div class="kindle-group-meta">
+                        <div class="kindle-group-title">${escapeHTML(g.title)} <span class="kindle-group-count">(${g.highlights.length})</span></div>
+                        <div class="kindle-group-sub">${escapeHTML(g.author || t('book.unknownAuthor'))} · ${matchedBadge}</div>
+                        ${previewQuote}
+                    </div>
+                </label>
+            `
+        }).join('')
+
+        modal.style.display = 'flex'
+        modal.classList.add('show')
+
+        btnConfirm.onclick = async () => {
+            btnConfirm.disabled = true
+            try {
+                const allowCreateUnmatched = Boolean(createMissingCb?.checked)
+                const checkedIdx = new Set(
+                    Array.from(listEl.querySelectorAll('.kindle-group-check:checked')).map(c => Number(c.dataset.groupIdx))
+                )
+                const now = Date.now()
+                const records = []
+                let importedBooks = 0
+
+                for (let idx = 0; idx < groups.length; idx++) {
+                    if (!checkedIdx.has(idx)) continue
+                    const g = groups[idx]
+                    let targetBookId = g.matchedBookId
+                    if (!targetBookId) {
+                        if (!allowCreateUnmatched) continue
+                        targetBookId = this._hashKindleId(`book|${g.key}`)
+                        const existingBook = await db.getBook(targetBookId).catch(() => null)
+                        if (!existingBook) {
+                            await db.saveBook({
+                                id: targetBookId,
+                                title: g.title,
+                                author: g.author || t('book.unknownAuthor'),
+                                format: 'txt',
+                                isCloudOnly: false,
+                                hasLocalFile: false,
+                                isOffline: true,
+                                addedAt: now,
+                                updatedAt: now,
+                                progress: { fraction: 0, updatedAt: now }
+                            })
+                        }
+                    }
+                    importedBooks++
+                    for (const hl of (g.highlights || [])) {
+                        const detId = this._hashKindleId(`${targetBookId}|${hl.text}|${hl.note || ''}|${hl.locationStart ?? ''}`)
+                        records.push({
+                            id: detId,
+                            bookId: targetBookId,
+                            formatType: 'txt',
+                            text: hl.text,
+                            note: hl.note || '',
+                            color: '#facc15',
+                            style: 'highlight',
+                            chapterTitle: hl.page != null
+                                ? `P.${hl.page}`
+                                : (hl.locationStart != null ? `Loc ${hl.locationStart}` : t('adv.kindleImportSource')),
+                            createdAt: now,
+                            updatedAt: now
+                        })
+                    }
+                }
+
+                if (records.length > 0) {
+                    if (typeof db.saveHighlightsBatch === 'function') {
+                        await db.saveHighlightsBatch(records)
+                    } else {
+                        for (const r of records) await db.saveHighlight(r)
+                    }
+                }
+                closeModal()
+                window.app?.bookshelf?.refreshBookshelf?.()
+                if (window.app?.currentBookId) {
+                    window.app?.annotations?.loadNotesList?.()
+                    window.app?.annotations?.updateSidebarNotesCount?.()
+                }
+                this.app?.showToast?.(t('adv.toast.kindleImported', { highlights: records.length, books: importedBooks }), 'success')
+            } catch (err) {
+                console.warn('[AdvancedSettings] Kindle import failed:', err)
+                this.app?.showToast?.(t('adv.toast.opFailed', { error: err?.message || err }), 'warning')
+            } finally {
+                btnConfirm.disabled = false
+            }
         }
     }
 

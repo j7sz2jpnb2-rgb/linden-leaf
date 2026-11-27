@@ -4,8 +4,7 @@
  * ("Morandi Reform") dual-tone palette.
  *
  * Canonical storage hex keys (#facc15, #4ade80, #60a5fa, #f472b6, #a855f7)
- * remain backward-compatible with IndexedDB records, Cloud Sync payloads,
- * and backup archives while mapping legacy variants (#c084fc, #f87171) cleanly.
+ * map cleanly to Morandi display swatches, translucent ink fills, and stroke tones.
  */
 
 export const HIGHLIGHT_PALETTE = Object.freeze([
@@ -57,7 +56,7 @@ export const HIGHLIGHT_PALETTE = Object.freeze([
     Object.freeze({
         id: 'coral',
         storageHex: '#f472b6',
-        aliases: Object.freeze(['pink', 'red', '#f87171', '#ef4444', '#fb7185', '#9e4c5a']),
+        aliases: Object.freeze(['pink']),
         uiHex: '#c96f7b',
         uiHexDark: '#d98490',
         inkHexLight: '#e87a94',
@@ -72,7 +71,7 @@ export const HIGHLIGHT_PALETTE = Object.freeze([
     Object.freeze({
         id: 'lilac',
         storageHex: '#a855f7',
-        aliases: Object.freeze(['purple', '#c084fc', '#9333ea', '#8d74a8']),
+        aliases: Object.freeze(['purple']),
         uiHex: '#9276b8',
         uiHexDark: '#a88ecf',
         inkHexLight: '#a67ce0',

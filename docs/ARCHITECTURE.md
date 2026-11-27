@@ -19,7 +19,13 @@
 | 设置默认值与清洗 | `js/advanced-settings-schema.js` | UI 与后台备份共同使用；`advanced-settings.js` 只管理设置界面与反馈。 |
 | 单书 PDF 偏好 | `js/pdf-preferences.js` | 唯一的 localStorage 键定义、旧格式读取、备份与恢复映射。 |
 | PDF 渲染与交互状态 | `js/pdf-viewport.js` | 控制可见页面、缩放、选区、标尺、自动滚屏。按钮读视口状态，避免在 App 再维护一份运行标志。 |
-| PDF 后端调用 | `js/pdf-driver.js` | 对外统一文本、几何、位图接口。普通搜索/TTS 使用纯文本 API，需要选区才请求逐字几何。 |
+| PDF 后端调用 | `js/pdf-driver.js` | 对外统一文本、几何、位图接口。普通搜索/TTS 使用纯文本 API，需要选区才请求逐字几何；外链 PDF 直开走零拷贝与按需暂存路径。 |
+| 离线 OCR 与版面重建 | `js/ocr-service.js`、`js/ocr-layout.js`、`js/ocr-onnx-worker.js`、`js/ocr-model-manager.js`、`src-tauri/src/commands/ocr_models.rs` | 双轨路由：未安装模型时默认使用内置 Tesseract.js；按需下载/导入 PP-OCRv6 Small/Tiny 后经独立 ONNX Worker（WebGPU / WASM SIMD）推理，支持竖排右起与双栏顺序、CTC 单字映射、分版本缓存与闲置预识别。详细说明见 [OFFLINE_OCR.md](OFFLINE_OCR.md)。 |
+| 增量 Markdown Sidecar | `js/markdown-sidecar.js` | 按书籍生成并幂等更新受控批注块，不覆盖用户在 Obsidian/Logseq 中自行撰写的正文与双链。 |
+| 第三方词典与书摘导入 | `js/custom-dict-importer.js`、`js/clippings-importer.js` | 解析 MDict (`.mdx`) / StarDict (`.ifo/.idx/.dict[.dz]`) 本地词典，以及 Kindle `My Clippings.txt` 去重匹配导入。 |
+| 流式大 TXT、净化与繁简切换 | `src-tauri/src/commands/txt_stream.rs`、`js/txt-purifier.js`、`js/chinese-script.js` | Rust 侧大文本增量分章流式读取、正文广告水印规则净化，以及基于 DOM 文本节点的章节内可逆繁简互转（排除代码块）。 |
+| 阅读人体工学与自定义顶栏 | `js/reading-ergonomics.js`、`js/reader-toolbar-config.js` | 阅读标尺、聚焦弱化、一键隐私遮罩（`Alt+Shift+H`），以及顶部工具栏显隐/排序、溢出收纳与新手引导。 |
+| 桌面浏览器 AI 伴读与官方登录 | `js/external-ai-companion.js`、`src-tauri/src/commands/ai_companion.rs`、`src-tauri/src/commands/siwc.rs`、`extensions/chromium-companion/` | Windows 桌面伴读（Native Messaging + 本地 ACL 保护 + 并排停靠）与可选 OAuth 2.0 PKCE 官方登录分支，与现有 BYOK 侧栏共用限流与审计守卫。详细说明见 [Chromium Companion README](../extensions/chromium-companion/README.md)。 |
 | 云端书籍二进制 | `js/storage-providers.js` | 使用当前选定提供者；不支持整书文件的提供者明确返回能力限制，不能偷偷回退到 WebDAV。 |
 
 ## App 与功能控制器
@@ -70,6 +76,10 @@ App 保留既有模块确实使用的公共方法转发及少量状态访问器�
 在仓库根目录执行，先做与修改相关的检查；变更数据契约或公共生命周期时再跑全量回归。
 
 ```powershell
+# 一键运行全部 17 项前端语法、结构、契约、双语、安全、OCR 版面与回归验证套件
+npm run verify
+
+# 或按需单独执行各单项脚本
 node scripts/run-syntax-checks.mjs
 node --expose-internals scripts/check-structure.cjs
 node scripts/test-data-contracts.mjs
@@ -81,7 +91,12 @@ node scripts/test-i18n.mjs
 node scripts/test-i18n-interactions.mjs
 node scripts/test-ui-output-safety.mjs
 node scripts/test-regression-suite.mjs
+node --test scripts/test-audit-hardening.mjs
+node --test scripts/test-ux-polish-modules.mjs
+node --test scripts/test-roadmap-upgrades.mjs
+node --test scripts/test-ppocr-engine.mjs
 
+# Rust 单元测试（未启用 MuPDF / 启用原生 MuPDF 两组配置）
 . .\scripts\env.ps1
 cargo check --offline --manifest-path src-tauri/Cargo.toml
 cargo test --lib --locked --offline --manifest-path src-tauri/Cargo.toml

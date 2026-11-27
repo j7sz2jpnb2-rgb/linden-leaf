@@ -117,6 +117,63 @@ export const READER_TOOLBAR_ITEMS = Object.freeze([
     },
 ])
 
+export const READER_TOOLBAR_PRESETS = Object.freeze({
+    full: Object.freeze({
+        key: 'full',
+        i18nKey: 'settings.readerToolbarPresetFull',
+        fallbackLabel: '全部展开',
+        visibility: Object.freeze({
+            history: true,
+            pinWindow: true,
+            refPage: true,
+            ocrPage: true,
+            search: true,
+            notes: true,
+            exportPdf: true,
+            aiSidebar: true,
+            chapterTranslate: true,
+            tts: true,
+            fullscreen: true,
+        }),
+    }),
+    study: Object.freeze({
+        key: 'study',
+        i18nKey: 'settings.readerToolbarPresetStudy',
+        fallbackLabel: '研读精简',
+        visibility: Object.freeze({
+            history: true,
+            pinWindow: false,
+            refPage: false,
+            ocrPage: true,
+            search: true,
+            notes: true,
+            exportPdf: true,
+            aiSidebar: true,
+            chapterTranslate: true,
+            tts: false,
+            fullscreen: false,
+        }),
+    }),
+    minimal: Object.freeze({
+        key: 'minimal',
+        i18nKey: 'settings.readerToolbarPresetMinimal',
+        fallbackLabel: '沉浸极简',
+        visibility: Object.freeze({
+            history: false,
+            pinWindow: false,
+            refPage: false,
+            ocrPage: false,
+            search: true,
+            notes: true,
+            exportPdf: false,
+            aiSidebar: true,
+            chapterTranslate: false,
+            tts: false,
+            fullscreen: false,
+        }),
+    }),
+})
+
 export function getDefaultReaderToolbarVisibility() {
     const map = {}
     for (const item of READER_TOOLBAR_ITEMS) {

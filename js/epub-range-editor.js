@@ -13,6 +13,30 @@ const BLOCK_SELECTOR = 'p, li, blockquote, dd, dt, pre, h1, h2, h3, h4, h5, h6, 
 const SENTENCE_TERMINATORS = new Set(['。', '！', '？', '；', '.', '!', '?', '\n'])
 const TRAILING_CLOSERS = new Set(['”', '’', '」', '』', '）', '】', '"', "'", ')', ']', '》', '〉'])
 const LEADING_OPENERS_SKIP = new Set([' ', '\t', '\r', '\n', '　'])
+const ABBREVIATIONS = new Set([
+    'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'etc',
+    'fig', 'eq', 'no', 'vol', 'ch', 'pp', 'ed', 'al', 'inc', 'ltd',
+])
+
+function isNonTerminatingDot(text, idx) {
+    if (text[idx] !== '.') return false
+    const prev = idx > 0 ? text[idx - 1] : ''
+    const next = idx + 1 < text.length ? text[idx + 1] : ''
+    // Decimal or version numbers (e.g. 3.14, v1.0) and ellipsis (...)
+    if (/\d/.test(prev) && /\d/.test(next)) return true
+    if (prev === '.' || next === '.') return true
+    // Initialisms like U.S., e.g., i.e., Ph.D.
+    if (/[A-Za-z]/.test(prev) && (next === '.' || (idx >= 2 && text[idx - 2] === '.'))) return true
+    if (idx + 2 < text.length && /[A-Za-z]/.test(next) && text[idx + 2] === '.' && /[A-Za-z]/.test(prev)) return true
+    // Common abbreviations followed by whitespace/letter (not paragraph break)
+    if (/[A-Za-z]/.test(prev) && next !== '\n') {
+        let start = idx
+        while (start > 0 && /[A-Za-z]/.test(text[start - 1])) start--
+        const word = text.slice(start, idx).toLowerCase()
+        if (ABBREVIATIONS.has(word)) return true
+    }
+    return false
+}
 
 /**
  * Pure string offset expansion to surrounding CJK/English sentence boundaries.
@@ -29,7 +53,7 @@ export function expandTextRangeOffsetsToSentence(fullText, startOffset, endOffse
     // Walk backward until after the previous sentence terminator (skip leading closers right next to it)
     while (s > 0) {
         const ch = text[s - 1]
-        if (SENTENCE_TERMINATORS.has(ch)) break
+        if (SENTENCE_TERMINATORS.has(ch) && !isNonTerminatingDot(text, s - 1)) break
         // Stop before paragraph boundary whitespace after sentence end
         if (ch === '\n') break
         s--
@@ -43,7 +67,7 @@ export function expandTextRangeOffsetsToSentence(fullText, startOffset, endOffse
         const ch = text[e]
         if (ch === '\n') break
         e++
-        if (SENTENCE_TERMINATORS.has(ch)) {
+        if (SENTENCE_TERMINATORS.has(ch) && !isNonTerminatingDot(text, e - 1)) {
             while (e < len && TRAILING_CLOSERS.has(text[e])) {
                 e++
             }
@@ -255,6 +279,9 @@ export class EpubRangeEditor {
         this.getWritingMode = getWritingMode || (() => 'horizontal')
         this._session = null
         this._overlayHost = null
+        this._previewLayer = null
+        this._startHandle = null
+        this._endHandle = null
         this._dragState = null
         this._nudgeTimer = null
         this._nudgePendingRange = null
@@ -300,6 +327,9 @@ export class EpubRangeEditor {
             this._overlayHost.remove()
             this._overlayHost = null
         }
+        this._previewLayer = null
+        this._startHandle = null
+        this._endHandle = null
         this._session = null
     }
 
@@ -376,8 +406,15 @@ export class EpubRangeEditor {
             pointerEvents: 'none',
             zIndex: '2147483000',
         })
+        const previewLayer = doc.createElement('div')
+        previewLayer.setAttribute('data-linden-range-preview', 'true')
+        Object.assign(previewLayer.style, { position: 'fixed', inset: '0', pointerEvents: 'none' })
+        host.appendChild(previewLayer)
         doc.body.appendChild(host)
         this._overlayHost = host
+        this._previewLayer = previewLayer
+        this._startHandle = null
+        this._endHandle = null
         return host
     }
 
@@ -385,7 +422,8 @@ export class EpubRangeEditor {
         if (!this._session || !range) return
         const { doc, color } = this._session
         const host = this._ensureOverlayHost(doc)
-        host.replaceChildren()
+        const previewLayer = this._previewLayer || host
+        previewLayer.replaceChildren()
 
         const rects = Array.from(range.getClientRects()).filter(r => r.width >= 1 && r.height >= 1)
         if (!rects.length) return
@@ -404,7 +442,7 @@ export class EpubRangeEditor {
                     borderRadius: '3px',
                     pointerEvents: 'none',
                 })
-                host.appendChild(band)
+                previewLayer.appendChild(band)
             }
         }
 
@@ -417,18 +455,24 @@ export class EpubRangeEditor {
         const endX = vertical ? (last.left + last.width / 2) : last.right
         const endY = vertical ? last.bottom : last.bottom
 
-        host.appendChild(this._createHandleEl('start', startX, startY, first.height, vertical, color))
-        host.appendChild(this._createHandleEl('end', endX, endY, last.height, vertical, color))
+        if (!this._startHandle || this._startHandle.ownerDocument !== doc || !host.contains(this._startHandle)) {
+            this._startHandle = this._createHandleEl('start', startX, startY, first.height, vertical, color)
+            host.appendChild(this._startHandle)
+        } else {
+            this._positionHandleEl(this._startHandle, 'start', startX, startY, first.height, vertical, color)
+        }
+
+        if (!this._endHandle || this._endHandle.ownerDocument !== doc || !host.contains(this._endHandle)) {
+            this._endHandle = this._createHandleEl('end', endX, endY, last.height, vertical, color)
+            host.appendChild(this._endHandle)
+        } else {
+            this._positionHandleEl(this._endHandle, 'end', endX, endY, last.height, vertical, color)
+        }
     }
 
-    _createHandleEl(role, x, y, lineH, vertical, color) {
-        const doc = this._session.doc
-        const handle = doc.createElement('div')
-        handle.dataset.handleRole = role
-        const accent = color || '#d4a644'
+    _positionHandleEl(handle, role, x, y, lineH, vertical, color) {
         const size = 14
         const stemH = Math.max(12, Math.min(26, Math.round(lineH || 18)))
-
         Object.assign(handle.style, {
             position: 'fixed',
             left: `${Math.round(x - 14)}px`,
@@ -446,6 +490,14 @@ export class EpubRangeEditor {
             justifyContent: role === 'start' ? 'flex-start' : 'flex-end',
             userSelect: 'none',
         })
+        return { size, stemH, accent: color || '#d4a644' }
+    }
+
+    _createHandleEl(role, x, y, lineH, vertical, color) {
+        const doc = this._session.doc
+        const handle = doc.createElement('div')
+        handle.dataset.handleRole = role
+        const { size, stemH, accent } = this._positionHandleEl(handle, role, x, y, lineH, vertical, color)
 
         const svgNs = 'http://www.w3.org/2000/svg'
         const svg = doc.createElementNS(svgNs, 'svg')
@@ -544,8 +596,18 @@ export class EpubRangeEditor {
                 this._renderHandlesAndPreview(this._session.originalRange, false)
             }
         }
+        const cancelDrag = e => {
+            if (!this._dragState || this._dragState.pointerId !== e.pointerId) return
+            e.preventDefault()
+            e.stopPropagation()
+            try { handle.releasePointerCapture(e.pointerId) } catch {}
+            this._dragState = null
+            if (this._session?.currentRange) {
+                this._renderHandlesAndPreview(this._session.currentRange, false)
+            }
+        }
         handle.addEventListener('pointerup', finishDrag)
-        handle.addEventListener('pointercancel', finishDrag)
+        handle.addEventListener('pointercancel', cancelDrag)
 
         return handle
     }

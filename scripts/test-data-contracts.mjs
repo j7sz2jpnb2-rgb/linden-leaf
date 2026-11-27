@@ -21,6 +21,8 @@ await test('full content hash detects changes outside the former sample regions'
 await test('legacy aliases preserve identity; sampled hashes cannot prove a duplicate', async () => {
     const hash = await computeContentHash(new Blob(['abc']));
     assert.equal(contentIdentityRelation({ documentHash: 'hash_old_3', documentHashAliases: [hash] }, { documentHash: hash }), 'same');
+    const hashB = await computeContentHash(new Blob(['xyz']));
+    assert.equal(contentIdentityRelation({ documentHash: hash, documentHashAliases: ['hash_shared'] }, { documentHash: hashB, documentHashAliases: ['hash_shared'] }), 'different');
     assert.equal(contentIdentityRelation({ documentHash: 's_old' }, { documentHash: 's_old' }), 'unknown');
     const book = { id: 'legacy', format: 'txt', size: 3, filename: 'x.txt', documentHash: 's_old' };
     assert.equal((await findSameContentBook([book], { format: 'txt', size: 3, filename: 'x.txt', documentHash: hash }, async () => ({ blob: new Blob(['abc']) }))).id, 'legacy');
@@ -179,6 +181,78 @@ await test('external EPUB only reuses a saved copy when its content and file sti
     assert.equal(imports, 2)
 });
 
+await test('external PDF skips full SHA-256 on unchanged OS fileIdentity and falls back on mtime change', async () => {
+    const { openLocalPdfSource } = await import('../js/book-source.js');
+    const file = { filePath: 'E:/test/paper.pdf', filename: 'paper.pdf' };
+    const book = {
+        id: 'pdf-1', nativePath: file.filePath, format: 'pdf', size: 1200,
+        nativeSnapshotPath: 'C:/cache/snap.pdf', nativeSnapshotSize: 1200,
+        documentHash: 'c'.repeat(64),
+        fileIdentity: { volumeId: 'vol1', fileId: 'vol1:123', size: 1200, mtimeMs: 1000 },
+    };
+    let hashCalls = 0, stageCalls = 0, saves = 0;
+    let currentStat = { ...book.fileIdentity };
+    const db = {
+        getAllBooks: async () => [book],
+        getBookFileSnapshot: async () => null,
+        saveBook: async () => { saves++; },
+    };
+    const bridge = {
+        getNativeFileIdentity: async () => currentStat,
+        validatePdfSnapshot: async () => true,
+        computeNativeFileHash: async () => { hashCalls++; return book.documentHash; },
+        stagePdfSource: async () => { stageCalls++; return null; },
+        reclaimSnapshot: async () => true,
+    };
+    const fast = await openLocalPdfSource(file, { db, bridge });
+    assert.equal(fast.book.id, 'pdf-1');
+    assert.equal(hashCalls, 0);
+    assert.equal(stageCalls, 0);
+    assert.equal(saves, 0);
 
+    currentStat = { ...book.fileIdentity, mtimeMs: 2000 };
+    const slow = await openLocalPdfSource(file, { db, bridge });
+    assert.equal(slow.book.id, 'pdf-1');
+    assert.equal(hashCalls, 1);
+    assert.equal(saves, 1);
+});
+
+await test('Google Drive read/write handles version tokens and detects version conflicts without bogus If-Match', async () => {
+    const provider = new GoogleDriveStorageProvider({ clientId: 'test', accessToken: 'test' });
+    const originalFetch = globalThis.fetch;
+    let remoteVersion = '7';
+    let patchCalls = 0;
+    let lastPatchHeaders = null;
+    globalThis.fetch = async (url, options = {}) => {
+        if (url.includes('spaces=appDataFolder&q=')) {
+            assert.ok(url.includes('orderBy=modifiedTime%20desc'));
+            assert.ok(url.includes('fields=files(id,name,version,modifiedTime)'));
+            return Response.json({ files: [{ id: 'f1', version: remoteVersion }] });
+        }
+        if (url.includes('?alt=media')) {
+            return new Response('{"books":[]}', { status: 200 });
+        }
+        if (options.method === 'PATCH') {
+            patchCalls++;
+            lastPatchHeaders = options.headers;
+            remoteVersion = '8';
+            return Response.json({ id: 'f1', version: remoteVersion });
+        }
+        return new Response('unexpected', { status: 500 });
+    };
+    try {
+        const readRes = await provider.readFile('sync.json');
+        assert.equal(readRes.etag, 'version:7');
+        const writeOk = await provider.writeFile('sync.json', '{"books":[1]}', { ifMatch: readRes.etag });
+        assert.equal(writeOk.success, true);
+        assert.equal(writeOk.etag, 'version:8');
+        assert.equal(lastPatchHeaders['If-Match'], undefined);
+        remoteVersion = '9';
+        const conflictRes = await provider.writeFile('sync.json', '{"books":[2]}', { ifMatch: writeOk.etag });
+        assert.equal(conflictRes.success, false);
+        assert.equal(conflictRes.conflict, true);
+        assert.equal(patchCalls, 1);
+    } finally { globalThis.fetch = originalFetch; }
+});
 
 console.log(`Data contract tests: ${count} passed.`);

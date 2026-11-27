@@ -12,8 +12,10 @@ let _cachedAiApiKey = null
 
 export const DEFAULT_AI_CONFIG = {
     enabled: false,
+    authMode: 'api', // 'api' | 'siwc'
     endpoint: 'https://api.openai.com/v1',
     model: 'gpt-4o-mini',
+    siwcModel: 'gpt-5-codex',
     cooldownSeconds: 10,
     dailyLimit: 100,
     maxTokens: 20000
@@ -117,6 +119,13 @@ export async function saveAiConfig(cfg = {}) {
 
     if (cfg.enabled !== undefined) {
         merged.enabled = Boolean(cfg.enabled)
+    }
+    if (cfg.authMode === 'api' || cfg.authMode === 'siwc') {
+        merged.authMode = cfg.authMode
+    }
+    if (cfg.siwcModel !== undefined) {
+        const cleanSiwcModel = String(cfg.siwcModel || '').trim()
+        if (cleanSiwcModel) merged.siwcModel = cleanSiwcModel
     }
     if (cfg.endpoint !== undefined) {
         const val = validateEndpointUrl(cfg.endpoint)
@@ -248,10 +257,49 @@ export function getAiApiKeySync() {
 }
 
 /**
+ * Queries official Sign in with ChatGPT authorization status (via native Rust keychain/DPAPI)
+ */
+export async function getSiwcStatus() {
+    if (globalThis.__TAURI__?.core?.invoke) {
+        try {
+            return await globalThis.__TAURI__.core.invoke('siwc_get_status')
+        } catch (e) {
+            return { signedIn: false, hasDirectScope: false, error: e?.message || String(e) }
+        }
+    }
+    return { signedIn: false, hasDirectScope: false, error: 'Desktop Tauri required' }
+}
+
+export async function startSiwcSignIn(sessionId = `siwc_${Date.now()}`) {
+    if (!globalThis.__TAURI__?.core?.invoke) {
+        throw new Error(t('aiAssistant.error.credentialStoreUnavailable'))
+    }
+    return globalThis.__TAURI__.core.invoke('siwc_start_sign_in', {
+        sessionId,
+        locale: getLocale()
+    })
+}
+
+export async function cancelSiwcSignIn(sessionId) {
+    if (!globalThis.__TAURI__?.core?.invoke || !sessionId) return false
+    return globalThis.__TAURI__.core.invoke('siwc_cancel_sign_in', { sessionId }).catch(() => false)
+}
+
+export async function signOutSiwc() {
+    if (!globalThis.__TAURI__?.core?.invoke) return { signedIn: false, hasDirectScope: false }
+    return globalThis.__TAURI__.core.invoke('siwc_sign_out')
+}
+
+/**
  * Checks whether AI service is configured and ready
  */
 export async function isAiReady() {
     const cfg = getAiConfig()
+    if (cfg.authMode === 'siwc') {
+        if (!cfg.enabled) return false
+        const status = await getSiwcStatus()
+        return Boolean(status?.signedIn && status?.hasDirectScope)
+    }
     const key = await getAiApiKey()
     return Boolean(cfg.enabled && key && cfg.endpoint && cfg.model)
 }
@@ -481,7 +529,7 @@ export async function requestAiCompletion({
             signal, beforeDispatch, onWait,
             getStatus: () => getAiStatus({ requireNative: !!globalThis.__TAURI__?.core?.invoke, purpose }),
             invoke: () => requestAiCompletion({
-                requestId: reqId, requestScope, purpose, endpoint: targetEndpoint, model: targetModel, apiKey,
+                requestId: reqId, requestScope, purpose, endpoint, model, apiKey,
                 prompt, systemPrompt, messages, maxTokens: targetMaxTokens,
                 returnMetadata, onChunk, signal
             })
@@ -571,6 +619,20 @@ export async function requestAiCompletion({
                 if (signal?.aborted) {
                     finishReject(new DOMException('AI request aborted', 'AbortError'))
                     return
+                }
+
+                const useSiwc = cfg.authMode === 'siwc' && !endpoint
+                if (useSiwc) {
+                    return globalThis.__TAURI__.core.invoke('ai_request_siwc_completion', {
+                        payload: {
+                            requestId: reqId,
+                            requestScope,
+                            purpose,
+                            model: model || cfg.siwcModel || 'gpt-5-codex',
+                            messages: chatMessages,
+                            locale: getLocale()
+                        }
+                    })
                 }
 
                 return globalThis.__TAURI__.core.invoke('ai_request_chat_completion', {

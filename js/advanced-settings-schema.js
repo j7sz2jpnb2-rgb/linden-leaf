@@ -21,6 +21,8 @@ export const DEFAULT_ADVANCED_SETTINGS = Object.freeze({
     paraMarginBottom: 0.5,
     paraIndentSize: '2em',
     txtMergeSoftBreaks: true,
+    txtPurifyEnabled: false,
+    txtPurifyCustomRules: '',
     // Interaction & Animation
     reducedMotion: false,
     glassmorphismBlur: true,
@@ -51,7 +53,13 @@ export const DEFAULT_ADVANCED_SETTINGS = Object.freeze({
     ttsApiKeyConfigured: false,
     ttsApiModel: 'tts-1',
     ttsOfflineEndpoint: 'http://127.0.0.1:8880/v1/audio/speech',
-    ttsOfflineModel: 'kokoro-82m-zh'
+    ttsOfflineModel: 'kokoro-82m-zh',
+    // Offline OCR (PP-OCRv6 & ONNX Runtime)
+    ocrEngine: 'auto',                    // 'auto' | 'ppocrv6-small' | 'ppocrv6-tiny' | 'tesseract'
+    ocrBackend: 'auto',                   // 'auto' | 'webgpu' | 'wasm'
+    ocrDirection: 'auto',                 // 'auto' | 'horizontal' | 'vertical'
+    ocrUseMirror: false,
+    ocrIdlePrefetch: true
 })
 
 export function sanitizeAdvancedSettings(incoming = {}) {
@@ -61,14 +69,18 @@ export function sanitizeAdvancedSettings(incoming = {}) {
         const type = typeof result[key]
         if (type === 'boolean' && typeof value === 'boolean') result[key] = value
         if (type === 'number' && typeof value === 'number' && Number.isFinite(value)) result[key] = value
-        if (type === 'string' && typeof value === 'string') result[key] = value.trim().slice(0, 1000)
+        if (type === 'string' && typeof value === 'string') {
+            const limit = key === 'txtPurifyCustomRules' ? 4000 : 1000
+            result[key] = value.trim().slice(0, limit)
+        }
     }
     const bounds = { aiContextTokenBudget: [0, 10000], aiMaxTokens: [256, 20000], aiCooldownSeconds: [0, 3600], aiDailyLimit: [0, 100000],
         paraMarginTop: [0, 3], paraMarginBottom: [0, 3], sidebarDefaultWidth: [320, 640], dictLookupDelay: [100, 600],
         highlighterOpacity: [0.15, 0.75], underlineWidth: [0.5, 5], pdfPenWidth: [0.5, 10], bgIndexConcurrency: [1, 4], ttsRate: [0.5, 3] }
     for (const [key, [min, max]] of Object.entries(bounds)) result[key] = Math.max(min, Math.min(max, result[key]))
     const enums = { ttsProvider: ['system', 'api', 'offline'], chapterTransStyle: ['auto', 'literal', 'literary', 'academic'],
-        animIntensity: ['none', 'soft', 'normal'], modelTokenizer: ['auto', 'cl100k_base', 'gpt2', 'cjk_heuristic'], paraIndentSize: ['0', '0em', '1em', '2em', '3em'] }
+        animIntensity: ['none', 'soft', 'normal'], modelTokenizer: ['auto', 'cl100k_base', 'gpt2', 'cjk_heuristic'], paraIndentSize: ['0', '0em', '1em', '2em', '3em'],
+        ocrEngine: ['auto', 'ppocrv6-small', 'ppocrv6-tiny', 'tesseract'], ocrBackend: ['auto', 'webgpu', 'wasm'], ocrDirection: ['auto', 'horizontal', 'vertical'] }
     for (const [key, allowed] of Object.entries(enums)) if (!allowed.includes(result[key])) result[key] = DEFAULT_ADVANCED_SETTINGS[key]
     return result
 }

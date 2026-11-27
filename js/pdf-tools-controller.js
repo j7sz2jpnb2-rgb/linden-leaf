@@ -21,6 +21,9 @@ export class PdfToolsController {
             const spreadMode = this.app.pdfViewport.getSpreadMode ? this.app.pdfViewport.getSpreadMode() : (this.app.settings.pdfSpreadMode || 'none')
             this.dom.btnPdfSpreadToggle.setAttribute('title', spreadMode === 'dual' ? t('pdfTools.switchToSingleTitle') : t('pdfTools.switchToDualTitle'))
         }
+        if (this.dom.modalPdfOcr?.classList?.contains('show')) {
+            this._refreshPdfOcrEngineBadge()
+        }
         const refPane = this._pdfSplitSession?.pane
         if (refPane) {
             refPane.setAttribute('aria-label', t('pdfTools.refAria'))
@@ -75,6 +78,8 @@ export class PdfToolsController {
             pdfOcrCharCount: document.getElementById('pdf-ocr-char-count'),
             pdfOcrPageRange: document.getElementById('pdf-ocr-page-range'),
             pdfOcrMode: document.getElementById('pdf-ocr-mode'),
+            pdfOcrDirection: document.getElementById('pdf-ocr-direction'),
+            pdfOcrEngineBadge: document.getElementById('pdf-ocr-engine-badge'),
             btnStartPdfOcr: document.getElementById('btn-start-pdf-ocr')
         }
     }
@@ -216,6 +221,45 @@ export class PdfToolsController {
         this.events.on(cropModeSelect, 'change', updateCropSettings);
         this.events.on(cropTb, 'input', updateCropSettings);
         this.events.on(cropLr, 'input', updateCropSettings);
+        this.events.on(document.getElementById('btn-pdf-auto-crop'), 'click', async () => {
+            const driver = this.app.pdfViewport?.driver
+            if (!driver?.computeAutoCrop) return
+            try {
+                const detected = await driver.computeAutoCrop()
+                const top = Math.max(0, Math.min(30, Math.round(detected?.top ?? 0)))
+                const bottom = Math.max(0, Math.min(30, Math.round(detected?.bottom ?? 0)))
+                const left = Math.max(0, Math.min(30, Math.round(detected?.left ?? 0)))
+                const right = Math.max(0, Math.min(30, Math.round(detected?.right ?? 0)))
+                const tb = Math.min(top, bottom)
+                const lr = Math.min(left, right)
+                const hasCrop = top > 0 || bottom > 0 || left > 0 || right > 0
+                const mode = hasCrop ? 'manual' : 'none'
+                if (cropModeSelect) cropModeSelect.value = mode
+                if (cropWrap) cropWrap.style.display = mode === 'none' ? 'none' : 'flex'
+                if (cropTb) cropTb.value = String(tb)
+                if (cropLr) cropLr.value = String(lr)
+                if (cropTbVal) cropTbVal.textContent = `${tb}%`
+                if (cropLrVal) cropLrVal.textContent = `${lr}%`
+                const settings = {
+                    mode,
+                    margins: { top, bottom, left, right },
+                    oddMargins: { top, bottom, left, right: Math.max(0, right - 2) },
+                    evenMargins: { top, bottom, left: Math.max(0, left - 2), right }
+                }
+                this.app.pdfViewport?.setCropSettings?.(settings)
+                if (this.app.currentBookId) {
+                    db.updateBook(this.app.currentBookId, { cropSettings: settings }).catch(() => {})
+                    if (this.app.currentBookData) this.app.currentBookData.cropSettings = settings
+                }
+                this.app.dialogs?.showToast?.(
+                    t(hasCrop ? 'pdfTools.autoCropApplied' : 'pdfTools.autoCropEmpty'),
+                    hasCrop ? 'success' : 'info'
+                )
+            } catch (err) {
+                console.warn('[PdfTools] autoCrop failed:', err)
+                this.app.dialogs?.showToast?.(t('pdfTools.autoCropFailed'), 'warning')
+            }
+        });
         this.events.on(this.dom.btnPdfZoomOut, 'click', () => this.stepPDFZoom(-10));
         this.events.on(this.dom.btnPdfZoomIn, 'click', () => this.stepPDFZoom(10));
         this.events.on(this.dom.pdfZoomSlider, 'input', e => {
@@ -247,6 +291,12 @@ export class PdfToolsController {
         this.events.on(document.getElementById('setting-pdf-page-appearance'), 'change', e => {
             this.app.setSetting('pdfPageAppearance', e.target.value)
             this.applyPdfPageAppearance()
+            this.app.saveSettingsDebounced()
+        });
+        this.events.on(document.getElementById('setting-pdf-preserve-images'), 'change', e => {
+            const enabled = Boolean(e.target.checked)
+            this.app.setSetting('pdfPreserveImagesInDarkMode', enabled)
+            this.app.pdfViewport?.setPreserveImagesInDarkMode?.(enabled)
             this.app.saveSettingsDebounced()
         });
         this.events.on(this.dom.btnPdfFitWidth, 'click', () => this.setPDFZoom('fit-width'));
@@ -304,12 +354,131 @@ export class PdfToolsController {
         this.events.on(document.getElementById('btn-scan-text-darken'), 'click', () => this.toggleScanPreset('text-darken'));
     }
 
+    _cancelOcrIdlePrefetch() {
+        clearTimeout(this._ocrPrefetchTimer)
+        this._ocrPrefetchTimer = null
+        this._ocrPrefetchAbortController?.abort()
+        this._ocrPrefetchAbortController = null
+    }
+
+    _getOcrDirection() {
+        return this.dom.pdfOcrDirection?.value
+            || this.app.advancedSettings?.config?.ocrDirection
+            || ocrService.getConfig?.()?.direction
+            || 'auto'
+    }
+
+    _getOcrCacheKeys(docHash, pageIndex, engineTag, direction) {
+        const v2Key = `linden_ocr_v2_${docHash}_p${pageIndex}_${engineTag}_${direction}`
+        const legacyKey = `linden_ocr_${docHash}_p${pageIndex}`
+        return { v2Key, legacyKey }
+    }
+
+    async _refreshPdfOcrEngineBadge() {
+        const badge = this.dom.pdfOcrEngineBadge
+        if (!badge) return
+        try {
+            const info = await ocrService.getActiveEngineInfo()
+            const nameKey = info.effectiveEngine === 'ppocrv6-small'
+                ? 'pdfTools.ocrEngineSmall'
+                : (info.effectiveEngine === 'ppocrv6-tiny' ? 'pdfTools.ocrEngineTiny' : 'pdfTools.ocrEngineTesseract')
+            const providerLabel = info.effectiveEngine === 'tesseract'
+                ? ''
+                : (info.executionProvider === 'webgpu' ? 'WebGPU' : (info.executionProvider === 'wasm' ? 'WASM SIMD' : t('pdfTools.ocrBackendAuto')))
+            const baseName = t(nameKey)
+            badge.textContent = providerLabel ? `${baseName} (${providerLabel})` : baseName
+        } catch (_) {
+            badge.textContent = t('pdfTools.ocrEngineTesseract')
+        }
+    }
+
+    _scheduleOcrIdlePrefetch(basePageIndex, engineTag, direction) {
+        this._cancelOcrIdlePrefetch()
+        if (this.app.advancedSettings?.config?.ocrIdlePrefetch === false) return
+        if (engineTag !== 'ppocrv6-small' && engineTag !== 'ppocrv6-tiny') return
+        if (this._isPdfOcrRunning || this._isPageOcrRunning) return
+
+        const bookId = this.app.currentBookId
+        const docHash = this.app.currentBookData?.documentHash || bookId
+        const viewport = this.app.pdfViewport
+        const driver = this.app.pdfDriver || viewport?.driver
+        const epoch = this.app._currentBookEpoch
+        const totalPages = driver?.numPages || viewport?.numPages || 0
+        if (!bookId || !viewport || !driver || totalPages <= 0) return
+
+        const isAndroid = typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent || '')
+        const lookahead = isAndroid ? 1 : 2
+        const controller = this._ocrPrefetchAbortController = new AbortController()
+        const signal = controller.signal
+
+        const isStale = () => signal.aborted || this._isPdfOcrRunning || this._isPageOcrRunning ||
+            this.app.currentBookId !== bookId || this.app.pdfViewport !== viewport ||
+            this.app._currentBookEpoch !== epoch || viewport?._destroyed
+
+        this._ocrPrefetchTimer = setTimeout(async () => {
+            this._ocrPrefetchTimer = null
+            for (let offset = 1; offset <= lookahead; offset++) {
+                const targetPage = basePageIndex + offset
+                if (targetPage >= totalPages || isStale()) break
+                if (viewport._pageOcrSpans?.get(targetPage)?.length) continue
+
+                const { v2Key } = this._getOcrCacheKeys(docHash, targetPage, engineTag, direction)
+                const cached = await db.getSetting(v2Key).catch(() => null)
+                if (isStale()) break
+                if (Array.isArray(cached) && cached.length) {
+                    viewport.setPageOcrData?.(targetPage, cached)
+                    continue
+                }
+
+                // Skip pages that already possess a native PDF text layer
+                if (typeof driver.getTextLayer === 'function') {
+                    const layer = await driver.getTextLayer(targetPage).catch(() => null)
+                    if (isStale()) break
+                    if (layer?.spans?.length && layer.spans.some(s => String(s?.text || '').trim().length > 0)) {
+                        continue
+                    }
+                }
+
+                let canvas = null
+                try {
+                    const scale = 1.5
+                    const pageSize = viewport.pageSizes?.[targetPage] || driver.pageSizes?.[targetPage] || null
+                    const bmp = typeof driver.renderPageBitmap === 'function'
+                        ? await driver.renderPageBitmap(targetPage, scale, signal)
+                        : await driver.renderPage?.(targetPage, scale, signal)
+                    canvas = bmp?.canvas || (bmp?.tagName === 'CANVAS' ? bmp : null)
+                    if (isStale() || !canvas) break
+
+                    const recognized = await ocrService.recognizeCanvas(canvas, signal, {
+                        scale,
+                        direction,
+                        originX: driver?.kind === 'mupdf' ? (pageSize?.x0 || 0) : 0,
+                        originY: driver?.kind === 'mupdf' ? (pageSize?.y0 || 0) : 0
+                    })
+                    if (isStale()) break
+                    if (recognized?.spans?.length) {
+                        viewport.setPageOcrData?.(targetPage, recognized.spans)
+                        await db.setSetting(v2Key, recognized.spans).catch(() => {})
+                    }
+                } catch (_) {
+                    if (isStale()) break
+                } finally {
+                    if (canvas) { canvas.width = 0; canvas.height = 0 }
+                }
+            }
+            if (this._ocrPrefetchAbortController === controller) {
+                this._ocrPrefetchAbortController = null
+            }
+        }, 1200)
+    }
+
     async recognizeCurrentPage() {
         if (!this.app.currentBookId || this.app.currentBookData?.format !== 'pdf') return
         if (this._isPageOcrRunning) {
             this.app.dialogs.showToast(t('pdfTools.recognizingCurrent'), 'info')
             return
         }
+        this._cancelOcrIdlePrefetch()
         const controller = this._pageOcrAbortController = new AbortController()
         const signal = controller.signal
         this._isPageOcrRunning = true
@@ -317,16 +486,25 @@ export class PdfToolsController {
         const driver = this.app.pdfDriver || viewport?.driver
         const epoch = this.app._currentBookEpoch
         const pageIndex = viewport?.currentPage ?? 0
-        const cacheKey = `linden_ocr_${this.app.currentBookData?.documentHash || bookId}_p${pageIndex}`
+        const docHash = this.app.currentBookData?.documentHash || bookId
+        const direction = this._getOcrDirection()
+        const engineInfo = await ocrService.getActiveEngineInfo().catch(() => ({ effectiveEngine: 'tesseract' }))
+        const engineTag = engineInfo.effectiveEngine || 'tesseract'
+        const { v2Key, legacyKey } = this._getOcrCacheKeys(docHash, pageIndex, engineTag, direction)
         const isStale = () => signal.aborted || this.app.currentBookId !== bookId ||
             this.app.pdfViewport !== viewport || this.app._currentBookEpoch !== epoch || viewport?._destroyed
         let canvas = null
+        let prefetchArgs = null
         try {
-            const cached = await db.getSetting(cacheKey).catch(() => null)
+            let cached = await db.getSetting(v2Key).catch(() => null)
+            if (!cached && direction === 'auto') {
+                cached = await db.getSetting(legacyKey).catch(() => null)
+            }
             if (isStale()) return
             if (Array.isArray(cached) && cached.length) {
                 viewport.setPageOcrData(pageIndex, cached)
                 this.app.dialogs.showToast(t('pdfTools.textLayerRestored', { page: pageIndex + 1 }), 'info')
+                prefetchArgs = [pageIndex, engineTag, direction]
                 return
             }
             this.app.dialogs.showToast(t('pdfTools.ocringPage', { page: pageIndex + 1 }), 'info')
@@ -339,14 +517,23 @@ export class PdfToolsController {
             if (isStale() || !canvas) return
             const recognized = await ocrService.recognizeCanvas(canvas, signal, {
                 scale,
+                direction,
                 originX: driver?.kind === 'mupdf' ? (pageSize?.x0 || 0) : 0,
                 originY: driver?.kind === 'mupdf' ? (pageSize?.y0 || 0) : 0
             })
             if (isStale()) return
             if (recognized?.spans?.length) {
+                const actualTag = recognized.engine || engineTag
+                const persistKeys = this._getOcrCacheKeys(docHash, pageIndex, actualTag, direction)
                 viewport.setPageOcrData(pageIndex, recognized.spans)
-                await db.setSetting(cacheKey, recognized.spans).catch(() => {})
-                if (!isStale()) this.app.dialogs.showToast(t('pdfTools.textLayerCreated', { page: pageIndex + 1 }), 'success')
+                await db.setSetting(persistKeys.v2Key, recognized.spans).catch(() => {})
+                if (direction === 'auto') {
+                    await db.setSetting(legacyKey, recognized.spans).catch(() => {})
+                }
+                if (!isStale()) {
+                    this.app.dialogs.showToast(t('pdfTools.textLayerCreated', { page: pageIndex + 1 }), 'success')
+                    prefetchArgs = [pageIndex, actualTag, direction]
+                }
             } else {
                 this.app.dialogs.showToast(t('pdfTools.noTextRecognizedPage', { page: pageIndex + 1 }), 'info')
             }
@@ -361,6 +548,9 @@ export class PdfToolsController {
                 this._isPageOcrRunning = false
             }
             if (canvas) { canvas.width = 0; canvas.height = 0 }
+            if (prefetchArgs && !isStale()) {
+                this._scheduleOcrIdlePrefetch(...prefetchArgs)
+            }
         }
     }
 
@@ -387,6 +577,7 @@ export class PdfToolsController {
 
     resetSessionState() {
         clearTimeout(this._pdfZoomOverlayTimer)
+        this._cancelOcrIdlePrefetch()
         this._pageOcrAbortController?.abort()
         this._pageOcrAbortController = null
         this._isPageOcrRunning = false
@@ -419,6 +610,10 @@ export class PdfToolsController {
         })
         const select = document.getElementById('setting-pdf-page-appearance')
         if (select) select.value = setting
+        const preserveImages = this.app.settings?.pdfPreserveImagesInDarkMode !== false
+        this.app.pdfViewport?.setPreserveImagesInDarkMode?.(preserveImages)
+        const preserveCheckbox = document.getElementById('setting-pdf-preserve-images')
+        if (preserveCheckbox) preserveCheckbox.checked = preserveImages
         if (this.dom.btnPdfSpreadToggle && this.app.pdfViewport) {
             const spreadMode = this.app.pdfViewport.getSpreadMode ? this.app.pdfViewport.getSpreadMode() : (this.app.settings.pdfSpreadMode || 'none')
             this.dom.btnPdfSpreadToggle.classList.toggle('active', spreadMode === 'dual')
@@ -519,7 +714,11 @@ export class PdfToolsController {
         clearTimeout(this._pdfOcrCloseTimer)
         this.dom.modalPdfOcr.style.display = 'flex'
         this.dom.modalPdfOcr.classList.add('show')
+        this._refreshPdfOcrEngineBadge()
         if (this._isPdfOcrRunning) return
+        if (this.dom.pdfOcrDirection) {
+            this.dom.pdfOcrDirection.value = this.app.advancedSettings?.config?.ocrDirection || 'auto'
+        }
         const curPage = (this.app.pdfViewport?.currentPage ?? this.app.currentPdfPageIndex ?? 0) + 1
         if (this.dom.pdfOcrPageRange) {
             this.dom.pdfOcrPageRange.value = ''
@@ -540,11 +739,13 @@ export class PdfToolsController {
             if (this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = t('pdfTools.ocrStoppedStatus')
             return
         }
+        this._cancelOcrIdlePrefetch()
         const driver = this.app.pdfDriver || this.app._activeSession?.driver
         if (!driver) { this.app.dialogs.showToast(t('pdfTools.openPdfFirst'), 'warning'); return }
         const curPage = (this.app.pdfViewport?.currentPage ?? this.app.currentPdfPageIndex ?? 0) + 1
         const rangeStr = (this.dom.pdfOcrPageRange?.value || '').trim() || String(curPage)
         const mode = this.dom.pdfOcrMode?.value || 'auto'
+        const direction = this._getOcrDirection()
         const totalPages = driver.numPages || this.app.pdfViewport?.numPages || this.app.currentLocation?.totalPages || 1
         const check = parsePageRange(rangeStr, totalPages, curPage, MAX_OCR_PAGES)
         if (!check.valid) {
@@ -564,7 +765,7 @@ export class PdfToolsController {
         let completedChars = 0
         try {
             const res = await ocrService.extractText({
-                driver, pages: check.pages, mode,
+                driver, pages: check.pages, mode, direction,
                 onProgress: msg => { if (isCurrent() && this.dom.pdfOcrStatusText) this.dom.pdfOcrStatusText.innerText = msg },
                 onPageResult: (page, chunk) => {
                     if (!isCurrent()) return
@@ -576,6 +777,7 @@ export class PdfToolsController {
                     if (this.dom.pdfOcrCharCount) this.dom.pdfOcrCharCount.innerText = t('pdfTools.ocrCharCount', { count: completedChars })
                 }
             })
+            if (isCurrent()) this._refreshPdfOcrEngineBadge()
             if (!isCurrent()) return
             if (this.dom.pdfOcrResultText) this.dom.pdfOcrResultText.value = res.fullText || ''
             const count = res.results.reduce((sum, page) => sum + (page.text?.length || 0), 0)

@@ -110,7 +110,7 @@ for (const file of pure) {
   // (c): duplicate HTML attributes in JS HTML template tags
   const jsTagsRe = /<(button|div|span|input|select|textarea|label|a|form|img|option|section|header|footer|ul|li|p|h[1-6]|tr|td|th)\b((?:\s+[a-zA-Z_:][a-zA-Z0-9_.:-]*(?:\s*=\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"'=<>`${}]+))?)+)\s*\/?>/g;
   for (const jsRelPath of files) {
-    const absJs = pathMod.isAbsolute(jsRelPath) ? jsRelPath : pathMod.join(rootDir, jsRelPath);
+    const absJs = pathMod.isAbsolute(jsRelPath) ? jsRelPath : pathMod.join(rootDir, 'js', jsRelPath);
     if (!fsMod.existsSync(absJs)) continue;
     const jsSrc = fsMod.readFileSync(absJs, 'utf8');
     let jm;
@@ -141,6 +141,20 @@ for (const file of pure) {
         console.error(`[structure] Duplicate @keyframes "${kfName}" across: ${locations.join(', ')}`);
         failures += 1;
       }
+    }
+
+    // (d): CSS !important ratchet ceiling so CSS override technical debt never grows
+    const MAX_CSS_IMPORTANT = 1291;
+    let importantCount = 0;
+    for (const cssFile of cssFiles) {
+      const cssSrc = fsMod.readFileSync(pathMod.join(cssDir, cssFile), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
+      const matches = cssSrc.match(/!important\b/g);
+      if (matches) importantCount += matches.length;
+    }
+    if (importantCount > MAX_CSS_IMPORTANT) {
+      console.error(`[structure] CSS !important count (${importantCount}) exceeded ratchet ceiling (${MAX_CSS_IMPORTANT}).`);
+      failures += 1;
     }
   }
 })();

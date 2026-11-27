@@ -5,6 +5,7 @@ import { platformBridge } from './platformBridge.js'
 import { performWebSearch } from './search-config.js'
 import { resolveExcerptSource } from './excerpt-source-resolver.js'
 import { uiSymbol, escapeHTML, mapHighlightDisplayColor } from './ui-format.js'
+import { mergeMarkdownSidecar, sanitizeSidecarFilename } from './markdown-sidecar.js'
 import { NoteComposer } from './note-composer.js'
 import {
     DEFAULT_HIGHLIGHT_COLOR,
@@ -36,6 +37,7 @@ export class AnnotationsDrawerController {
         this.activePenColor = normalizeHighlightColor(this._loadPref(PEN_COLOR_STORAGE_KEY, DEFAULT_HIGHLIGHT_COLOR))
         this._crossPageAnchor = null
         this._portalAnchor = null
+        this._portalNextDirection = new Map()
         this._undoStack = []
         this.rangeEditor = new EpubRangeEditor({
             getWritingMode: () => this.app.settings?.writingMode || 'horizontal',
@@ -117,8 +119,10 @@ export class AnnotationsDrawerController {
             },
             tocContainer: document.getElementById('toc-tree-container'),
             portalsHost: document.getElementById('reader-portals-host'),
+            pdfEmbeddedHost: document.getElementById('reader-pdf-embedded-host'),
             notesContainer: document.getElementById('notes-list-container'),
             btnExportNotes: document.getElementById('btn-export-notes'),
+            btnSyncSidecar: document.getElementById('btn-sync-markdown-sidecar'),
             selectionPopup: document.getElementById('selection-popup'),
             popupMultiBadge: document.getElementById('popup-multi-badge'),
             popupStyleButtons: document.querySelectorAll('#selection-popup .popup-pen-style-btn'),
@@ -227,8 +231,8 @@ export class AnnotationsDrawerController {
         this.events.on(this.dom.btnPopupNote, 'click', () => {
             this.openNoteComposerForSelection({ title: t('annotations.addNoteTitle') })
         });
-        this.events.on(this.dom.btnPopupCopy, 'click', async () => {
-            await this.app.copyMultiSelectionOrSingle()
+        this.events.on(this.dom.btnPopupCopy, 'click', async e => {
+            await this.app.copyMultiSelectionOrSingle({ raw: Boolean(e?.altKey) })
         });
         this.events.on(this.dom.btnPopupSearch, 'click', () => {
             const text = (this.multiSelectedRanges && this.multiSelectedRanges.length > 0)
@@ -261,7 +265,9 @@ export class AnnotationsDrawerController {
             const selInfo = this.selectedTextInfo ? { ...this.selectedTextInfo } : (this._frozenSelectionSnapshot ? { ...this._frozenSelectionSnapshot } : null)
             this.clearActiveTextSelection()
             this.hideSelectionPopup()
-            if (this.app.aiSidebar && selInfo) {
+            if (typeof this.app.openAiWithReference === 'function' && selInfo) {
+                this.app.openAiWithReference(selInfo)
+            } else if (this.app.aiSidebar && selInfo) {
                 this.app.aiSidebar.openWithSelection(selInfo)
             } else if (this.app.aiSidebar) {
                 this.app.aiSidebar.openSidebar()
@@ -372,6 +378,9 @@ export class AnnotationsDrawerController {
                     this.hideHighlightActionPopup()
                 }
             }
+        });
+        this.events.on(this.dom.btnSyncSidecar, 'click', () => {
+            this.syncBookMarkdownSidecar(this.app.currentBookId, { silent: false })
         });
     }
 
@@ -779,13 +788,14 @@ export class AnnotationsDrawerController {
             this.clearActiveTextSelection()
             this.hideSelectionPopup()
             this.loadNotesList()
+            this.scheduleMarkdownSidecarSync(bookId)
             return
         }
 
         const text = (target.text || target.selectedText || targetRef?.selectedText || targetRef?.text || '').trim()
 
         if (this.app.pdfViewport && (target?.formatType === 'pdf' || target?.pdfTarget)) {
-            const chapterTitle = targetRef?.chapterTitle || this._resolveChapterTitleForSelection({ pdfTarget: target.pdfTarget })
+            const chapterTitle = targetRef?.chapterTitle || targetRef?.chapter || targetRef?.chapterOrPage || this._resolveChapterTitleForSelection({ pdfTarget: target.pdfTarget })
             const hl = {
                 id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 bookId: bookId,
@@ -813,6 +823,7 @@ export class AnnotationsDrawerController {
             }
             this.updateSidebarNotesCount()
             this.loadNotesList()
+            this.scheduleMarkdownSidecarSync(bookId)
             this.app.dialogs.showToast(t('annotations.addedHighlight'), 'success')
             return
         }
@@ -831,10 +842,16 @@ export class AnnotationsDrawerController {
                 return
             }
 
-            // Update color or note of existing annotation of this style
+            // Update color or note of existing annotation of this style (append rather than overwrite when appendNote is set)
             const before = { ...matched }
             matched.color = colorVal
-            if (note) matched.note = note
+            if (note) {
+                if (targetRef?.appendNote && matched.note?.trim()) {
+                    matched.note = matched.note.includes(note.trim()) ? matched.note : `${matched.note}\n\n${note}`
+                } else {
+                    matched.note = note
+                }
+            }
             if (cfi) matched.cfi = cfi
             matched.updatedAt = Date.now()
             await db.saveHighlight(matched)
@@ -856,7 +873,7 @@ export class AnnotationsDrawerController {
         }
 
         // 2. New Highlight Record (coexists with other styles like highlight + underline!)
-        const chapterTitle = targetRef?.chapterTitle || this._resolveChapterTitleForSelection({ range: target.range })
+        const chapterTitle = targetRef?.chapterTitle || targetRef?.chapter || targetRef?.chapterOrPage || this._resolveChapterTitleForSelection({ range: target.range })
         const hl = {
             id: `hl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             bookId: bookId,
@@ -892,6 +909,7 @@ export class AnnotationsDrawerController {
 
         this.updateSidebarNotesCount()
         this.loadNotesList()
+        this.scheduleMarkdownSidecarSync(bookId)
         this.app.dialogs.showToast(t('annotations.addedHighlight'), 'success')
     }
 
@@ -936,6 +954,7 @@ export class AnnotationsDrawerController {
             this._syncHighlightActionUi(hl)
         }
         this.loadNotesList()
+        this.scheduleMarkdownSidecarSync(hl.bookId || this.app.currentBookId)
         return true
     }
 
@@ -979,6 +998,7 @@ export class AnnotationsDrawerController {
             this._syncHighlightActionUi(current)
         }
         this.loadNotesList()
+        this.scheduleMarkdownSidecarSync(hl.bookId || this.app.currentBookId)
         return true
     }
 
@@ -1005,6 +1025,7 @@ export class AnnotationsDrawerController {
                 }
             }
             this.loadNotesList()
+            this.scheduleMarkdownSidecarSync(hl.bookId || this.app.currentBookId)
             this.clearActiveTextSelection()
             this.hideHighlightActionPopup()
         }
@@ -1027,6 +1048,7 @@ export class AnnotationsDrawerController {
                 this._pushUndoEntry({ type: 'delete', items: [before] })
             }
             this.loadNotesList()
+            this.scheduleMarkdownSidecarSync(hl.bookId || this.app.currentBookId)
         }
     }
 
@@ -1147,6 +1169,7 @@ export class AnnotationsDrawerController {
 
     clearPortalAnchor() {
         this._portalAnchor = null
+        this._portalNextDirection = new Map()
         if (this.dom.portalBanner) this.dom.portalBanner.hidden = true
         this.dom.hlActionPortal?.classList?.remove('active')
     }
@@ -1210,13 +1233,25 @@ export class AnnotationsDrawerController {
         this.app.dialogs?.showToast?.(t('annotations.portalCreatedToast'), 'success')
     }
 
-    async navigateToPortal(portal, currentBookId) {
+    async navigateToPortal(portal, currentBookId, options = {}) {
         if (!portal) return
-        const isSourceCurrent = String(portal.sourceBookId) === String(currentBookId)
-        const destBookId = isSourceCurrent ? portal.targetBookId : portal.sourceBookId
-        const destCfi = isSourceCurrent ? portal.targetCfi : portal.sourceCfi
-        const destPdfTarget = isSourceCurrent ? portal.targetPdfTarget : portal.sourcePdfTarget
-        const destHighlightId = isSourceCurrent ? portal.targetHighlightId : portal.sourceHighlightId
+        const isSameBook = String(portal.sourceBookId) === String(portal.targetBookId)
+        let goToTarget
+        if (!isSameBook) {
+            goToTarget = String(portal.sourceBookId) === String(currentBookId)
+        } else if (options?.fromHighlightId) {
+            goToTarget = String(options.fromHighlightId) !== String(portal.targetHighlightId)
+        } else {
+            const nextDir = portal.id ? this._portalNextDirection?.get(portal.id) : null
+            goToTarget = nextDir ? nextDir === 'target' : true
+        }
+        if (isSameBook && portal.id) {
+            this._portalNextDirection?.set(portal.id, goToTarget ? 'source' : 'target')
+        }
+        const destBookId = goToTarget ? portal.targetBookId : portal.sourceBookId
+        const destCfi = goToTarget ? portal.targetCfi : portal.sourceCfi
+        const destPdfTarget = goToTarget ? portal.targetPdfTarget : portal.sourcePdfTarget
+        const destHighlightId = goToTarget ? portal.targetHighlightId : portal.sourceHighlightId
 
         if (String(destBookId) === String(currentBookId)) {
             this.app.navHistory?.pushLocation()
@@ -1595,6 +1630,7 @@ export class AnnotationsDrawerController {
         const portals = typeof db.getPortalsByBook === 'function' ? await db.getPortalsByBook(bookId) : []
         if (activeSession && !activeSession.isCurrent()) return
         this._renderPortalsHost(portals, bookId)
+        this._renderPdfEmbeddedAnnotationsHost(bookId, activeSession).catch(() => {})
         const container = this.dom.notesContainer
         container.innerHTML = ''
 
@@ -1613,6 +1649,7 @@ export class AnnotationsDrawerController {
         }
 
         if (this.dom.btnExportNotes) this.dom.btnExportNotes.style.display = 'inline-flex'
+        if (this.dom.btnSyncSidecar) this.dom.btnSyncSidecar.style.display = platformBridge.isTauri ? 'inline-flex' : 'none'
 
         notes.forEach(note => {
             const match = snapshot ? db.isContentIdentityMatching(note, snapshot) : { matches: true }
@@ -1722,6 +1759,7 @@ export class AnnotationsDrawerController {
                     await this.app.foliateView.deleteAnnotation({ value: note.cfi, id: note.id }).catch(() => {})
                 }
                 this.loadNotesList()
+                this.scheduleMarkdownSidecarSync(bookId)
             })
 
             container.appendChild(card)
@@ -1744,13 +1782,13 @@ export class AnnotationsDrawerController {
         host.appendChild(heading)
 
         for (const ptl of portals) {
+            const isCrossBook = String(ptl.sourceBookId) !== String(ptl.targetBookId)
             const isSourceCurrent = String(ptl.sourceBookId) === String(currentBookId)
             const destBookTitle = isSourceCurrent ? ptl.targetBookTitle : ptl.sourceBookTitle
             const destLabel = isSourceCurrent ? ptl.targetLabel : ptl.sourceLabel
-            const isCrossBook = String(ptl.sourceBookId) !== String(ptl.targetBookId)
             const chipText = isCrossBook
                 ? `↗ ${destBookTitle}: ${destLabel}`
-                : `⇄ ${destLabel}`
+                : `⇄ ${ptl.sourceLabel} ↔ ${ptl.targetLabel}`
 
             const row = document.createElement('div')
             row.className = 'reader-portal-chip-row'
@@ -1828,6 +1866,198 @@ export class AnnotationsDrawerController {
             }
         } else {
             this.app.dialogs.showToast(t('annotations.export.failed', { error: res.error || t('annotations.unknownError') }), 'warning')
+        }
+    }
+
+    _hashEmbeddedAnnotId(bookId, annot) {
+        const seed = `${bookId}|${annot.page}|${annot.subtype}|${annot.contents || ''}|${(annot.rect || []).map(v => Number(v || 0).toFixed(4)).join(',')}`
+        let h = 2166136261
+        for (let i = 0; i < seed.length; i++) {
+            h ^= seed.charCodeAt(i)
+            h = Math.imul(h, 16777619)
+        }
+        return `pdf_annot_${(h >>> 0).toString(36)}`
+    }
+
+    async _renderPdfEmbeddedAnnotationsHost(bookId, activeSession) {
+        const host = this.dom.pdfEmbeddedHost || (typeof document !== 'undefined' ? document.getElementById('reader-pdf-embedded-host') : null)
+        if (!host) return
+        const driver = this.app.pdfViewport?.driver
+        if (!driver || typeof driver.extractEmbeddedAnnotations !== 'function' || this.app.currentBookFormat !== 'pdf') {
+            host.hidden = true
+            host.replaceChildren()
+            return
+        }
+        const cacheKey = `${bookId}:${driver.docId || 'pdfjs'}`
+        let items = this._embeddedAnnotCache?.get?.(cacheKey)
+        if (!items) {
+            items = await driver.extractEmbeddedAnnotations().catch(() => [])
+            if (!this._embeddedAnnotCache) this._embeddedAnnotCache = new Map()
+            this._embeddedAnnotCache.set(cacheKey, Array.isArray(items) ? items : [])
+        }
+        if (activeSession && !activeSession.isCurrent()) return
+        if (!items || items.length === 0) {
+            host.hidden = true
+            host.replaceChildren()
+            return
+        }
+
+        host.hidden = false
+        host.innerHTML = `
+            <details class="pdf-embedded-annots-details">
+                <summary class="pdf-embedded-annots-summary">
+                    <span>${escapeHTML(t('annotations.embeddedPdfHeading', { count: items.length }))}</span>
+                    <button type="button" id="btn-import-pdf-embedded" class="btn-tool pdf-embedded-import-btn">${escapeHTML(t('annotations.embeddedPdfImportBtn'))}</button>
+                </summary>
+                <div class="pdf-embedded-annots-list">
+                    ${items.slice(0, 120).map((it, idx) => {
+                        const pageLabel = `P.${(Number(it.page) || 0) + 1}`
+                        const subtypeLabel = it.subtype || 'highlight'
+                        const bodyText = (it.contents || '').trim() || t('annotations.embeddedPdfNoText')
+                        const authorText = (it.author || '').trim()
+                        return `
+                            <div class="pdf-embedded-annot-item" data-embedded-idx="${idx}">
+                                <div class="pdf-embedded-annot-meta">
+                                    <span class="pdf-embedded-color-dot" style="background:${escapeHTML(it.color || '#facc15')}"></span>
+                                    <span>${escapeHTML(pageLabel)} · ${escapeHTML(subtypeLabel)}</span>
+                                    ${authorText ? `<span class="pdf-embedded-author">${escapeHTML(authorText)}</span>` : ''}
+                                </div>
+                                <div class="pdf-embedded-annot-body">${escapeHTML(bodyText)}</div>
+                            </div>
+                        `
+                    }).join('')}
+                </div>
+            </details>
+        `
+
+        host.querySelectorAll('.pdf-embedded-annot-item').forEach(el => {
+            el.addEventListener('click', () => {
+                const item = items[Number(el.dataset.embeddedIdx)]
+                if (!item || !this.app.pdfViewport) return
+                const page = Math.max(0, Number(item.page) || 0)
+                const yRatio = Array.isArray(item.rect) && item.rect.length >= 2 ? item.rect[1] : 0
+                this.app.pdfViewport.goToPage(page, yRatio)
+                if (Array.isArray(item.rect) && item.rect.length >= 4) {
+                    this.app.pdfViewport.pulseHighlight?.(page, null, [item.rect], item.color || '#facc15')
+                }
+                this.closeDrawer()
+            })
+        })
+
+        host.querySelector('#btn-import-pdf-embedded')?.addEventListener('click', async e => {
+            e.preventDefault()
+            e.stopPropagation()
+            const existing = await db.getHighlightsByBook(bookId)
+            const existingIds = new Set(existing.map(x => String(x.id)))
+            const snap = this.app._currentSnapshot || {}
+            const now = Date.now()
+            const toImport = []
+            for (const it of items) {
+                const deterministicId = this._hashEmbeddedAnnotId(bookId, it)
+                if (existingIds.has(deterministicId)) continue
+                existingIds.add(deterministicId)
+                const rect = Array.isArray(it.rect) && it.rect.length >= 4 ? it.rect : [0.1, 0.1, 0.9, 0.14]
+                const subtypeStyle = it.subtype === 'underline' ? 'underline' : (it.subtype === 'squiggly' ? 'squiggly' : 'highlight')
+                const pageNum = Math.max(0, Number(it.page) || 0)
+                toImport.push({
+                    id: deterministicId,
+                    bookId,
+                    formatType: 'pdf',
+                    text: (it.contents || '').trim() || t('annotations.embeddedPdfImportedLabel', { page: pageNum + 1 }),
+                    note: it.author ? `[${it.author}]` : '',
+                    color: normalizeHighlightColor(it.color || '#facc15'),
+                    style: subtypeStyle,
+                    chapterTitle: t('annotations.embeddedPdfImportedLabel', { page: pageNum + 1 }),
+                    createdAt: now,
+                    updatedAt: now,
+                    blobRevision: snap.blobRevision,
+                    revisionOrigin: snap.revisionOrigin,
+                    documentHash: snap.documentHash,
+                    pdfTarget: {
+                        page: pageNum,
+                        rects: [rect],
+                        quads: Array.isArray(it.quadPoints) ? it.quadPoints : [],
+                        coordinateVersion: 'mupdf-page-v1'
+                    }
+                })
+            }
+            if (toImport.length === 0) {
+                this.app.dialogs.showToast(t('annotations.embeddedPdfAlreadyImported'), 'info')
+                return
+            }
+            if (typeof db.saveHighlightsBatch === 'function') {
+                await db.saveHighlightsBatch(toImport)
+            } else {
+                for (const r of toImport) await db.saveHighlight(r)
+            }
+            if (this.app.pdfViewport) {
+                const updatedHls = await db.getHighlightsByBook(bookId)
+                this.app.pdfViewport.setHighlights(updatedHls, snap)
+            }
+            this.updateSidebarNotesCount()
+            await this.loadNotesList()
+            this.scheduleMarkdownSidecarSync(bookId)
+            this.app.dialogs.showToast(t('annotations.embeddedPdfImportedCount', { count: toImport.length }), 'success')
+        })
+    }
+
+    scheduleMarkdownSidecarSync(bookId = this.app.currentBookId) {
+        if (!platformBridge.isTauri || !bookId) return
+        const autoEnabled = typeof localStorage !== 'undefined' && localStorage.getItem('linden_markdown_sidecar_autosync') === 'true'
+        const sidecarDir = typeof localStorage !== 'undefined' ? (localStorage.getItem('linden_markdown_sidecar_dir') || '').trim() : ''
+        if (!autoEnabled || !sidecarDir) return
+        clearTimeout(this._sidecarDebounceTimer)
+        this._sidecarDebounceTimer = setTimeout(() => {
+            this.syncBookMarkdownSidecar(bookId, { silent: true }).catch(err => {
+                console.warn('[Sidecar] Auto sync failed:', err)
+            })
+        }, 1500)
+    }
+
+    async syncBookMarkdownSidecar(bookId = this.app.currentBookId, { silent = false } = {}) {
+        if (!platformBridge.isTauri) {
+            if (!silent) this.app.dialogs.showToast(t('annotations.sidecarDesktopOnly'), 'info')
+            return null
+        }
+        if (!bookId) {
+            if (!silent) this.app.dialogs.showToast(t('annotations.export.openBookFirst'), 'info')
+            return null
+        }
+        let dir = typeof localStorage !== 'undefined' ? (localStorage.getItem('linden_markdown_sidecar_dir') || '').trim() : ''
+        if (!dir && !silent) {
+            const picked = await platformBridge.pickSidecarFolder?.()
+            if (picked) {
+                dir = picked
+                try { localStorage.setItem('linden_markdown_sidecar_dir', dir) } catch {}
+            }
+        }
+        if (!dir) {
+            if (!silent) this.app.dialogs.showToast(t('annotations.sidecarNoDir'), 'info')
+            return null
+        }
+        try {
+            const authorizedDir = await platformBridge.registerSidecarDir(dir)
+            const resolvedDir = authorizedDir || dir
+            const bookData = (String(this.app.currentBookId) === String(bookId) && this.app.currentBookData)
+                ? this.app.currentBookData
+                : await db.getBook(bookId)
+            const highlights = await db.getHighlightsByBook(bookId)
+            const filename = sanitizeSidecarFilename(bookData?.customTitle || bookData?.title || bookId)
+            const sep = resolvedDir.includes('\\') ? '\\' : '/'
+            const fullPath = `${resolvedDir.replace(/[\\/]+$/, '')}${sep}${filename}`
+            const existingMd = await platformBridge.readTextFile(fullPath).catch(() => '')
+            const mergeRes = mergeMarkdownSidecar(existingMd || '', bookData || {}, highlights || [])
+            await platformBridge.writeFileText(fullPath, mergeRes.content)
+            if (!silent) {
+                this.app.dialogs.showToast(t('annotations.sidecarSyncedPath', { path: fullPath }), 'success', 4000)
+            }
+            return fullPath
+        } catch (err) {
+            console.warn('[Sidecar] Sync error:', err)
+            if (!silent) {
+                this.app.dialogs.showToast(t('annotations.sidecarSyncFailed', { error: err?.message || err }), 'warning')
+            }
+            return null
         }
     }
 

@@ -12,11 +12,10 @@ import { AnnotationsDrawerController } from './annotations-drawer-controller.js'
 import { ReaderCardsController } from './reader-cards-controller.js'
 import { ReaderAppearanceController } from './reader-appearance-controller.js'
 import { FoliateSectionBinder } from './foliate-section-binder.js'
-import '../foliate-js-main/view.js'
 export { ReaderLocationHistory, normalizeNavigationTarget, decodePdfProgress } from './reader-navigation.js'
 export { FEATURE_CHAPTER_TRANSLATION_ENABLED, APP_BUILD_VER } from './app-features.js'
-import { openLocalEpubSource, openLocalPdfSource } from './book-source.js'
-import { Overlayer } from '../foliate-js-main/overlayer.js'
+import { openLocalEpubSource, openLocalPdfSource, openLocalPdfDirectFirst, reconcileDirectPdfInBackground } from './book-source.js'
+import { computeTextSampleFingerprint } from './document-identity.js'
 import * as db from './db.js'
 import { tracker } from './tracker.js'
 import { quoteCard } from './quote-card.js'
@@ -33,11 +32,11 @@ import { customFontManager } from './custom-font-manager.js'
 import { resolveReaderSettings, READER_OVERRIDE_ALLOWED_KEYS, resolveLegacyPreserveOriginalStyles } from './translation-job-core.js'
 import { detectReaderViewportEnv, getDefaultReaderSettings, migrateLegacyReaderSettings } from './reader-style-builder.js'
 import { ttsPlayer } from './tts-player.js'
-import { mobileShell } from './mobile-shell.js'
 import { ReaderLocationHistory, decodePdfProgress } from './reader-navigation.js'
 import { coverUrlPool } from './cover-url-pool.js'
 import { FEATURE_CHAPTER_TRANSLATION_ENABLED } from './app-features.js'
-import { ensureAdvancedSettingsLoaded, ensureAiSidebarLoaded, ensureChapterTranslationLoaded } from './app-modules.js'
+import { extractEnclosingSentenceContext } from './ai-context.js'
+import { ensureAdvancedSettingsLoaded, ensureAiSidebarLoaded, ensureChapterTranslationLoaded, ensureExternalCompanionLoaded } from './app-modules.js'
 import { DEFAULT_READER_NAME } from './ui-format.js'
 import { smartCleanPdfCopyText } from './text-copy-utils.js'
 import { getHighlightInkSolidHex, getHighlightStrokeHex, normalizeHighlightColor } from './highlight-palette.js'
@@ -217,6 +216,7 @@ class UniversalReaderApp {
         this.dictionaryService.app = this
         this.advancedSettings = { config: {} }
         this.aiSidebar = null
+        this.externalCompanion = null
         this.chapterTranslationManager = null
         this.navHistory = new ReaderLocationHistory(this)
 
@@ -264,12 +264,14 @@ class UniversalReaderApp {
         // Window close flush listener is bound once in bindEvents() via platformBridge.onFlushBeforeQuit()
 
         this.checkFirstTimeUser()
+        this._ensureMobileShellIfNeeded()
         platformBridge.syncSystemInsets?.().catch?.(() => {})
         this.rootEvents.on(window, 'focus', () => {
             platformBridge.syncSystemInsets?.().catch?.(() => {})
             this.imports.debouncedRescanLinkedRoots?.()
         })
         const syncReaderLayoutOnResize = () => {
+            this._ensureMobileShellIfNeeded()
             platformBridge.syncSystemInsets?.().catch?.(() => {})
             if (this.currentBookFormat && this.currentBookFormat !== 'pdf' && this.foliateView) {
                 clearTimeout(this._resizeAppearanceTimer)
@@ -688,6 +690,14 @@ class UniversalReaderApp {
         ['modal-manage-book-lists', () => this.bookshelf.closeManageBookListsModal()],
         ['modal-create-list', () => this.bookshelf.closeCreateListModal()],
         ['modal-update-dialog', () => this.updates.closeUpdateModal()],
+        ['modal-kindle-import', () => {
+            const m = document.getElementById('modal-kindle-import')
+            if (m) { m.classList.remove('show'); m.style.display = 'none' }
+        }],
+        ['modal-relink-notes', () => {
+            const m = document.getElementById('modal-relink-notes')
+            if (m) { m.classList.remove('show'); m.style.display = 'none' }
+        }],
     ]
     const open = routes.map(([id, close], order) => ({ element: document.getElementById(id), close, order }))
         .filter(item => visible(item.element) && (!item.element.classList.contains('global-modal-backdrop') || item.element.classList.contains('show')))
@@ -1364,13 +1374,18 @@ class UniversalReaderApp {
                 let nativeSnapshotPath = null
                 let savedBookId = null
                 let preparedEpub = null
+                let directBook = null
+                let directReconcile = null
                 try {
                     const ext = (fileInfo.filename || '').split('.').pop()?.toLowerCase() || ''
                     if (ext === 'pdf' && fileInfo.filePath) {
-                        const prepared = await openLocalPdfSource(fileInfo, { db, bridge: platformBridge })
+                        const pdfMode = this.settings?.pdfOpenMode || 'direct'
+                        const prepared = await openLocalPdfDirectFirst(fileInfo, { db, bridge: platformBridge, mode: pdfMode })
                         if (prepared) {
                             nativeSnapshotPath = prepared.descriptor
                             savedBookId = prepared.book.id
+                            directBook = prepared.book
+                            directReconcile = prepared.needsBackgroundReconcile ? { fileInfo, book: prepared.book } : null
                             this.markBootStage?.('stage')
                             Object.assign(this.bootStageTimings || {}, {
                                 stageCopyHashMs: prepared.descriptor.copyHashMs,
@@ -1450,8 +1465,10 @@ class UniversalReaderApp {
 
                     if (savedBookId) {
                         const shouldOpenInPlace = Boolean(!this.currentBookId || hadOpenBook)
-                        await this.openBook(savedBookId, null, {
+                        await this.openBook(directBook?.isEphemeral ? directBook : savedBookId, null, {
                             forceInPlace: shouldOpenInPlace,
+                            nativeSnapshotPath,
+                            directReconcile,
                             takePreparedEpub: preparedEpub ? snapshot => {
                                 if (preparedEpub.documentHash !== snapshot.documentHash) return null
                                 const { book } = preparedEpub
@@ -1741,10 +1758,41 @@ class UniversalReaderApp {
 
     _bindReaderNavigationEvents() {
         this.rootEvents.on(this.dom.btnBackToShelf, 'click', () => this.closeReader());
-        this.rootEvents.on(document.getElementById('btn-toggle-ai-sidebar'), 'click', async () => {
+        this.rootEvents.on(document.getElementById('btn-toggle-ai-sidebar'), 'click', async (e) => {
             const session = this._activeSession
+            if (this._isExternalCompanionModeEnabled() && !e?.shiftKey) {
+                const companion = await ensureExternalCompanionLoaded(this)
+                if (!session?.isCurrent()) return
+                if (companion.isActive && companion.companionHwnd) {
+                    await companion.dockNow()
+                } else {
+                    await companion.openCompanionForBook({ autoLaunch: true })
+                }
+                return
+            }
+            if (!e?.shiftKey && this.shouldShowFirstRunAiGuide()) {
+                await this.openFirstRunAiChooser()
+                return
+            }
             const sidebar = await ensureAiSidebarLoaded(this)
             if (session?.isCurrent()) await sidebar.toggleSidebar()
+        });
+        this.rootEvents.on(this.dom.readerTopBar, 'contextmenu', (e) => {
+            if (platformBridge?.isAndroid || this.isMobileLayout?.() || window.mobileShell?.isMobileViewport?.()) return
+            e.preventDefault()
+            this.appearance?.openToolbarCustomizationInSettings?.()
+        });
+        const topbarTipEl = document.getElementById('reader-topbar-discover-tip')
+        this.rootEvents.on(document.getElementById('btn-topbar-discover-customize'), 'click', () => {
+            try { localStorage.setItem('linden_topbar_tip_seen', 'true') } catch (_) {}
+            if (topbarTipEl) topbarTipEl.hidden = true
+            clearTimeout(this._topbarTipTimer)
+            this.appearance?.openToolbarCustomizationInSettings?.()
+        });
+        this.rootEvents.on(document.getElementById('btn-topbar-discover-dismiss'), 'click', () => {
+            try { localStorage.setItem('linden_topbar_tip_seen', 'true') } catch (_) {}
+            if (topbarTipEl) topbarTipEl.hidden = true
+            clearTimeout(this._topbarTipTimer)
         });
         this.rootEvents.on(this.dom.btnNavLeft, 'click', () => this.turnPagePrev());
         this.rootEvents.on(this.dom.btnNavRight, 'click', () => this.turnPageNext());
@@ -2476,7 +2524,7 @@ class UniversalReaderApp {
 
     toggleBookSelection(...args) { return this.bookshelf.toggleBookSelection(...args) }
 
-    async copyMultiSelectionOrSingle({ clearAfter = true } = {}) {
+    async copyMultiSelectionOrSingle({ clearAfter = true, raw = false } = {}) {
         const selection = this.annotations.selectedTextInfo || this.annotations._frozenSelectionSnapshot
         const isPdfActive = Boolean(this.pdfViewport || selection?.formatType === 'pdf')
         const matchingMultiRanges = Array.isArray(this.annotations.multiSelectedRanges)
@@ -2487,7 +2535,7 @@ class UniversalReaderApp {
 
         if (matchingMultiRanges.length > 1) {
             const rawMergedText = matchingMultiRanges.map(r => r.text).filter(Boolean).join('\n\n')
-            const mergedText = isPdfActive ? smartCleanPdfCopyText(rawMergedText) : rawMergedText
+            const mergedText = (isPdfActive && !raw) ? smartCleanPdfCopyText(rawMergedText) : rawMergedText
             if (!mergedText) return false
             try {
                 await navigator.clipboard.writeText(mergedText)
@@ -2504,7 +2552,7 @@ class UniversalReaderApp {
             }
         } else if (selection?.text) {
             try {
-                const textToCopy = isPdfActive ? smartCleanPdfCopyText(selection.text) : selection.text
+                const textToCopy = (isPdfActive && !raw) ? smartCleanPdfCopyText(selection.text) : selection.text
                 await navigator.clipboard.writeText(textToCopy)
                 this.dialogs.showToast(t('app.copiedSelectionToast'), 'success')
                 if (clearAfter) {
@@ -2569,6 +2617,21 @@ class UniversalReaderApp {
         if (e.defaultPrevented) return
         const editing = e.target?.isContentEditable || e.target?.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="slider"], [role="combobox"], [role="tab"], [role="menuitem"]')
         if (editing && e.key !== 'Escape') return
+
+        if (e.altKey && e.shiftKey && e.key.toLowerCase() === 's') {
+            if (this.dom.bookshelfView?.style?.display === 'none' && this.externalCompanion?.isActive) {
+                e.preventDefault()
+                this.externalCompanion.openSaveBackflowModal()
+                return
+            }
+        }
+        if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'h') {
+            if (this.dom.bookshelfView?.style?.display === 'none') {
+                e.preventDefault()
+                this.appearance?.ergonomics?.toggleManualPrivacyVeil?.()
+                return
+            }
+        }
 
         if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
             e.preventDefault()
@@ -2666,7 +2729,7 @@ class UniversalReaderApp {
             }
             if (this.aiSidebar?.isOpen) {
                 e.preventDefault()
-                this.aiSidebar.close()
+                this.aiSidebar.closeSidebar?.() || this.aiSidebar.close?.()
                 return
             }
             if (this.annotations.activeDrawer && this.annotations.activeDrawer !== 'none') {
@@ -2954,7 +3017,7 @@ class UniversalReaderApp {
             session.driver?.kind === platformBridge.getAndroidPdfEngine()) return
         const location = session.viewport.getReadingLocation()
         if (session.location) session.location = { ...session.location, ...location }
-        await this.openBook(session.bookId, location, { forceInPlace: true, password: session.pdfPassword })
+        await this.openBook(session.bookId, location, { forceInPlace: true, password: session.pdfPassword, peek: Boolean(session.isPeek) })
     }
 
     _syncPeekBanner(session) {
@@ -3137,13 +3200,45 @@ class UniversalReaderApp {
             }
 
             // 4. Fetch snapshot with content identity
-            const snapshot = await db.getBookFileSnapshot(bookId)
+            let snapshot = await db.getBookFileSnapshot(bookId)
             if (!readerSession.isCurrent()) return
 
             const bookData = (typeof bookOrId === 'object' && bookOrId !== null && bookOrId.title)
                 ? { ...snapshot, ...bookOrId }
                 : (await db.getBook(bookId)) || snapshot
             if (!readerSession.isCurrent()) return
+
+            const directDesc = options?.nativeSnapshotPath?.directReadOnly ? options.nativeSnapshotPath : null
+            const directPath = directDesc?.path || bookData?.nativeSnapshotPath || bookData?.nativePath || bookData?.filePath
+            if ((!snapshot || !snapshot.blob) && (directDesc || (bookData?.format === 'pdf' && bookData?.directReadOnly && directPath))) {
+                const size = directDesc?.size || bookData?.size || 0
+                const lazyDirectBlob = {
+                    size,
+                    type: 'application/pdf',
+                    isLazySnapshot: true,
+                    nativeSnapshotOnly: true,
+                    directReadOnly: true,
+                    materialize: async () => {
+                        const buf = await platformBridge.readFileBuffer?.(directPath)
+                        return buf ? new Blob([buf], { type: 'application/pdf' }) : null
+                    }
+                }
+                snapshot = {
+                    ...(snapshot || {}),
+                    bookId,
+                    format: 'pdf',
+                    nativePath: directPath,
+                    nativeSnapshotPath: directPath,
+                    nativeSnapshotSize: size,
+                    nativeSnapshotOnly: true,
+                    directReadOnly: true,
+                    documentHash: directDesc?.documentHash || bookData?.documentHash || null,
+                    documentHashAliases: directDesc?.documentHashAliases || bookData?.documentHashAliases || [],
+                    blobRevision: directDesc?.revision || bookData?.blobRevision || 1,
+                    revisionOrigin: snapshot?.revisionOrigin || 'direct-fs',
+                    blob: lazyDirectBlob
+                }
+            }
 
             await this.appearance.checkBookSpecificSettings(bookId)
             if (!readerSession.isCurrent()) return
@@ -3201,6 +3296,16 @@ class UniversalReaderApp {
                 : ((targetBlob instanceof File && targetBlob.name && !targetBlob.name.toLowerCase().endsWith('.pdf') && !isPdf)
                     ? targetBlob
                     : new File([targetBlob], safeFileName, { type: safeFileType }))
+            if (safeFormat === 'txt' && (bookData?.nativePath || snapshot?.nativePath) && !fileObj.nativePath) {
+                try {
+                    Object.defineProperty(fileObj, 'nativePath', {
+                        value: bookData?.nativePath || snapshot?.nativePath,
+                        configurable: true,
+                        enumerable: false,
+                        writable: true
+                    })
+                } catch {}
+            }
 
             if (bookData && !bookData.format && safeFormat) bookData.format = safeFormat;
             this.currentBookFormat = safeFormat;
@@ -3220,6 +3325,11 @@ class UniversalReaderApp {
             this.dom.readerView.style.display = 'block'
             this.dom.readerView.classList.add('active')
             this._syncPeekBanner(readerSession)
+            this._syncEphemeralPdfBanner(bookData, options?.directReconcile?.fileInfo || {
+                filePath: bookData?.nativePath || bookData?.filePath || snapshot?.nativePath,
+                filename: safeFileName
+            })
+            this.appearance?.ergonomics?.syncReaderState?.({ isInReader: true })
             document.documentElement.dataset.startupView = 'ready'
             this.imports.minimizeImportPanel()
             const resolvedBookTitle = bookData.title || snapshot.title || t('app.readingFallbackTitle')
@@ -3257,6 +3367,7 @@ class UniversalReaderApp {
                 this.foliateView.remove?.()
                 this.foliateView = null
             }
+            this.externalCompanion?.onBookOpened?.(bookId)
 
             if (isPdf) return await this._openPdfSession({ initialLocation, options, bookId, readerSession, snapshot, bookData, fileObj })
             return await this._openFoliateSession({ initialLocation, bookId, readerSession, snapshot, bookData, fileObj, takePreparedEpub: options.takePreparedEpub })
@@ -3290,9 +3401,10 @@ class UniversalReaderApp {
                 this.dom.readerView?.classList.add('is-pdf-mode')
                 this.dom.readerView?.removeAttribute?.('data-reader-flow')
                 this.appearance?.applyReaderToolbarCustomization?.()
+                this._maybeShowTopbarDiscoverTip()
 
                 // Independent PDF Viewport (no iframe sandbox)
-                const nativePath = snapshot.nativePath || await db.getBookNativePath(bookId)
+                const nativePath = snapshot.nativeSnapshotPath || snapshot.nativePath || bookData?.nativePath || await db.getBookNativePath(bookId)
                 if (!readerSession.isCurrent()) return
 
                 const isMobile = Boolean(platformBridge?.isAndroid) || (window.mobileShell?.isMobileViewport?.() ?? false) || (typeof window !== 'undefined' && window.innerWidth < 768)
@@ -3301,7 +3413,9 @@ class UniversalReaderApp {
                 const sessionViewport = new PdfViewport(this.dom.readerContentArea, {
                     spreadMode: isPortraitMobile ? 'none' : (this.settings.pdfSpreadMode || 'none'),
                     scale: isMobile ? 1.0 : 1.25,
+                    preserveImagesInDarkMode: this.settings.pdfPreserveImagesInDarkMode !== false,
                     deferPdfTextLayer: platformBridge.isAndroid,
+                    useMobileTilePlanner: Boolean(platformBridge?.isAndroid),
                     minScale: 0.1,
                     snapshot,
                     onInitialPageRendered: ({ page, canvas }) => {
@@ -3309,6 +3423,51 @@ class UniversalReaderApp {
                             window.mobileShell?.finishReaderSessionLoading?.()
                         }
                         this.reportInitialPdfFrame(readerSession, sessionViewport, page, canvas)
+                        if (readerSession.isCurrent() && options?.directReconcile && !sessionViewport._didBackgroundReconcile) {
+                            sessionViewport._didBackgroundReconcile = true
+                            reconcileDirectPdfInBackground({
+                                file: options.directReconcile.fileInfo,
+                                book: options.directReconcile.book,
+                                db,
+                                bridge: platformBridge,
+                                pageCount: sessionViewport.numPages || 0,
+                                onReconciled: async (res) => {
+                                    if (!readerSession.isCurrent() || this.currentBookId !== bookId) return
+                                    if (res?.book) {
+                                        this.currentBookData = res.book
+                                        readerSession.bookData = res.book
+                                        this._currentSnapshot = { ...this._currentSnapshot, documentHash: res.documentHash, documentHashAliases: res.book.documentHashAliases || [] }
+                                    }
+                                    if (res?.relinkStats && (res.relinkStats.migratedHighlights || res.relinkStats.migratedBookmarks || res.relinkStats.migratedDrawings)) {
+                                        const refreshedHls = await db.getHighlightsByBook(bookId).catch(() => [])
+                                        if (readerSession.isCurrent()) {
+                                            sessionViewport.setHighlights(refreshedHls, this._currentSnapshot)
+                                            this.annotations.loadNotesList()
+                                            this.annotations.updateSidebarNotesCount()
+                                        }
+                                    }
+                                    this.bookshelf?.refreshBookshelf?.()
+                                }
+                            }).catch(() => {})
+                        }
+                        if (readerSession.isCurrent() && !bookData?.isEphemeral && !bookData?.textFingerprint) {
+                            setTimeout(async () => {
+                                if (!readerSession.isCurrent() || this.currentBookId !== bookId) return
+                                try {
+                                    const maxSample = Math.min(3, sessionViewport.numPages || 1)
+                                    const chunks = []
+                                    for (let p = 0; p < maxSample; p++) {
+                                        const txt = await sessionDriver.getPagePlainText(p).catch(() => '')
+                                        if (txt) chunks.push(txt)
+                                    }
+                                    const fp = computeTextSampleFingerprint(chunks.join('\n'))
+                                    if (fp && readerSession.isCurrent()) {
+                                        bookData.textFingerprint = fp
+                                        await db.saveBook({ id: bookId, textFingerprint: fp }).catch(() => {})
+                                    }
+                                } catch {}
+                            }, 900)
+                        }
                     },
                     onSlotMount: (pageIdx, slot) => {
                         if (!readerSession.isCurrent()) return
@@ -3402,10 +3561,17 @@ class UniversalReaderApp {
                         // Debounce progress update to db using unified makeProgressSnapshot
                         clearTimeout(this._progressDebounceTimer)
                         this._progressDebounceTimer = setTimeout(() => {
-                            if (readerSession.isCurrent() && this.currentBookId === bookId) {
+                            if (readerSession.isCurrent() && this.currentBookId === bookId && !bookData?.isEphemeral) {
                                 const progressSnapshot = this.makeProgressSnapshot(readerSession)
                                 if (progressSnapshot) {
                                     db.updateBookProgress(bookId, progressSnapshot).catch(err => console.warn('Failed to update PDF progress:', err))
+                                }
+                                if (nativePath && platformBridge.isTauri) {
+                                    platformBridge.updatePdfQuickIndex?.({
+                                        filePath: nativePath,
+                                        pageIndex: pageIdx,
+                                        scale: sessionViewport.scale
+                                    }).catch(() => {})
                                 }
                             }
                         }, 500)
@@ -3426,10 +3592,17 @@ class UniversalReaderApp {
                         }
                         clearTimeout(this._progressDebounceTimer)
                         this._progressDebounceTimer = setTimeout(() => {
-                            if (readerSession.isCurrent() && this.currentBookId === bookId) {
+                            if (readerSession.isCurrent() && this.currentBookId === bookId && !bookData?.isEphemeral) {
                                 const progressSnapshot = this.makeProgressSnapshot(readerSession)
                                 if (progressSnapshot) {
                                     db.updateBookProgress(bookId, progressSnapshot).catch(err => console.warn('Failed to update PDF scroll progress:', err))
+                                }
+                                if (nativePath && platformBridge.isTauri) {
+                                    platformBridge.updatePdfQuickIndex?.({
+                                        filePath: nativePath,
+                                        pageIndex: Math.max(0, nextPage - 1),
+                                        scale: sessionViewport.scale
+                                    }).catch(() => {})
                                 }
                             }
                         }, 500)
@@ -3439,6 +3612,7 @@ class UniversalReaderApp {
                         const makePdfItem = (item) => ({
                             text: item.text,
                             formatType: 'pdf',
+                            pageIndex: item.page,
                             pdfTarget: {
                                 page: item.page,
                                 rects: item.rects,
@@ -3473,11 +3647,28 @@ class UniversalReaderApp {
                         const isSingleWord = !isMulti && /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && dictEnabled
                         const shouldLookUp = isSingleWord && (!selInfo.selectionMode || selInfo.selectionMode === 'word')
                         if (shouldLookUp) {
-                            const wordSnapshot = { ...this.annotations.selectedTextInfo }
+                            const pageSlotEl = document.querySelector(`.pdf-page-slot[data-page-index="${currentItem.pageIndex}"], .pdf-page-container[data-page-index="${currentItem.pageIndex}"]`)
+                            const sentenceContext = extractEnclosingSentenceContext({
+                                pageText: pageSlotEl?.innerText || '',
+                                selectedText: trimmed
+                            })
+                            const wordSnapshot = { ...this.annotations.selectedTextInfo, sentenceContext }
                             this.annotations.hideSelectionPopup(true)
                             this.annotations.selectedTextInfo = wordSnapshot
                             this.annotations._frozenSelectionSnapshot = wordSnapshot
                             this.cards.showDictionaryCard(wordSnapshot)
+                            if (!sentenceContext && currentItem.pageIndex != null && typeof sessionViewport?.driver?.getPlainText === 'function') {
+                                sessionViewport.driver.getPlainText(currentItem.pageIndex).then((plain) => {
+                                    if (!plain || this.annotations.selectedTextInfo !== wordSnapshot) return
+                                    const lateSentence = extractEnclosingSentenceContext({ pageText: plain, selectedText: trimmed })
+                                    if (lateSentence) {
+                                        wordSnapshot.sentenceContext = lateSentence
+                                        if (this.cards?._lastDictSelectionInfo === wordSnapshot) {
+                                            this.cards._lastDictSelectionInfo.sentenceContext = lateSentence
+                                        }
+                                    }
+                                }).catch(() => {})
+                            }
                         } else {
                             this.cards.hideDictionaryCard()
                             this.annotations.showSelectionPopup(selInfo.clientRect)
@@ -3588,7 +3779,7 @@ this.pdfTools.applyPdfPageAppearance()
                 }
                 const docInfo = await sessionViewport.load(
                     sessionDriver,
-                    { blob: fileObj, nativePath, password: options?.password || null },
+                    { blob: fileObj, nativePath, directReadOnly: Boolean(snapshot?.directReadOnly), password: options?.password || null },
                     { initialPage: initialPageFn, initialYRatio: initialLocation ? (initialLocation.yRatio ?? 0) :
                         ((!bookData.progress?.blobRevision || db.isContentIdentityMatching(bookData.progress, snapshot).matches) ? (bookData.progress?.yRatio ?? 0) : 0), snapshot }
                 )
@@ -3689,7 +3880,7 @@ this.pdfTools.applyPdfPageAppearance()
                         this._setReaderLiveTimer(activeSecs, isIdle)
                     }
                 }
-                if (!readerSession.isPeek) {
+                if (!readerSession.isPeek && !bookData?.isEphemeral) {
                     tracker.startSession(bookId, bookData.title, initialFrac, bookData.author || '')
                     db.recordBookOpened(bookId).catch(err => {
                         console.warn('Failed to record book opened for PDF:', err)
@@ -3704,10 +3895,44 @@ this.pdfTools.applyPdfPageAppearance()
             
     }
 
+    async _ensureMobileShellIfNeeded() {
+        const isMobile = Boolean(platformBridge?.isAndroid) ||
+            (typeof window !== 'undefined' && window.innerWidth > 0 && window.innerWidth < 768)
+        if (!isMobile || (typeof window !== 'undefined' && window.mobileShell)) return window?.mobileShell || null
+        if (!this._mobileShellLoadPromise) {
+            this._mobileShellLoadPromise = import('./mobile-shell.js')
+                .then(m => m?.mobileShell || null)
+                .catch(err => {
+                    this._mobileShellLoadPromise = null
+                    console.warn('[App] mobile-shell lazy load failed:', err)
+                    return null
+                })
+        }
+        return await this._mobileShellLoadPromise
+    }
+
+    async _ensureFoliateModules() {
+        if (!this._foliateModulesPromise) {
+            this._foliateModulesPromise = Promise.all([
+                import('../foliate-js-main/view.js'),
+                import('../foliate-js-main/overlayer.js'),
+            ]).then(([, overlayerMod]) => ({
+                Overlayer: overlayerMod.Overlayer,
+            })).catch(err => {
+                this._foliateModulesPromise = null
+                throw err
+            })
+        }
+        return await this._foliateModulesPromise
+    }
+
     // Runs inside the owning App session; errors propagate to openBook's existing cleanup.
     async _openFoliateSession({ initialLocation, bookId, readerSession, snapshot, bookData, fileObj, takePreparedEpub }) {
+            const { Overlayer } = await this._ensureFoliateModules()
+            if (!readerSession.isCurrent()) return
             this.dom.readerView?.classList.remove('is-pdf-mode')
             this.appearance?.applyReaderToolbarCustomization?.()
+            this._maybeShowTopbarDiscoverTip()
             const sessionView = document.createElement('foliate-view')
             readerSession.view = sessionView
             this.foliateView = sessionView
@@ -3970,6 +4195,25 @@ this.pdfTools.applyPdfPageAppearance()
             // Set initial styles & flow
             this.appearance.applySettingsToReader()
             this.pageTurnController?.setAdapter(new FoliatePageTurnAdapter(this.foliateView))
+            if (readerSession.isCurrent() && !bookData?.isEphemeral && !bookData?.textFingerprint && Array.isArray(sessionView.book?.sections)) {
+                setTimeout(async () => {
+                    if (!readerSession.isCurrent() || this.currentBookId !== bookId) return
+                    try {
+                        const parts = []
+                        const count = Math.min(2, sessionView.book.sections.length)
+                        for (let i = 0; i < count; i++) {
+                            const secDoc = await sessionView.book.sections[i]?.createDocument?.().catch(() => null)
+                            const txt = secDoc?.body?.textContent?.trim() || ''
+                            if (txt) parts.push(txt)
+                        }
+                        const fp = computeTextSampleFingerprint(parts.join('\n'))
+                        if (fp && readerSession.isCurrent()) {
+                            bookData.textFingerprint = fp
+                            await db.saveBook({ id: bookId, textFingerprint: fp }).catch(() => {})
+                        }
+                    } catch {}
+                }, 900)
+            }
 
             // Restore location with content identity check or jump to initialLocation
             let lastLoc = 0
@@ -4245,6 +4489,9 @@ this.pdfTools.applyPdfPageAppearance()
             } catch (aErr) {
                 console.warn('flushReaderStateOnExit: aiSidebar flush error:', aErr)
             }
+            try {
+                this.externalCompanion?.closeCompanion?.()
+            } catch (_) {}
 
             // 4. Close handshake completion: Only call if requestId is a non-empty string
             if (typeof requestId === 'string' && requestId.length > 0) {
@@ -4291,6 +4538,8 @@ this.pdfTools.applyPdfPageAppearance()
 
     async closeReader() {
         document.documentElement.dataset.startupView = 'ready'
+        this.appearance?.ergonomics?.syncReaderState?.({ isInReader: false })
+        this._syncEphemeralPdfBanner(null)
         this.pdfTools.resetSessionState()
         this.drawing.resetSessionState()
         this.navHistory.reset()
@@ -4317,6 +4566,9 @@ this.pdfTools.applyPdfPageAppearance()
         // 1. Immediately and synchronously abort closing session so its callbacks become no-op
         this.dom.readerView?.classList.remove('is-pdf-mode')
         this.dom.readerView?.removeAttribute('data-reader-flow')
+        clearTimeout(this._topbarTipTimer)
+        const topbarTip = document.getElementById('reader-topbar-discover-tip')
+        if (topbarTip) topbarTip.hidden = true
         this.appearance?.applyReaderToolbarCustomization?.()
         this.pageTurnController?.cancelCurrent()
         this.pageTurnController?.setAdapter(null)
@@ -4372,6 +4624,7 @@ this.pdfTools.applyPdfPageAppearance()
 
         this.search.clearSearchState(true)
         this.annotations.closeDrawer()
+        this.externalCompanion?.onReaderClosed?.()
         if (this.annotations.dom.tocContainer) this.annotations.dom.tocContainer.innerHTML = ''
         if (this.search.dom.searchResultsContainer) this.search.dom.searchResultsContainer.innerHTML = ''
         const searchResultsList = document.getElementById('search-results-list')
@@ -4811,6 +5064,193 @@ this.pdfTools.applyPdfPageAppearance()
 
     createHighlight(...args) { return this.annotations.createHighlight(...args) }
 
+    _isExternalCompanionModeEnabled() {
+        try {
+            if (platformBridge?.isAndroid) return false
+            const raw = localStorage.getItem('linden_ai_companion_config')
+            if (!raw) return false
+            return JSON.parse(raw)?.companionMode === 'external'
+        } catch (_) {
+            return false
+        }
+    }
+
+    shouldShowFirstRunAiGuide() {
+        if (typeof localStorage === 'undefined') return false
+        if (platformBridge?.isAndroid || this.isMobileLayout?.() || window.mobileShell?.isMobileViewport?.()) return false
+        if (this._isExternalCompanionModeEnabled()) return false
+        try {
+            if (localStorage.getItem('linden_ai_first_run_seen') === 'true') return false
+            const rawAi = localStorage.getItem('linden_ai_config')
+            if (rawAi) {
+                const parsed = JSON.parse(rawAi)
+                if (parsed?.enabled || parsed?.authMode === 'siwc') return false
+            }
+        } catch (_) {
+            return false
+        }
+        return true
+    }
+
+    _maybeShowTopbarDiscoverTip() {
+        const tip = document.getElementById('reader-topbar-discover-tip')
+        if (!tip) return
+        if (platformBridge?.isAndroid || this.isMobileLayout?.() || window.mobileShell?.isMobileViewport?.()) {
+            tip.hidden = true
+            return
+        }
+        try {
+            if (localStorage.getItem('linden_topbar_tip_seen') === 'true') return
+        } catch (_) {
+            return
+        }
+        tip.hidden = false
+        clearTimeout(this._topbarTipTimer)
+        this._topbarTipTimer = setTimeout(() => {
+            tip.hidden = true
+            try { localStorage.setItem('linden_topbar_tip_seen', 'true') } catch (_) {}
+        }, 9000)
+    }
+
+    async openFirstRunAiChooser({ pendingRef = null, options = {} } = {}) {
+        const modal = document.getElementById('modal-ai-first-run')
+        if (!modal || platformBridge?.isAndroid || this.isMobileLayout?.() || window.mobileShell?.isMobileViewport?.()) {
+            const sidebar = await ensureAiSidebarLoaded(this)
+            if (pendingRef) return sidebar.openWithSelection(pendingRef, { ...options, skipFirstRunGuide: true })
+            return sidebar.toggleSidebar()
+        }
+
+        const session = this._activeSession
+        this._firstRunAiContext = {
+            pendingRef,
+            options,
+            session,
+            selectedProvider: modal.dataset.selectedProvider || 'chatgpt',
+        }
+
+        const closeModal = () => {
+            modal.classList.remove('show')
+            setTimeout(() => {
+                if (!modal.classList.contains('show')) modal.style.display = 'none'
+            }, 180)
+        }
+
+        const persistCompanionMode = (mode, providerId) => {
+            try {
+                const raw = localStorage.getItem('linden_ai_companion_config')
+                const parsed = raw ? JSON.parse(raw) : {}
+                parsed.companionMode = mode
+                if (providerId) parsed.providerId = providerId
+                localStorage.setItem('linden_ai_companion_config', JSON.stringify(parsed))
+            } catch (_) {}
+        }
+
+        if (!modal.dataset.bound) {
+            modal.dataset.bound = '1'
+            const chips = modal.querySelectorAll('.ai-provider-chip[data-first-run-provider]')
+            chips.forEach(chip => {
+                this.rootEvents.on(chip, 'click', () => {
+                    const pid = chip.dataset.firstRunProvider || 'chatgpt'
+                    if (this._firstRunAiContext) this._firstRunAiContext.selectedProvider = pid
+                    modal.dataset.selectedProvider = pid
+                    chips.forEach(c => c.classList.toggle('active', c === chip))
+                })
+            })
+
+            this.rootEvents.on(document.getElementById('btn-close-ai-first-run'), 'click', closeModal)
+            this.rootEvents.on(modal, 'click', (e) => {
+                if (e.target === modal) closeModal()
+            })
+
+            this.rootEvents.on(document.getElementById('btn-ai-first-use-external'), 'click', async () => {
+                const ctx = this._firstRunAiContext || {}
+                const providerId = ctx.selectedProvider || 'chatgpt'
+                try { localStorage.setItem('linden_ai_first_run_seen', 'true') } catch (_) {}
+                persistCompanionMode('external', providerId)
+                this.appearance?.syncCompanionSettingsUI?.()
+                closeModal()
+                if (ctx.session && !ctx.session.isCurrent()) return
+                const companion = await ensureExternalCompanionLoaded(this)
+                if (ctx.session && !ctx.session.isCurrent()) return
+                if (ctx.pendingRef?.text || ctx.pendingRef?.selectedText) {
+                    await companion.sendReference(ctx.pendingRef, ctx.options || {})
+                } else {
+                    await companion.openCompanionForBook({ autoLaunch: true })
+                }
+            })
+
+            this.rootEvents.on(document.getElementById('btn-ai-first-use-api'), 'click', async () => {
+                try { localStorage.setItem('linden_ai_first_run_seen', 'true') } catch (_) {}
+                persistCompanionMode('sidebar')
+                try {
+                    const { saveAiConfig } = await import('./reading-ai-assistant.js')
+                    await saveAiConfig({ authMode: 'api' })
+                } catch (_) {}
+                this.appearance?.syncCompanionSettingsUI?.()
+                closeModal()
+                this.annotations?.openDrawer?.('settings')
+                this.appearance?.switchSettingsDomain?.('assistant')
+            })
+
+            this.rootEvents.on(document.getElementById('btn-ai-first-use-siwc'), 'click', async () => {
+                try { localStorage.setItem('linden_ai_first_run_seen', 'true') } catch (_) {}
+                persistCompanionMode('sidebar')
+                try {
+                    const { saveAiConfig } = await import('./reading-ai-assistant.js')
+                    await saveAiConfig({ authMode: 'siwc' })
+                } catch (_) {}
+                this.appearance?.syncCompanionSettingsUI?.()
+                closeModal()
+                this.annotations?.openDrawer?.('settings')
+                this.appearance?.switchSettingsDomain?.('assistant')
+            })
+
+            this.rootEvents.on(document.getElementById('btn-ai-first-use-skip'), 'click', async () => {
+                const ctx = this._firstRunAiContext || {}
+                try { localStorage.setItem('linden_ai_first_run_seen', 'true') } catch (_) {}
+                closeModal()
+                const sidebar = await ensureAiSidebarLoaded(this)
+                if (ctx.session && !ctx.session.isCurrent()) return
+                if (ctx.pendingRef) {
+                    await sidebar.openWithSelection(ctx.pendingRef, { ...(ctx.options || {}), skipFirstRunGuide: true })
+                } else {
+                    await sidebar.toggleSidebar()
+                }
+            })
+        }
+
+        modal.style.display = 'flex'
+        requestAnimationFrame(() => modal.classList.add('show'))
+    }
+
+    async openAiWithReference(selectionInfo, options = {}) {
+        const useExternal = Boolean(options?.forceExternal) || (this._isExternalCompanionModeEnabled() && !options?.forceSidebar)
+        if (useExternal) {
+            const companion = await ensureExternalCompanionLoaded(this)
+            return companion.sendReference(selectionInfo, options)
+        }
+        if (!options?.skipFirstRunGuide && this.shouldShowFirstRunAiGuide()) {
+            return this.openFirstRunAiChooser({ pendingRef: selectionInfo, options })
+        }
+        const sidebar = await ensureAiSidebarLoaded(this)
+        return sidebar.openWithSelection(selectionInfo, options)
+    }
+
+    async switchToExternalCompanion(pendingRef = null) {
+        try {
+            const raw = localStorage.getItem('linden_ai_companion_config')
+            const parsed = raw ? JSON.parse(raw) : {}
+            parsed.companionMode = 'external'
+            localStorage.setItem('linden_ai_companion_config', JSON.stringify(parsed))
+        } catch (_) {}
+        this.appearance?.syncCompanionSettingsUI?.()
+        const companion = await ensureExternalCompanionLoaded(this)
+        if (pendingRef && pendingRef.selectedText) {
+            return companion.sendReference(pendingRef, { isWordContext: pendingRef.kind === 'word_context' })
+        }
+        return companion.openCompanionForBook({ autoLaunch: true })
+    }
+
     // ==========================================
     // Drawer Management (TOC, Notes, Search, Settings)
     // ==========================================
@@ -4898,6 +5338,97 @@ this.pdfTools.applyPdfPageAppearance()
         this._crossWindowSyncBus?.close()
         clearTimeout(this._crossWindowRefreshTimer)
         this._eventsBound = false
+    }
+
+    _syncEphemeralPdfBanner(bookData, fileInfo = null) {
+        const banner = document.getElementById('ephemeral-pdf-banner')
+        const pinBtn = document.getElementById('btn-pin-ephemeral-pdf')
+        if (!banner) return
+        if (!bookData?.isEphemeral) {
+            banner.hidden = true
+            return
+        }
+        banner.hidden = false
+        if (pinBtn) {
+            pinBtn.disabled = false
+            pinBtn.onclick = async () => {
+                pinBtn.disabled = true
+                try {
+                    const persisted = {
+                        ...bookData,
+                        isEphemeral: false,
+                        isRecentOnly: false,
+                        updatedAt: Date.now()
+                    }
+                    await db.saveBook(persisted, { bindNativeSnapshot: false })
+                    if (this.currentBookData && String(this.currentBookData.id) === String(persisted.id)) {
+                        this.currentBookData = persisted
+                        if (this._activeSession) this._activeSession.bookData = persisted
+                    }
+                    banner.hidden = true
+                    if (fileInfo?.filePath) {
+                        reconcileDirectPdfInBackground({
+                            file: fileInfo,
+                            book: persisted,
+                            db,
+                            bridge: platformBridge,
+                            pageCount: this.pdfViewport?.numPages || 0
+                        }).catch(() => {})
+                    }
+                    this.bookshelf?.refreshBookshelf?.()
+                    this.dialogs?.showToast?.(t('app.ephemeralPinnedToast'), 'success')
+                } catch (err) {
+                    pinBtn.disabled = false
+                    this.dialogs?.showToast?.(err?.message || t('app.ephemeralPinFailed'), 'warning')
+                }
+            }
+        }
+    }
+
+    showSyncProgressDivergenceBanner(divergences = []) {
+        const bar = document.getElementById('sync-progress-divergence-bar')
+        const msgEl = document.getElementById('sync-divergence-text')
+        const jumpBtn = document.getElementById('btn-sync-divergence-jump')
+        const dismissBtn = document.getElementById('btn-sync-divergence-dismiss')
+        if (!bar || !msgEl || !Array.isArray(divergences) || divergences.length === 0) return
+
+        const activeBookId = this.currentBookId ? String(this.currentBookId) : null
+        const entry = (activeBookId && divergences.find(d => String(d.bookId) === activeBookId)) || divergences[0]
+        if (!entry) return
+
+        const altPct = Math.round((entry.alternateFraction || 0) * 100)
+        const curPct = Math.round((entry.winnerFraction || 0) * 100)
+        const altPage = Number(entry.alternateProgress?.page || entry.alternateProgress?.currentPage || 0)
+        msgEl.textContent = altPage > 0
+            ? t('app.syncDivergenceWithPage', { title: entry.title || entry.bookId, currentPct: curPct, remotePct: altPct, page: altPage })
+            : t('app.syncDivergenceNoPage', { title: entry.title || entry.bookId, currentPct: curPct, remotePct: altPct })
+
+        if (jumpBtn) {
+            jumpBtn.onclick = async () => {
+                bar.hidden = true
+                const targetProg = entry.alternateProgress
+                if (!targetProg) return
+                if (this.currentBookId && String(this.currentBookId) === String(entry.bookId)) {
+                    if (this.pdfViewport && (targetProg.page || targetProg.fraction != null)) {
+                        const p = Number(targetProg.page) > 0
+                            ? Number(targetProg.page) - 1
+                            : Math.max(0, Math.round((targetProg.fraction || 0) * Math.max(1, (this.pdfViewport.numPages || 1) - 1)))
+                        this.pdfViewport.goToPage(p, targetProg.yRatio || 0)
+                    } else if (this.foliateView) {
+                        const loc = targetProg.cfi || (targetProg.fraction != null ? { fraction: targetProg.fraction } : 0)
+                        await this.foliateView.goTo(loc).catch(() => {})
+                    }
+                } else {
+                    await this.openBook(entry.bookId, targetProg)
+                }
+            }
+        }
+        if (dismissBtn) {
+            dismissBtn.onclick = () => {
+                bar.hidden = true
+            }
+        }
+        bar.hidden = false
     }
 
     // Compatibility accessors expose one backing state; internal code uses its owner.

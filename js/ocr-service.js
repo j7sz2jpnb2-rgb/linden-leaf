@@ -1,8 +1,9 @@
 // js/ocr-service.js - Managed, Cancellable OCR & Page Range Text Extraction
-// Features: embedded vs forced image OCR, page range validation, memory-capped rendering,
-// progress stages, worker lifecycle management, and clear error classification.
+// Unifies offline PP-OCRv6 (ONNX Runtime WebGPU / WASM SIMD Worker) with built-in Tesseract.js fallback,
+// reading-order layout reconstruction (horizontal, vertical right-to-left, two-column), and abort isolation.
 
 import { t } from './i18n.js'
+import { ocrModelManager } from './ocr-model-manager.js'
 
 export const MAX_OCR_PAGES = 100
 
@@ -51,7 +52,6 @@ export function parsePageRange(rangeStr, totalPages, currentPage, maxPages = MAX
         return { valid: true, pages: [cur] }
     }
 
-    // Normalize range separators and spaces around them: e.g. "5 - 8" -> "5-8"
     const normalized = raw.replace(/\s*([–—~～至到\-])\s*/g, '$1')
     const tokens = normalized.split(/[,，、\s]+/).filter(Boolean)
     if (tokens.length === 0) {
@@ -60,7 +60,6 @@ export function parsePageRange(rangeStr, totalPages, currentPage, maxPages = MAX
 
     const pagesSet = new Set()
     for (const token of tokens) {
-        // Range token: e.g. 5-8, 5~8, 5～8, 5–8, 5—8, 5至8, 5到8
         const rangeMatch = token.match(/^(\d+)[–—~～至到\-]+(\d+)$/)
         if (rangeMatch) {
             const start = parseInt(rangeMatch[1], 10)
@@ -103,8 +102,6 @@ export function parsePageRange(rangeStr, totalPages, currentPage, maxPages = MAX
 export function formatSpansToText(spans) {
     if (!spans || !spans.length) return ''
 
-    // Native MuPDF supplies line/x/y; PDF.js supplies x/y/w/h. Neither
-    // driver supplies the old rect-only shape assumed by the OCR dialog.
     if (spans.every(s => Number.isFinite(s.line))) {
         const lines = new Map()
         for (const span of spans) {
@@ -126,8 +123,7 @@ export function formatSpansToText(spans) {
     }
     spans = spans.map(s => ({ ...s, rect: s.rect || (Number.isFinite(s.x) && Number.isFinite(s.y)
         ? [s.x, s.y, s.x + (s.w || 0), s.y + (s.h || 0)] : undefined) }))
-    
-    // Sort spans by vertical position (y), then horizontal (x) if rect exists
+
     const hasRect = spans.some(s => Array.isArray(s.rect) && s.rect.length >= 4)
     let sorted = spans
     if (hasRect) {
@@ -180,14 +176,10 @@ export function formatSpansToText(spans) {
  */
 export function cleanOcrChineseSpaces(text) {
     if (!text) return ''
-    // Horizontal gaps only. Do not merge real lines or consume alternating
-    // pairs in strings such as "这 是 一 行".
     return text.replace(/([\u4e00-\u9fff\u3000-\u303f\uff01-\uff5e])[ \t\u00a0]+(?=[\u4e00-\u9fff\u3000-\u303f\uff01-\uff5e])/g, '$1')
 }
 
 export function getOcrAssetOptions(baseUrl = document.baseURI) {
-    // Pin one of the cores actually shipped with the application. Passing
-    // a directory lets Tesseract choose Relaxed SIMD, which is not bundled.
     const simdProbe = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11])
     const simd = typeof WebAssembly !== 'undefined' && WebAssembly.validate(simdProbe)
     const asset = name => new URL(`./vendor/tesseract/${name}`, baseUrl).href
@@ -206,10 +198,50 @@ function recognizeWithCancellation(worker, canvas, signal) {
         cancel = () => reject(createCancelledError())
         signal.addEventListener('abort', cancel, { once: true })
     })
-    // Tesseract.terminate() kills its worker but does not settle pending
-    // recognize() calls. Settle our caller and free its page canvas too.
     return Promise.race([worker.recognize(canvas, {}, { text: true, blocks: true }), stopped])
         .finally(() => signal.removeEventListener('abort', cancel))
+}
+
+function extractRgbaForOnnx(canvas, rotation = 0) {
+    const w = canvas.width || 0
+    const h = canvas.height || 0
+    if (w <= 0 || h <= 0) throw new Error('Invalid canvas dimensions for OCR')
+
+    if (!rotation || rotation === 0 || (rotation !== 90 && rotation !== 180 && rotation !== 270)) {
+        const ctx = canvas.getContext?.('2d', { willReadFrequently: true }) || canvas.getContext?.('2d')
+        if (!ctx) throw new Error('Canvas 2D context unavailable')
+        const img = ctx.getImageData(0, 0, w, h)
+        return { rgbaBuffer: img.data.buffer.slice(0), width: w, height: h }
+    }
+
+    const outW = (rotation === 90 || rotation === 270) ? h : w
+    const outH = (rotation === 90 || rotation === 270) ? w : h
+    const tmp = typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(outW, outH)
+        : document.createElement('canvas')
+    tmp.width = outW
+    tmp.height = outH
+    try {
+        const ctx = tmp.getContext('2d', { willReadFrequently: true })
+        ctx.save()
+        if (rotation === 90) {
+            ctx.translate(outW, 0)
+            ctx.rotate(Math.PI / 2)
+        } else if (rotation === 180) {
+            ctx.translate(outW, outH)
+            ctx.rotate(Math.PI)
+        } else if (rotation === 270) {
+            ctx.translate(0, outH)
+            ctx.rotate(-Math.PI / 2)
+        }
+        ctx.drawImage(canvas, 0, 0)
+        ctx.restore()
+        const img = ctx.getImageData(0, 0, outW, outH)
+        return { rgbaBuffer: img.data.buffer.slice(0), width: outW, height: outH }
+    } finally {
+        tmp.width = 0
+        tmp.height = 0
+    }
 }
 
 export class OcrService {
@@ -225,10 +257,66 @@ export class OcrService {
         this._onStageChange = null
         this._cancelWorkerInit = null
         this._recognizeChain = Promise.resolve()
+
+        this._config = {
+            engine: 'auto',
+            backend: 'auto',
+            direction: 'auto'
+        }
+        this._onnxWorker = null
+        this._onnxInitPromise = null
+        this._onnxModelId = null
+        this._onnxBackendPref = null
+        this._onnxExecutionProvider = null
+        this._onnxMsgSeq = 0
+        this._onnxPending = new Map()
+    }
+
+    configure(opts = {}) {
+        if (!opts || typeof opts !== 'object') return
+        const nextEngine = ['auto', 'ppocrv6-small', 'ppocrv6-tiny', 'tesseract'].includes(opts.engine)
+            ? opts.engine
+            : this._config.engine
+        const nextBackend = ['auto', 'webgpu', 'wasm'].includes(opts.backend)
+            ? opts.backend
+            : this._config.backend
+        const nextDirection = ['auto', 'horizontal', 'vertical'].includes(opts.direction)
+            ? opts.direction
+            : this._config.direction
+
+        const backendChanged = nextBackend !== this._config.backend
+        const explicitModelChanged = (nextEngine === 'ppocrv6-small' || nextEngine === 'ppocrv6-tiny')
+            && this._onnxModelId && this._onnxModelId !== nextEngine
+        this._config = { engine: nextEngine, backend: nextBackend, direction: nextDirection }
+
+        if (backendChanged || explicitModelChanged || nextEngine === 'tesseract') {
+            this._terminateOnnxWorker()
+        }
+    }
+
+    getConfig() {
+        return { ...this._config }
+    }
+
+    _terminateOnnxWorker() {
+        this._onnxInitPromise = null
+        this._onnxModelId = null
+        this._onnxBackendPref = null
+        this._onnxExecutionProvider = null
+        for (const [, pending] of this._onnxPending) {
+            pending.reject?.(createCancelledError())
+        }
+        this._onnxPending.clear()
+        if (this._onnxWorker) {
+            const w = this._onnxWorker
+            this._onnxWorker = null
+            try { w.postMessage({ type: 'dispose', id: ++this._onnxMsgSeq }) } catch (_) {}
+            try { w.terminate() } catch (_) {}
+        }
     }
 
     /**
-     * Terminate active worker and cancel any running job
+     * Terminate active workers and cancel any running job
      */
     async abort() {
         this._abortEpoch++
@@ -244,6 +332,7 @@ export class OcrService {
             this._activeAbortController.abort()
             this._activeAbortController = null
         }
+        this._terminateOnnxWorker()
         if (this._worker) {
             const w = this._worker
             this._worker = null
@@ -251,6 +340,208 @@ export class OcrService {
             try {
                 await w.terminate()
             } catch (e) {}
+        }
+    }
+
+    async resolveEffectiveEngine(preferred = this._config.engine) {
+        const pref = ['auto', 'ppocrv6-small', 'ppocrv6-tiny', 'tesseract'].includes(preferred) ? preferred : 'auto'
+        if (pref === 'tesseract') {
+            return { engine: 'tesseract', fallbackReason: null, status: null }
+        }
+        // Without Worker + OffscreenCanvas, fall back gracefully to Tesseract
+        if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') {
+            return { engine: 'tesseract', fallbackReason: 'unsupported_env', status: null }
+        }
+        let status = null
+        try {
+            status = await ocrModelManager.getStatus()
+        } catch (_) {
+            status = null
+        }
+        const byId = new Map((status?.models || []).map(m => [m.id, m]))
+        if (pref === 'ppocrv6-small' || pref === 'ppocrv6-tiny') {
+            if (byId.get(pref)?.ready) {
+                return { engine: pref, fallbackReason: null, status }
+            }
+            return { engine: 'tesseract', fallbackReason: 'model_not_installed', status }
+        }
+        if (byId.get('ppocrv6-small')?.ready) {
+            return { engine: 'ppocrv6-small', fallbackReason: null, status }
+        }
+        if (byId.get('ppocrv6-tiny')?.ready) {
+            return { engine: 'ppocrv6-tiny', fallbackReason: null, status }
+        }
+        return { engine: 'tesseract', fallbackReason: 'no_ppocr_installed', status }
+    }
+
+    async getActiveEngineInfo() {
+        const resolved = await this.resolveEffectiveEngine(this._config.engine)
+        return {
+            configuredEngine: this._config.engine,
+            configuredBackend: this._config.backend,
+            configuredDirection: this._config.direction,
+            effectiveEngine: resolved.engine,
+            executionProvider: resolved.engine === 'tesseract'
+                ? 'wasm'
+                : (this._onnxModelId === resolved.engine && this._onnxExecutionProvider
+                    ? this._onnxExecutionProvider
+                    : this._config.backend),
+            fallbackReason: resolved.fallbackReason,
+            status: resolved.status
+        }
+    }
+
+    _sendOnnxWorkerRpc(worker, type, payload, transfer = [], signal = null) {
+        if (signal?.aborted) return Promise.reject(createCancelledError())
+        const id = ++this._onnxMsgSeq
+        return new Promise((resolve, reject) => {
+            const onAbort = () => {
+                this._onnxPending.delete(id)
+                this._terminateOnnxWorker()
+                reject(createCancelledError())
+            }
+            if (signal) signal.addEventListener('abort', onAbort, { once: true })
+            this._onnxPending.set(id, {
+                resolve: (res) => {
+                    signal?.removeEventListener('abort', onAbort)
+                    resolve(res)
+                },
+                reject: (err) => {
+                    signal?.removeEventListener('abort', onAbort)
+                    reject(err)
+                }
+            })
+            try {
+                worker.postMessage({ type, id, payload }, transfer)
+            } catch (err) {
+                signal?.removeEventListener('abort', onAbort)
+                this._onnxPending.delete(id)
+                reject(err)
+            }
+        })
+    }
+
+    async _ensureOnnxWorker(modelId, backendPref = this._config.backend, onStageChange = null, abortEpoch = this._abortEpoch, signal = null) {
+        if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
+        if (this._onnxWorker && !this._onnxInitPromise && this._onnxModelId === modelId && this._onnxBackendPref === backendPref) {
+            return this._onnxWorker
+        }
+        if (this._onnxInitPromise && this._onnxModelId === modelId && this._onnxBackendPref === backendPref) {
+            const w = await this._onnxInitPromise
+            if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
+            return w
+        }
+
+        this._terminateOnnxWorker()
+        this._onnxModelId = modelId
+        this._onnxBackendPref = backendPref
+
+        const initTask = (async () => {
+            onStageChange?.(t('ocr.stage.loadingOnnxModel', { model: modelId }))
+            const assets = await ocrModelManager.loadModelAssets(modelId)
+            if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
+
+            const workerUrl = new URL('./ocr-onnx-worker.js', import.meta.url)
+            const worker = new Worker(workerUrl, { type: 'module' })
+            worker.addEventListener('message', (event) => {
+                const msg = event?.data
+                if (!msg || typeof msg.id !== 'number') return
+                const pending = this._onnxPending.get(msg.id)
+                if (!pending) return
+                this._onnxPending.delete(msg.id)
+                if (String(msg.type).endsWith('_err')) {
+                    pending.reject(new Error(msg.error || 'ONNX OCR worker error'))
+                } else {
+                    pending.resolve(msg.result)
+                }
+            })
+            worker.addEventListener('error', (errEvent) => {
+                const msg = errEvent?.message || 'ONNX OCR worker crashed'
+                for (const [, p] of this._onnxPending) p.reject(new Error(msg))
+                this._onnxPending.clear()
+                if (this._onnxWorker === worker) this._terminateOnnxWorker()
+            })
+
+            this._onnxWorker = worker
+            const isAndroid = typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent || '')
+            const transfers = [assets.detBuffer, assets.recBuffer, assets.wasmBuffer]
+                .filter(buf => buf instanceof ArrayBuffer)
+            const info = await this._sendOnnxWorkerRpc(
+                worker,
+                'init',
+                {
+                    modelId,
+                    detBuffer: assets.detBuffer,
+                    recBuffer: assets.recBuffer,
+                    dictText: assets.dictText,
+                    wasmBuffer: assets.wasmBuffer,
+                    backendPref,
+                    isAndroid
+                },
+                transfers,
+                signal
+            )
+            if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
+            this._onnxExecutionProvider = info?.executionProvider || 'wasm'
+            return worker
+        })()
+
+        this._onnxInitPromise = initTask
+        try {
+            return await initTask
+        } catch (err) {
+            if (this._onnxInitPromise === initTask) {
+                this._terminateOnnxWorker()
+            }
+            throw err
+        } finally {
+            if (this._onnxInitPromise === initTask) {
+                this._onnxInitPromise = null
+            }
+        }
+    }
+
+    async _recognizeCanvasWithOnnx(modelId, canvas, signal, opts = {}) {
+        const abortEpoch = this._abortEpoch
+        const worker = await this._ensureOnnxWorker(
+            modelId,
+            this._config.backend,
+            opts.onStageChange,
+            abortEpoch,
+            signal
+        )
+        if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
+
+        const scale = opts.scale || 1.0
+        const rotation = opts.rotation || 0
+        const originX = opts.originX || 0
+        const originY = opts.originY || 0
+        const direction = opts.direction || this._config.direction || 'auto'
+
+        const { rgbaBuffer, width, height } = extractRgbaForOnnx(canvas, rotation)
+        const activeSignal = signal || new AbortController().signal
+
+        const run = async () => {
+            if (activeSignal.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
+            return await this._sendOnnxWorkerRpc(
+                worker,
+                'recognize',
+                { rgbaBuffer, width, height, direction, scale, originX, originY },
+                [rgbaBuffer],
+                activeSignal
+            )
+        }
+        const next = this._recognizeChain.then(run, run)
+        this._recognizeChain = next.catch(() => {})
+        const res = await next
+        if (activeSignal.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
+        return {
+            text: cleanOcrChineseSpaces(res?.text || ''),
+            spans: Array.isArray(res?.spans) ? res.spans : [],
+            direction: res?.direction || direction,
+            engine: res?.modelId || modelId,
+            executionProvider: res?.executionProvider || this._onnxExecutionProvider || 'wasm',
+            elapsedMs: res?.elapsedMs || 0
         }
     }
 
@@ -322,8 +613,6 @@ export class OcrService {
                         }
                     }
                 })
-                // A cancelled initialization may resolve later; do not retain
-                // its worker or let it overwrite a newer request.
                 creation.then(created => {
                     if (initToken !== this._workerInitToken || abortEpoch !== this._abortEpoch) created.terminate().catch(() => {})
                 }, () => {})
@@ -371,18 +660,10 @@ export class OcrService {
         return worker
     }
 
-    /**
-     * Recognize text from a single canvas with geometry spans mapped back to page points
-     * @param {HTMLCanvasElement} canvas
-     * @param {AbortSignal} [signal]
-     * @param {number|object} [scaleOrOptions=1.0] Rendering scale or options of canvas relative to page points
-     * @returns {Promise<{ text: string, spans: Array<{ text: string, rect: number[], line: number }> }>}
-     */
-    async recognizeCanvas(canvas, signal = null, scaleOrOptions = 1.0) {
-        if (!canvas) throw new Error('Canvas is required for OCR')
-        if (signal?.aborted) throw createCancelledError()
+    async _recognizeCanvasWithTesseract(canvas, signal = null, scaleOrOptions = 1.0) {
         const abortEpoch = this._abortEpoch
-        const worker = await this._getWorker(null, abortEpoch, signal)
+        const onStageChange = (scaleOrOptions && typeof scaleOrOptions === 'object') ? scaleOrOptions.onStageChange : null
+        const worker = await this._getWorker(onStageChange || null, abortEpoch, signal)
         if (signal?.aborted || abortEpoch !== this._abortEpoch) throw createCancelledError()
         const activeSignal = signal || new AbortController().signal
         const ocrRes = await this._enqueueRecognize(worker, canvas, activeSignal)
@@ -499,7 +780,41 @@ export class OcrService {
 
         const rawText = (ocrRes?.data?.text || spans.map(s => s.text).join('\n')).trim()
         const text = cleanOcrChineseSpaces(rawText)
-        return { text, spans }
+        return { text, spans, engine: 'tesseract', executionProvider: 'wasm' }
+    }
+
+    /**
+     * Recognize text from a single canvas with geometry spans mapped back to page points.
+     * Routes automatically to PP-OCRv6 Small/Tiny ONNX Worker when installed, falling back safely to Tesseract.js.
+     * @param {HTMLCanvasElement} canvas
+     * @param {AbortSignal} [signal]
+     * @param {number|object} [scaleOrOptions=1.0] Rendering scale or options of canvas relative to page points
+     * @returns {Promise<{ text: string, spans: Array<{ text: string, rect: number[], line: number }> }>}
+     */
+    async recognizeCanvas(canvas, signal = null, scaleOrOptions = 1.0) {
+        if (!canvas) throw new Error('Canvas is required for OCR')
+        if (signal?.aborted) throw createCancelledError()
+
+        const opts = (scaleOrOptions && typeof scaleOrOptions === 'object') ? scaleOrOptions : null
+        const hasInjectedTesseract = Boolean(this._worker) || (this._getWorker !== OcrService.prototype._getWorker)
+        if (hasInjectedTesseract || opts?.forceTesseract) {
+            return await this._recognizeCanvasWithTesseract(canvas, signal, scaleOrOptions)
+        }
+
+        const resolved = await this.resolveEffectiveEngine(opts?.engine || this._config.engine)
+        if (signal?.aborted) throw createCancelledError()
+
+        if (resolved.engine === 'ppocrv6-small' || resolved.engine === 'ppocrv6-tiny') {
+            try {
+                return await this._recognizeCanvasWithOnnx(resolved.engine, canvas, signal, opts || { scale: scaleOrOptions })
+            } catch (err) {
+                if (signal?.aborted || isCancelledError(err)) throw err
+                console.warn(`[OCR] ${resolved.engine} failed, falling back to Tesseract:`, err)
+                this._terminateOnnxWorker()
+            }
+        }
+
+        return await this._recognizeCanvasWithTesseract(canvas, signal, scaleOrOptions)
     }
 
     /**
@@ -508,10 +823,11 @@ export class OcrService {
      * @param {object} params.driver PDF driver
      * @param {number[]} params.pages 1-based page numbers
      * @param {'auto' | 'text_only' | 'force_image'} [params.mode='auto']
+     * @param {'auto' | 'horizontal' | 'vertical'} [params.direction]
      * @param {function(string, number): void} [params.onProgress] (statusText, overallPercent)
      * @returns {Promise<{ success: boolean, results: Array<{ page: number, text: string, isImageOcr: boolean }>, fullText: string, error?: string }>}
      */
-    async extractText({ driver, pages, mode = 'auto', onProgress, onPageResult }) {
+    async extractText({ driver, pages, mode = 'auto', direction, onProgress, onPageResult }) {
         if (!driver) throw new Error(t('ocr.error.driverUnavailable'))
         if (!pages || !pages.length) throw new Error(t('ocr.error.selectPages'))
         if (pages.length > MAX_OCR_PAGES) throw new Error(t('ocr.error.maxPages', { maxPages: MAX_OCR_PAGES }))
@@ -554,7 +870,6 @@ export class OcrService {
                 let isImageOcr = false
 
                 try {
-                    // 1. In 'auto' mode, check for embedded text layer first
                     if (mode !== 'force_image' && driver.getTextLayer) {
                         onProgress?.(t('ocr.stage.checkingEmbedded', { page: pageNum, index: i + 1, total }), baseProgress + 5 / total)
                         try {
@@ -572,7 +887,6 @@ export class OcrService {
                         }
                     }
 
-                    // 2. If no embedded text or forced image OCR, render high-fidelity page image
                     if (mode === 'text_only' && !driver.getTextLayer) throw new Error(t('ocr.error.noTextLayerSupport'))
                     if (mode !== 'text_only' && (!pageText || mode === 'force_image')) {
                         isImageOcr = true
@@ -580,15 +894,13 @@ export class OcrService {
                         onProgress?.(t('ocr.stage.renderingPage', { page: pageNum, index: i + 1, total }), baseProgress + 10 / total)
 
                         let canvas = null
+                        let renderScale = 1.5
                         try {
-                            // One whole page at a time; enough detail for small
-                            // Chinese print, bounded to 2400px on the long side.
                             const pageSizes = await driver.getPageSizes(pageIndex, 1, signal)
                             const size = pageSizes?.[0] || { width: 800, height: 1100 }
                             const maxDim = Math.max(size.width, size.height, 1)
-                            const scale = Math.min(3.0, 2400 / maxDim)
-
-                            canvas = await driver.renderPage(pageIndex, scale, signal)
+                            renderScale = Math.min(3.0, 2400 / maxDim)
+                            canvas = await driver.renderPage(pageIndex, renderScale, signal)
                         } catch (renderErr) {
                             if (signal.aborted) throw createCancelledError()
                             console.warn(`[OCR] Page ${pageNum} renderPage failed:`, renderErr)
@@ -599,19 +911,17 @@ export class OcrService {
                             throw new Error(t('ocr.error.invalidCanvas', { page: pageNum }))
                         }
 
-                        // 3. Run OCR on the original, unfiltered page canvas.
                         try {
-                            const worker = await this._getWorker((stageMsg) => {
-                                onProgress?.(t('ocr.stage.pageStagePrefix', { page: pageNum, stage: stageMsg }), baseProgress + 20 / total)
-                            }, abortEpoch, signal)
-
-                            if (signal.aborted || batchJobId !== this._batchJobId || abortEpoch !== this._abortEpoch) throw createCancelledError()
-
                             onProgress?.(t('ocr.stage.recognizingPage', { page: pageNum }), baseProgress + 30 / total)
-                            const ocrRes = await this._enqueueRecognize(worker, canvas, signal)
+                            const recognized = await this.recognizeCanvas(canvas, signal, {
+                                scale: renderScale,
+                                direction: direction || this._config.direction || 'auto',
+                                onStageChange: (stageMsg) => {
+                                    onProgress?.(t('ocr.stage.pageStagePrefix', { page: pageNum, stage: stageMsg }), baseProgress + 20 / total)
+                                }
+                            })
                             if (signal.aborted || batchJobId !== this._batchJobId || abortEpoch !== this._abortEpoch) throw createCancelledError()
-                            const rawOcrText = (ocrRes?.data?.text || '').trim()
-                            pageText = cleanOcrChineseSpaces(rawOcrText)
+                            pageText = cleanOcrChineseSpaces((recognized?.text || '').trim())
                         } finally {
                             canvas.width = 0
                             canvas.height = 0
@@ -646,7 +956,6 @@ export class OcrService {
             }
 
             const fullText = fullTextSoFar()
-
             const allFailed = results.length > 0 && results.every(r => r.error)
 
             return {

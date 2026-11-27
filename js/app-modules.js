@@ -149,3 +149,25 @@ export const ensureChapterTranslationLoaded = (appInstance, loader = () => impor
         return chapterTranslationManager
     })
 }
+
+export let _externalCompanionModPromise = null
+
+export const ensureExternalCompanionLoaded = (appInstance, loader = () => import('./external-ai-companion.js')) => {
+    if (appInstance?.externalCompanion?._isRealInstance) return Promise.resolve(appInstance.externalCompanion)
+    if (!_externalCompanionModPromise) {
+        _externalCompanionModPromise = Promise.resolve()
+            .then(() => loader())
+            .catch(err => {
+                _externalCompanionModPromise = null
+                throw err
+            })
+    }
+    return _externalCompanionModPromise.then(({ ExternalAiCompanionManager }) => {
+        if (appInstance && !appInstance.externalCompanion?._isRealInstance) {
+            const mgr = new ExternalAiCompanionManager(appInstance)
+            mgr._isRealInstance = true
+            appInstance.externalCompanion = mgr
+        }
+        return appInstance?.externalCompanion
+    })
+}

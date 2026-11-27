@@ -6,6 +6,12 @@
 const CJK_CHAR_RE = /[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef\u3040-\u30ff\uac00-\ud7af]/
 const CJK_JOIN_RE = /([\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef\u3040-\u30ff\uac00-\ud7af])\r?\n([\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef\u3040-\u30ff\uac00-\ud7af])/g
 const EN_HYPHEN_RE = /([A-Za-z]{2,})-\r?\n([a-z]{2,})/g
+const HYPHENATED_COMPOUND_LEFT = new Set([
+    'well', 'cost', 'self', 'non', 'cross', 'half', 'full', 'high', 'low',
+    'long', 'short', 'real', 'open', 'free', 'mid', 'anti', 'pseudo', 'quasi',
+    'all', 'ex', 'vice', 'two', 'three', 'four', 'five', 'multi', 'pre', 'post',
+    'first', 'second', 'third', 'best', 'up', 'down', 'in', 'out', 'off', 'on',
+])
 const BULLET_OR_NUMBER_LINE_RE = /^\s*(?:[-•*·▪]|(?:\d{1,3}|[a-zA-Z])[.)、]|\[[0-9]+\])/
 const SENTENCE_END_LINE_RE = /[。！？；.!?\u2026”’」』）】"']\s*$/
 
@@ -39,8 +45,10 @@ export function smartCleanPdfCopyText(rawText) {
         }
 
         let joined = lines.join('\n')
-        // De-wrap hyphenated English line breaks first
-        joined = joined.replace(EN_HYPHEN_RE, '$1$2')
+        // De-wrap broken line-end hyphenations while preserving genuine hyphenated compounds (e.g. well-known)
+        joined = joined.replace(EN_HYPHEN_RE, (full, left, right) => (
+            HYPHENATED_COMPOUND_LEFT.has(left.toLowerCase()) ? `${left}-${right}` : `${left}${right}`
+        ))
 
         // Walk line by line so list lines or clear paragraph-like short sentence endings aren't flattened
         const stepLines = joined.split('\n')

@@ -1,0 +1,11 @@
+{
+  "extName": {
+    "message": "Linden Leaf AI Companion"
+  },
+  "extDesc": {
+    "message": "Connects Linden Leaf Reader to your ChatGPT, Gemini, AI Studio, or DeepSeek browser window with draft-safe quotes and compact layout."
+  },
+  "menuSaveSelection": {
+    "message": "Save selection to Linden Leaf notes"
+  }
+}

@@ -446,6 +446,44 @@ pub async fn fs_write_file(file_path: String, content: String) -> Result<(), Str
 }
 
 #[tauri::command]
+pub async fn fs_register_sidecar_dir(dir_path: String) -> Result<String, String> {
+    let abs = validate_safe_path_syntax(&dir_path)?;
+    check_leaf_not_symlink(&abs)?;
+    let canon = std::fs::canonicalize(&abs)
+        .map_err(|e| format!("SIDECAR_DIR_INVALID: Cannot resolve folder '{}': {e}", dir_path))?;
+    if !canon.is_dir() {
+        return Err(format!("SIDECAR_DIR_INVALID: Not a directory: {}", dir_path));
+    }
+    let key = normalized_path_key(&canon);
+    if key.len() <= 2 && canon.parent().is_none() {
+        return Err("SIDECAR_DIR_DENIED: Filesystem root cannot be used directly as a sidecar directory".into());
+    }
+    register_authorized_write_dir(&canon);
+    Ok(canon.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn fs_read_text_file(file_path: String) -> Result<Option<String>, String> {
+    let resolved = authorize_write_path(&file_path, ALLOWED_TEXT_WRITE_EXTENSIONS)?;
+    if !resolved.exists() {
+        return Ok(None);
+    }
+    let meta = fs::metadata(&resolved)
+        .await
+        .map_err(|e| format!("Failed inspecting file '{}': {e}", resolved.display()))?;
+    if !meta.is_file() {
+        return Err("Target path is not a regular file".into());
+    }
+    if meta.len() > 16 * 1024 * 1024 {
+        return Err("PAYLOAD_TOO_LARGE: Text sidecar exceeds 16MiB limit".into());
+    }
+    let text = fs::read_to_string(&resolved)
+        .await
+        .map_err(|e| format!("Failed reading text file '{}': {e}", resolved.display()))?;
+    Ok(Some(text))
+}
+
+#[tauri::command]
 pub async fn fs_write_binary_file(file_path: String, bytes_base64: String) -> Result<(), String> {
     use base64::Engine as _;
 
@@ -488,6 +526,102 @@ pub async fn fs_write_binary_file(file_path: String, bytes_base64: String) -> Re
         .await
         .map_err(|e| format!("Failed writing binary file '{}': {}", resolved.display(), e))?;
     Ok(())
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct FileIdentityInfo {
+    pub size: u64,
+    #[serde(rename = "mtimeMs")]
+    pub mtime_ms: u64,
+    #[serde(rename = "volumeId")]
+    pub volume_id: Option<String>,
+    #[serde(rename = "fileId")]
+    pub file_id: Option<String>,
+}
+
+fn read_path_file_identity(path: &Path, meta_opt: Option<&std::fs::Metadata>) -> FileIdentityInfo {
+    let owned_meta = if meta_opt.is_some() { None } else { std::fs::metadata(path).ok() };
+    let meta = meta_opt.or(owned_meta.as_ref());
+    let size = meta.map(|m| m.len()).unwrap_or(0);
+    let mtime_ms = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    #[cfg(target_os = "windows")]
+    let (volume_id, file_id) = {
+        use std::os::windows::io::AsRawHandle;
+        #[repr(C)]
+        struct BY_HANDLE_FILE_INFORMATION {
+            dw_file_attributes: u32,
+            ft_creation_time: [u32; 2],
+            ft_last_access_time: [u32; 2],
+            ft_last_write_time: [u32; 2],
+            dw_volume_serial_number: u32,
+            n_file_size_high: u32,
+            n_file_size_low: u32,
+            n_number_of_links: u32,
+            n_file_index_high: u32,
+            n_file_index_low: u32,
+        }
+        extern "system" {
+            fn GetFileInformationByHandle(
+                h_file: *mut std::ffi::c_void,
+                lp_file_information: *mut BY_HANDLE_FILE_INFORMATION,
+            ) -> i32;
+        }
+        if let Ok(file) = std::fs::File::open(path) {
+            let handle = file.as_raw_handle();
+            let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+            let res = unsafe { GetFileInformationByHandle(handle as *mut std::ffi::c_void, info.as_mut_ptr()) };
+            if res != 0 {
+                let info = unsafe { info.assume_init() };
+                let idx = ((info.n_file_index_high as u64) << 32) | (info.n_file_index_low as u64);
+                let vol = format!("{:08x}", info.dw_volume_serial_number);
+                let fid = format!("{:08x}:{:016x}", info.dw_volume_serial_number, idx);
+                (Some(vol), Some(fid))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (volume_id, file_id) = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let vol = meta.map(|m| m.dev().to_string());
+            let fid = meta.map(|m| format!("{}:{}", m.dev(), m.ino()));
+            (vol, fid)
+        }
+        #[cfg(not(unix))]
+        {
+            (None::<String>, None::<String>)
+        }
+    };
+    FileIdentityInfo {
+        size,
+        mtime_ms,
+        volume_id,
+        file_id,
+    }
+}
+
+#[tauri::command]
+pub async fn fs_get_file_identity(file_path: String) -> Result<FileIdentityInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let p = Path::new(&file_path);
+        let meta = std::fs::metadata(p)
+            .map_err(|e| format!("Failed inspecting file '{}': {}", file_path, e))?;
+        if !meta.is_file() {
+            return Err(format!("Not a file: {}", file_path));
+        }
+        Ok(read_path_file_identity(p, Some(&meta)))
+    })
+    .await
+    .map_err(|e| format!("File identity task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -603,82 +737,27 @@ pub(crate) fn scan_folder_sync(
                         .map(|s| s.to_lowercase())
                         .unwrap_or_default();
                     if SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+                        if ext == "pdf" {
+                            let _ = crate::commands::mupdf::authorize_direct_pdf_path(&p);
+                        }
                         let meta = entry.metadata().ok();
-                        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                        let modified_time = meta.as_ref()
-                            .and_then(|m| m.modified().ok())
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0);
+                        let ident = read_path_file_identity(&p, meta.as_ref());
                         let name = p.file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("unknown")
                             .to_string();
-                        #[cfg(target_os = "windows")]
-                        let (volume_id, file_id) = {
-                            use std::os::windows::io::AsRawHandle;
-                            #[repr(C)]
-                            struct BY_HANDLE_FILE_INFORMATION {
-                                dw_file_attributes: u32,
-                                ft_creation_time: [u32; 2],
-                                ft_last_access_time: [u32; 2],
-                                ft_last_write_time: [u32; 2],
-                                dw_volume_serial_number: u32,
-                                n_file_size_high: u32,
-                                n_file_size_low: u32,
-                                n_number_of_links: u32,
-                                n_file_index_high: u32,
-                                n_file_index_low: u32,
-                            }
-                            extern "system" {
-                                fn GetFileInformationByHandle(
-                                    h_file: *mut std::ffi::c_void,
-                                    lp_file_information: *mut BY_HANDLE_FILE_INFORMATION,
-                                ) -> i32;
-                            }
-                            if let Ok(file) = std::fs::File::open(&p) {
-                                let handle = file.as_raw_handle();
-                                let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-                                let res = unsafe { GetFileInformationByHandle(handle as *mut std::ffi::c_void, info.as_mut_ptr()) };
-                                if res != 0 {
-                                    let info = unsafe { info.assume_init() };
-                                    let idx = ((info.n_file_index_high as u64) << 32) | (info.n_file_index_low as u64);
-                                    let vol = format!("{:08x}", info.dw_volume_serial_number);
-                                    let fid = format!("{:08x}:{:016x}", info.dw_volume_serial_number, idx);
-                                    (Some(vol), Some(fid))
-                                } else {
-                                    (None, None)
-                                }
-                            } else {
-                                (None, None)
-                            }
-                        };
-                        #[cfg(not(target_os = "windows"))]
-                        let (volume_id, file_id) = {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::MetadataExt;
-                                let vol = meta.as_ref().map(|m| m.dev().to_string());
-                                let fid = meta.as_ref().map(|m| format!("{}:{}", m.dev(), m.ino()));
-                                (vol, fid)
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                (None::<String>, None::<String>)
-                            }
-                        };
                         results.push(FolderBookItem {
                             path: p.to_string_lossy().to_string(),
                             name,
-                            size,
-                            modified_time,
-                            mtime: modified_time,
+                            size: ident.size,
+                            modified_time: ident.mtime_ms,
+                            mtime: ident.mtime_ms,
                             extension: ext.clone(),
                             ext,
-                            volume_id: volume_id.clone(),
-                            volume_id_camel: volume_id,
-                            file_id: file_id.clone(),
-                            file_id_camel: file_id,
+                            volume_id: ident.volume_id.clone(),
+                            volume_id_camel: ident.volume_id,
+                            file_id: ident.file_id.clone(),
+                            file_id_camel: ident.file_id,
                             document_hash: None,
                             document_hash_camel: None,
                         });
@@ -930,5 +1009,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&sibling_prefix);
         let _ = std::fs::remove_dir_all(&outside_sync_a);
         let _ = std::fs::remove_dir_all(&outside_sync_b);
+    }
+
+    #[test]
+    fn test_read_path_file_identity_tracks_size_and_file_id() {
+        let base = std::env::temp_dir().join(format!("linden_ident_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let file_path = base.join("sample.pdf");
+        std::fs::write(&file_path, b"%PDF-1.4\nhello world").unwrap();
+        let ident = read_path_file_identity(&file_path, None);
+        assert_eq!(ident.size, 20);
+        assert!(ident.mtime_ms > 0);
+        assert!(ident.file_id.is_some());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

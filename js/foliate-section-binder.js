@@ -4,6 +4,9 @@ import { platformBridge } from './platformBridge.js'
 import { markReaderPaperBackgrounds } from './reader-paper.js'
 import { FEATURE_CHAPTER_TRANSLATION_ENABLED } from './app-features.js'
 import { applyChineseQuotesToDocument } from './chinese-quotes.js'
+import { applyChineseScriptToDocument } from './chinese-script.js'
+import { applyFocusDimmingToDocument } from './reading-ergonomics.js'
+import { extractEnclosingSentenceContext } from './ai-context.js'
 import { t } from './i18n.js'
 
 /** Owns sections UI state, DOM queries and bindings. App supplies shared reading/session coordination. */
@@ -462,10 +465,20 @@ export class FoliateSectionBinder {
             }
         }, { passive: true })
 
+        // Chinese Script Transformation (Reversible WeakMap S2T/T2S; preserves code blocks)
+        if (doc.body && this.app.settings?.chineseScriptMode && this.app.settings.chineseScriptMode !== 'original') {
+            applyChineseScriptToDocument(doc, this.app.settings.chineseScriptMode)
+        }
+
         // Chinese Quotes Transformation (Reversible via WeakMap; only applies to CJK content)
         if (this.app.settings.chineseQuotes && doc.body) {
             const bookLang = this.app.book?.metadata?.language || this.app.currentBook?.language || ''
             applyChineseQuotesToDocument(doc, true, { bookLang })
+        }
+
+        // Paragraph Focus Dimming
+        if (doc.body && this.app.settings?.focusDimming) {
+            applyFocusDimmingToDocument(doc, true)
         }
 
         let selectionTimeout = null
@@ -655,7 +668,8 @@ export class FoliateSectionBinder {
                 const dictEnabled = typeof this.app.dictionaryService?.isEnabled === 'function' ? this.app.dictionaryService.isEnabled() : (this.app.dictionaryService?.isEnabled !== false)
                 const isSingleWord = !isCtrl && /^[a-zA-Z]+(?:['’-][a-zA-Z]+)?$/.test(trimmed) && dictEnabled
                 if (isSingleWord) {
-                    const wordItem = { ...currentItem }
+                    const sentenceContext = extractEnclosingSentenceContext({ doc, range, selectedText: trimmed })
+                    const wordItem = { ...currentItem, sentenceContext }
                     this.app.annotations._frozenSelectionSnapshot = wordItem
                     this.app.annotations.selectedTextInfo = wordItem
                     this.app.annotations.hideSelectionPopup(true)

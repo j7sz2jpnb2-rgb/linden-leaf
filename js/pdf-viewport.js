@@ -23,6 +23,78 @@ const quadBounds = q => {
     return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]
 }
 
+/**
+ * Convert normalized OCR spans (horizontal, vertical, or explicit charRects)
+ * into selectable per-character quad entries for the PDF viewport layer.
+ * @param {Array<object>} normalizedSpans
+ */
+export function buildOcrCharEntries(normalizedSpans) {
+    const chars = []
+    let lineIdx = 0
+    for (const span of (Array.isArray(normalizedSpans) ? normalizedSpans : [])) {
+        const text = span?.text || ''
+        if (!text) continue
+        const [rx0, ry0, rx1, ry1] = span.rect || [
+            span.x || 0,
+            span.y || 0,
+            (span.x || 0) + (span.w || 10),
+            (span.y || 0) + (span.h || 10)
+        ]
+        const x0 = Math.min(rx0, rx1)
+        const x1 = Math.max(rx0, rx1)
+        const y0 = Math.min(ry0, ry1)
+        const y1 = Math.max(ry0, ry1)
+        const isVertical = Boolean(span.vertical)
+        const hasCharRects = Array.isArray(span.charRects) && span.charRects.length === text.length
+
+        if (hasCharRects) {
+            for (let i = 0; i < text.length; i++) {
+                const cr = span.charRects[i]
+                const cx0 = Number(cr?.[0]) || x0
+                const cy0 = Number(cr?.[1]) || y0
+                const cx1 = Number(cr?.[2]) || cx0 + 1
+                const cy1 = Number(cr?.[3]) || cy0 + 1
+                chars.push({
+                    text: text[i],
+                    line: span.line ?? lineIdx,
+                    size: isVertical ? Math.max(1, cx1 - cx0) : Math.max(1, cy1 - cy0),
+                    quad: [cx0, cy0, cx1, cy0, cx0, cy1, cx1, cy1]
+                })
+            }
+        } else if (isVertical) {
+            const totalH = Math.max(1, y1 - y0)
+            const charH = totalH / Math.max(1, text.length)
+            const charSize = Math.max(1, x1 - x0)
+            for (let i = 0; i < text.length; i++) {
+                const cy0 = y0 + i * charH
+                const cy1 = cy0 + charH
+                chars.push({
+                    text: text[i],
+                    line: span.line ?? lineIdx,
+                    size: charSize,
+                    quad: [x0, cy0, x1, cy0, x0, cy1, x1, cy1]
+                })
+            }
+        } else {
+            const totalW = Math.max(1, x1 - x0)
+            const charW = totalW / Math.max(1, text.length)
+            const charSize = Math.max(1, y1 - y0)
+            for (let i = 0; i < text.length; i++) {
+                const cx0 = x0 + i * charW
+                const cx1 = cx0 + charW
+                chars.push({
+                    text: text[i],
+                    line: span.line ?? lineIdx,
+                    size: charSize,
+                    quad: [cx0, y0, cx1, y0, cx0, y1, cx1, y1]
+                })
+            }
+        }
+        lineIdx++
+    }
+    return chars
+}
+
 function pointToSegmentDistanceSq(px, py, x1, y1, x2, y2) {
     const dx = x2 - x1, dy = y2 - y1
     const lenSq = dx * dx + dy * dy
@@ -82,6 +154,7 @@ export class PdfViewport {
             maxCanvasEdge: 4096,
             maxCanvasPixels: 10_000_000,
             enableClip: true,
+            useMobileTilePlanner: false,
             clipPixelThreshold: 2_000_000,
             bitmapCacheLimitBytes: 64 * 1024 * 1024,
             snapshot: null,
@@ -109,6 +182,8 @@ export class PdfViewport {
         this.numPages = 0
         this.pageSizes = []
         this.pageOffsets = []
+        this.preserveImagesInDarkMode = Boolean(this.options.preserveImagesInDarkMode ?? true)
+        this._currentPdfFilter = ''
         this._layoutRows = []
         this._layoutRowsSource = null
         this._layoutRowsLength = 0
@@ -149,6 +224,10 @@ export class PdfViewport {
         this._nativeGeometryUse = new Map()
         this._nativeGeometryLimit = 16
         this._nativeDrag = null
+        this._touchNativeDrag = null
+        this._touchHandleDrag = null
+        this._touchNativeRange = null
+        this._touchSelectionActive = false
         this._nativePreview = null
         this._multiSelections = []
         this._lastSingleSelection = null
@@ -246,6 +325,7 @@ export class PdfViewport {
         .pdf-page-canvas,.pdf-page-img{position:absolute;inset:0;width:100%;height:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none}
         .pdf-page-preview{position:absolute;inset:0;width:100%;height:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none;z-index:1}
         .pdf-clip-canvas{position:absolute;left:0;width:100%;filter:var(--pdf-page-filter,var(--reader-img-filter,none));pointer-events:none;z-index:2}
+        .pdf-image-preserve-canvas{position:absolute;inset:0;width:100%;height:100%;filter:none;pointer-events:none;z-index:2}
         .pdf-text-layer{position:absolute;inset:0;overflow:clip;z-index:4;opacity:1;line-height:1;text-size-adjust:none;transform-origin:0 0;user-select:text;-webkit-user-select:text;pointer-events:auto}
         .pdf-text-layer .textLayer{position:absolute;inset:0;transform-origin:0 0;--scale-round-x:1px;--scale-round-y:1px;--text-scale-factor:calc(var(--total-scale-factor)*var(--min-font-size));--min-font-size-inv:calc(1/var(--min-font-size))}
         .pdf-text-layer .textLayer[data-main-rotation="90"]{transform:rotate(90deg) translateY(-100%)}
@@ -259,6 +339,9 @@ export class PdfViewport {
         .pdf-highlight-layer{z-index:3}.pdf-multi-select-layer{z-index:4}.pdf-native-selection-layer{z-index:5}.pdf-locate-pulse-layer{z-index:9}
         .pdf-native-selection-layer svg,.pdf-multi-select-layer svg,.pdf-locate-pulse-layer svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
         .pdf-native-selection-layer polygon{fill:rgba(37,99,235,.28)}
+        .pdf-native-sel-handle{position:absolute;width:26px;height:26px;transform:translate(-50%,-2px);pointer-events:auto;touch-action:none;z-index:6;display:flex;align-items:flex-start;justify-content:center;cursor:grab}
+        .pdf-native-sel-handle::after{content:"";width:13px;height:13px;border-radius:50% 50% 50% 0;background:var(--accent-color,#2563eb);border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.28);transform:rotate(-45deg);margin-top:2px}
+        .pdf-native-sel-handle[data-handle="start"]::after{border-radius:50% 50% 0 50%;transform:rotate(45deg)}
         .pdf-multi-select-layer polygon{fill:rgba(37,99,235,.26)}
         .pdf-multi-select-rect{position:absolute;background:rgba(37,99,235,.26);border-radius:2px;pointer-events:none}
         .pdf-locate-pulse-item{position:absolute;border-radius:2px;pointer-events:none;mix-blend-mode:multiply}
@@ -324,6 +407,7 @@ export class PdfViewport {
         })
         const captureDismissalState = (e) => {
             if (this.interactionMode === 'draw') return
+            if (e?.target?.closest?.('.pdf-native-sel-handle')) return
             if (e && (e.ctrlKey || e.metaKey)) this._ctrlSelectHeld = true
             const now = performance.now()
             const sel = window.getSelection?.()
@@ -1627,12 +1711,19 @@ export class PdfViewport {
             let scale = fullPageScale
             const priority = renderEntry?.tier ?? 0
             const generation = token
+            const hasMobileTilePlanner = Boolean(
+                this.options.useMobileTilePlanner &&
+                this.driver?.kind === 'mupdf' &&
+                typeof this.driver.planMobileRender === 'function' &&
+                typeof this.driver.renderMobilePlan === 'function'
+            )
 
             // V1-B: Bounded 2D Viewport High-Res Clip Calculation
             // Uses uncapped Retina scale (`unthrottledScale`) ONLY when clipping is needed
             // because fullPageScale was downscaled below unthrottledScale by pixel/edge caps.
             let clip = null
             let requestedClip = null
+            let mobilePlanRect = null
             const size = this.pageSizes[page] || { width: 595, height: 842 }
             const candDevW = Math.round(size.width * unthrottledScale)
             const candDevH = Math.round(size.height * unthrottledScale)
@@ -1641,7 +1732,7 @@ export class PdfViewport {
             const pageOffset = this.pageOffsets[page]
             const isPreview = Boolean(renderEntry?.previewOnly) && this.driver.kind === 'mupdf' && totalPixels >= 1_500_000
             if (isPreview) {
-                scale = fullPageScale * 0.55
+                scale = hasMobileTilePlanner ? unthrottledScale : (fullPageScale * 0.55)
             }
 
             if (!isPreview &&
@@ -1671,14 +1762,18 @@ export class PdfViewport {
                     cssX0 = Math.floor(cssX0 / GRID_STEP) * GRID_STEP
                     cssX1 = Math.min(clipWin.uncroppedWidth, Math.ceil(cssX1 / GRID_STEP) * GRID_STEP)
 
-                    // Clamp scale only if the clipped 2D window itself would exceed maxCanvasEdge / maxCanvasPixels
+                    // Clamp scale only if the clipped 2D window itself would exceed maxCanvasEdge / composite pixel budget.
+                    // When ll_mupdf_mobile tiles the region, native C pixmaps remain capped at 4/8 MiB per tile.
                     const clipCssW = Math.max(1, cssX1 - cssX0)
                     const clipCssH = Math.max(1, cssY1 - cssY0)
                     let clipScale = unthrottledScale
                     const rawClipDevW = clipCssW * (clipScale / this.scale)
                     const rawClipDevH = clipCssH * (clipScale / this.scale)
+                    const maxCompositePixels = hasMobileTilePlanner
+                        ? Math.max(this.options.maxCanvasPixels, 8_000_000)
+                        : this.options.maxCanvasPixels
                     const edgeFactor = Math.min(1, (this.options.maxCanvasEdge - 2) / Math.max(1, rawClipDevW, rawClipDevH))
-                    const pixelFactor = Math.min(1, Math.sqrt((this.options.maxCanvasPixels * 0.98) / Math.max(1, rawClipDevW * rawClipDevH)))
+                    const pixelFactor = Math.min(1, Math.sqrt((maxCompositePixels * 0.98) / Math.max(1, rawClipDevW * rawClipDevH)))
                     clipScale *= Math.min(edgeFactor, pixelFactor)
 
                     const fullDevW = Math.round(size.width * clipScale)
@@ -1693,6 +1788,16 @@ export class PdfViewport {
                         scale = clipScale
                         clip = [devX0, devY0, devX1, devY1]
                         requestedClip = { left: cssX0, right: cssX1, top: cssY0, bottom: cssY1, devX0, devY0, devX1, devY1 }
+                        if (hasMobileTilePlanner) {
+                            const originX = size.x0 || 0
+                            const originY = size.y0 || 0
+                            mobilePlanRect = [
+                                originX + cssX0 / this.scale,
+                                originY + cssY0 / this.scale,
+                                originX + cssX1 / this.scale,
+                                originY + cssY1 / this.scale,
+                            ]
+                        }
                     }
                 }
             }
@@ -1704,20 +1809,43 @@ export class PdfViewport {
             if (deferredClipRefine) {
                 clip = null
                 requestedClip = null
-                scale = fullPageScale
+                mobilePlanRect = null
+                scale = hasMobileTilePlanner ? unthrottledScale : fullPageScale
             }
 
             if (!isCurrent()) return
 
-            let canvas = clip || isPreview ? null : this._takePageCanvas(this._cacheKey(page, scale))
+            const shouldUseMobilePreviewPlan = Boolean(
+                hasMobileTilePlanner &&
+                !clip &&
+                (isPreview || deferredClipRefine || (priority !== 0 && totalPixels >= threshold))
+            )
+            const shouldUseMobileDetailPlan = Boolean(
+                hasMobileTilePlanner &&
+                !shouldUseMobilePreviewPlan &&
+                (clip || (priority === 0 && totalPixels > 1_048_576))
+            )
+
+            let canvas = clip || isPreview || shouldUseMobilePreviewPlan ? null : this._takePageCanvas(this._cacheKey(page, scale))
             if (!canvas) {
                 try {
-                    canvas = await this.driver.renderPage(page, scale, signal, clip, priority, generation)
+                    if (shouldUseMobilePreviewPlan || shouldUseMobileDetailPlan) {
+                        const quality = shouldUseMobilePreviewPlan ? 0 : 1
+                        const plan = await this.driver.planMobileRender(page, scale, {
+                            visiblePageRect: quality === 1 ? mobilePlanRect : null,
+                            quality,
+                        })
+                        scale = plan.scale
+                        canvas = await this.driver.renderMobilePlan(page, plan, signal, generation)
+                    } else {
+                        canvas = await this.driver.renderPage(page, scale, signal, clip, priority, generation)
+                    }
                 } catch (err) {
                     if (clip && !signal.aborted && !/abort/i.test(String(err))) {
                         console.warn('[PdfViewport] clipped render failed, falling back to full-page render:', err)
                         clip = null
                         requestedClip = null
+                        mobilePlanRect = null
                         scale = fullPageScale
                         canvas = this._takePageCanvas(this._cacheKey(page, scale)) ||
                             await this.driver.renderPage(page, scale, signal, null, priority, generation)
@@ -1857,6 +1985,7 @@ export class PdfViewport {
                 }
             }
             this.visualVersion = (this.visualVersion || 0) + 1
+            this._syncSlotImagePreserve(page, slot, canvas).catch(() => {})
             this._notifyPageReadyWaiters(page)
             if (page === this._initialTargetPage && canvas?.width > 0 && canvas?.height > 0 && isCurrent()) {
                 this.options.onInitialPageRendered?.({ page, canvas, slot })
@@ -2368,26 +2497,7 @@ export class PdfViewport {
         if (!this._pageOcrData) this._pageOcrData = new Map()
         if (!this._pageOcrSpans) this._pageOcrSpans = new Map()
         const normalizedSpans = Array.isArray(ocrSpans) ? ocrSpans : []
-        const chars = []
-        let lineIdx = 0
-        for (const span of normalizedSpans) {
-            const text = span.text || ''
-            if (!text) continue
-            const [x0, y0, x1, y1] = span.rect || [span.x || 0, span.y || 0, (span.x || 0) + (span.w || 10), (span.y || 0) + (span.h || 10)]
-            const totalW = Math.max(1, x1 - x0)
-            const charW = totalW / Math.max(1, text.length)
-            for (let i = 0; i < text.length; i++) {
-                const cx0 = x0 + i * charW
-                const cx1 = cx0 + charW
-                chars.push({
-                    text: text[i],
-                    line: span.line ?? lineIdx,
-                    size: y1 - y0,
-                    quad: [cx0, y0, cx1, y0, cx0, y1, cx1, y1]
-                })
-            }
-            lineIdx++
-        }
+        const chars = buildOcrCharEntries(normalizedSpans)
         this._pageOcrData.set(page, chars)
         this._pageOcrSpans.set(page, normalizedSpans)
         this._nativeGeometry.delete(page)
@@ -2430,7 +2540,14 @@ export class PdfViewport {
             spanEl.style.top = `${(y0 - originY) * scale}px`
             spanEl.style.width = `${cssW}px`
             spanEl.style.height = `${cssH}px`
-            spanEl.style.fontSize = `${Math.max(8, cssH)}px`
+            if (span.vertical) {
+                spanEl.style.writingMode = 'vertical-rl'
+                spanEl.style.textOrientation = 'upright'
+                spanEl.style.fontSize = `${Math.max(8, cssW)}px`
+                spanEl.dataset.vertical = '1'
+            } else {
+                spanEl.style.fontSize = `${Math.max(8, cssH)}px`
+            }
             spanEl.style.lineHeight = '1'
             spanEl.style.whiteSpace = 'pre'
             spanEl.style.color = 'transparent'
@@ -2684,11 +2801,24 @@ export class PdfViewport {
         if (drag?.pointerId != null) {
             try { this.scrollArea.releasePointerCapture?.(drag.pointerId) } catch (_) {}
         }
+        if (this._singleTouchStart) {
+            clearTimeout(this._singleTouchStart.longPressTimer)
+            clearTimeout(this._singleTouchStart.warmTimer)
+        }
+        this._touchNativeDrag = null
+        this._touchHandleDrag = null
+        this._touchNativeRange = null
+        this._touchSelectionActive = false
+        if (this.scrollArea?.style?.touchAction === 'none') {
+            this.scrollArea.style.touchAction = ''
+        }
         this._clearNativePreview()
         globalThis.getSelection?.()?.removeAllRanges?.()
     }
 
     _clearNativePreview() {
+        this._touchSelectionActive = false
+        this._touchNativeRange = null
         if (!this._nativePreview?.length) return
         this._nativePreview = null
         this._redrawNativePreview()
@@ -2721,6 +2851,10 @@ export class PdfViewport {
         if (!e.touches) return
         if (e.touches.length === 2) {
             clearTimeout(this._singleTapTimer)
+            if (this._singleTouchStart) {
+                clearTimeout(this._singleTouchStart.longPressTimer)
+                clearTimeout(this._singleTouchStart.warmTimer)
+            }
             this._singleTouchStart = null
             this._ignoreClickUntil = performance.now() + 500
             globalThis.app?.pageTurnController?.cancelCurrent?.()
@@ -2755,18 +2889,52 @@ export class PdfViewport {
                 this._cancelPinch()
             }
             const touch = e.touches[0]
-            this._singleTouchStart = {
+            const handleEl = e.target?.closest?.('.pdf-native-sel-handle')
+            if (handleEl && this.driver?.kind === 'mupdf' && this.interactionMode !== 'draw' && this._touchNativeRange) {
+                if (e.cancelable) e.preventDefault()
+                e.stopPropagation?.()
+                clearTimeout(this._singleTapTimer)
+                this._singleTouchStart = null
+                this._suppressSelectionClick = true
+                this._ignoreClickUntil = performance.now() + 900
+                const role = handleEl.dataset.handle === 'start' ? 'start' : 'end'
+                const range = this._touchNativeRange
+                const anchor = role === 'start' ? range.end : range.start
+                const focus = role === 'start' ? range.start : range.end
+                const epoch = ++this._nativeGestureEpoch
+                if (this.scrollArea?.style) this.scrollArea.style.touchAction = 'none'
+                this._touchSelectionActive = true
+                this._touchHandleDrag = {
+                    role,
+                    epoch,
+                    anchor,
+                    focus,
+                    lastClientX: touch.clientX,
+                    lastClientY: touch.clientY,
+                    moved: true,
+                    moveSeq: 0,
+                    appliedMoveSeq: 0,
+                    pendingHitPromise: null,
+                    released: false,
+                }
+                return
+            }
+
+            const gesture = {
                 time: performance.now(),
                 x: touch.clientX,
                 y: touch.clientY,
-                moved: false
+                moved: false,
+                longPressFired: false,
+                longPressTimer: null,
+                warmTimer: null,
             }
+            this._singleTouchStart = gesture
+            const page = e.target.closest?.('.pdf-page-slot')?.dataset.page
             // A swipe also starts with a finger down. Prepare text early only
             // if the finger stays on the same spot for a potential long press.
             if (this.options.deferPdfTextLayer && this.driver?.kind === 'pdfjs' && this.interactionMode !== 'draw') {
-                const page = e.target.closest?.('.pdf-page-slot')?.dataset.page
                 if (page != null) {
-                    const gesture = this._singleTouchStart
                     clearTimeout(this._pdfTextPressTimer)
                     this._pdfTextPressTimer = setTimeout(() => {
                         this._pdfTextPressTimer = null
@@ -2775,6 +2943,20 @@ export class PdfViewport {
                         }
                     }, 160)
                 }
+            } else if (this.driver?.kind === 'mupdf' && this.interactionMode !== 'draw' && page != null) {
+                const pageNum = Number(page)
+                gesture.warmTimer = setTimeout(() => {
+                    gesture.warmTimer = null
+                    if (this._singleTouchStart === gesture && !gesture.moved && !this._destroyed) {
+                        this._ensureNativeGeometry(pageNum).catch(() => {})
+                    }
+                }, 120)
+                gesture.longPressTimer = setTimeout(() => {
+                    gesture.longPressTimer = null
+                    if (this._singleTouchStart === gesture && !gesture.moved && !this._pinch && !this._destroyed) {
+                        this._startTouchNativeSelection(gesture.x, gesture.y, gesture).catch(() => {})
+                    }
+                }, 360)
             }
         } else {
             if (this._pinch) this._cancelPinch()
@@ -2783,10 +2965,21 @@ export class PdfViewport {
 
     _handleTouchMove(e) {
         if (!e.touches) return
+        const activeTouchDrag = this._touchHandleDrag || this._touchNativeDrag
+        if (activeTouchDrag && e.touches.length === 1) {
+            if (e.cancelable) e.preventDefault()
+            const touch = e.touches[0]
+            this._updateTouchNativeDrag(touch.clientX, touch.clientY)
+            return
+        }
         if (this._singleTouchStart && e.touches.length === 1) {
             const touch = e.touches[0]
             if (Math.hypot(touch.clientX - this._singleTouchStart.x, touch.clientY - this._singleTouchStart.y) > 8) {
                 this._singleTouchStart.moved = true
+                clearTimeout(this._singleTouchStart.longPressTimer)
+                clearTimeout(this._singleTouchStart.warmTimer)
+                this._singleTouchStart.longPressTimer = null
+                this._singleTouchStart.warmTimer = null
                 this._ignoreClickUntil = performance.now() + 450
             }
         }
@@ -2832,7 +3025,17 @@ export class PdfViewport {
                 this._commitPinchZoom(finalScale, pinch)
                 this._notifyNavIdle()
             }
+        } else if (this._touchHandleDrag || this._touchNativeDrag) {
+            if (this._singleTouchStart) {
+                clearTimeout(this._singleTouchStart.longPressTimer)
+                clearTimeout(this._singleTouchStart.warmTimer)
+                this._singleTouchStart = null
+            }
+            if (e.cancelable) e.preventDefault()
+            await this._finishTouchNativeDrag(e)
         } else if (e.changedTouches && e.changedTouches.length === 1 && this._singleTouchStart) {
+            clearTimeout(this._singleTouchStart.longPressTimer)
+            clearTimeout(this._singleTouchStart.warmTimer)
             const touch = e.changedTouches[0]
             const dur = performance.now() - this._singleTouchStart.time
             const dist = Math.hypot(touch.clientX - this._singleTouchStart.x, touch.clientY - this._singleTouchStart.y)
@@ -2924,7 +3127,18 @@ export class PdfViewport {
         clearTimeout(this._singleTapTimer)
         this._ignoreClickUntil = performance.now() + 450
         this._cancelPinch()
+        if (this._singleTouchStart) {
+            clearTimeout(this._singleTouchStart.longPressTimer)
+            clearTimeout(this._singleTouchStart.warmTimer)
+        }
         this._singleTouchStart = null
+        if (this._touchNativeDrag || this._touchHandleDrag) {
+            this._touchNativeDrag = null
+            this._touchHandleDrag = null
+            if (this.scrollArea?.style?.touchAction === 'none') {
+                this.scrollArea.style.touchAction = ''
+            }
+        }
     }
 
     _cancelPinch() {
@@ -2948,6 +3162,184 @@ export class PdfViewport {
         const fit = this.getFitScale('fit-width')
         if (this.scale > fit * 1.15) this.setZoom('fit-width')
         else this.setZoom(fit * 2, { anchor: this._captureZoomAnchor(clientX, clientY) })
+    }
+
+    _compareNativePos(a, b) {
+        return a.page !== b.page ? (a.page - b.page) : (a.index - b.index)
+    }
+
+    async _touchPointToPageChar(clientX, clientY, maxDist = 42) {
+        const hit = this._slotForPoint(clientX, clientY)
+        if (!hit) return null
+        const point = this._clientToPage(hit, clientX, clientY)
+        const ch = await this._hitNativeChar(hit.page, point, maxDist)
+        if (!ch) return null
+        return { page: hit.page, index: ch.index, point }
+    }
+
+    async _resolveTouchWordRange(pos) {
+        const geom = await this._ensureNativeGeometry(pos.page).catch(() => null)
+        let wordResult = null
+        try {
+            wordResult = await this.driver.select(pos.page, pos.point, pos.point, 'word')
+        } catch {}
+        if (geom?.chars?.length && wordResult?.quads?.length) {
+            let startIdx = null
+            let endIdx = null
+            for (let i = 0; i < geom.chars.length; i++) {
+                const q = geom.chars[i].quad
+                const cx = (q[0] + q[2] + q[4] + q[6]) / 4
+                const cy = (q[1] + q[3] + q[5] + q[7]) / 4
+                const inside = wordResult.quads.some(wq => {
+                    const b = quadBounds(wq)
+                    return cx >= b[0] - 1 && cx <= b[2] + 1 && cy >= b[1] - 1 && cy <= b[3] + 1
+                })
+                if (inside) {
+                    if (startIdx == null) startIdx = i
+                    endIdx = i
+                }
+            }
+            if (startIdx != null && endIdx != null) {
+                return {
+                    start: { page: pos.page, index: startIdx, point: pos.point },
+                    end: { page: pos.page, index: endIdx, point: pos.point },
+                }
+            }
+        }
+        return { start: pos, end: pos }
+    }
+
+    async _startTouchNativeSelection(clientX, clientY, gesture) {
+        if (this._destroyed || this.driver?.kind !== 'mupdf' || this.interactionMode === 'draw' || this._pinch) return false
+        const pos = await this._touchPointToPageChar(clientX, clientY, 28).catch(() => null)
+        if (!pos || this._destroyed || this._pinch || this.interactionMode === 'draw') return false
+        if (this._singleTouchStart !== gesture || gesture.moved) return false
+
+        gesture.longPressFired = true
+        clearTimeout(this._singleTapTimer)
+        this._suppressSelectionClick = true
+        this._ignoreClickUntil = performance.now() + 900
+        try { globalThis.navigator?.vibrate?.(12) } catch {}
+        if (this.scrollArea?.style) this.scrollArea.style.touchAction = 'none'
+
+        const range = await this._resolveTouchWordRange(pos)
+        if (this._destroyed || this._pinch || this.interactionMode === 'draw' || this._singleTouchStart !== gesture || gesture.moved) {
+            if (this.scrollArea?.style?.touchAction === 'none') this.scrollArea.style.touchAction = ''
+            return false
+        }
+
+        const epoch = ++this._nativeGestureEpoch
+        this._multiSelections = []
+        this._lastSingleSelection = null
+        this._redrawMultiSelections()
+        this._touchSelectionActive = true
+        this._touchNativeDrag = {
+            epoch,
+            originStart: range.start,
+            originEnd: range.end,
+            anchor: range.start,
+            focus: range.end,
+            lastClientX: clientX,
+            lastClientY: clientY,
+            moved: false,
+            moveSeq: 0,
+            appliedMoveSeq: 0,
+            pendingHitPromise: null,
+            released: false,
+        }
+        await this._updateNativePreview()
+        return true
+    }
+
+    async _updateTouchNativeDrag(clientX, clientY) {
+        const drag = this._touchHandleDrag || this._touchNativeDrag
+        if (!drag || drag.released || this.interactionMode === 'draw') return
+        drag.lastClientX = clientX
+        drag.lastClientY = clientY
+        drag.moved = true
+        const moveSeq = (drag.moveSeq = (drag.moveSeq || 0) + 1)
+        const hitPromise = this._touchPointToPageChar(clientX, clientY, 42).catch(() => null)
+        drag.pendingHitPromise = hitPromise
+        const pos = await hitPromise
+        if (drag.pendingHitPromise === hitPromise) drag.pendingHitPromise = null
+        const active = this._touchHandleDrag || this._touchNativeDrag
+        if (!pos || active !== drag || drag.released || drag.epoch !== this._nativeGestureEpoch || this.interactionMode === 'draw') return
+        if (drag.appliedMoveSeq && moveSeq <= drag.appliedMoveSeq) return
+        drag.appliedMoveSeq = moveSeq
+
+        if (drag === this._touchNativeDrag) {
+            if (this._compareNativePos(pos, drag.originStart) < 0) {
+                drag.anchor = drag.originEnd
+                drag.focus = pos
+            } else if (this._compareNativePos(pos, drag.originEnd) > 0) {
+                drag.anchor = drag.originStart
+                drag.focus = pos
+            } else {
+                drag.anchor = drag.originStart
+                drag.focus = drag.originEnd
+            }
+        } else {
+            drag.focus = pos
+        }
+        if (!drag.released) this._scheduleNativePreview()
+    }
+
+    async _finishTouchNativeDrag(e) {
+        const drag = this._touchHandleDrag || this._touchNativeDrag
+        if (!drag) return
+        drag.released = true
+        this._suppressSelectionClick = true
+        this._ignoreClickUntil = performance.now() + 900
+        if (this.scrollArea?.style?.touchAction === 'none') {
+            this.scrollArea.style.touchAction = ''
+        }
+        if (drag.pendingHitPromise) {
+            try { await drag.pendingHitPromise } catch (_) {}
+        }
+        const touch = e?.changedTouches?.[0]
+        if (touch && drag.moved) {
+            const finalPos = await this._touchPointToPageChar(touch.clientX, touch.clientY, 42).catch(() => null)
+            if (finalPos && drag.epoch === this._nativeGestureEpoch) {
+                if (drag === this._touchNativeDrag) {
+                    if (this._compareNativePos(finalPos, drag.originStart) < 0) {
+                        drag.anchor = drag.originEnd
+                        drag.focus = finalPos
+                    } else if (this._compareNativePos(finalPos, drag.originEnd) > 0) {
+                        drag.anchor = drag.originStart
+                        drag.focus = finalPos
+                    }
+                } else {
+                    drag.focus = finalPos
+                }
+            }
+        }
+
+        const isActive = (this._touchHandleDrag === drag || this._touchNativeDrag === drag)
+        this._touchHandleDrag = null
+        this._touchNativeDrag = null
+        if (this._destroyed || !isActive || drag.epoch !== this._nativeGestureEpoch) return
+        const postEpoch = ++this._nativeGestureEpoch
+        if (this.interactionMode === 'draw') {
+            this._clearNativePreview()
+            return
+        }
+
+        const forward = this._compareNativePos(drag.anchor, drag.focus) <= 0
+        const orderedStart = forward ? drag.anchor : drag.focus
+        const orderedEnd = forward ? drag.focus : drag.anchor
+        const mode = drag.moved ? 'char' : 'word'
+        this._touchSelectionActive = true
+        this._touchNativeRange = { start: orderedStart, end: orderedEnd }
+
+        const selection = await this._finalizeNativeSelection(orderedStart, orderedEnd, mode).catch(err => {
+            console.warn('[PDF] touch native selection failed:', err)
+            return null
+        })
+        if (selection && !this._destroyed && this.interactionMode !== 'draw' && postEpoch === this._nativeGestureEpoch) {
+            this._emitNativeSelection(selection, mode, false)
+        } else if (!selection) {
+            this._clearNativePreview()
+        }
     }
 
     async _selectionEndpoints(anchor, focus) {
@@ -3083,13 +3475,14 @@ export class PdfViewport {
     }
 
     async _updateNativePreview() {
-        const drag = this._nativeDrag
+        const drag = this._touchHandleDrag || this._touchNativeDrag || this._nativeDrag
         if (!drag || drag.released) return
         const previewSeq = (drag.previewSeq = (drag.previewSeq || 0) + 1)
         const epoch = drag.epoch
+        const isCurrentDrag = () => (this._touchHandleDrag || this._touchNativeDrag || this._nativeDrag) === drag
         try {
             const { segments } = await this._selectionEndpoints(drag.anchor, drag.focus)
-            if (this._destroyed || this._nativeDrag !== drag || drag.epoch !== epoch || this._nativeGestureEpoch !== epoch) return
+            if (this._destroyed || !isCurrentDrag() || drag.epoch !== epoch || this._nativeGestureEpoch !== epoch) return
             if (drag.latestRenderedPreviewSeq && previewSeq < drag.latestRenderedPreviewSeq) return
 
             const preview = await Promise.all(segments.map(async seg => {
@@ -3099,13 +3492,13 @@ export class PdfViewport {
                 const slice = geom.chars.slice(a, b + 1)
                 return { page: seg.page, quads: this._buildLineBandQuads(slice) }
             }))
-            if (this._destroyed || this._nativeDrag !== drag || drag.epoch !== epoch || this._nativeGestureEpoch !== epoch) return
+            if (this._destroyed || !isCurrentDrag() || drag.epoch !== epoch || this._nativeGestureEpoch !== epoch) return
             if (drag.latestRenderedPreviewSeq && previewSeq < drag.latestRenderedPreviewSeq) return
             drag.latestRenderedPreviewSeq = previewSeq
             this._nativePreview = preview.filter(Boolean)
             this._redrawNativePreview()
         } catch (err) {
-            if (this._nativeDrag === drag && drag.epoch === epoch) console.warn('[PDF] native selection preview failed:', err)
+            if (isCurrentDrag() && drag.epoch === epoch) console.warn('[PDF] native selection preview failed:', err)
         }
     }
 
@@ -3135,6 +3528,7 @@ export class PdfViewport {
         }
         const size = this.pageSizes[page] || { width: 595, height: 842, x0: 0, y0: 0 }
         const x0 = size.x0 || 0, y0 = size.y0 || 0
+        const pageW = Math.max(0.001, size.width), pageH = Math.max(0.001, size.height)
         const svg = document.createElementNS('http://www.w3.org/2000/svg','svg')
         svg.setAttribute('viewBox', `${x0} ${y0} ${size.width} ${size.height}`)
         for (const q of segment.quads) {
@@ -3142,7 +3536,29 @@ export class PdfViewport {
             poly.setAttribute('points', `${q[0]},${q[1]} ${q[2]},${q[3]} ${q[6]},${q[7]} ${q[4]},${q[5]}`)
             svg.append(poly)
         }
-        layer.replaceChildren(svg)
+        const nodes = [svg]
+        if (this._touchSelectionActive) {
+            const nonEmpty = this._nativePreview.filter(seg => seg?.quads?.length)
+            const firstSeg = nonEmpty[0]
+            const lastSeg = nonEmpty[nonEmpty.length - 1]
+            const makeHandle = (role, px, py) => {
+                const handle = document.createElement('div')
+                handle.className = 'pdf-native-sel-handle'
+                handle.dataset.handle = role
+                handle.style.left = `${clamp(((px - x0) / pageW) * 100, 0, 100)}%`
+                handle.style.top = `${clamp(((py - y0) / pageH) * 100, 0, 100)}%`
+                return handle
+            }
+            if (firstSeg?.page === page) {
+                const q = firstSeg.quads[0]
+                nodes.push(makeHandle('start', q[4] ?? q[0], q[5] ?? q[3]))
+            }
+            if (lastSeg?.page === page) {
+                const q = lastSeg.quads[lastSeg.quads.length - 1]
+                nodes.push(makeHandle('end', q[6] ?? q[2], q[7] ?? q[5]))
+            }
+        }
+        layer.replaceChildren(...nodes)
     }
 
     _quadToNormalizedRect(q, bounds) {
@@ -3337,7 +3753,88 @@ export class PdfViewport {
             if (filterVal) this.container.style.setProperty('--pdf-page-filter', filterVal)
             else this.container.style.removeProperty('--pdf-page-filter')
         }
+        this._currentPdfFilter = filterVal || ''
         this.visualVersion = (this.visualVersion || 0) + 1
+        this._refreshAllImagePreservation()
+    }
+
+    setPreserveImagesInDarkMode(enabled) {
+        const next = Boolean(enabled)
+        if (this.preserveImagesInDarkMode === next) return
+        this.preserveImagesInDarkMode = next
+        this.visualVersion = (this.visualVersion || 0) + 1
+        this._refreshAllImagePreservation()
+    }
+
+    _isImagePreserveActive() {
+        return Boolean(this.preserveImagesInDarkMode && this._currentPdfFilter && this.driver)
+    }
+
+    _clearSlotImagePreserve(slot) {
+        if (!slot?.querySelectorAll) return
+        slot.querySelectorAll('.pdf-image-preserve-canvas').forEach(c => {
+            c.remove?.()
+            c.width = c.height = 0
+        })
+    }
+
+    _refreshAllImagePreservation() {
+        if (!this.activeSlots) return
+        for (const [page, slot] of this.activeSlots.entries()) {
+            if (!slot) continue
+            if (!this._isImagePreserveActive()) {
+                this._clearSlotImagePreserve(slot)
+            } else {
+                this._syncSlotImagePreserve(page, slot).catch(() => {})
+            }
+        }
+    }
+
+    async _syncSlotImagePreserve(page, slot, explicitCanvas = null) {
+        if (!slot || this._destroyed) return
+        const pixels = slot.querySelector?.('.pdf-img-wrapper')
+        if (!pixels) return
+        if (!this._isImagePreserveActive() || typeof this.driver?.getPageImageRects !== 'function') {
+            this._clearSlotImagePreserve(slot)
+            return
+        }
+        const sourceCanvas = explicitCanvas?.classList?.contains?.('pdf-page-canvas')
+            ? explicitCanvas
+            : pixels.querySelector?.('.pdf-page-canvas')
+        if (!sourceCanvas || !sourceCanvas.width || !sourceCanvas.height) return
+
+        const rects = await this.driver.getPageImageRects(page).catch(() => [])
+        if (this._destroyed || !slot.isConnected || !this._isImagePreserveActive()) {
+            this._clearSlotImagePreserve(slot)
+            return
+        }
+        if (!Array.isArray(rects) || rects.length === 0) {
+            this._clearSlotImagePreserve(slot)
+            return
+        }
+
+        const cw = sourceCanvas.width
+        const ch = sourceCanvas.height
+        let overlay = pixels.querySelector('.pdf-image-preserve-canvas')
+        if (!overlay) {
+            overlay = document.createElement('canvas')
+            overlay.className = 'pdf-image-preserve-canvas'
+            pixels.appendChild(overlay)
+        }
+        if (overlay.width !== cw) overlay.width = cw
+        if (overlay.height !== ch) overlay.height = ch
+        const ctx = overlay.getContext('2d')
+        if (!ctx) return
+        ctx.clearRect(0, 0, cw, ch)
+        for (const r of rects) {
+            if (!Array.isArray(r) || r.length < 4) continue
+            const sx = Math.max(0, Math.floor(r[0] * cw))
+            const sy = Math.max(0, Math.floor(r[1] * ch))
+            const sw = Math.min(cw - sx, Math.ceil((r[2] - r[0]) * cw))
+            const sh = Math.min(ch - sy, Math.ceil((r[3] - r[1]) * ch))
+            if (sw <= 1 || sh <= 1) continue
+            ctx.drawImage(sourceCanvas, sx, sy, sw, sh, sx, sy, sw, sh)
+        }
     }
 
     setZoom(value, { anchor = null, render = true } = {}) {
@@ -3362,7 +3859,7 @@ export class PdfViewport {
                 slot._needsClipRefine = false
                 // Old tile positions are CSS pixels at the previous zoom. The full
                 // page preview scales with its wrapper while a fresh raster is made.
-                slot.querySelectorAll('.pdf-clip-canvas').forEach(canvas => {
+                slot.querySelectorAll('.pdf-clip-canvas, .pdf-image-preserve-canvas').forEach(canvas => {
                     canvas.remove()
                     canvas.width = canvas.height = 0
                 })
@@ -4320,10 +4817,12 @@ export class PdfViewport {
                     slot._renderToken = (slot._renderToken || 0) + 1
                     slot.renderAbort?.abort()
                     slot.renderAbort = new AbortController()
-                    slot.querySelectorAll?.('.pdf-clip-canvas')?.forEach?.(c => {
+                    slot.querySelectorAll?.('.pdf-clip-canvas, .pdf-image-preserve-canvas')?.forEach?.(c => {
                         c.remove?.()
                         c.width = c.height = 0
                     })
+                } else {
+                    this._clearSlotImagePreserve(slot)
                 }
             }
         }
@@ -4556,6 +5055,10 @@ export class PdfViewport {
         this._lastSingleSelection = null
         this._ctrlSelectHeld = false
         this._nativeDrag = null
+        this._touchNativeDrag = null
+        this._touchHandleDrag = null
+        this._touchNativeRange = null
+        this._touchSelectionActive = false
         this._nativePreview = null
         if (this._previewRaf) cancelAnimationFrame(this._previewRaf)
         this._previewRaf = null

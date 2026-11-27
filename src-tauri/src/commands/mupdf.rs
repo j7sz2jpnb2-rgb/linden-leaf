@@ -56,6 +56,30 @@ pub struct PdfLinkItem {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MobileRenderTile {
+    pub content: [i32; 4],
+    pub clip: [f32; 4],
+    #[serde(rename = "rgbaBytes")]
+    pub rgba_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MobileRenderPlan {
+    pub scale: f32,
+    pub rotation: f32,
+    pub matrix: [f32; 6],
+    pub region: [i32; 4],
+    #[serde(rename = "tileEdge")]
+    pub tile_edge: i32,
+    pub bleed: i32,
+    pub columns: i32,
+    pub rows: i32,
+    #[serde(rename = "maxTileBytes")]
+    pub max_tile_bytes: usize,
+    pub tiles: Vec<MobileRenderTile>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RenderDiagnostics {
     #[serde(rename = "requestId")]
     pub request_id: String,
@@ -75,6 +99,193 @@ pub struct RenderDiagnostics {
     pub packet_us: u64,
     #[serde(rename = "packetBytes")]
     pub packet_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ExtractedPdfAnnot {
+    pub page: usize,
+    #[serde(rename = "type")]
+    pub annot_type: String,
+    pub color: String,
+    pub opacity: f32,
+    pub rect: [f32; 4],
+    #[serde(rename = "pageBounds")]
+    pub page_bounds: [f32; 4],
+    pub quads: Vec<[f32; 8]>,
+    pub rects: Vec<[f32; 4]>,
+    pub text: Option<String>,
+    pub author: Option<String>,
+    #[serde(rename = "quoteText")]
+    pub quote_text: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AutoCropMargins {
+    pub uniform: [f32; 4],
+    pub odd: [f32; 4],
+    pub even: [f32; 4],
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct QuickPdfIndexEntry {
+    page: usize,
+    scale: f32,
+    #[serde(rename = "updatedAt")]
+    updated_at: u64,
+}
+
+static AUTHORIZED_DIRECT_PDF_PATHS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::OnceLock::new();
+
+fn authorized_direct_pdf_store(
+) -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    AUTHORIZED_DIRECT_PDF_PATHS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+pub(crate) fn authorize_direct_pdf_path(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let raw = path.to_string_lossy();
+    let abs = super::fs::validate_safe_path_syntax(&raw)?;
+    let ext = abs
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext != "pdf" {
+        return Err("Direct MuPDF access requires a .pdf file".into());
+    }
+    let sym = std::fs::symlink_metadata(&abs)
+        .map_err(|e| format!("Cannot inspect PDF file: {e}"))?;
+    if sym.file_type().is_symlink() {
+        return Err("Symbolic links are not permitted for direct PDF open".into());
+    }
+    let canon = std::fs::canonicalize(&abs)
+        .map_err(|e| format!("Cannot resolve PDF path: {e}"))?;
+    let meta = std::fs::metadata(&canon)
+        .map_err(|e| format!("Cannot stat PDF file: {e}"))?;
+    if !meta.is_file() || meta.len() == 0 {
+        return Err("Target PDF must be a non-empty regular file".into());
+    }
+    if !file_has_pdf_header_prefix(&canon)? {
+        return Err("Target file does not have a valid %PDF- header".into());
+    }
+    if let Ok(mut guard) = authorized_direct_pdf_store().lock() {
+        guard.insert(canon.clone());
+    }
+    Ok(canon)
+}
+
+#[cfg_attr(not(ll_mupdf), allow(dead_code))]
+pub(crate) fn is_authorized_direct_pdf_path(path: &std::path::Path) -> bool {
+    let Ok(canon) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    authorized_direct_pdf_store()
+        .lock()
+        .map(|guard| guard.contains(&canon))
+        .unwrap_or(false)
+}
+
+fn quick_index_key(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    #[cfg(target_os = "windows")]
+    {
+        s.to_ascii_lowercase()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        s
+    }
+}
+
+fn quick_index_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("pdf_quick_index.json"))
+}
+
+#[cfg_attr(not(ll_mupdf), allow(dead_code))]
+pub(crate) fn read_quick_index_entry(
+    app: &tauri::AppHandle,
+    canonical_path: &std::path::Path,
+) -> Option<(usize, f32)> {
+    let idx_path = quick_index_file(app)?;
+    let content = std::fs::read_to_string(idx_path).ok()?;
+    let map: std::collections::HashMap<String, QuickPdfIndexEntry> =
+        serde_json::from_str(&content).ok()?;
+    let key = quick_index_key(canonical_path);
+    map.get(&key)
+        .map(|entry| (entry.page, entry.scale.clamp(0.4, 4.0)))
+}
+
+#[tauri::command]
+pub async fn mupdf_authorize_direct_pdf_path(file_path: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        authorize_direct_pdf_path(std::path::Path::new(&file_path))?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("Authorize PDF task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn mupdf_update_quick_index(
+    app: tauri::AppHandle,
+    file_path: String,
+    page_index: usize,
+    scale: f32,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(idx_path) = quick_index_file(&app) else {
+            return Ok(false);
+        };
+        let Ok(canon) = std::fs::canonicalize(&file_path) else {
+            return Ok(false);
+        };
+        if let Some(parent) = idx_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut map: std::collections::HashMap<String, QuickPdfIndexEntry> =
+            std::fs::read_to_string(&idx_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        map.insert(
+            quick_index_key(&canon),
+            QuickPdfIndexEntry {
+                page: page_index,
+                scale: if scale.is_finite() { scale.clamp(0.4, 4.0) } else { 1.25 },
+                updated_at: now,
+            },
+        );
+        if map.len() > 200 {
+            let mut entries: Vec<(String, u64)> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.updated_at))
+                .collect();
+            entries.sort_by_key(|(_, ts)| *ts);
+            let remove_n = map.len() - 200;
+            for (k, _) in entries.into_iter().take(remove_n) {
+                map.remove(&k);
+            }
+        }
+        if let Ok(json) = serde_json::to_string(&map) {
+            let tmp = idx_path.with_extension("json.tmp");
+            if std::fs::write(&tmp, json.as_bytes()).is_ok() {
+                let _ = std::fs::rename(&tmp, &idx_path);
+            }
+        }
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("Update PDF quick index failed: {e}"))?
 }
 
 #[cfg(ll_mupdf)]
@@ -170,6 +381,56 @@ mod imp {
         width: f32,
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct LlMobileRenderPlan {
+        scale: c_float,
+        rotation: c_float,
+        matrix: [c_float; 6],
+        region: [c_int; 4],
+        tile_edge: c_int,
+        bleed: c_int,
+        columns: c_int,
+        rows: c_int,
+        tile_count: c_int,
+        max_tile_bytes: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct LlMobileTile {
+        content: [c_int; 4],
+        clip: [c_float; 4],
+        rgba_bytes: usize,
+    }
+
+    #[repr(C)]
+    struct LlPdfAnnot {
+        page: c_int,
+        annot_type: c_int,
+        color: [c_float; 3],
+        opacity: c_float,
+        rect: [c_float; 4],
+        page_bounds: [c_float; 4],
+        quads: *mut LlQuad,
+        quad_count: c_int,
+        text: *mut c_char,
+        author: *mut c_char,
+        quote_text: *mut c_char,
+    }
+
+    #[repr(C)]
+    struct LlPdfAnnotList {
+        items: *mut LlPdfAnnot,
+        count: c_int,
+    }
+
+    #[repr(C)]
+    struct LlRectList {
+        rects: *mut c_float,
+        count: c_int,
+    }
+
     #[cfg(target_os = "windows")]
     #[repr(C)]
     struct LlRenderJob { _private: [u8; 0] }
@@ -224,6 +485,47 @@ mod imp {
             annots: *const LlExportAnnot,
             annot_count: c_int,
         ) -> c_int;
+        fn ll_mobile_plan_render(
+            page_bounds: *const c_float,
+            scale: c_float,
+            rotation: c_float,
+            visible_page_rect: *const c_float,
+            quality: c_int,
+            memory_mb: u32,
+            out: *mut LlMobileRenderPlan,
+        ) -> c_int;
+        fn ll_mobile_tile_at(
+            plan: *const LlMobileRenderPlan,
+            index: c_int,
+            out: *mut LlMobileTile,
+        ) -> c_int;
+        fn ll_mobile_render_tile(
+            doc: *mut LlDoc,
+            page: c_int,
+            plan: *const LlMobileRenderPlan,
+            index: c_int,
+            cancel: *mut LlCancel,
+            out: *mut LlImage,
+        ) -> c_int;
+        fn ll_extract_pdf_annots(
+            doc: *mut LlDoc,
+            max_annots: c_int,
+            out: *mut LlPdfAnnotList,
+        ) -> c_int;
+        fn ll_free_pdf_annots(out: *mut LlPdfAnnotList);
+        fn ll_compute_auto_crop(
+            doc: *mut LlDoc,
+            max_samples: c_int,
+            out_uniform: *mut c_float,
+            out_odd: *mut c_float,
+            out_even: *mut c_float,
+        ) -> c_int;
+        fn ll_get_page_image_rects(
+            doc: *mut LlDoc,
+            page: c_int,
+            out: *mut LlRectList,
+        ) -> c_int;
+        fn ll_free_rect_list(out: *mut LlRectList);
     }
 
     fn native_error(doc: *mut LlDoc) -> String {
@@ -299,6 +601,25 @@ mod imp {
             page: usize,
             reply: oneshot::Sender<Result<String, String>>,
         },
+        ExtractAnnotations {
+            reply: oneshot::Sender<Result<Vec<ExtractedPdfAnnot>, String>>,
+        },
+        ComputeAutoCrop {
+            reply: oneshot::Sender<Result<AutoCropMargins, String>>,
+        },
+        PageImageRects {
+            page: usize,
+            reply: oneshot::Sender<Result<Vec<[f32; 4]>, String>>,
+        },
+        PlanMobileRender {
+            page: usize,
+            scale: f32,
+            rotation: f32,
+            visible_page_rect: Option<[f32; 4]>,
+            quality: i32,
+            memory_mb: u32,
+            reply: oneshot::Sender<Result<MobileRenderPlan, String>>,
+        },
         Render(RenderRequest),
         Close,
     }
@@ -308,6 +629,7 @@ mod imp {
         scale: f32,
         rotation: f32,
         clip: Option<[f32; 4]>,
+        mobile_tile: Option<(LlMobileRenderPlan, c_int)>,
         cancel: Arc<CancelHandle>,
         request_id: String,
         priority: u8,
@@ -343,6 +665,11 @@ mod imp {
 
     enum RasterTarget {
         Document(*mut LlDoc),
+        MobileTile {
+            doc: *mut LlDoc,
+            plan: LlMobileRenderPlan,
+            tile_index: c_int,
+        },
         #[cfg(target_os = "windows")]
         Auxiliary(PreparedRaster),
     }
@@ -435,6 +762,14 @@ mod imp {
                 let error = (status < LL_OK).then(|| native_error(*doc));
                 (status, unsafe { ll_get_last_render_timings(*doc) }, &serial_image, error)
             }
+            RasterTarget::MobileTile { doc, plan, tile_index } => {
+                let status = unsafe {
+                    ll_mobile_render_tile(*doc, request.page as i32, plan, *tile_index,
+                                          request.cancel.ptr(), &mut serial_image)
+                };
+                let error = (status < LL_OK).then(|| native_error(*doc));
+                (status, unsafe { ll_get_last_render_timings(*doc) }, &serial_image, error)
+            }
             #[cfg(target_os = "windows")]
             RasterTarget::Auxiliary(prepared) => {
                 let mut timings = LlRenderTimings::default();
@@ -476,7 +811,7 @@ mod imp {
             }
         }
         match target {
-            RasterTarget::Document(doc) => unsafe { ll_free_image(doc, &mut serial_image) },
+            RasterTarget::Document(doc) | RasterTarget::MobileTile { doc, .. } => unsafe { ll_free_image(doc, &mut serial_image) },
             #[cfg(target_os = "windows")]
             RasterTarget::Auxiliary(prepared) => drop(prepared),
         }
@@ -636,12 +971,13 @@ mod imp {
                     let score = match c {
                         DocCommand::Close => 0,
                         DocCommand::Select { .. } => 1,
+                        DocCommand::PlanMobileRender { .. } => 2,
                         DocCommand::Render(RenderRequest { priority: 0, .. }) => 2,
                         DocCommand::Text { .. } => 3,
                         DocCommand::Bounds { .. } => 4,
                         DocCommand::Render(RenderRequest { priority, .. }) => 10 + (*priority as i32),
                         DocCommand::PlainText { .. } => 25,
-                        DocCommand::Outline { .. } | DocCommand::Links { .. } => 26,
+                        DocCommand::Outline { .. } | DocCommand::Links { .. } | DocCommand::ExtractAnnotations { .. } | DocCommand::ComputeAutoCrop { .. } | DocCommand::PageImageRects { .. } => 26,
                     };
                     if score < best_score {
                         best_score = score;
@@ -733,6 +1069,45 @@ mod imp {
                         let _ = reply.send(Err(native_error(doc)));
                     }
                 }
+                DocCommand::ExtractAnnotations { reply } => {
+                    let _ = reply.send(extract_annots_from_doc(doc));
+                }
+                DocCommand::ComputeAutoCrop { reply } => {
+                    let mut uniform = [0f32; 4];
+                    let mut odd = [0f32; 4];
+                    let mut even = [0f32; 4];
+                    let status = unsafe {
+                        ll_compute_auto_crop(doc, 12, uniform.as_mut_ptr(), odd.as_mut_ptr(), even.as_mut_ptr())
+                    };
+                    let res = if status == LL_OK {
+                        Ok(AutoCropMargins { uniform, odd, even })
+                    } else {
+                        Err(native_error(doc))
+                    };
+                    let _ = reply.send(res);
+                }
+                DocCommand::PageImageRects { page, reply } => {
+                    let mut raw = LlRectList { rects: std::ptr::null_mut(), count: 0 };
+                    let status = unsafe { ll_get_page_image_rects(doc, page as c_int, &mut raw) };
+                    let res = if status != LL_OK {
+                        Err(native_error(doc))
+                    } else {
+                        let mut out = Vec::with_capacity(raw.count.max(0) as usize);
+                        if raw.count > 0 && !raw.rects.is_null() {
+                            let slice = unsafe { std::slice::from_raw_parts(raw.rects, raw.count as usize * 4) };
+                            for chunk in slice.chunks_exact(4) {
+                                out.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                            }
+                        }
+                        Ok(out)
+                    };
+                    unsafe { ll_free_rect_list(&mut raw) };
+                    let _ = reply.send(res);
+                }
+                DocCommand::PlanMobileRender { page, scale, rotation, visible_page_rect, quality, memory_mb, reply } => {
+                    let result = build_mobile_render_plan(doc, page, scale, rotation, visible_page_rect, quality, memory_mb);
+                    let _ = reply.send(result);
+                }
                 DocCommand::Links { page, reply } => {
                     let mut raw = LlLinks { items: std::ptr::null_mut(), count: 0 };
                     let status = unsafe { ll_get_links(doc, page as i32, &mut raw) };
@@ -755,8 +1130,12 @@ mod imp {
                     unsafe { ll_free_links(&mut raw) };
                     let _ = reply.send(result);
                 }
-                DocCommand::Render(request) => {
+                DocCommand::Render(mut request) => {
                     let started = Instant::now();
+                    if let Some((plan, tile_index)) = request.mobile_tile.take() {
+                        render_request(request, RasterTarget::MobileTile { doc, plan, tile_index }, &cancels, started);
+                        continue;
+                    }
                     #[cfg(target_os = "windows")]
                     let request = if let Some(raster) = &raster {
                         match raster.dispatch(doc, request, started) {
@@ -779,6 +1158,10 @@ mod imp {
                 DocCommand::Select { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
                 DocCommand::Outline { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
                 DocCommand::PlainText { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::ExtractAnnotations { reply } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::ComputeAutoCrop { reply } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::PageImageRects { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
+                DocCommand::PlanMobileRender { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
                 DocCommand::Links { reply, .. } => { let _ = reply.send(Err("Document closed".into())); }
                 DocCommand::Render(request) => request.cancel(&cancels, "Document closed"),
                 DocCommand::Close => {}
@@ -1026,6 +1409,220 @@ mod imp {
         }).await.map_err(|e| format!("PDF stage worker failed: {e}"))?
     }
 
+    fn rgb_to_hex(col: [f32; 3]) -> String {
+        let r = (col[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+        let g = (col[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+        let b = (col[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+        format!("#{r:02x}{g:02x}{b:02x}")
+    }
+
+    fn extract_annots_from_doc(doc: *mut LlDoc) -> Result<Vec<ExtractedPdfAnnot>, String> {
+        let mut raw = LlPdfAnnotList { items: std::ptr::null_mut(), count: 0 };
+        let status = unsafe { ll_extract_pdf_annots(doc, 2000, &mut raw) };
+        let result = if status != LL_OK {
+            Err(native_error(doc))
+        } else {
+            let mut out = Vec::with_capacity(raw.count.max(0) as usize);
+            if raw.count > 0 && !raw.items.is_null() {
+                let slice = unsafe { std::slice::from_raw_parts(raw.items, raw.count as usize) };
+                for item in slice {
+                    let annot_type = match item.annot_type {
+                        0 => "highlight",
+                        1 => "underline",
+                        2 => "strikeout",
+                        3 => "squiggly",
+                        4 => "note",
+                        5 => "freetext",
+                        6 => "ink",
+                        _ => "highlight",
+                    }
+                    .to_string();
+                    let quads: Vec<[f32; 8]> = if item.quad_count > 0 && !item.quads.is_null() {
+                        unsafe { std::slice::from_raw_parts(item.quads, item.quad_count as usize) }
+                            .iter()
+                            .map(|q| q.xy)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let bw = (item.page_bounds[2] - item.page_bounds[0]).abs().max(0.001);
+                    let bh = (item.page_bounds[3] - item.page_bounds[1]).abs().max(0.001);
+                    let mut rects: Vec<[f32; 4]> = quads
+                        .iter()
+                        .map(|q| {
+                            let min_x = q[0].min(q[2]).min(q[4]).min(q[6]);
+                            let max_x = q[0].max(q[2]).max(q[4]).max(q[6]);
+                            let min_y = q[1].min(q[3]).min(q[5]).min(q[7]);
+                            let max_y = q[1].max(q[3]).max(q[5]).max(q[7]);
+                            [
+                                ((min_x - item.page_bounds[0]) / bw).clamp(0.0, 1.0),
+                                ((min_y - item.page_bounds[1]) / bh).clamp(0.0, 1.0),
+                                ((max_x - item.page_bounds[0]) / bw).clamp(0.0, 1.0),
+                                ((max_y - item.page_bounds[1]) / bh).clamp(0.0, 1.0),
+                            ]
+                        })
+                        .collect();
+                    if rects.is_empty() && item.rect[2] > item.rect[0] && item.rect[3] > item.rect[1] {
+                        rects.push(item.rect);
+                    }
+                    let text = if item.text.is_null() {
+                        None
+                    } else {
+                        let s = unsafe { CStr::from_ptr(item.text) }.to_string_lossy().into_owned();
+                        if s.trim().is_empty() { None } else { Some(s) }
+                    };
+                    let author = if item.author.is_null() {
+                        None
+                    } else {
+                        let s = unsafe { CStr::from_ptr(item.author) }.to_string_lossy().into_owned();
+                        if s.trim().is_empty() { None } else { Some(s) }
+                    };
+                    let quote_text = if item.quote_text.is_null() {
+                        None
+                    } else {
+                        let s = unsafe { CStr::from_ptr(item.quote_text) }.to_string_lossy().into_owned();
+                        if s.trim().is_empty() { None } else { Some(s) }
+                    };
+                    out.push(ExtractedPdfAnnot {
+                        page: item.page.max(0) as usize,
+                        annot_type,
+                        color: rgb_to_hex(item.color),
+                        opacity: item.opacity.clamp(0.05, 1.0),
+                        rect: item.rect,
+                        page_bounds: item.page_bounds,
+                        quads,
+                        rects,
+                        text,
+                        author,
+                        quote_text,
+                    });
+                }
+            }
+            Ok(out)
+        };
+        unsafe { ll_free_pdf_annots(&mut raw) };
+        result
+    }
+
+    struct PrewarmedSession {
+        canonical_path: PathBuf,
+        num_pages: usize,
+        width: f32,
+        height: f32,
+        title: Option<String>,
+        author: Option<String>,
+        parallel: bool,
+        tx: mpsc::Sender<DocCommand>,
+        cancels: CancellationMap,
+        created_at: Instant,
+        prewarm_frame: Option<(usize, f32, Vec<u8>)>,
+    }
+
+    static PREWARM_SESSIONS: OnceLock<Mutex<Vec<PrewarmedSession>>> = OnceLock::new();
+    static PREWARM_FRAMES: OnceLock<Mutex<HashMap<String, (usize, f32, Vec<u8>, Instant)>>> = OnceLock::new();
+
+    fn prewarm_sessions_store() -> &'static Mutex<Vec<PrewarmedSession>> {
+        PREWARM_SESSIONS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    fn prewarm_frames_store() -> &'static Mutex<HashMap<String, (usize, f32, Vec<u8>, Instant)>> {
+        PREWARM_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn prune_stale_prewarms(sessions: &mut Vec<PrewarmedSession>) {
+        let now = Instant::now();
+        let mut i = 0;
+        while i < sessions.len() {
+            if now.duration_since(sessions[i].created_at).as_secs() >= 30 {
+                let expired = sessions.remove(i);
+                let _ = expired.tx.send(DocCommand::Close);
+            } else {
+                i += 1;
+            }
+        }
+        while sessions.len() >= 2 {
+            let oldest = sessions.remove(0);
+            let _ = oldest.tx.send(DocCommand::Close);
+        }
+    }
+
+    pub fn prewarm_pdf_launch(app: &tauri::AppHandle, file_path: String) {
+        let app_handle = app.clone();
+        let _ = thread::Builder::new().name("ll-mupdf-prewarm".into()).spawn(move || {
+            let Ok(canon) = super::authorize_direct_pdf_path(Path::new(&file_path)) else {
+                return;
+            };
+            let (target_page, target_scale) = super::read_quick_index_entry(&app_handle, &canon)
+                .unwrap_or((0usize, 1.25f32));
+            let max_store_mb = DEFAULT_STORE_MB.load(Ordering::Relaxed).clamp(32, 1024);
+            let parallel = cfg!(target_os = "windows");
+            let (tx, rx) = mpsc::channel();
+            let cancels = Arc::new(Mutex::new(HashMap::new()));
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let worker_cancels = cancels.clone();
+            let worker_path = canon.to_string_lossy().into_owned();
+            if thread::Builder::new()
+                .name("ll-mupdf-prewarm-doc".into())
+                .spawn(move || {
+                    worker(worker_path, String::new(), max_store_mb, parallel, rx, worker_cancels, ready_tx)
+                })
+                .is_err()
+            {
+                return;
+            }
+            let Ok(Ok(OpenDocument { pages, first, title, author, parallel })) = ready_rx.blocking_recv() else {
+                return;
+            };
+            let mut frame: Option<(usize, f32, Vec<u8>)> = None;
+            if pages > 0 {
+                let clamped_page = target_page.min(pages - 1);
+                if let Ok(cancel) = CancelHandle::new().map(Arc::new) {
+                    let req_id = format!("prewarm:{clamped_page}");
+                    if let Ok(mut m) = cancels.lock() {
+                        m.insert(req_id.clone(), cancel.clone());
+                    }
+                    let (ftx, frx) = oneshot::channel();
+                    if tx.send(DocCommand::Render(RenderRequest {
+                        page: clamped_page,
+                        scale: target_scale,
+                        rotation: 0.0,
+                        clip: None,
+                        mobile_tile: None,
+                        cancel,
+                        request_id: req_id,
+                        priority: 0,
+                        generation: 0,
+                        enqueued_at: Instant::now(),
+                        reply: ftx,
+                    })).is_ok() {
+                        if let Ok(Ok(packet)) = frx.blocking_recv() {
+                            frame = Some((clamped_page, target_scale, packet));
+                        }
+                    }
+                }
+            }
+            let width = (first[2] - first[0]).abs().max(1.0);
+            let height = (first[3] - first[1]).abs().max(1.0);
+            let resolved_title = title.or_else(|| canon.file_stem().map(|x| x.to_string_lossy().into_owned()));
+            if let Ok(mut store) = prewarm_sessions_store().lock() {
+                prune_stale_prewarms(&mut store);
+                store.push(PrewarmedSession {
+                    canonical_path: canon,
+                    num_pages: pages,
+                    width,
+                    height,
+                    title: resolved_title,
+                    author,
+                    parallel,
+                    tx,
+                    cancels,
+                    created_at: Instant::now(),
+                    prewarm_frame: frame,
+                });
+            }
+        });
+    }
+
     #[tauri::command]
     pub async fn mupdf_open_document(
         app: tauri::AppHandle,
@@ -1035,13 +1632,11 @@ mod imp {
         max_store_mb: Option<u32>,
         window_label: Option<String>,
         parallel_rendering: Option<bool>,
+        direct_read_only: Option<bool>,
     ) -> Result<DocumentMetadata, String> {
         let max_store_mb = max_store_mb.unwrap_or_else(|| DEFAULT_STORE_MB.load(Ordering::Relaxed)).clamp(32, 1024);
         let parallel = cfg!(target_os = "windows") && parallel_rendering.unwrap_or(false);
-        let size = expected_size.ok_or_else(|| "Native PDF open requires expectedSize to verify snapshot boundary".to_string())?;
-        if size == 0 {
-            return Err("Native PDF snapshot size cannot be zero".into());
-        }
+        let is_direct = direct_read_only.unwrap_or(false);
         if file_path.trim().is_empty() {
             return Err("MuPDF requires a local file path".into());
         }
@@ -1049,24 +1644,94 @@ mod imp {
         if !raw_path.exists() || !raw_path.is_file() {
             return Err("MuPDF requires an existing readable local file".into());
         }
-        let root = std::fs::canonicalize(native_snapshot_dir(&app)?)
-            .map_err(|e| format!("Native PDF cache unavailable: {e}"))?;
         let actual_path = std::fs::canonicalize(raw_path)
-            .map_err(|e| format!("Native PDF snapshot unavailable: {e}"))?;
-        if actual_path.parent() != Some(root.as_path()) {
-            return Err("Native PDF snapshot is outside the app cache".into());
-        }
-        let file_name = actual_path.file_name().and_then(|s| s.to_str()).ok_or("Invalid snapshot filename")?;
-        if !file_name.starts_with("snapshot-") || !file_name.ends_with(".pdf") {
-            return Err("Invalid native PDF snapshot file format".into());
-        }
+            .map_err(|e| format!("Native PDF file unavailable: {e}"))?;
         let actual_size = std::fs::metadata(&actual_path).map_err(|e| e.to_string())?.len();
-        if actual_size != size {
-            return Err("Native PDF snapshot size differs from the indexed Blob".into());
+        if actual_size == 0 {
+            return Err("Native PDF file size cannot be zero".into());
+        }
+        if is_direct {
+            if !super::is_authorized_direct_pdf_path(&actual_path) {
+                super::authorize_direct_pdf_path(&actual_path)?;
+            }
+            if let Some(sz) = expected_size.filter(|&s| s > 0) {
+                if actual_size != sz {
+                    return Err("Native PDF file size changed before open".into());
+                }
+            }
+        } else {
+            let size = expected_size.ok_or_else(|| "Native PDF open requires expectedSize to verify snapshot boundary".to_string())?;
+            if size == 0 {
+                return Err("Native PDF snapshot size cannot be zero".into());
+            }
+            let root = std::fs::canonicalize(native_snapshot_dir(&app)?)
+                .map_err(|e| format!("Native PDF cache unavailable: {e}"))?;
+            if actual_path.parent() != Some(root.as_path()) {
+                return Err("Native PDF snapshot is outside the app cache".into());
+            }
+            let file_name = actual_path.file_name().and_then(|s| s.to_str()).ok_or("Invalid snapshot filename")?;
+            if !file_name.starts_with("snapshot-") || !file_name.ends_with(".pdf") {
+                return Err("Invalid native PDF snapshot file format".into());
+            }
+            if actual_size != size {
+                return Err("Native PDF snapshot size differs from the indexed Blob".into());
+            }
         }
         if !file_has_pdf_header_prefix(&actual_path)? {
             return Err("Invalid native PDF binary payload".into());
         }
+
+        if password.as_deref().unwrap_or("").is_empty() {
+            let claimed = prewarm_sessions_store().lock().ok().and_then(|mut guard| {
+                let now = Instant::now();
+                let mut i = 0;
+                while i < guard.len() {
+                    if now.duration_since(guard[i].created_at).as_secs() >= 30 {
+                        let expired = guard.remove(i);
+                        let _ = expired.tx.send(DocCommand::Close);
+                    } else {
+                        i += 1;
+                    }
+                }
+                guard.iter().position(|p| p.canonical_path == actual_path).map(|idx| guard.remove(idx))
+            });
+            if let Some(mut prewarmed) = claimed {
+                let doc_id = make_doc_id();
+                if let Some(ref win) = window_label {
+                    register_window_doc(win, &doc_id);
+                }
+                if let Some((ppage, pscale, packet)) = prewarmed.prewarm_frame.take() {
+                    if let Ok(mut frames) = prewarm_frames_store().lock() {
+                        frames.retain(|_, (_, _, _, ts)| ts.elapsed().as_secs() < 15);
+                        frames.insert(doc_id.clone(), (ppage, pscale, packet, Instant::now()));
+                    }
+                }
+                if let Ok(mut store_guard) = store().lock() {
+                    store_guard.insert(
+                        doc_id.clone(),
+                        DocumentSession {
+                            tx: prewarmed.tx,
+                            cancels: prewarmed.cancels,
+                            num_pages: prewarmed.num_pages,
+                            file_path: actual_path.clone(),
+                            password,
+                        },
+                    );
+                }
+                return Ok(DocumentMetadata {
+                    doc_id,
+                    num_pages: prewarmed.num_pages,
+                    default_width: prewarmed.width,
+                    default_height: prewarmed.height,
+                    title: prewarmed.title,
+                    author: prewarmed.author,
+                    format: "PDF".into(),
+                    native_backend: true,
+                    parallel_rendering: prewarmed.parallel,
+                });
+            }
+        }
+
         let doc_id = make_doc_id();
         if let Some(ref win) = window_label {
             register_window_doc(win, &doc_id);
@@ -1162,6 +1827,23 @@ mod imp {
                                    request_id: String,
                                    priority: Option<u8>,
                                    generation: Option<u32>) -> Result<Response, String> {
+        let rot = rotation.unwrap_or(0.0);
+        if clip.is_none() && rot.abs() < 1e-3 {
+            let cached = prewarm_frames_store().lock().ok().and_then(|mut map| {
+                map.retain(|_, (_, _, _, ts)| ts.elapsed().as_secs() < 15);
+                let matches = map.get(&doc_id)
+                    .map(|(p, s, _, _)| *p == page_index && (scale - *s).abs() <= 0.12)
+                    .unwrap_or(false);
+                if matches {
+                    map.remove(&doc_id).map(|(_, _, pkt, _)| pkt)
+                } else {
+                    None
+                }
+            });
+            if let Some(packet) = cached {
+                return Ok(Response::new(packet));
+            }
+        }
         let s = session(&doc_id)?;
         let cancel = Arc::new(CancelHandle::new()?);
         let cancel_check = cancel.clone();
@@ -1169,6 +1851,7 @@ mod imp {
         let (tx, rx) = oneshot::channel();
         if s.tx.send(DocCommand::Render(RenderRequest {
             page: page_index, scale, rotation: rotation.unwrap_or(0.0), clip,
+            mobile_tile: None,
             cancel, request_id: request_id.clone(),
             priority: priority.unwrap_or(0),
             generation: generation.unwrap_or(0),
@@ -1179,6 +1862,140 @@ mod imp {
             return Err("MuPDF worker is closed".into());
         }
         let packet = rx.await.map_err(|_| "MuPDF worker dropped render request".to_string())??;
+        if cancel_check.is_aborted() {
+            return Err("render cancelled".into());
+        }
+        Ok(Response::new(packet))
+    }
+
+    fn build_mobile_render_plan(
+        doc: *mut LlDoc,
+        page: usize,
+        scale: f32,
+        rotation: f32,
+        visible_page_rect: Option<[f32; 4]>,
+        quality: i32,
+        memory_mb: u32,
+    ) -> Result<MobileRenderPlan, String> {
+        let mut bounds = [0f32; 4];
+        if unsafe { ll_page_bounds(doc, page as c_int, bounds.as_mut_ptr()) } != LL_OK {
+            return Err(native_error(doc));
+        }
+        let mut raw = LlMobileRenderPlan {
+            scale: 0.0,
+            rotation: 0.0,
+            matrix: [0.0; 6],
+            region: [0; 4],
+            tile_edge: 0,
+            bleed: 0,
+            columns: 0,
+            rows: 0,
+            tile_count: 0,
+            max_tile_bytes: 0,
+        };
+        let visible_ptr = visible_page_rect.as_ref().map_or(std::ptr::null(), |r| r.as_ptr());
+        if unsafe { ll_mobile_plan_render(bounds.as_ptr(), scale, rotation, visible_ptr, quality, memory_mb, &mut raw) } != LL_OK {
+            return Err("Invalid mobile MuPDF render geometry".into());
+        }
+        let mut tiles = Vec::with_capacity(raw.tile_count.max(0) as usize);
+        for index in 0..raw.tile_count {
+            let mut tile = LlMobileTile { content: [0; 4], clip: [0.0; 4], rgba_bytes: 0 };
+            if unsafe { ll_mobile_tile_at(&raw, index, &mut tile) } != LL_OK {
+                return Err("Mobile MuPDF tile exceeds memory cap".into());
+            }
+            tiles.push(MobileRenderTile {
+                content: tile.content,
+                clip: tile.clip,
+                rgba_bytes: tile.rgba_bytes,
+            });
+        }
+        Ok(MobileRenderPlan {
+            scale: raw.scale,
+            rotation: raw.rotation,
+            matrix: raw.matrix,
+            region: raw.region,
+            tile_edge: raw.tile_edge,
+            bleed: raw.bleed,
+            columns: raw.columns,
+            rows: raw.rows,
+            max_tile_bytes: raw.max_tile_bytes,
+            tiles,
+        })
+    }
+
+    #[tauri::command]
+    pub async fn mupdf_plan_mobile_render(
+        doc_id: String,
+        page_index: usize,
+        scale: f32,
+        rotation: Option<f32>,
+        visible_page_rect: Option<[f32; 4]>,
+        quality: i32,
+        memory_mb: Option<u32>,
+    ) -> Result<MobileRenderPlan, String> {
+        let s = session(&doc_id)?;
+        let (tx, rx) = oneshot::channel();
+        s.tx.send(DocCommand::PlanMobileRender {
+            page: page_index,
+            scale,
+            rotation: rotation.unwrap_or(0.0),
+            visible_page_rect,
+            quality,
+            memory_mb: memory_mb.unwrap_or(0),
+            reply: tx,
+        }).map_err(|_| "MuPDF worker is closed".to_string())?;
+        rx.await.map_err(|_| "MuPDF worker dropped mobile render plan".to_string())?
+    }
+
+    #[tauri::command]
+    pub async fn mupdf_render_mobile_tile(
+        doc_id: String,
+        page_index: usize,
+        plan: MobileRenderPlan,
+        tile_index: i32,
+        request_id: String,
+        generation: Option<u32>,
+    ) -> Result<Response, String> {
+        let s = session(&doc_id)?;
+        let tile_count = plan.columns.checked_mul(plan.rows)
+            .filter(|&n| n > 0 && n as usize == plan.tiles.len())
+            .ok_or_else(|| "Invalid mobile render plan tile count".to_string())?;
+        if tile_index < 0 || tile_index >= tile_count {
+            return Err("Mobile tile index out of range".into());
+        }
+        let raw_plan = LlMobileRenderPlan {
+            scale: plan.scale,
+            rotation: plan.rotation,
+            matrix: plan.matrix,
+            region: plan.region,
+            tile_edge: plan.tile_edge,
+            bleed: plan.bleed,
+            columns: plan.columns,
+            rows: plan.rows,
+            tile_count,
+            max_tile_bytes: plan.max_tile_bytes,
+        };
+        let cancel = Arc::new(CancelHandle::new()?);
+        let cancel_check = cancel.clone();
+        s.cancels.lock().map_err(|e| e.to_string())?.insert(request_id.clone(), cancel.clone());
+        let (tx, rx) = oneshot::channel();
+        if s.tx.send(DocCommand::Render(RenderRequest {
+            page: page_index,
+            scale: plan.scale,
+            rotation: plan.rotation,
+            clip: None,
+            mobile_tile: Some((raw_plan, tile_index)),
+            cancel,
+            request_id: request_id.clone(),
+            priority: 0,
+            generation: generation.unwrap_or(0),
+            enqueued_at: Instant::now(),
+            reply: tx,
+        })).is_err() {
+            if let Ok(mut m) = s.cancels.lock() { m.remove(&request_id); }
+            return Err("MuPDF worker is closed".into());
+        }
+        let packet = rx.await.map_err(|_| "MuPDF worker dropped mobile tile render".to_string())??;
         if cancel_check.is_aborted() {
             return Err("render cancelled".into());
         }
@@ -1323,6 +2140,39 @@ mod imp {
         s.tx.send(DocCommand::PlainText { page: page_index, reply: tx })
             .map_err(|_| "MuPDF worker is closed".to_string())?;
         rx.await.map_err(|_| "Worker dropped PlainText reply channel".to_string())?
+    }
+
+    #[tauri::command]
+    pub async fn mupdf_extract_annotations(doc_id: String) -> Result<Vec<ExtractedPdfAnnot>, String> {
+        let s = session(&doc_id)?;
+        let (tx, rx) = oneshot::channel();
+        s.tx.send(DocCommand::ExtractAnnotations { reply: tx })
+            .map_err(|_| "MuPDF worker is closed".to_string())?;
+        rx.await.map_err(|_| "Worker dropped ExtractAnnotations reply channel".to_string())?
+    }
+
+    #[tauri::command]
+    pub async fn mupdf_compute_auto_crop(doc_id: String) -> Result<AutoCropMargins, String> {
+        let s = session(&doc_id)?;
+        let (tx, rx) = oneshot::channel();
+        s.tx.send(DocCommand::ComputeAutoCrop { reply: tx })
+            .map_err(|_| "MuPDF worker is closed".to_string())?;
+        rx.await.map_err(|_| "Worker dropped ComputeAutoCrop reply channel".to_string())?
+    }
+
+    #[tauri::command]
+    pub async fn mupdf_get_page_image_rects(
+        doc_id: String,
+        page_index: usize,
+    ) -> Result<Vec<[f32; 4]>, String> {
+        let s = session(&doc_id)?;
+        if page_index >= s.num_pages {
+            return Err(format!("Page index {} out of bounds", page_index));
+        }
+        let (tx, rx) = oneshot::channel();
+        s.tx.send(DocCommand::PageImageRects { page: page_index, reply: tx })
+            .map_err(|_| "MuPDF worker is closed".to_string())?;
+        rx.await.map_err(|_| "Worker dropped PageImageRects reply channel".to_string())?
     }
 
     #[derive(serde::Deserialize)]
@@ -1724,6 +2574,28 @@ mod imp {
                 assert!(img.width > 0 && img.height > 0 && !img.samples.is_null());
                 unsafe { ll_free_image(doc, &mut img) };
             }
+
+            let extracted = extract_annots_from_doc(doc).expect("extract_annots_from_doc");
+            assert_eq!(extracted.len(), 5, "Should extract all 5 exported annotation subtypes cleanly");
+            assert_eq!(extracted[0].annot_type, "highlight");
+            assert_eq!(extracted[0].text.as_deref(), Some("hl-note"));
+            assert_eq!(extracted[0].author.as_deref(), Some("Linden Test"));
+            assert_eq!(extracted[1].annot_type, "underline");
+            assert_eq!(extracted[2].annot_type, "note");
+            assert_eq!(extracted[3].annot_type, "strikeout");
+            assert_eq!(extracted[4].annot_type, "ink");
+
+            let mut u = [0f32; 4];
+            let mut o = [0f32; 4];
+            let mut e = [0f32; 4];
+            let crop_rc = unsafe { ll_compute_auto_crop(doc, 2, u.as_mut_ptr(), o.as_mut_ptr(), e.as_mut_ptr()) };
+            assert_eq!(crop_rc, LL_OK);
+
+            let mut imgs = LlRectList { rects: std::ptr::null_mut(), count: 0 };
+            let img_rc = unsafe { ll_get_page_image_rects(doc, 0, &mut imgs) };
+            assert_eq!(img_rc, LL_OK);
+            unsafe { ll_free_rect_list(&mut imgs) };
+
             unsafe { ll_close(doc) };
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }
@@ -1849,17 +2721,20 @@ mod imp {
 
     pub fn mupdf_close_documents_for_window(_window_label: &str) {}
     pub fn register_window_doc(_window_label: &str, _doc_id: &str) {}
+    pub fn prewarm_pdf_launch(_app: &tauri::AppHandle, _file_path: String) {}
 
     #[tauri::command] pub fn mupdf_is_available() -> bool { false }
     #[tauri::command] pub fn mupdf_set_store_limit(_max_mb: u32) -> Result<u32, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_stage_pdf_bytes(_app: tauri::AppHandle, _request: tauri::ipc::Request<'_>) -> Result<String, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_stage_pdf(_app: tauri::AppHandle, _file_path: String) -> Result<String, String> { unavailable() }
-    #[tauri::command] pub async fn mupdf_open_document(_app: tauri::AppHandle, _file_path: String, _password: Option<String>, _expected_size: Option<u64>, _max_store_mb: Option<u32>, _window_label: Option<String>, _parallel_rendering: Option<bool>) -> Result<DocumentMetadata, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_open_document(_app: tauri::AppHandle, _file_path: String, _password: Option<String>, _expected_size: Option<u64>, _max_store_mb: Option<u32>, _window_label: Option<String>, _parallel_rendering: Option<bool>, _direct_read_only: Option<bool>) -> Result<DocumentMetadata, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_bounds_range(_doc_id: String, _start_page: usize, _count: usize) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_page_sizes(_doc_id: String) -> Result<Vec<f32>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_text_layer(_doc_id: String, _page_index: usize) -> Result<TextLayerResponse, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_select(_doc_id: String, _page_index: usize, _a: [f32; 2], _b: [f32; 2], _mode: Option<String>) -> Result<SelectionResponse, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_render_page(_doc_id: String, _page_index: usize, _scale: f32, _rotation: Option<f32>, _clip: Option<[f32; 4]>, _request_id: String, _priority: Option<u8>, _generation: Option<u32>) -> Result<Response, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_plan_mobile_render(_doc_id: String, _page_index: usize, _scale: f32, _rotation: Option<f32>, _visible_page_rect: Option<[f32; 4]>, _quality: i32, _memory_mb: Option<u32>) -> Result<MobileRenderPlan, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_render_mobile_tile(_doc_id: String, _page_index: usize, _plan: MobileRenderPlan, _tile_index: i32, _request_id: String, _generation: Option<u32>) -> Result<Response, String> { unavailable() }
     #[tauri::command] pub fn mupdf_enable_diagnostics(_enable: bool) {}
     #[tauri::command] pub fn mupdf_get_render_diagnostics() -> Vec<RenderDiagnostics> { Vec::new() }
     #[tauri::command] pub fn mupdf_cancel_render(_doc_id: String, _request_id: String) -> bool { false }
@@ -1868,6 +2743,9 @@ mod imp {
     #[tauri::command] pub fn mupdf_close_document(_doc_id: String) -> bool { false }
     pub(crate) fn native_snapshot_dir_public(_app: &tauri::AppHandle) -> Result<PathBuf, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_get_plain_text(_doc_id: String, _page_index: usize) -> Result<String, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_extract_annotations(_doc_id: String) -> Result<Vec<ExtractedPdfAnnot>, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_compute_auto_crop(_doc_id: String) -> Result<AutoCropMargins, String> { unavailable() }
+    #[tauri::command] pub async fn mupdf_get_page_image_rects(_doc_id: String, _page_index: usize) -> Result<Vec<[f32; 4]>, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_export_annotated_pdf(_doc_id: String, _output_path: String, _annotations_json: String) -> Result<bool, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_validate_snapshot(_app: tauri::AppHandle, _snapshot_path: String, _expected_size: u64) -> Result<bool, String> { unavailable() }
     #[tauri::command] pub async fn mupdf_reclaim_snapshot(_app: tauri::AppHandle, _snapshot_path: String) -> Result<bool, String> { unavailable() }

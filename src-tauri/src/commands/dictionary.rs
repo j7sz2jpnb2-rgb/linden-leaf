@@ -119,6 +119,24 @@ pub struct DictEntryRow {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct CustomDictInfo {
+    pub id: i64,
+    pub name: String,
+    pub format: String,
+    pub entry_count: i64,
+    pub enabled: bool,
+    pub added_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomDictEntryInput {
+    pub word: String,
+    pub definition: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct DictLookupResult {
     pub found: bool,
     pub word: String,
@@ -512,6 +530,257 @@ fn dict_source_ecdict(en: bool) -> &'static str {
     l10n(en, "ECDICT 离线词库", "ECDICT Offline Dictionary")
 }
 
+fn get_custom_dict_db_path() -> PathBuf {
+    let mut path = get_dict_storage_dir();
+    path.push("custom_dictionaries.db");
+    path
+}
+
+fn ensure_custom_dict_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS custom_dicts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            format TEXT NOT NULL,
+            entry_count INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            added_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS custom_entries (
+            dict_id INTEGER NOT NULL,
+            word TEXT NOT NULL,
+            definition TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_custom_entries_word ON custom_entries(word COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_custom_entries_dict_id ON custom_entries(dict_id);",
+    )
+    .map_err(|e| format!("Failed initializing custom dictionaries schema: {e}"))
+}
+
+fn open_custom_dict_conn_at(path: &Path) -> Result<Connection, String> {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let conn = Connection::open(path).map_err(|e| format!("Failed opening custom dictionary DB: {e}"))?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    ensure_custom_dict_schema(&conn)?;
+    Ok(conn)
+}
+
+fn query_custom_dict_entries_at(
+    db_path: &Path,
+    queries: &[&str],
+) -> (Vec<DictEntryRow>, Vec<String>, Option<String>) {
+    if !db_path.is_file() || queries.is_empty() {
+        return (Vec::new(), Vec::new(), None);
+    }
+    let Ok(conn) = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return (Vec::new(), Vec::new(), None);
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT d.name, e.word, e.definition
+         FROM custom_entries e
+         JOIN custom_dicts d ON d.id = e.dict_id
+         WHERE d.enabled = 1 AND e.word = ?1 COLLATE NOCASE
+         ORDER BY d.id ASC
+         LIMIT 24",
+    ) {
+        Ok(s) => s,
+        Err(_) => return (Vec::new(), Vec::new(), None),
+    };
+
+    let mut rows = Vec::new();
+    let mut raw_defs = Vec::new();
+    let mut matched_word: Option<String> = None;
+    let mut seen = std::collections::HashSet::new();
+
+    for q in queries {
+        let q_trimmed = q.trim();
+        if q_trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(iter) = stmt.query_map(params![q_trimmed], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }) {
+            for item in iter.flatten() {
+                let (dict_name, w, def) = item;
+                let clean_def = def.trim();
+                if clean_def.is_empty() {
+                    continue;
+                }
+                let dedup_key = format!("{dict_name}::{clean_def}");
+                if !seen.insert(dedup_key) {
+                    continue;
+                }
+                if matched_word.is_none() {
+                    matched_word = Some(w);
+                }
+                rows.push(DictEntryRow {
+                    pos: format!("[{dict_name}]"),
+                    def: clean_def.to_string(),
+                });
+                raw_defs.push(format!("[{dict_name}] {clean_def}"));
+            }
+        }
+        if !rows.is_empty() {
+            break;
+        }
+    }
+    (rows, raw_defs, matched_word)
+}
+
+#[tauri::command]
+pub fn dict_custom_begin_import(name: String, format: String) -> Result<i64, String> {
+    let clean_name = name.trim();
+    if clean_name.is_empty() {
+        return Err("Dictionary name cannot be empty".into());
+    }
+    let clean_fmt = format.trim().to_ascii_lowercase();
+    let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let conn = open_custom_dict_conn_at(&get_custom_dict_db_path())?;
+    let added_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    conn.execute(
+        "INSERT INTO custom_dicts (name, format, entry_count, enabled, added_at) VALUES (?1, ?2, 0, 1, ?3)",
+        params![clean_name, clean_fmt, added_at],
+    )
+    .map_err(|e| format!("Failed creating custom dictionary record: {e}"))?;
+    Ok(conn.last_insert_rowid())
+}
+
+#[tauri::command]
+pub fn dict_custom_insert_batch(dict_id: i64, entries: Vec<CustomDictEntryInput>) -> Result<usize, String> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let mut conn = open_custom_dict_conn_at(&get_custom_dict_db_path())?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Failed starting dictionary import transaction: {e}"))?;
+    let mut inserted = 0usize;
+    {
+        let mut stmt = tx
+            .prepare_cached("INSERT INTO custom_entries (dict_id, word, definition) VALUES (?1, ?2, ?3)")
+            .map_err(|e| format!("Failed preparing entry insert: {e}"))?;
+        for entry in entries {
+            let w = entry.word.trim();
+            let d = entry.definition.trim();
+            if w.is_empty() || d.is_empty() {
+                continue;
+            }
+            stmt.execute(params![dict_id, w, d])
+                .map_err(|e| format!("Failed inserting dictionary entry: {e}"))?;
+            inserted += 1;
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("Failed committing dictionary batch: {e}"))?;
+    Ok(inserted)
+}
+
+#[tauri::command]
+pub fn dict_custom_finish_import(dict_id: i64) -> Result<CustomDictInfo, String> {
+    let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let conn = open_custom_dict_conn_at(&get_custom_dict_db_path())?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM custom_entries WHERE dict_id = ?1",
+            params![dict_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("Failed counting imported entries: {e}"))?;
+    conn.execute(
+        "UPDATE custom_dicts SET entry_count = ?1 WHERE id = ?2",
+        params![count, dict_id],
+    )
+    .map_err(|e| format!("Failed updating custom dictionary count: {e}"))?;
+    conn.query_row(
+        "SELECT id, name, format, entry_count, enabled, added_at FROM custom_dicts WHERE id = ?1",
+        params![dict_id],
+        |row| {
+            Ok(CustomDictInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                format: row.get(2)?,
+                entry_count: row.get(3)?,
+                enabled: row.get::<_, i64>(4)? != 0,
+                added_at: row.get::<_, i64>(5)?.max(0) as u64,
+            })
+        },
+    )
+    .map_err(|e| format!("Custom dictionary not found after import: {e}"))
+}
+
+#[tauri::command]
+pub fn dict_custom_list() -> Result<Vec<CustomDictInfo>, String> {
+    let db_path = get_custom_dict_db_path();
+    if !db_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = open_custom_dict_conn_at(&db_path)?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, format, entry_count, enabled, added_at FROM custom_dicts ORDER BY id DESC")
+        .map_err(|e| format!("Failed querying custom dictionaries: {e}"))?;
+    let iter = stmt
+        .query_map([], |row| {
+            Ok(CustomDictInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                format: row.get(2)?,
+                entry_count: row.get(3)?,
+                enabled: row.get::<_, i64>(4)? != 0,
+                added_at: row.get::<_, i64>(5)?.max(0) as u64,
+            })
+        })
+        .map_err(|e| format!("Failed reading custom dictionaries: {e}"))?;
+    Ok(iter.flatten().collect())
+}
+
+#[tauri::command]
+pub fn dict_custom_toggle(dict_id: i64, enabled: bool) -> Result<bool, String> {
+    let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let db_path = get_custom_dict_db_path();
+    if !db_path.is_file() {
+        return Ok(false);
+    }
+    let conn = open_custom_dict_conn_at(&db_path)?;
+    let updated = conn
+        .execute(
+            "UPDATE custom_dicts SET enabled = ?1 WHERE id = ?2",
+            params![i64::from(enabled), dict_id],
+        )
+        .map_err(|e| format!("Failed toggling custom dictionary: {e}"))?;
+    Ok(updated > 0)
+}
+
+#[tauri::command]
+pub fn dict_custom_delete(dict_id: i64) -> Result<bool, String> {
+    let _lock = DB_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let db_path = get_custom_dict_db_path();
+    if !db_path.is_file() {
+        return Ok(false);
+    }
+    let mut conn = open_custom_dict_conn_at(&db_path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Failed starting delete transaction: {e}"))?;
+    tx.execute("DELETE FROM custom_entries WHERE dict_id = ?1", params![dict_id])
+        .map_err(|e| format!("Failed removing custom entries: {e}"))?;
+    let deleted = tx
+        .execute("DELETE FROM custom_dicts WHERE id = ?1", params![dict_id])
+        .map_err(|e| format!("Failed removing custom dictionary record: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("Failed committing dictionary deletion: {e}"))?;
+    Ok(deleted > 0)
+}
+
 #[tauri::command]
 pub fn dict_lookup(word: String, locale: Option<String>) -> DictLookupResult {
     let en = is_en_locale(locale.as_deref());
@@ -529,9 +798,33 @@ pub fn dict_lookup(word: String, locale: Option<String>) -> DictLookupResult {
         };
     }
 
+    let raw_trimmed = word.trim();
+    let candidates = generate_lemma_candidates(&norm);
+    let mut custom_queries: Vec<&str> = Vec::with_capacity(candidates.len() + 2);
+    custom_queries.push(raw_trimmed);
+    if !norm.is_empty() && norm != raw_trimmed {
+        custom_queries.push(&norm);
+    }
+    for cand in &candidates {
+        custom_queries.push(cand.as_str());
+    }
+    let (custom_entries, custom_raw_defs, custom_matched_word) =
+        query_custom_dict_entries_at(&get_custom_dict_db_path(), &custom_queries);
+
     let db_path = match get_effective_db_path() {
         Some(p) => p,
         None => {
+            if !custom_entries.is_empty() {
+                return DictLookupResult {
+                    found: true,
+                    word,
+                    normalized_word: custom_matched_word.unwrap_or(norm),
+                    phonetic: String::new(),
+                    entries: custom_entries,
+                    translation_raw: custom_raw_defs.join("\n"),
+                    source: l10n(en, "自定义本地词典", "Custom Local Dictionary").to_string(),
+                };
+            }
             return DictLookupResult {
                 found: false,
                 word,
@@ -561,6 +854,17 @@ pub fn dict_lookup(word: String, locale: Option<String>) -> DictLookupResult {
                 *conn_guard = Some((db_path.clone(), c));
             }
             Err(_) => {
+                if !custom_entries.is_empty() {
+                    return DictLookupResult {
+                        found: true,
+                        word,
+                        normalized_word: custom_matched_word.unwrap_or(norm),
+                        phonetic: String::new(),
+                        entries: custom_entries,
+                        translation_raw: custom_raw_defs.join("\n"),
+                        source: l10n(en, "自定义本地词典", "Custom Local Dictionary").to_string(),
+                    };
+                }
                 return DictLookupResult {
                     found: false,
                     word,
@@ -579,6 +883,17 @@ pub fn dict_lookup(word: String, locale: Option<String>) -> DictLookupResult {
     let mut stmt = match conn.prepare_cached(query) {
         Ok(s) => s,
         Err(e) => {
+            if !custom_entries.is_empty() {
+                return DictLookupResult {
+                    found: true,
+                    word,
+                    normalized_word: custom_matched_word.unwrap_or(norm),
+                    phonetic: String::new(),
+                    entries: custom_entries,
+                    translation_raw: custom_raw_defs.join("\n"),
+                    source: l10n(en, "自定义本地词典", "Custom Local Dictionary").to_string(),
+                };
+            }
             return DictLookupResult {
                 found: false,
                 word,
@@ -596,7 +911,6 @@ pub fn dict_lookup(word: String, locale: Option<String>) -> DictLookupResult {
     };
 
     // 1. Direct match (try raw trimmed first to preserve abbreviations like A.M.D. / etc., then norm)
-    let raw_trimmed = word.trim();
     let mut direct = stmt.query_row(params![raw_trimmed], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -617,12 +931,18 @@ pub fn dict_lookup(word: String, locale: Option<String>) -> DictLookupResult {
     }
 
     if let Ok((matched_word, phonetic, translation, exchange)) = direct {
-        let entries = parse_translation_entries(&translation);
+        let mut entries = custom_entries;
+        entries.extend(parse_translation_entries(&translation));
         let root_lemma = extract_root_lemma(&exchange);
         let final_norm = if let Some(r) = root_lemma {
             if r.to_lowercase() != norm.to_lowercase() { r } else { matched_word }
         } else {
             matched_word
+        };
+        let raw_joined = if custom_raw_defs.is_empty() {
+            translation
+        } else {
+            format!("{}\n{}", custom_raw_defs.join("\n"), translation)
         };
         return DictLookupResult {
             found: true,
@@ -630,13 +950,12 @@ pub fn dict_lookup(word: String, locale: Option<String>) -> DictLookupResult {
             normalized_word: final_norm,
             phonetic: if phonetic.is_empty() { String::new() } else { format!("/{}/", phonetic) },
             entries,
-            translation_raw: translation,
+            translation_raw: raw_joined,
             source: dict_source_ecdict(en).to_string(),
         };
     }
 
     // 2. Lemmatization candidates
-    let candidates = generate_lemma_candidates(&norm);
     for cand in candidates {
         let found_cand = stmt.query_row(params![cand], |row| {
             Ok((
@@ -647,19 +966,37 @@ pub fn dict_lookup(word: String, locale: Option<String>) -> DictLookupResult {
             ))
         });
         if let Ok((matched_word, phonetic, translation, exchange)) = found_cand {
-            let entries = parse_translation_entries(&translation);
+            let mut entries = custom_entries;
+            entries.extend(parse_translation_entries(&translation));
             let root_lemma = extract_root_lemma(&exchange);
             let final_norm = root_lemma.unwrap_or(matched_word);
+            let raw_joined = if custom_raw_defs.is_empty() {
+                translation
+            } else {
+                format!("{}\n{}", custom_raw_defs.join("\n"), translation)
+            };
             return DictLookupResult {
                 found: true,
                 word,
                 normalized_word: final_norm,
                 phonetic: if phonetic.is_empty() { String::new() } else { format!("/{}/", phonetic) },
                 entries,
-                translation_raw: translation,
+                translation_raw: raw_joined,
                 source: dict_source_ecdict(en).to_string(),
             };
         }
+    }
+
+    if !custom_entries.is_empty() {
+        return DictLookupResult {
+            found: true,
+            word,
+            normalized_word: custom_matched_word.unwrap_or(norm),
+            phonetic: String::new(),
+            entries: custom_entries,
+            translation_raw: custom_raw_defs.join("\n"),
+            source: l10n(en, "自定义本地词典", "Custom Local Dictionary").to_string(),
+        };
     }
 
     // Not found in installed dictionary
@@ -2081,6 +2418,37 @@ read,riːd,\"look at and comprehend\",\"v. 阅读\\nn. 读物\",v,,,,,p:reads,\n
             resolve_bundled_db_path_from(None, Some(&base.join("missing_exe")), Some(&cwd_dir)),
             Some(cwd_db.clone())
         );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_custom_dictionary_import_lookup_toggle_delete() {
+        let base = std::env::temp_dir().join(format!("linden_test_custom_dict_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let db_file = base.join("custom_dictionaries.db");
+        let conn = open_custom_dict_conn_at(&db_file).unwrap();
+        conn.execute(
+            "INSERT INTO custom_dicts (id, name, format, entry_count, enabled, added_at) VALUES (1, 'LawDict', 'mdx', 1, 1, 1)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO custom_entries (dict_id, word, definition) VALUES (1, 'Tort', 'Civil wrong causing harm')",
+            [],
+        ).unwrap();
+        drop(conn);
+
+        let (entries, defs, matched) = query_custom_dict_entries_at(&db_file, &["tort"]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pos, "[LawDict]");
+        assert_eq!(defs[0], "[LawDict] Civil wrong causing harm");
+        assert_eq!(matched.as_deref(), Some("Tort"));
+
+        let conn2 = open_custom_dict_conn_at(&db_file).unwrap();
+        conn2.execute("UPDATE custom_dicts SET enabled = 0 WHERE id = 1", []).unwrap();
+        drop(conn2);
+        let (disabled_entries, _, _) = query_custom_dict_entries_at(&db_file, &["tort"]);
+        assert!(disabled_entries.is_empty());
 
         let _ = fs::remove_dir_all(&base);
     }

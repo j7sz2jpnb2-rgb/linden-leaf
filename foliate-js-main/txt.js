@@ -2,6 +2,7 @@
 import { runTxtRulesWorker } from '../js/txt-toc-worker.js'
 import { getLocale, t } from '../js/i18n.js'
 import { resolveBookTitle } from '../js/book-title.js'
+import { purifyTxtContent } from '../js/txt-purifier.js'
 
 export const TXT_LAYOUT_VERSION = 2
 
@@ -145,6 +146,24 @@ export const setCustomTxtPatterns = (patterns) => {
 }
 
 export const getCustomTxtPatterns = () => customTxtPatterns
+
+let txtPurifyConfig = {
+    enabled: false,
+    stripAds: true,
+    collapseBlankLines: true,
+    customRulesText: ''
+}
+
+export const setTxtPurifyConfig = (config = {}) => {
+    txtPurifyConfig = {
+        enabled: Boolean(config?.enabled),
+        stripAds: config?.stripAds !== false,
+        collapseBlankLines: config?.collapseBlankLines !== false,
+        customRulesText: String(config?.customRulesText || '')
+    }
+}
+
+export const getTxtPurifyConfig = () => txtPurifyConfig
 
 const isLegacyChapterHeading = line => {
     const trimmed = (line || '').trim()
@@ -359,8 +378,224 @@ const isDecorativeDividerOnly = line => {
     return trimmed.length > 0 && /^[-=_*#~`^/\\+|—\s]+$/.test(trimmed)
 }
 
-export const makeTXT = async (file, { filename = file.name, legacyLayout = false } = {}) => {
-    const rawText = detectAndDecode(await file.arrayBuffer())
+const buildSectionXHTML = ({ chapterTitle, isHeaderExplicit, contentHtml, language, legacyLayout }) => `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="${language}" xml:lang="${language}">
+<head>
+  <meta charset="utf-8"/>
+  <title>${escapeHTML(chapterTitle)}</title>
+  <style type="text/css">
+    body {
+      font-family: inherit;
+      line-height: inherit;
+      color: inherit;
+      background-color: transparent;
+      margin: 0;
+      padding: 0 1rem;
+      word-wrap: break-word;
+    }
+    .chapter-heading {
+      font-size: 1.5em;
+      font-weight: 700;
+      margin: 1.6em 0 1.2em 0;
+      text-align: center;
+      line-height: 1.35;
+      letter-spacing: 0.05em;
+    }
+    .book-toc-block {
+      margin: 1.5em auto;
+      max-width: 90%;
+      padding: 0.8em 1.2em;
+      border-top: 1px dashed rgba(128, 128, 128, 0.25);
+      border-bottom: 1px dashed rgba(128, 128, 128, 0.25);
+    }
+    .toc-marker {
+      font-size: 1.25em;
+      font-weight: 700;
+      margin: 1.2em 0 0.6em 0;
+      text-align: center;
+      letter-spacing: 0.05em;
+    }
+    .toc-line {
+      text-indent: 0 !important;
+      margin: 0.45em 0;
+      line-height: 1.6;
+      font-size: 1.05em;
+    }
+    .toc-line a {
+      color: inherit;
+      text-decoration: none;
+      border-bottom: 1px dashed rgba(128, 128, 128, 0.35);
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+    .toc-line a:hover {
+      color: #6366f1;
+      border-bottom-color: #6366f1;
+    }
+    .prose-p {
+      text-indent: ${!legacyLayout && language === 'en' ? '0' : '2em'};
+      margin: 0.85em 0;
+      text-align: justify;
+      line-height: inherit;
+    }
+    .verse-stanza {
+      margin: 1.4em 0;
+      text-indent: 0 !important;
+      text-align: left;
+      line-height: 1.75;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <div class="chapter-content">
+    ${isHeaderExplicit ? `<h1 class="chapter-heading" id="heading">${escapeHTML(chapterTitle)}</h1>` : '<div id="heading"></div>'}
+    ${contentHtml}
+  </div>
+</body>
+</html>`
+
+export const makeStreamingTXT = async (file, options = {}) => {
+    const filename = options.filename || file?.name || 'book.txt'
+    const legacyLayout = Boolean(options.legacyLayout)
+    const purifyCfg = options.purifyConfig || txtPurifyConfig
+    const bridge = (typeof window !== 'undefined' && window.platformBridge) ? window.platformBridge : null
+    if (!bridge || !file?.nativePath || typeof bridge.txtOpenStream !== 'function') {
+        throw new Error('Streaming TXT backend unavailable')
+    }
+    const patternStrings = Array.isArray(customTxtPatterns)
+        ? customTxtPatterns.map(p => (typeof p === 'string' ? p : (p?.pattern || ''))).filter(Boolean)
+        : null
+    const meta = await bridge.txtOpenStream(file.nativePath, patternStrings)
+    const streamId = meta?.streamId || meta?.stream_id
+    const chapters = Array.isArray(meta?.chapters) ? meta.chapters : []
+    if (!streamId || chapters.length === 0) {
+        if (streamId) await bridge.txtCloseStream(streamId)
+        throw new Error('Empty TXT stream metadata')
+    }
+
+    const headRaw = await bridge.txtReadChapter(streamId, 0).catch(() => '')
+    const parsedMeta = txtMetadata(filename, headRaw || '')
+    const language = meta.language || parsedMeta.language || 'zh-CN'
+    const title = parsedMeta.title || resolveBookTitle(filename)
+    const author = parsedMeta.author || t('book.unknownAuthor')
+    const poetryTitle = /哀歌|诗选|诗集|诗篇|诗歌|十四行诗|商籁|\b(?:sonnets?|elegy|elegies|poems?|poetry)\b/i
+    const isBookPoetry = poetryTitle.test(title) || /哀歌|诗选|诗集/.test((headRaw || '').slice(0, 200))
+
+    const urlCache = new Map()
+    const htmlCache = new Map()
+    const MAX_CACHE = 8
+
+    const remember = (map, key, val, onEvict = null) => {
+        if (map.has(key)) map.delete(key)
+        map.set(key, val)
+        if (map.size > MAX_CACHE) {
+            const oldestKey = map.keys().next().value
+            const oldestVal = map.get(oldestKey)
+            map.delete(oldestKey)
+            if (onEvict) onEvict(oldestVal)
+        }
+    }
+
+    const getChapterHtml = async (index, chMeta) => {
+        if (htmlCache.has(index)) {
+            const existing = htmlCache.get(index)
+            htmlCache.delete(index)
+            htmlCache.set(index, existing)
+            return existing
+        }
+        let chapterText = index === 0 && headRaw ? headRaw : await bridge.txtReadChapter(streamId, index)
+        if (purifyCfg?.enabled) {
+            chapterText = purifyTxtContent(chapterText, purifyCfg)
+        }
+        const rawLines = String(chapterText || '').split(/\r\n?|\n/)
+        const explicitHeading = Boolean(chMeta?.isExplicit ?? chMeta?.is_explicit ?? true)
+        const bodyLines = (explicitHeading && rawLines.length > 0 && rawLines[0].trim() === String(chMeta?.title || '').trim())
+            ? rawLines.slice(1)
+            : rawLines
+        const htmlBody = renderContentToHTML(
+            bodyLines.map((l, idx) => ({ text: l, lineIndex: idx, isTOC: false })),
+            { isPoetryMode: isBookPoetry, tocLinkMap: null, language, legacyLayout }
+        )
+        const fullHtml = buildSectionXHTML({
+            chapterTitle: chMeta?.title || `${title} (${index + 1})`,
+            isHeaderExplicit: explicitHeading,
+            contentHtml: htmlBody,
+            language,
+            legacyLayout
+        })
+        remember(htmlCache, index, fullHtml)
+        return fullHtml
+    }
+
+    const sections = chapters.map((ch, index) => ({
+        id: index,
+        title: ch.title || `${title} (${index + 1})`,
+        size: Math.max(256, Number(ch.byteLen ?? ch.byte_len ?? 2048)),
+        load: async () => {
+            if (urlCache.has(index)) {
+                const existingUrl = urlCache.get(index)
+                urlCache.delete(index)
+                urlCache.set(index, existingUrl)
+                return existingUrl
+            }
+            const html = await getChapterHtml(index, ch)
+            const blob = new Blob([html], { type: MIME.XHTML })
+            const url = URL.createObjectURL(blob)
+            remember(urlCache, index, url, u => { try { URL.revokeObjectURL(u) } catch {} })
+            return url
+        },
+        createDocument: async () => new DOMParser().parseFromString(await getChapterHtml(index, ch), MIME.XHTML)
+    }))
+
+    const coverBlob = new Blob([generateCoverSVG(title, author)], { type: MIME.SVG })
+
+    return {
+        metadata: { title, author, language, identifier: null },
+        txtLayoutVersion: legacyLayout ? 1 : TXT_LAYOUT_VERSION,
+        isStreamingTxt: true,
+        tocPreviewLines: String(headRaw || '').split(/\r\n?|\n/).slice(0, 1000),
+        sections,
+        toc: sections.map((s, idx) => ({ label: s.title, href: `${idx}#heading` })),
+        resolveHref: href => {
+            if (!href) return { index: 0 }
+            const [sectionIdx, anchorId] = href.split('#')
+            return {
+                index: parseInt(sectionIdx, 10) || 0,
+                anchor: doc => (anchorId ? doc.getElementById(anchorId) : null) || doc.body
+            }
+        },
+        splitTOCHref: href => {
+            if (!href) return []
+            const parts = href.split('#')
+            return [parseInt(parts[0], 10) || 0, parts[1] || '']
+        },
+        getTOCFragment: (doc, id) => id ? doc.getElementById(id) : null,
+        isExternal: uri => /^\w+:/i.test(uri),
+        getCover: () => coverBlob,
+        destroy: () => {
+            for (const u of urlCache.values()) { try { URL.revokeObjectURL(u) } catch {} }
+            urlCache.clear()
+            htmlCache.clear()
+            bridge.txtCloseStream?.(streamId)?.catch?.(() => {})
+        }
+    }
+}
+
+export const makeTXT = async (file, { filename = file.name, legacyLayout = false, purifyConfig = txtPurifyConfig, disableStreaming = false } = {}) => {
+    if (!legacyLayout && !disableStreaming && file?.nativePath && (file?.size || 0) > 4 * 1024 * 1024
+        && typeof window !== 'undefined' && window.platformBridge?.isTauri
+        && typeof window.platformBridge.txtOpenStream === 'function') {
+        try {
+            return await makeStreamingTXT(file, { filename, legacyLayout, purifyConfig })
+        } catch (err) {
+            console.warn('[TXT] Streaming TXT open failed, falling back to in-memory loader:', err)
+        }
+    }
+    let rawText = detectAndDecode(await file.arrayBuffer())
+    if (!legacyLayout && purifyConfig?.enabled) {
+        rawText = purifyTxtContent(rawText, purifyConfig)
+    }
     const { title, author, language } = txtMetadata(filename, rawText)
     const labels = contentLabels(language)
     const lines = rawText.split(legacyLayout ? /\r?\n/ : /\r\n?|\n/)
@@ -599,83 +834,14 @@ export const makeTXT = async (file, { filename = file.name, legacyLayout = false
         }
     }
 
-    // Wrap section in elegant HTML
-    const template = (chapterTitle, isHeaderExplicit, contentHtml) => `<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml" lang="${language}" xml:lang="${language}">
-<head>
-  <meta charset="utf-8"/>
-  <title>${escapeHTML(chapterTitle)}</title>
-  <style type="text/css">
-    body {
-      font-family: inherit;
-      line-height: inherit;
-      color: inherit;
-      background-color: transparent;
-      margin: 0;
-      padding: 0 1rem;
-      word-wrap: break-word;
-    }
-    .chapter-heading {
-      font-size: 1.5em;
-      font-weight: 700;
-      margin: 1.6em 0 1.2em 0;
-      text-align: center;
-      line-height: 1.35;
-      letter-spacing: 0.05em;
-    }
-    .book-toc-block {
-      margin: 1.5em auto;
-      max-width: 90%;
-      padding: 0.8em 1.2em;
-      border-top: 1px dashed rgba(128, 128, 128, 0.25);
-      border-bottom: 1px dashed rgba(128, 128, 128, 0.25);
-    }
-    .toc-marker {
-      font-size: 1.25em;
-      font-weight: 700;
-      margin: 1.2em 0 0.6em 0;
-      text-align: center;
-      letter-spacing: 0.05em;
-    }
-    .toc-line {
-      text-indent: 0 !important;
-      margin: 0.45em 0;
-      line-height: 1.6;
-      font-size: 1.05em;
-    }
-    .toc-line a {
-      color: inherit;
-      text-decoration: none;
-      border-bottom: 1px dashed rgba(128, 128, 128, 0.35);
-      transition: color 0.15s ease, border-color 0.15s ease;
-    }
-    .toc-line a:hover {
-      color: #6366f1;
-      border-bottom-color: #6366f1;
-    }
-    .prose-p {
-      text-indent: ${!legacyLayout && language === 'en' ? '0' : '2em'};
-      margin: 0.85em 0;
-      text-align: justify;
-      line-height: inherit;
-    }
-    .verse-stanza {
-      margin: 1.4em 0;
-      text-indent: 0 !important;
-      text-align: left;
-      line-height: 1.75;
-      word-break: break-word;
-    }
-  </style>
-</head>
-<body>
-  <div class="chapter-content">
-    ${isHeaderExplicit ? `<h1 class="chapter-heading" id="heading">${escapeHTML(chapterTitle)}</h1>` : '<div id="heading"></div>'}
-    ${contentHtml}
-  </div>
-</body>
-</html>`
+    const htmlPartsTemplate = (chapterTitle, isHeaderExplicit, contentHtml) => buildSectionXHTML({
+        chapterTitle,
+        isHeaderExplicit,
+        contentHtml,
+        language,
+        legacyLayout
+    })
+    const template = htmlPartsTemplate
 
     const urls = []
     const estimateChapterSize = (chapter) => {

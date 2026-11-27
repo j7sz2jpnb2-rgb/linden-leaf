@@ -24,6 +24,7 @@ import {
   ensureAdvancedSettingsLoaded,
   ensureAiSidebarLoaded,
   ensureChapterTranslationLoaded,
+  ensureExternalCompanionLoaded,
 } from '../js/app-modules.js';
 import { makeTXT } from '../foliate-js-main/txt.js';
 
@@ -40,6 +41,12 @@ test('Sync merge is strictly commutative across tied timestamps and collections'
         id: 'b1',
         title: 'Book One',
         format: 'epub',
+        tags: ['philosophy'],
+        tagsUpdatedAt: 1500,
+        customListIds: ['list-a'],
+        listsUpdatedAt: 1500,
+        isFavorite: true,
+        favoriteUpdatedAt: 1500,
         isArchived: true,
         archivedAt: fixedNow - 10_000,
         archivedUpdatedAt: fixedNow - 5_000,
@@ -80,6 +87,12 @@ test('Sync merge is strictly commutative across tied timestamps and collections'
         id: 'b1',
         title: 'Book One',
         format: 'epub',
+        tags: ['literature'],
+        tagsUpdatedAt: 1500,
+        customListIds: ['list-b'],
+        listsUpdatedAt: 1500,
+        isFavorite: false,
+        favoriteUpdatedAt: 1500,
         isArchived: false,
         archivedAt: null,
         archivedUpdatedAt: fixedNow - 5_000,
@@ -362,6 +375,21 @@ test('app-modules lazy loaders clear cached rejected promises and succeed on ret
   });
   assert.equal(ctAttempts, 2);
   assert.equal(ctInst._isRealInstance, true);
+
+  let extAttempts = 0;
+  await assert.rejects(
+    ensureExternalCompanionLoaded(fakeApp, () => {
+      extAttempts++;
+      return Promise.reject(new Error('transient companion failure'));
+    }),
+    /transient companion/
+  );
+  const extInst = await ensureExternalCompanionLoaded(fakeApp, () => {
+    extAttempts++;
+    return Promise.resolve({ ExternalAiCompanionManager: class FakeComp {} });
+  });
+  assert.equal(extAttempts, 2);
+  assert.equal(extInst._isRealInstance, true);
 });
 
 test('TXT chapter splitter recognizes Traditional and Formal Chinese numerals while rejecting numbered verse', async () => {
@@ -395,13 +423,15 @@ test('TXT chapter splitter recognizes Traditional and Formal Chinese numerals wh
 });
 
 test('Security & format-consistency contracts hold across frontend, Rust, C, and Android sources', () => {
-  // 1. CSP removes unsafe-eval and uses wasm-unsafe-eval
+  // 1. CSP removes unsafe-eval and script-src unsafe-inline, uses wasm-unsafe-eval
   const indexHtml = readRepoFile('index.html');
   const tauriConf = readRepoFile('src-tauri/tauri.conf.json');
   assert.ok(!indexHtml.includes("'unsafe-eval'"), 'index.html CSP must not allow unsafe-eval');
   assert.ok(indexHtml.includes("'wasm-unsafe-eval'"), 'index.html CSP must allow wasm-unsafe-eval');
+  assert.ok(!/script-src[^;]*'unsafe-inline'/.test(indexHtml), 'index.html script-src must not allow unsafe-inline');
   assert.ok(!tauriConf.includes("'unsafe-eval'"), 'tauri.conf.json CSP must not allow unsafe-eval');
   assert.ok(tauriConf.includes("'wasm-unsafe-eval'"), 'tauri.conf.json CSP must allow wasm-unsafe-eval');
+  assert.ok(!/script-src[^;]*'unsafe-inline'/.test(tauriConf), 'tauri.conf.json script-src must not allow unsafe-inline');
 
   // 2. Format consistency: unrenderable djvu removed from import & native filters
   assert.ok(!SUPPORTED_IMPORT_FORMATS.includes('djvu'));
@@ -446,4 +476,27 @@ test('Security & format-consistency contracts hold across frontend, Rust, C, and
   assert.ok(dbJs.includes('export const removeBookLocalFile'), 'db.js must export removeBookLocalFile');
   assert.ok(dbJs.includes('export const archiveBook'), 'db.js must export archiveBook');
   assert.ok(dbJs.includes('preserveAnnotations'), 'db.js deleteBook must support preserveAnnotations option');
+
+  // 9. Chromium MV3 companion extension keeps strict minimal privileges and no inline script
+  const extManifest = JSON.parse(readRepoFile('extensions/chromium-companion/manifest.json'));
+  assert.equal(extManifest.manifest_version, 3);
+  assert.ok(!extManifest.host_permissions.includes('<all_urls>'), 'Extension must not request <all_urls> by default');
+  assert.ok(!extManifest.permissions.includes('<all_urls>'), 'Extension permissions must not include <all_urls>');
+  assert.equal(extManifest.web_accessible_resources, undefined, 'Extension manifest must not expose web_accessible_resources');
+  const extRules = JSON.parse(readRepoFile('extensions/chromium-companion/adapters/rules.json'));
+  assert.ok(extRules.providers?.chatgpt && extRules.providers?.gemini && extRules.providers?.aistudio && extRules.providers?.deepseek);
+  assert.ok(
+    !(extRules.providers.deepseek.sidebarToggleSelectors || []).includes("div[class*='sidebar'] button"),
+    'DeepSeek sidebarToggleSelectors must not contain broad div[class*="sidebar"] button selector'
+  );
+  const extBackgroundJs = readRepoFile('extensions/chromium-companion/background.js');
+  assert.ok(extBackgroundJs.includes('providerSpec'), 'Extension background.js must forward providerSpec directly to content script');
+  const extPopupHtml = readRepoFile('extensions/chromium-companion/popup.html');
+  assert.ok(!/<script\b(?![^>]*\bsrc=)[^>]*>/i.test(extPopupHtml), 'Extension popup.html must not contain inline <script>');
+
+  // 10. SIWC credential keys stay blocked from arbitrary IPC reads and companion extension is bundled
+  const securityRs = readRepoFile('src-tauri/src/commands/security.rs');
+  assert.ok(securityRs.includes('starts_with("siwc_")'), 'security.rs must block siwc_* keys from generic IPC credential commands');
+  const tauriConfBundleRaw = readRepoFile('src-tauri/tauri.conf.json');
+  assert.ok(tauriConfBundleRaw.includes('extensions/chromium-companion/**/*'), 'tauri.conf.json must bundle extensions/chromium-companion/**/* resources');
 });

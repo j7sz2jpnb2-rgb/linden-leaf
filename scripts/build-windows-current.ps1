@@ -107,6 +107,12 @@ if (-not $NoBundle -and $installer) {
     Copy-Item -LiteralPath $installer -Destination $destination -Force
 }
 Copy-Item -LiteralPath $binary -Destination (Join-Path $delivery 'linden-leaf.exe') -Force
+$extSrc = Join-Path $projectRoot 'extensions\chromium-companion'
+if (Test-Path -LiteralPath $extSrc) {
+    $extDest = Join-Path $delivery 'extensions\chromium-companion'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $extDest) | Out-Null
+    Copy-Item -Path $extSrc -Destination (Split-Path -Parent $extDest) -Recurse -Force
+}
 
 if ($Deploy) {
     Write-Host "=== 4. Syncing to Desktop Target (-Deploy requested) ===" -ForegroundColor Cyan

@@ -22,6 +22,8 @@ const steps = [
   { name: 'Regression Suite', args: ['scripts/test-regression-suite.mjs'] },
   { name: 'Audit Hardening Suite', args: ['--test', 'scripts/test-audit-hardening.mjs'] },
   { name: 'UX & Polish Modules Suite', args: ['--test', 'scripts/test-ux-polish-modules.mjs'] },
+  { name: 'Roadmap Upgrades Suite', args: ['--test', 'scripts/test-roadmap-upgrades.mjs'] },
+  { name: 'PP-OCRv6 Engine & Layout Suite', args: ['--test', 'scripts/test-ppocr-engine.mjs'] },
 ];
 
 const results = [];

@@ -4,8 +4,10 @@ Release Android builds include both PDF.js (default) and MuPDF linked into the
 shared Rust worker, while Debug builds link MuPDF when run with `-NativePdf`. A
 native open failure automatically falls back to PDF.js. Android PDF snapshots for
 this backend live in app data so they survive cache eviction. The mobile tile
-planner described below has its own verifier and awaits integration with the
-viewport scheduler.
+planner described below is wired through `mupdf_plan_mobile_render` /
+`mupdf_render_mobile_tile` into `PdfViewport` when `useMobileTilePlanner` is
+enabled, and Android MuPDF supports long-press + drag + start/end handle text
+selection.
 
 ## Ownership and boundary
 
@@ -94,11 +96,10 @@ are shared between the engines. PDF.js opens books that fail native staging or o
 Release builds include both engines by default. Debug builds include MuPDF
 when run with `-NativePdf`.
 
-Use a populated library to verify installing over the old APK. For the native
-trial, check CJK fonts, first page, scrolling, zoom, text selection, copying,
-rotate/resume and closing/reopening a document. The native mouse-selection
-implementation skips touch events. Verify Android touch selection and connect
-the tile planner before considering a default switch.
+Use a populated library to verify installing over the old APK. For real-device
+verification, check CJK fonts, first page, scrolling, zoom, long-press touch
+text selection and handle extension, copying, rotate/resume and closing/reopening
+a document before considering switching the Android default away from PDF.js.
 
 References: [MuPDF Android](https://mupdf.readthedocs.io/en/latest/guide/using-with-android.html),
 [Android NDK build](https://developer.android.com/ndk/guides/ndk-build).

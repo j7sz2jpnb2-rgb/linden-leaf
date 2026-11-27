@@ -105,6 +105,7 @@ export class AiSidebarController {
             btnAiNewConv: document.getElementById('btn-ai-new-conv'),
             btnAiViewHistory: document.getElementById('btn-ai-view-history'),
             btnAiCollapseSidebar: document.getElementById('btn-ai-collapse-sidebar'),
+            btnAiPopoutExternal: document.getElementById('btn-ai-popout-external'),
             aiChatMessages: document.getElementById('ai-chat-messages'),
 
             // Pending quote reference
@@ -186,6 +187,13 @@ export class AiSidebarController {
 
     bindEvents() {
         this.dom.btnAiCollapseSidebar?.addEventListener('click', () => this.closeSidebar())
+        this.dom.btnAiPopoutExternal?.addEventListener('click', async () => {
+            const pendingRef = this.currentReference
+            await this.closeSidebar()
+            if (typeof this.app?.switchToExternalCompanion === 'function') {
+                await this.app.switchToExternalCompanion(pendingRef)
+            }
+        })
 
         // Resizer drag
         this.setupResizer()
@@ -543,7 +551,7 @@ export class AiSidebarController {
      * Called when user clicks "AI" in selection bubble.
      * Takes stable snapshot BEFORE popup is closed or selection collapsed!
      */
-    async openWithSelection(selectionInfo) {
+    async openWithSelection(selectionInfo, options = {}) {
         if (!selectionInfo || !selectionInfo.text) return
 
         // 1. Create stable, immutable reference snapshot
@@ -553,6 +561,14 @@ export class AiSidebarController {
 
         // 2. Extract surrounding context within <= 1000 tokens hard budget
         this.currentContext = this.extractContextForSelection(selectionInfo)
+        if ((!this.currentContext || !this.currentContext.contextText) && selectionInfo.sentenceContext) {
+            this.currentContext = buildSurroundingContext({
+                beforeText: selectionInfo.sentenceContext,
+                afterText: '',
+                maxTokens: 400,
+                tokenizer: this.app?.advancedSettings?.config?.modelTokenizer || 'auto'
+            })
+        }
 
         // 3. Resolve selection anchor explicitly from selectionInfo
         let anchor = null
@@ -575,8 +591,11 @@ export class AiSidebarController {
         // 6. Update context preview
         this.renderContextPreview()
 
-        // 7. Focus input without erasing user draft
+        // 7. Focus input without erasing user draft; optionally seed concise contextual-meaning prompt if draft is empty
         if (this.dom.aiChatInput) {
+            if ((options?.isWordContext || selectionInfo.isWordContext) && !this.dom.aiChatInput.value.trim()) {
+                this.dom.aiChatInput.value = t('companion.sidebarWordDraftPrompt')
+            }
             this.dom.aiChatInput.focus()
         }
     }
@@ -856,7 +875,11 @@ export class AiSidebarController {
         }
         if (!ready) {
             releaseLockOnPreflightError()
-            this.app?.showToast?.(t('aiSidebar.toastNeedApiKey'), 'warning')
+            const cfg = getAiConfig()
+            this.app?.showToast?.(
+                cfg.authMode === 'siwc' ? t('companion.toastNeedSiwcLogin') : t('aiSidebar.toastNeedApiKey'),
+                'warning'
+            )
             return
         }
 

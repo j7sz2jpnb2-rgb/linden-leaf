@@ -1254,4 +1254,525 @@ int ll_export_annotated_pdf(const char *input_path, const char *output_path,
     return result;
 }
 
+static char *ll_strdup_nonempty(const char *s) {
+    if (!s || !s[0]) return NULL;
+    size_t len = strlen(s);
+    char *out = malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, s, len + 1);
+    return out;
+}
+
+static float ll_clamp01(float v) {
+    if (!ll_isfinite(v)) return 0.0f;
+    if (v < 0.0f) return 0.0f;
+    if (v > 1.0f) return 1.0f;
+    return v;
+}
+
+static void ll_extract_quote_for_quads(fz_context *ctx, fz_stext_page *stext,
+                                       const ll_quad *quads, int quad_count, char **out_quote) {
+    *out_quote = NULL;
+    if (!ctx || !stext || !quads || quad_count <= 0) return;
+
+    fz_buffer *buf = NULL;
+    fz_var(buf);
+    fz_try(ctx) {
+        buf = fz_new_buffer(ctx, 256);
+        int last_line = -1;
+        int line_idx = 0;
+        for (fz_stext_block *b = stext->first_block; b; b = b->next) {
+            if (b->type != FZ_STEXT_BLOCK_TEXT) continue;
+            for (fz_stext_line *l = b->u.t.first_line; l; l = l->next, ++line_idx) {
+                int wrote_any_on_line = 0;
+                for (fz_stext_char *c = l->first_char; c; c = c->next) {
+                    float cx = (c->quad.ul.x + c->quad.lr.x) * 0.5f;
+                    float cy = (c->quad.ul.y + c->quad.lr.y) * 0.5f;
+                    int hit = 0;
+                    for (int qi = 0; qi < quad_count; ++qi) {
+                        const float *q = quads[qi].xy;
+                        float qx0 = q[0], qx1 = q[0], qy0 = q[1], qy1 = q[1];
+                        for (int k = 1; k < 4; ++k) {
+                            float px = q[k * 2], py = q[k * 2 + 1];
+                            if (px < qx0) qx0 = px;
+                            if (px > qx1) qx1 = px;
+                            if (py < qy0) qy0 = py;
+                            if (py > qy1) qy1 = py;
+                        }
+                        if (cx >= qx0 - 1.5f && cx <= qx1 + 1.5f && cy >= qy0 - 1.5f && cy <= qy1 + 1.5f) {
+                            hit = 1;
+                            break;
+                        }
+                    }
+                    if (!hit) continue;
+                    if (!wrote_any_on_line && last_line >= 0 && last_line != line_idx) {
+                        fz_append_byte(ctx, buf, ' ');
+                    }
+                    wrote_any_on_line = 1;
+                    last_line = line_idx;
+                    fz_append_rune(ctx, buf, c->c);
+                }
+            }
+        }
+        const char *str = fz_string_from_buffer(ctx, buf);
+        *out_quote = ll_strdup_nonempty(str);
+    }
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, buf);
+    }
+    fz_catch(ctx) {
+        free(*out_quote);
+        *out_quote = NULL;
+    }
+}
+
+int ll_extract_pdf_annots(ll_doc *d, int max_annots, ll_pdf_annot_list *out) {
+    if (!d || !out) return LL_ERROR;
+    clear_error(d);
+    memset(out, 0, sizeof(*out));
+    if (max_annots <= 0) max_annots = 2000;
+
+    pdf_document *pdf = pdf_specifics(d->ctx, d->document);
+    if (!pdf) return LL_OK;
+
+    int cap = 32;
+    ll_pdf_annot *items = calloc((size_t)cap, sizeof(ll_pdf_annot));
+    if (!items) {
+        snprintf(d->error, sizeof(d->error), "Allocation failed");
+        return LL_ERROR;
+    }
+    int count = 0;
+    pdf_page *ppage = NULL;
+    fz_var(ppage);
+    fz_var(items);
+    fz_var(cap);
+    fz_var(count);
+
+    fz_try(d->ctx) {
+        int total_pages = pdf_count_pages(d->ctx, pdf);
+        if (d->count < total_pages) total_pages = d->count;
+        for (int p = 0; p < total_pages && count < max_annots; ++p) {
+            ppage = pdf_load_page(d->ctx, pdf, p);
+            if (!ppage) continue;
+
+            pdf_annot *first_a = pdf_first_annot(d->ctx, ppage);
+            if (!first_a) {
+                pdf_drop_page(d->ctx, ppage);
+                ppage = NULL;
+                continue;
+            }
+
+            fz_rect pbounds = fz_bound_page(d->ctx, (fz_page *)ppage);
+            float bw = pbounds.x1 - pbounds.x0;
+            float bh = pbounds.y1 - pbounds.y0;
+            if (bw < 1e-3f) bw = 1.0f;
+            if (bh < 1e-3f) bh = 1.0f;
+            fz_stext_page *stext = NULL;
+
+            for (pdf_annot *a = first_a; a && count < max_annots; a = pdf_next_annot(d->ctx, a)) {
+                enum pdf_annot_type raw_type = pdf_annot_type(d->ctx, a);
+                int mapped_type = -1;
+                switch (raw_type) {
+                    case PDF_ANNOT_HIGHLIGHT: mapped_type = 0; break;
+                    case PDF_ANNOT_UNDERLINE: mapped_type = 1; break;
+                    case PDF_ANNOT_STRIKE_OUT: mapped_type = 2; break;
+                    case PDF_ANNOT_SQUIGGLY: mapped_type = 3; break;
+                    case PDF_ANNOT_TEXT: mapped_type = 4; break;
+                    case PDF_ANNOT_FREE_TEXT: mapped_type = 5; break;
+                    case PDF_ANNOT_INK: mapped_type = 6; break;
+                    default: break;
+                }
+                if (mapped_type < 0) continue;
+
+                if (count >= cap) {
+                    int new_cap = cap * 2;
+                    ll_pdf_annot *grown = realloc(items, sizeof(ll_pdf_annot) * (size_t)new_cap);
+                    if (!grown) fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
+                    memset(grown + cap, 0, sizeof(ll_pdf_annot) * (size_t)(new_cap - cap));
+                    items = grown;
+                    cap = new_cap;
+                }
+
+                ll_pdf_annot *dst = &items[count];
+                memset(dst, 0, sizeof(*dst));
+                dst->page = p;
+                dst->type = mapped_type;
+                dst->page_bounds[0] = pbounds.x0;
+                dst->page_bounds[1] = pbounds.y0;
+                dst->page_bounds[2] = pbounds.x1;
+                dst->page_bounds[3] = pbounds.y1;
+
+                int cn = 0;
+                float raw_col[4] = {0};
+                pdf_annot_color(d->ctx, a, &cn, raw_col);
+                if (cn == 1) {
+                    dst->color[0] = raw_col[0];
+                    dst->color[1] = raw_col[0];
+                    dst->color[2] = raw_col[0];
+                } else if (cn == 3) {
+                    dst->color[0] = raw_col[0];
+                    dst->color[1] = raw_col[1];
+                    dst->color[2] = raw_col[2];
+                } else if (cn == 4) {
+                    float inv_k = 1.0f - raw_col[3];
+                    dst->color[0] = (1.0f - raw_col[0]) * inv_k;
+                    dst->color[1] = (1.0f - raw_col[1]) * inv_k;
+                    dst->color[2] = (1.0f - raw_col[2]) * inv_k;
+                } else {
+                    dst->color[0] = 0.98f;
+                    dst->color[1] = 0.80f;
+                    dst->color[2] = 0.08f;
+                }
+                dst->opacity = ll_clamp01(pdf_annot_opacity(d->ctx, a));
+                if (dst->opacity <= 0.0f) dst->opacity = 1.0f;
+
+                if (pdf_annot_has_quad_points(d->ctx, a)) {
+                    int qn = pdf_annot_quad_point_count(d->ctx, a);
+                    if (qn > 512) qn = 512;
+                    if (qn > 0) {
+                        dst->quads = malloc(sizeof(ll_quad) * (size_t)qn);
+                        if (dst->quads) {
+                            for (int qi = 0; qi < qn; ++qi) {
+                                fz_quad q = pdf_annot_quad_point(d->ctx, a, qi);
+                                dst->quads[qi] = quad_out(q);
+                            }
+                            dst->quad_count = qn;
+                            if (!stext) stext = get_plain_text(d, p);
+                            if (stext) {
+                                ll_extract_quote_for_quads(d->ctx, stext, dst->quads, qn, &dst->quote_text);
+                            }
+                        }
+                    }
+                }
+
+                fz_rect ar = pdf_annot_has_rect(d->ctx, a)
+                    ? pdf_annot_rect(d->ctx, a)
+                    : pdf_bound_annot(d->ctx, a);
+                if (fz_is_empty_rect(ar) && dst->quads && dst->quad_count > 0) {
+                    ar = fz_empty_rect;
+                    for (int qi = 0; qi < dst->quad_count; ++qi) {
+                        for (int k = 0; k < 4; ++k) {
+                            ar = fz_include_point_in_rect(ar, fz_make_point(dst->quads[qi].xy[k * 2], dst->quads[qi].xy[k * 2 + 1]));
+                        }
+                    }
+                }
+                dst->rect[0] = ll_clamp01((ar.x0 - pbounds.x0) / bw);
+                dst->rect[1] = ll_clamp01((ar.y0 - pbounds.y0) / bh);
+                dst->rect[2] = ll_clamp01((ar.x1 - pbounds.x0) / bw);
+                dst->rect[3] = ll_clamp01((ar.y1 - pbounds.y0) / bh);
+
+                dst->text = ll_strdup_nonempty(pdf_annot_contents(d->ctx, a));
+                dst->author = pdf_annot_has_author(d->ctx, a)
+                    ? ll_strdup_nonempty(pdf_annot_author(d->ctx, a))
+                    : NULL;
+                count++;
+            }
+
+            pdf_drop_page(d->ctx, ppage);
+            ppage = NULL;
+        }
+    }
+    fz_always(d->ctx) {
+        if (ppage) pdf_drop_page(d->ctx, ppage);
+    }
+    fz_catch(d->ctx) {
+        caught(d);
+        out->items = items;
+        out->count = count;
+        ll_free_pdf_annots(out);
+        return LL_ERROR;
+    }
+
+    out->items = items;
+    out->count = count;
+    return LL_OK;
+}
+
+void ll_free_pdf_annots(ll_pdf_annot_list *out) {
+    if (!out) return;
+    if (out->items) {
+        for (int i = 0; i < out->count; ++i) {
+            free(out->items[i].quads);
+            free(out->items[i].text);
+            free(out->items[i].author);
+            free(out->items[i].quote_text);
+        }
+        free(out->items);
+    }
+    memset(out, 0, sizeof(*out));
+}
+
+static void ll_accumulate_crop(float cur_min[4], int *has_sample, const float sample[4]) {
+    if (!*has_sample) {
+        for (int i = 0; i < 4; ++i) cur_min[i] = sample[i];
+        *has_sample = 1;
+        return;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (sample[i] < cur_min[i]) cur_min[i] = sample[i];
+    }
+}
+
+static void ll_finalize_crop_margins(float out[4], const float raw_min[4], int has_sample) {
+    if (!has_sample) {
+        memset(out, 0, sizeof(float) * 4);
+        return;
+    }
+    const float padding_pct = 1.5f;
+    for (int i = 0; i < 4; ++i) {
+        float val = raw_min[i] - padding_pct;
+        if (val < 0.0f) val = 0.0f;
+        if (val > 35.0f) val = 35.0f;
+        out[i] = floorf(val * 2.0f + 0.5f) * 0.5f;
+    }
+}
+
+int ll_compute_auto_crop(ll_doc *d, int max_samples,
+                         float out_uniform[4], float out_odd[4], float out_even[4]) {
+    if (!d || !out_uniform || !out_odd || !out_even) return LL_ERROR;
+    clear_error(d);
+    memset(out_uniform, 0, sizeof(float) * 4);
+    memset(out_odd, 0, sizeof(float) * 4);
+    memset(out_even, 0, sizeof(float) * 4);
+    if (d->count <= 0) return LL_OK;
+
+    if (max_samples <= 0) max_samples = 12;
+    if (max_samples > 24) max_samples = 24;
+
+    int start_idx = (d->count >= 4) ? 1 : 0;
+    int span = d->count - start_idx;
+    int actual_samples = (span < max_samples) ? span : max_samples;
+    if (actual_samples <= 0) return LL_OK;
+
+    float min_all[4] = {0}, min_odd[4] = {0}, min_even[4] = {0};
+    int has_all = 0, has_odd = 0, has_even = 0;
+
+    fz_pixmap *pix = NULL;
+    fz_device *dev = NULL;
+    fz_var(pix);
+    fz_var(dev);
+
+    fz_try(d->ctx) {
+        for (int s = 0; s < actual_samples; ++s) {
+            int p_idx = (actual_samples == 1)
+                ? start_idx
+                : start_idx + (int)(((int64_t)s * (span - 1)) / (actual_samples - 1));
+            if (p_idx < 0) p_idx = 0;
+            if (p_idx >= d->count) p_idx = d->count - 1;
+
+            ll_page *page = get_page(d, p_idx);
+            if (!page || !page->list) continue;
+            float bw = page->bounds.x1 - page->bounds.x0;
+            float bh = page->bounds.y1 - page->bounds.y0;
+            if (bw < 10.0f || bh < 10.0f) continue;
+
+            float max_edge = bw > bh ? bw : bh;
+            float scale = 360.0f / max_edge;
+            if (scale < 0.08f) scale = 0.08f;
+            if (scale > 1.0f) scale = 1.0f;
+
+            fz_matrix m = fz_scale(scale, scale);
+            fz_rect tbox = fz_transform_rect(page->bounds, m);
+            m = fz_concat(m, fz_translate(-tbox.x0, -tbox.y0));
+            tbox = fz_transform_rect(page->bounds, m);
+            fz_irect bbox = fz_round_rect(tbox);
+            int w = bbox.x1 - bbox.x0;
+            int h = bbox.y1 - bbox.y0;
+            if (w < 16 || h < 16 || w > 600 || h > 600) continue;
+
+            pix = fz_new_pixmap_with_bbox(d->ctx, fz_device_rgb(d->ctx), bbox, NULL, 0);
+            fz_clear_pixmap_with_value(d->ctx, pix, 255);
+            dev = fz_new_draw_device(d->ctx, fz_identity, pix);
+            fz_run_display_list(d->ctx, page->list, dev, m, tbox, NULL);
+            fz_close_device(d->ctx, dev);
+            fz_drop_device(d->ctx, dev);
+            dev = NULL;
+
+            const unsigned char *samples = fz_pixmap_samples(d->ctx, pix);
+            int stride = fz_pixmap_stride(d->ctx, pix);
+            int min_x = w, max_x = -1, min_y = h, max_y = -1;
+            int dark_pixels = 0;
+
+            for (int y = 0; y < h; ++y) {
+                const unsigned char *row = samples + (size_t)y * (size_t)stride;
+                for (int x = 0; x < w; ++x) {
+                    const unsigned char *px = row + x * 3;
+                    int luma = (px[0] * 77 + px[1] * 150 + px[2] * 29) >> 8;
+                    if (luma < 242) {
+                        dark_pixels++;
+                        if (x < min_x) min_x = x;
+                        if (x > max_x) max_x = x;
+                        if (y < min_y) min_y = y;
+                        if (y > max_y) max_y = y;
+                    }
+                }
+            }
+
+            fz_drop_pixmap(d->ctx, pix);
+            pix = NULL;
+
+            if (dark_pixels * 1000 < w * h * 2) continue; /* blank or virtually empty page */
+            /* Ignore full-bleed background images covering > 92% of page */
+            if (dark_pixels * 100 > w * h * 92) continue;
+            if (max_x < min_x || max_y < min_y) continue;
+
+            float margins[4] = {
+                (float)min_y * 100.0f / (float)h,             /* top */
+                (float)(w - 1 - max_x) * 100.0f / (float)w,   /* right */
+                (float)(h - 1 - max_y) * 100.0f / (float)h,   /* bottom */
+                (float)min_x * 100.0f / (float)w              /* left */
+            };
+            ll_accumulate_crop(min_all, &has_all, margins);
+            if (((p_idx + 1) % 2) == 1) {
+                ll_accumulate_crop(min_odd, &has_odd, margins);
+            } else {
+                ll_accumulate_crop(min_even, &has_even, margins);
+            }
+        }
+    }
+    fz_always(d->ctx) {
+        fz_drop_device(d->ctx, dev);
+        fz_drop_pixmap(d->ctx, pix);
+    }
+    fz_catch(d->ctx) {
+        caught(d);
+        return LL_ERROR;
+    }
+
+    ll_finalize_crop_margins(out_uniform, min_all, has_all);
+    if (has_odd) ll_finalize_crop_margins(out_odd, min_odd, 1);
+    else memcpy(out_odd, out_uniform, sizeof(float) * 4);
+    if (has_even) ll_finalize_crop_margins(out_even, min_even, 1);
+    else memcpy(out_even, out_uniform, sizeof(float) * 4);
+    return LL_OK;
+}
+
+#define LL_MAX_IMAGE_RECTS 48
+
+typedef struct {
+    fz_device super;
+    fz_rect page_bounds;
+    float rects[LL_MAX_IMAGE_RECTS * 4];
+    int count;
+    int ignore_depth;
+} ll_img_device;
+
+static void ll_img_begin_mask(fz_context *ctx, fz_device *dev, fz_rect area,
+                              int luminosity, fz_colorspace *cs, const float *bc,
+                              fz_color_params color_params) {
+    (void)ctx; (void)area; (void)luminosity; (void)cs; (void)bc; (void)color_params;
+    ((ll_img_device *)dev)->ignore_depth++;
+}
+
+static void ll_img_end_mask(fz_context *ctx, fz_device *dev, fz_function *fn) {
+    (void)ctx; (void)fn;
+    ll_img_device *idev = (ll_img_device *)dev;
+    if (idev->ignore_depth > 0) idev->ignore_depth--;
+}
+
+static int ll_img_begin_tile(fz_context *ctx, fz_device *dev, fz_rect area, fz_rect view,
+                             float xstep, float ystep, fz_matrix ctm, int id) {
+    (void)ctx; (void)area; (void)view; (void)xstep; (void)ystep; (void)ctm; (void)id;
+    ((ll_img_device *)dev)->ignore_depth++;
+    return 0;
+}
+
+static void ll_img_end_tile(fz_context *ctx, fz_device *dev) {
+    (void)ctx;
+    ll_img_device *idev = (ll_img_device *)dev;
+    if (idev->ignore_depth > 0) idev->ignore_depth--;
+}
+
+static void ll_img_fill_image(fz_context *ctx, fz_device *dev, fz_image *img,
+                              fz_matrix ctm, float alpha, fz_color_params color_params) {
+    (void)alpha; (void)color_params;
+    ll_img_device *idev = (ll_img_device *)dev;
+    if (idev->ignore_depth > 0) return;
+    if (!img || !img->colorspace || fz_colorspace_n(ctx, img->colorspace) < 3) return;
+
+    fz_rect r = fz_transform_rect(fz_unit_rect, ctm);
+    r = fz_intersect_rect(r, idev->page_bounds);
+    if (fz_is_empty_rect(r)) return;
+
+    float bw = idev->page_bounds.x1 - idev->page_bounds.x0;
+    float bh = idev->page_bounds.y1 - idev->page_bounds.y0;
+    if (bw < 1e-3f || bh < 1e-3f) return;
+
+    float nx0 = ll_clamp01((r.x0 - idev->page_bounds.x0) / bw);
+    float ny0 = ll_clamp01((r.y0 - idev->page_bounds.y0) / bh);
+    float nx1 = ll_clamp01((r.x1 - idev->page_bounds.x0) / bw);
+    float ny1 = ll_clamp01((r.y1 - idev->page_bounds.y0) / bh);
+    float nw = nx1 - nx0;
+    float nh = ny1 - ny0;
+    if (nw < 0.04f || nh < 0.04f) return;
+    if (nw * nh > 0.78f) return;
+
+    for (int i = 0; i < idev->count; ++i) {
+        float *ex = &idev->rects[i * 4];
+        if (nx1 >= ex[0] - 0.008f && nx0 <= ex[2] + 0.008f &&
+            ny1 >= ex[1] - 0.008f && ny0 <= ex[3] + 0.008f) {
+            if (nx0 < ex[0]) ex[0] = nx0;
+            if (ny0 < ex[1]) ex[1] = ny0;
+            if (nx1 > ex[2]) ex[2] = nx1;
+            if (ny1 > ex[3]) ex[3] = ny1;
+            return;
+        }
+    }
+    if (idev->count >= LL_MAX_IMAGE_RECTS) return;
+    float *dst = &idev->rects[idev->count * 4];
+    dst[0] = nx0;
+    dst[1] = ny0;
+    dst[2] = nx1;
+    dst[3] = ny1;
+    idev->count++;
+}
+
+int ll_get_page_image_rects(ll_doc *d, int page, ll_rect_list *out) {
+    if (!d || !out) return LL_ERROR;
+    clear_error(d);
+    memset(out, 0, sizeof(*out));
+    if (page < 0 || page >= d->count) return LL_ERROR;
+
+    fz_device *dev = NULL;
+    fz_var(dev);
+    fz_try(d->ctx) {
+        ll_page *p = get_page(d, page);
+        if (p && p->list) {
+            ll_img_device *idev = (ll_img_device *)fz_new_device_of_size(d->ctx, (int)sizeof(ll_img_device));
+            idev->super.fill_image = ll_img_fill_image;
+            idev->super.begin_mask = ll_img_begin_mask;
+            idev->super.end_mask = ll_img_end_mask;
+            idev->super.begin_tile = ll_img_begin_tile;
+            idev->super.end_tile = ll_img_end_tile;
+            idev->page_bounds = p->bounds;
+            dev = (fz_device *)idev;
+
+            fz_run_display_list(d->ctx, p->list, dev, fz_identity, p->bounds, NULL);
+            fz_close_device(d->ctx, dev);
+
+            if (idev->count > 0) {
+                out->rects = malloc(sizeof(float) * (size_t)idev->count * 4);
+                if (!out->rects) fz_throw(d->ctx, FZ_ERROR_SYSTEM, "Allocation failed");
+                memcpy(out->rects, idev->rects, sizeof(float) * (size_t)idev->count * 4);
+                out->count = idev->count;
+            }
+        }
+    }
+    fz_always(d->ctx) {
+        fz_drop_device(d->ctx, dev);
+    }
+    fz_catch(d->ctx) {
+        caught(d);
+        ll_free_rect_list(out);
+        return LL_ERROR;
+    }
+    return LL_OK;
+}
+
+void ll_free_rect_list(ll_rect_list *out) {
+    if (!out) return;
+    free(out->rects);
+    memset(out, 0, sizeof(*out));
+}
+
 

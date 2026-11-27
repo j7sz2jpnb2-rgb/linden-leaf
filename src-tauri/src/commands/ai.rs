@@ -53,7 +53,7 @@ pub enum AiRequestPurpose {
 }
 
 impl AiRequestPurpose {
-    fn cooldown_seconds(self, configured: u64) -> u64 {
+    pub(crate) fn cooldown_seconds(self, configured: u64) -> u64 {
         match self {
             Self::Chat => configured,
             Self::ChapterTranslation => 0,
@@ -132,7 +132,7 @@ fn get_daily_usage_path() -> PathBuf {
 }
 
 // Howard Hinnant's algorithm for converting unix timestamp to UTC Y-M-D and ISO8601
-fn format_system_time_iso(time: SystemTime) -> (String, String) {
+pub(crate) fn format_system_time_iso(time: SystemTime) -> (String, String) {
     let secs = time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let days = (secs / 86400) as i64;
     let day_secs = (secs % 86400) as u32;
@@ -157,7 +157,7 @@ fn format_system_time_iso(time: SystemTime) -> (String, String) {
     (date_str, iso_str)
 }
 
-fn get_today_count() -> u32 {
+pub(crate) fn get_today_count() -> u32 {
     let path = get_daily_usage_path();
     let (today, _) = format_system_time_iso(SystemTime::now());
     if let Ok(content) = fs::read_to_string(&path) {
@@ -170,7 +170,7 @@ fn get_today_count() -> u32 {
     0
 }
 
-fn increment_today_count() -> u32 {
+pub(crate) fn increment_today_count() -> u32 {
     let path = get_daily_usage_path();
     let (today, _) = format_system_time_iso(SystemTime::now());
     let current = get_today_count();
@@ -206,7 +206,7 @@ pub fn append_audit_entry(entry: AiAuditEntry) {
 }
 
 // Clean error message without leaking sensitive authorization tokens or long HTML
-fn sanitize_error_message_localized(status: u16, raw: &str, locale: Option<&str>) -> String {
+pub(crate) fn sanitize_error_message_localized(status: u16, raw: &str, locale: Option<&str>) -> String {
     let en = is_en_locale(locale);
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -290,7 +290,7 @@ fn sanitize_error_message(status: u16, raw: &str) -> String {
     sanitize_error_message_localized(status, raw, None)
 }
 
-fn ai_concurrency_blocked_msg(en: bool, cur: &str) -> String {
+pub(crate) fn ai_concurrency_blocked_msg(en: bool, cur: &str) -> String {
     if en {
         format!(
             "CONCURRENCY_BLOCKED: Another generation request ({}) is already in progress. Please wait or click Stop.",
@@ -301,7 +301,7 @@ fn ai_concurrency_blocked_msg(en: bool, cur: &str) -> String {
     }
 }
 
-fn ai_cooldown_active_msg(en: bool, remaining_ms: u64) -> String {
+pub(crate) fn ai_cooldown_active_msg(en: bool, remaining_ms: u64) -> String {
     let seconds = (remaining_ms + 999) / 1000;
     if en {
         format!(
@@ -313,7 +313,7 @@ fn ai_cooldown_active_msg(en: bool, remaining_ms: u64) -> String {
     }
 }
 
-fn ai_daily_limit_exceeded_msg(en: bool, count: u32) -> String {
+pub(crate) fn ai_daily_limit_exceeded_msg(en: bool, count: u32) -> String {
     if en {
         format!(
             "DAILY_LIMIT_EXCEEDED: Daily request limit ({}) reached. Adjust the limit in Settings to continue.",
@@ -335,7 +335,7 @@ fn ai_bind_invalid_endpoint_msg(en: bool, err: &dyn std::fmt::Display) -> String
     }
 }
 
-fn ai_invalid_request_id_msg(en: bool) -> &'static str {
+pub(crate) fn ai_invalid_request_id_msg(en: bool) -> &'static str {
     l10n(
         en,
         "INVALID_REQUEST_ID: 缺少请求标识符",
@@ -343,7 +343,7 @@ fn ai_invalid_request_id_msg(en: bool) -> &'static str {
     )
 }
 
-fn ai_duplicate_request_id_msg(en: bool, req_id: &str, status: &str) -> String {
+pub(crate) fn ai_duplicate_request_id_msg(en: bool, req_id: &str, status: &str) -> String {
     if en {
         format!(
             "DUPLICATE_REQUEST_ID: Request '{}' is already processing or completed ({}); duplicate dispatch rejected.",
@@ -357,7 +357,7 @@ fn ai_duplicate_request_id_msg(en: bool, req_id: &str, status: &str) -> String {
     }
 }
 
-fn ai_duplicate_payload_blocked_msg(en: bool, prev_req_id: &str) -> String {
+pub(crate) fn ai_duplicate_payload_blocked_msg(en: bool, prev_req_id: &str) -> String {
     if en {
         format!(
             "DUPLICATE_PAYLOAD_BLOCKED: Detected prompt identical to recent request ({}); duplicate dispatch blocked to prevent accidental charges.",
@@ -401,7 +401,7 @@ fn ai_origin_mismatch_msg(en: bool, saved_origin: &str, target_origin: &str) -> 
     }
 }
 
-fn ai_http_client_error_msg(en: bool, err: &dyn std::fmt::Display) -> String {
+pub(crate) fn ai_http_client_error_msg(en: bool, err: &dyn std::fmt::Display) -> String {
     if en {
         format!("HTTP_CLIENT_ERROR: Failed to initialize HTTP client: {}", err)
     } else {
@@ -409,7 +409,7 @@ fn ai_http_client_error_msg(en: bool, err: &dyn std::fmt::Display) -> String {
     }
 }
 
-fn ai_network_failure_msg(en: bool, err: &dyn std::fmt::Display) -> String {
+pub(crate) fn ai_network_failure_msg(en: bool, err: &dyn std::fmt::Display) -> String {
     if en {
         format!("Network connection failed: {}", err)
     } else {
@@ -417,7 +417,7 @@ fn ai_network_failure_msg(en: bool, err: &dyn std::fmt::Display) -> String {
     }
 }
 
-fn ai_stream_interrupted_msg(en: bool, err: &dyn std::fmt::Display) -> String {
+pub(crate) fn ai_stream_interrupted_msg(en: bool, err: &dyn std::fmt::Display) -> String {
     if en {
         format!("Stream read interrupted: {}", err)
     } else {
@@ -425,7 +425,7 @@ fn ai_stream_interrupted_msg(en: bool, err: &dyn std::fmt::Display) -> String {
     }
 }
 
-fn ai_audit_terminal_message(
+pub(crate) fn ai_audit_terminal_message(
     en: bool,
     was_cancelled: bool,
     has_stream_error: bool,
@@ -464,7 +464,7 @@ fn compute_payload_hash(endpoint: &str, model: &str, messages: &[ChatMessage]) -
 }
 
 // Identical source text at two different locations is not a duplicate user action.
-fn compute_scoped_payload_hash(endpoint: &str, model: &str, messages: &[ChatMessage], scope: Option<&str>) -> u64 {
+pub(crate) fn compute_scoped_payload_hash(endpoint: &str, model: &str, messages: &[ChatMessage], scope: Option<&str>) -> u64 {
     let base = compute_payload_hash(endpoint, model, messages);
     match scope.filter(|value| !value.is_empty()) {
         None => base,
@@ -478,10 +478,10 @@ fn compute_scoped_payload_hash(endpoint: &str, model: &str, messages: &[ChatMess
     }
 }
 
-struct RequestLockGuard<'a> {
-    state: &'a AiState,
-    request_id: String,
-    final_status: Mutex<String>,
+pub(crate) struct RequestLockGuard<'a> {
+    pub(crate) state: &'a AiState,
+    pub(crate) request_id: String,
+    pub(crate) final_status: Mutex<String>,
 }
 
 impl<'a> Drop for RequestLockGuard<'a> {
@@ -631,12 +631,12 @@ pub fn ai_bind_credential(
 }
 
 // Millisecond admission state uses the same monotonic clock as dispatch.
-fn remaining_cooldown_ms(cooldown_secs: u64, elapsed: Duration) -> u64 {
+pub(crate) fn remaining_cooldown_ms(cooldown_secs: u64, elapsed: Duration) -> u64 {
     let remaining = Duration::from_secs(cooldown_secs).saturating_sub(elapsed);
     ((remaining.as_nanos() + 999_999) / 1_000_000) as u64
 }
 
-fn audit_local_rejection(payload: &AiCompletionPayload, request_id: &str, start: Instant, status: &str, message: String) -> String {
+pub(crate) fn audit_local_rejection(payload: &AiCompletionPayload, request_id: &str, start: Instant, status: &str, message: String) -> String {
     let (_, timestamp) = format_system_time_iso(SystemTime::now());
     append_audit_entry(AiAuditEntry {
         id: format!("audit_{}_local_{}", request_id, SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),

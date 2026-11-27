@@ -153,6 +153,12 @@ pub(crate) fn sanitize_credential_key(key: &str) -> String {
         .collect()
 }
 
+pub(crate) fn is_protected_ipc_key(sanitized: &str) -> bool {
+    sanitized == "sync_webdav_password"
+        || sanitized == "reading_ai_credential_origin"
+        || sanitized.starts_with("siwc_")
+}
+
 pub(crate) fn secure_store_credential_internal(
     #[allow(unused)] app_handle: tauri::AppHandle,
     key: String,
@@ -177,44 +183,13 @@ pub(crate) fn secure_store_credential_internal(
     }
 }
 
-#[tauri::command]
-pub fn secure_store_credential(
-    #[allow(unused)] app_handle: tauri::AppHandle,
-    key: String,
-    value: String,
-) -> Result<bool, String> {
-    let sanitized = sanitize_credential_key(&key);
-    if sanitized.is_empty() {
-        return Err("Credential key cannot be empty".to_string());
-    }
-    // Block renderer from directly overwriting WebDAV keystore secret or AI origin binding
-    if sanitized == "sync_webdav_password" || sanitized == "reading_ai_credential_origin" {
-        return Err(format!("Protected credential key '{}' cannot be modified directly via generic IPC", sanitized));
-    }
-    // If renderer changes tts_api_origin to a different origin, automatically wipe any bound tts_api_key
-    if sanitized == "tts_api_origin" {
-        if let Ok(Some(prev_origin)) = secure_load_credential(app_handle.clone(), "tts_api_origin".to_string()) {
-            let clean_prev = prev_origin.trim();
-            let clean_next = value.trim();
-            if !clean_prev.is_empty() && clean_prev != clean_next {
-                let _ = secure_store_credential_internal(app_handle.clone(), "tts_api_key".to_string(), String::new());
-            }
-        }
-    }
-    secure_store_credential_internal(app_handle, sanitized, value)
-}
-
-#[tauri::command]
-pub fn secure_load_credential(
+pub(crate) fn secure_load_credential_internal(
     #[allow(unused)] app_handle: tauri::AppHandle,
     key: String,
 ) -> Result<Option<String>, String> {
     let sanitized = sanitize_credential_key(&key);
     if sanitized.is_empty() {
         return Ok(None);
-    }
-    if sanitized == "sync_webdav_password" {
-        return Err("WebDAV password cannot be read via generic credential IPC".to_string());
     }
     #[cfg(target_os = "android")]
     {
@@ -238,24 +213,95 @@ pub fn secure_load_credential(
     }
 }
 
+pub(crate) fn secure_delete_credential_internal(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+) -> Result<bool, String> {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
+        return Ok(false);
+    }
+    #[cfg(target_os = "android")]
+    {
+        crate::commands::android::android_keystore_delete(app_handle, sanitized)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut file_path = get_credentials_dir();
+        file_path.push(format!("{}.enc", sanitized));
+
+        if file_path.exists() {
+            fs::remove_file(&file_path).map_err(|e| e.to_string())?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn secure_store_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+    value: String,
+) -> Result<bool, String> {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
+        return Err("Credential key cannot be empty".to_string());
+    }
+    // Block renderer from directly overwriting WebDAV keystore secret, AI origin binding, or SIWC OAuth tokens
+    if is_protected_ipc_key(&sanitized) {
+        return Err(format!("Protected credential key '{}' cannot be modified directly via generic IPC", sanitized));
+    }
+    // If renderer changes tts_api_origin to a different origin, automatically wipe any bound tts_api_key
+    if sanitized == "tts_api_origin" {
+        if let Ok(Some(prev_origin)) = secure_load_credential_internal(app_handle.clone(), "tts_api_origin".to_string()) {
+            let clean_prev = prev_origin.trim();
+            let clean_next = value.trim();
+            if !clean_prev.is_empty() && clean_prev != clean_next {
+                let _ = secure_store_credential_internal(app_handle.clone(), "tts_api_key".to_string(), String::new());
+            }
+        }
+    }
+    secure_store_credential_internal(app_handle, sanitized, value)
+}
+
+#[tauri::command]
+pub fn secure_load_credential(
+    #[allow(unused)] app_handle: tauri::AppHandle,
+    key: String,
+) -> Result<Option<String>, String> {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
+        return Ok(None);
+    }
+    if sanitized == "sync_webdav_password" || sanitized.starts_with("siwc_") {
+        return Err(format!("Protected credential key '{}' cannot be read via generic credential IPC", sanitized));
+    }
+    secure_load_credential_internal(app_handle, sanitized)
+}
+
 #[tauri::command]
 pub fn secure_has_credential(
     #[allow(unused)] app_handle: tauri::AppHandle,
     key: String,
 ) -> Result<bool, String> {
-    if key.trim().is_empty() {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
         return Ok(false);
+    }
+    if sanitized == "sync_webdav_password" || sanitized.starts_with("siwc_") {
+        return Err(format!("Protected credential key '{}' cannot be queried via generic credential IPC", sanitized));
     }
     #[cfg(target_os = "android")]
     {
-        match crate::commands::android::android_keystore_load(app_handle, key) {
+        match crate::commands::android::android_keystore_load(app_handle, sanitized) {
             Ok(Some(val)) => Ok(!val.is_empty()),
             _ => Ok(false),
         }
     }
     #[cfg(not(target_os = "android"))]
     {
-        let sanitized = sanitize_credential_key(&key);
         let mut file_path = get_credentials_dir();
         file_path.push(format!("{}.enc", sanitized));
         Ok(file_path.exists())
@@ -267,26 +313,14 @@ pub fn secure_delete_credential(
     #[allow(unused)] app_handle: tauri::AppHandle,
     key: String,
 ) -> Result<bool, String> {
-    if key.trim().is_empty() {
+    let sanitized = sanitize_credential_key(&key);
+    if sanitized.is_empty() {
         return Ok(false);
     }
-    #[cfg(target_os = "android")]
-    {
-        crate::commands::android::android_keystore_delete(app_handle, key)
+    if is_protected_ipc_key(&sanitized) {
+        return Err(format!("Protected credential key '{}' cannot be deleted via generic credential IPC", sanitized));
     }
-    #[cfg(not(target_os = "android"))]
-    {
-        let sanitized = sanitize_credential_key(&key);
-        let mut file_path = get_credentials_dir();
-        file_path.push(format!("{}.enc", sanitized));
-
-        if file_path.exists() {
-            fs::remove_file(&file_path).map_err(|e| e.to_string())?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
+    secure_delete_credential_internal(app_handle, sanitized)
 }
 
 #[cfg(test)]
@@ -309,5 +343,11 @@ mod tests {
         assert_eq!(sanitize_credential_key("reading_ai_credential_origin"), "reading_ai_credential_origin");
         assert_eq!(sanitize_credential_key("tts_api_origin"), "tts_api_origin");
         assert_eq!(sanitize_credential_key("custom/key!with#specials"), "custom_key_with_specials");
+        assert!(is_protected_ipc_key("siwc_access_token"));
+        assert!(is_protected_ipc_key("siwc_refresh_token"));
+        assert!(is_protected_ipc_key("siwc_dynamic_client_id"));
+        assert!(is_protected_ipc_key("siwc_token_meta"));
+        assert!(is_protected_ipc_key("sync_webdav_password"));
+        assert!(!is_protected_ipc_key("reading_ai_api_key"));
     }
 }

@@ -760,6 +760,18 @@ class PlatformBridge {
         return [];
     }
 
+    async getNativeFileIdentity(filePath) {
+        if (this.isTauri && filePath) {
+            try {
+                return await this._invokeTauri('fs_get_file_identity', { filePath: String(filePath) });
+            } catch (e) {
+                console.warn('[PlatformBridge] fs_get_file_identity failed:', e);
+                return null;
+            }
+        }
+        return null;
+    }
+
     async computeNativeFileHash(filePath) {
         if (this.isTauri && filePath) {
             try {
@@ -854,6 +866,226 @@ class PlatformBridge {
             }
         }
         return false;
+    }
+
+    async authorizeDirectPdfPath(filePath) {
+        if (!this.isTauri || !filePath) return false;
+        try {
+            return Boolean(await this._invokeTauri('mupdf_authorize_direct_pdf_path', { filePath }));
+        } catch (e) {
+            console.warn('[PlatformBridge] mupdf_authorize_direct_pdf_path failed:', e);
+            return false;
+        }
+    }
+
+    async updatePdfQuickIndex(pathOrOpts, pageIndex = 0, scale = 1.5) {
+        if (!this.isTauri) return false;
+        const opts = (typeof pathOrOpts === 'object' && pathOrOpts !== null) ? pathOrOpts : { filePath: pathOrOpts, pageIndex, scale };
+        const filePath = opts.filePath || opts.path;
+        if (!filePath) return false;
+        const resolvedPage = Number.isInteger(opts.pageIndex) ? opts.pageIndex : (Number.isInteger(opts.lastPage) ? opts.lastPage : (Number(pageIndex) || 0));
+        const resolvedScale = Number(opts.scale) || Number(scale) || 1.5;
+        try {
+            return Boolean(await this._invokeTauri('mupdf_update_quick_index', {
+                filePath,
+                pageIndex: Math.max(0, resolvedPage),
+                scale: resolvedScale
+            }));
+        } catch (_) {
+            return false;
+        }
+    }
+
+    async extractPdfAnnotations(docId) {
+        if (!this.isTauri || !docId) return [];
+        try {
+            const list = await this._invokeTauri('mupdf_extract_annotations', { docId });
+            return Array.isArray(list) ? list : [];
+        } catch (e) {
+            console.warn('[PlatformBridge] mupdf_extract_annotations failed:', e);
+            return [];
+        }
+    }
+
+    async computePdfAutoCrop(docId) {
+        if (!this.isTauri || !docId) return null;
+        try {
+            return await this._invokeTauri('mupdf_compute_auto_crop', { docId });
+        } catch (e) {
+            console.warn('[PlatformBridge] mupdf_compute_auto_crop failed:', e);
+            return null;
+        }
+    }
+
+    async getPdfPageImageRects(docId, pageIndex) {
+        if (!this.isTauri || !docId) return [];
+        try {
+            const rects = await this._invokeTauri('mupdf_get_page_image_rects', { docId, pageIndex });
+            return Array.isArray(rects) ? rects : [];
+        } catch (_) {
+            return [];
+        }
+    }
+
+    async pickSidecarFolder(locale = getLocale()) {
+        if (!this.isTauri) return null;
+        try {
+            return await this._invokeTauri('dialog_pick_sidecar_folder', { locale });
+        } catch (e) {
+            console.warn('[PlatformBridge] dialog_pick_sidecar_folder failed:', e);
+            return null;
+        }
+    }
+
+    async registerSidecarDir(dirPath) {
+        if (!this.isTauri || !dirPath) return null;
+        return await this._invokeTauri('fs_register_sidecar_dir', { dirPath });
+    }
+
+    async readTextFile(filePath) {
+        if (!this.isTauri || !filePath) return null;
+        return await this._invokeTauri('fs_read_text_file', { filePath });
+    }
+
+    async dictCustomBeginImport(name, format) {
+        if (!this.isTauri) throw new Error('Desktop backend required');
+        return await this._invokeTauri('dict_custom_begin_import', { name, format });
+    }
+
+    async dictCustomInsertBatch(dictId, entries) {
+        if (!this.isTauri) throw new Error('Desktop backend required');
+        return await this._invokeTauri('dict_custom_insert_batch', { dictId, entries });
+    }
+
+    async dictCustomFinishImport(dictId) {
+        if (!this.isTauri) throw new Error('Desktop backend required');
+        return await this._invokeTauri('dict_custom_finish_import', { dictId });
+    }
+
+    async dictCustomList() {
+        if (!this.isTauri) return [];
+        try {
+            const res = await this._invokeTauri('dict_custom_list', {});
+            return Array.isArray(res) ? res : [];
+        } catch (e) {
+            console.warn('[PlatformBridge] dict_custom_list failed:', e);
+            return [];
+        }
+    }
+
+    async dictCustomToggle(dictId, enabled) {
+        if (!this.isTauri) return false;
+        return Boolean(await this._invokeTauri('dict_custom_toggle', { dictId, enabled: Boolean(enabled) }));
+    }
+
+    async dictCustomDelete(dictId) {
+        if (!this.isTauri) return false;
+        return Boolean(await this._invokeTauri('dict_custom_delete', { dictId }));
+    }
+
+    async ocrModelListStatus() {
+        if (!this.isTauri) return null;
+        return await this._invokeTauri('ocr_model_list_status', {});
+    }
+
+    async ocrModelDownload(modelId, useMirror = false) {
+        if (!this.isTauri) {
+            throw new Error(t('ocr.model.desktopRequiredForDownload'));
+        }
+        return await this._invokeTauri('ocr_model_download', {
+            modelId,
+            model_id: modelId,
+            useMirror: Boolean(useMirror),
+            use_mirror: Boolean(useMirror),
+            locale: getLocale()
+        });
+    }
+
+    async ocrModelCancelDownload() {
+        if (!this.isTauri) return false;
+        await this._invokeTauri('ocr_model_cancel_download', {});
+        return true;
+    }
+
+    async ocrModelGetDownloadProgress() {
+        if (!this.isTauri) return null;
+        return await this._invokeTauri('ocr_model_get_download_progress', {});
+    }
+
+    async ocrModelReadAsset(modelId, assetName) {
+        if (!this.isTauri) return null;
+        const raw = await this._invokeTauri('ocr_model_read_asset', {
+            modelId,
+            model_id: modelId,
+            assetName,
+            asset_name: assetName
+        });
+        return await this._normalizeBinaryArrayBuffer(raw);
+    }
+
+    async ocrModelWriteAsset(modelId, assetName, buffer) {
+        if (!this.isTauri) return null;
+        const u8 = buffer instanceof Uint8Array
+            ? buffer
+            : (buffer instanceof ArrayBuffer
+                ? new Uint8Array(buffer)
+                : new Uint8Array(buffer || []));
+        if (!this.isAndroid) {
+            try {
+                const payload = (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength) ? u8 : u8.slice();
+                return await this._invokeTauri('ocr_model_write_asset', payload, {
+                    headers: {
+                        'x-ocr-model-id': String(modelId),
+                        'x-ocr-asset-name': String(assetName)
+                    }
+                });
+            } catch (err) {
+                console.warn('[PlatformBridge] Raw ocr_model_write_asset failed, falling back to JSON/base64:', err);
+            }
+        }
+        return await this._invokeTauri('ocr_model_write_asset', {
+            modelId,
+            assetName,
+            base64: this._bytesToBase64(u8)
+        });
+    }
+
+    async ocrModelDelete(modelId) {
+        if (!this.isTauri) return null;
+        return await this._invokeTauri('ocr_model_delete', {
+            modelId,
+            model_id: modelId
+        });
+    }
+
+    async txtOpenStream(filePath, customPatterns = null) {
+        if (!this.isTauri || !filePath) return null;
+        return await this._invokeTauri('txt_open_stream', {
+            filePath,
+            customPatterns: Array.isArray(customPatterns) && customPatterns.length ? customPatterns : null
+        });
+    }
+
+    async txtReadChapter(streamId, chapterIndex) {
+        if (!this.isTauri || !streamId) return '';
+        const raw = await this._invokeTauri('txt_read_chapter', { streamId, chapterIndex });
+        if (typeof raw === 'string') return raw;
+        let u8;
+        if (raw instanceof ArrayBuffer) u8 = new Uint8Array(raw);
+        else if (ArrayBuffer.isView(raw)) u8 = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+        else if (raw?.body instanceof ArrayBuffer) u8 = new Uint8Array(raw.body);
+        else if (Array.isArray(raw)) u8 = new Uint8Array(raw);
+        else return '';
+        return new TextDecoder('utf-8').decode(u8);
+    }
+
+    async txtCloseStream(streamId) {
+        if (!this.isTauri || !streamId) return false;
+        try {
+            return Boolean(await this._invokeTauri('txt_close_stream', { streamId }));
+        } catch (_) {
+            return false;
+        }
     }
 
     async writeFileText(filePath, content) {

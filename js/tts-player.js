@@ -1048,7 +1048,15 @@ export class TtsPlayer {
                     if (memOcr?.length) {
                         text = this._ocrCharsToText(memOcr)
                     } else if (docHash && typeof db?.getSetting === 'function') {
-                        const cached = await db.getSetting(`linden_ocr_${docHash}_p${p}`).catch(() => null)
+                        const ocrMod = await import('./ocr-service.js').catch(() => null)
+                        const activeOcr = ocrMod?.ocrService || ocrMod?.default
+                        const info = await activeOcr?.getActiveEngineInfo?.().catch(() => null)
+                        const eng = info?.effectiveEngine || 'tesseract'
+                        const dir = info?.configuredDirection || 'auto'
+                        let cached = await db.getSetting(`linden_ocr_v2_${docHash}_p${p}_${eng}_${dir}`).catch(() => null)
+                        if (!Array.isArray(cached) || !cached.length) {
+                            cached = await db.getSetting(`linden_ocr_${docHash}_p${p}`).catch(() => null)
+                        }
                         if (app.currentBookId !== activeBookId || app.pdfViewport !== viewport) {
                             this.segments = []
                             return []

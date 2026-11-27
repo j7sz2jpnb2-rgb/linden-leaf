@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "rulesVersion": "2026.11.27.1",
+  "providers": {
+    "chatgpt": {
+      "label": "ChatGPT",
+      "hosts": ["chatgpt.com", "chat.openai.com"],
+      "url": "https://chatgpt.com",
+      "editorSelectors": [
+        "#prompt-textarea",
+        "div.ProseMirror[contenteditable='true'][role='textbox']",
+        "textarea[data-id='root']",
+        "form textarea[name='prompt-textarea']"
+      ],
+      "sidebarToggleSelectors": [
+        "button[data-testid='close-sidebar-button']",
+        "button[aria-label*='Close sidebar' i]",
+        "button[aria-label*='收起侧边栏']",
+        "button[aria-label*='关闭侧栏']"
+      ],
+      "sidebarContainerSelectors": [
+        "nav[aria-label*='Chat history' i]",
+        "div[data-testid='left-sidebar']"
+      ],
+      "unsafeExcludeSelectors": [
+        "input[type='search']",
+        "[role='search'] input",
+        "[role='dialog'] textarea",
+        "[role='dialog'] [contenteditable='true']",
+        "article textarea",
+        "[data-message-author-role] textarea",
+        "[data-message-author-role] [contenteditable='true']"
+      ]
+    },
+    "gemini": {
+      "label": "Gemini",
+      "hosts": ["gemini.google.com"],
+      "url": "https://gemini.google.com/app",
+      "editorSelectors": [
+        "rich-textarea div.ql-editor[contenteditable='true']",
+        "div.ql-editor[contenteditable='true'][role='textbox']",
+        "[contenteditable='true'][aria-label*='Enter a prompt' i]",
+        "[contenteditable='true'][aria-label*='输入提示']",
+        "rich-textarea [contenteditable='true']"
+      ],
+      "sidebarToggleSelectors": [
+        "button[data-test-id='side-nav-menu-button']",
+        "button[aria-label*='Main menu' i]",
+        "button[aria-label*='主菜单']"
+      ],
+      "sidebarContainerSelectors": [
+        "bard-sidenav",
+        "side-navigation-content"
+      ],
+      "unsafeExcludeSelectors": [
+        "input[type='search']",
+        "[role='dialog'] [contenteditable='true']",
+        "header input"
+      ]
+    },
+    "aistudio": {
+      "label": "Google AI Studio",
+      "hosts": ["aistudio.google.com"],
+      "url": "https://aistudio.google.com/prompts/new_chat",
+      "editorSelectors": [
+        "ms-autosize-textarea textarea",
+        "ms-prompt-input textarea",
+        "textarea[aria-label*='Type something' i]",
+        "textarea[placeholder*='Type something' i]",
+        "textarea[aria-label*='prompt' i]"
+      ],
+      "sidebarToggleSelectors": [
+        "button[aria-label*='Toggle navigation' i]",
+        "button[aria-label*='navigation menu' i]"
+      ],
+      "sidebarContainerSelectors": [
+        "ms-navbar",
+        "nav"
+      ],
+      "unsafeExcludeSelectors": [
+        "input[type='search']",
+        "header input",
+        "mat-dialog-container textarea",
+        "ms-prompt-system-instructions textarea"
+      ]
+    },
+    "deepseek": {
+      "label": "DeepSeek",
+      "hosts": ["chat.deepseek.com"],
+      "url": "https://chat.deepseek.com",
+      "editorSelectors": [
+        "textarea#chat-input",
+        "textarea[placeholder*='DeepSeek' i]",
+        "div[role='textbox'][contenteditable='true']"
+      ],
+      "sidebarToggleSelectors": [
+        "button[aria-label*='sidebar' i]",
+        "button[aria-label*='收起']",
+        "button[aria-label*='折叠']",
+        "button[title*='收起']"
+      ],
+      "sidebarContainerSelectors": [
+        "aside",
+        "nav"
+      ],
+      "unsafeExcludeSelectors": [
+        "input[type='search']",
+        "[role='dialog'] textarea"
+      ]
+    }
+  },
+  "generic": {
+    "unsafeExcludeSelectors": [
+      "input[type='search']",
+      "input[type='password']",
+      "input[type='email']",
+      "[role='search'] input",
+      "[role='search'] textarea",
+      "[role='dialog'] input",
+      "[role='dialog'] textarea",
+      "[role='dialog'] [contenteditable='true']",
+      "header input",
+      "nav input",
+      "article textarea",
+      "article [contenteditable='true']"
+    ]
+  }
+}
